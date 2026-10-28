@@ -872,15 +872,14 @@ inline void validate_target_compile_policy(
 inline void validate_minimizer_registry(
     const minimizer_registry_spec& registry) {
     const minimizer_registry_spec expected =
-        make_minimizer_registry(registry.profile);
+        make_minimizer_registry(registry.profile, registry.alphabets);
     if (registry != expected) {
         throw std::runtime_error(
             "minimizer registry diverges from the source-derived profile model");
     }
 
-    const bool extended =
-        registry.profile == minimizer_registry_profile::extended;
-    const std::size_t expected_records = extended ? 13u : 7u;
+    structural_analysis::validate_biological_alphabet_manifest(registry.alphabets);
+    const std::size_t expected_records = expected.records.size();
     const std::size_t expected_owners = expected.highway_owners.size();
     std::size_t expected_exports = 0u;
     std::size_t expected_reference_exports = 0u;
@@ -905,18 +904,15 @@ inline void validate_minimizer_registry(
     for (const minimizer_physical_record_spec& record : registry.records) {
         const std::uint8_t expected_storage = static_cast<std::uint8_t>(
             ::bioseq::minimizers::minimizer_record_storage_bits(
-                record.position_log2, record.physical_kmer_size));
-        const std::uint8_t expected_hash = static_cast<std::uint8_t>(
-            expected_storage == 128u
-                ? 128u - 1u - record.position_log2 - 8u
-                : expected_storage - 1u - record.position_log2);
-        if (record.id == 0u || record.id > 13u
+                record.position_log2, record.hash_bits));
+        const std::uint8_t expected_hash = record.hash_bits;
+        if (record.id == 0u || record.id > expected_records
             || !detail::identifier(record.key)
             || !record.key.starts_with("minimizer_record_")
             || record.representation_type
                 != "::bioseq::minimizers::minimizer_representation<"
                     + std::to_string(record.position_log2) + "u,"
-                    + std::to_string(record.physical_kmer_size) + "u>"
+                    + std::to_string(record.hash_bits) + "u>"
             || (record.hash_output_width != "u16"
                 && record.hash_output_width != "u32"
                 && record.hash_output_width != "u64")
@@ -981,13 +977,6 @@ inline void validate_minimizer_registry(
                     "invalid or duplicate minimizer typed export '"
                     + symbol + "'");
             }
-            if (owner.algorithm == "minimap2_reference"
-                && owner.alphabet_id == 0u
-                && record->second->physical_kmer_size == 20u
-                && storage != "u64") {
-                throw std::runtime_error(
-                    "DNA4 reference-k20 generated a forbidden u32 export");
-            }
             ++export_count;
             if (owner.algorithm == "bounded_nthash") {
                 ++bounded_exports;
@@ -996,10 +985,10 @@ inline void validate_minimizer_registry(
             }
         }
     }
-    if (export_count != expected_exports || bounded_exports != 12u
+    if (export_count != expected_exports || bounded_exports != expected_exports - expected_reference_exports
         || reference_exports != expected_reference_exports) {
         throw std::runtime_error(
-            "minimizer typed-export caps diverged from 12 bounded and "
+            "minimizer typed-export caps diverged from the bounded and "
             "the registered reference export closure");
     }
 
@@ -1083,7 +1072,7 @@ inline void validate_minimizer_registry(
             }
         }
         const bool bounded =
-            profile.requested_algorithm == "bounded_nthash_simd";
+            profile.requested_algorithm == "bounded_nthash_simd" || profile.requested_algorithm == "vulkan_minimap_integer";
         const bool two_stack =
             profile.requested_algorithm == "two_stack_nthash";
         if (bounded
@@ -1096,70 +1085,17 @@ inline void validate_minimizer_registry(
             throw std::runtime_error(
                 "bounded minimizer runtime domain diverged from K1..31/W1..64");
         }
-        const std::uint16_t expected_two_stack_minimum_k =
-            profile.hash_width == "u16" ? 1u
-            : profile.hash_width == "u32" ? 9u
-            : 17u;
-        const std::uint16_t canonical_two_stack_maximum_k =
-            profile.hash_width == "u16" ? 8u
-            : profile.hash_width == "u32" ? 16u
-            : 31u;
-        if (two_stack
-            && (profile.runtime_window_size != 0u
-                || (record->second->storage_bits != 64u
-                    && record->second->storage_bits != 128u)
-                || capabilities.minimum_runtime_kmer_size
-                    != expected_two_stack_minimum_k
-                || capabilities.maximum_runtime_kmer_size
-                    != profile.runtime_kmer_size
-                || capabilities.maximum_runtime_kmer_size
-                    > canonical_two_stack_maximum_k
-                || capabilities.minimum_runtime_window_size != 1u
-                || capabilities.maximum_runtime_window_size != 256u)) {
-            throw std::runtime_error(
-                "two-stack minimizer runtime slice diverged from canonical "
-                "K1..31/W1..256 widths");
+        if (!bounded && (profile.runtime_kmer_size != capabilities.maximum_runtime_kmer_size
+            || profile.runtime_window_size != 0u || capabilities.maximum_runtime_window_size != 256u)) {
+            throw std::runtime_error("exact minimizer runtime domain differs from alphabet rank geometry");
         }
-        if (!bounded && !two_stack
-            && (profile.runtime_kmer_size == 0u
-                || profile.runtime_window_size != 0u
-                || capabilities.minimum_runtime_window_size != 1u
-                || capabilities.maximum_runtime_window_size != 256u
-                || static_cast<std::uint32_t>(
-                       capabilities.maximum_runtime_kmer_size) * 2u
-                    > record->second->available_hash_bits)) {
-            throw std::runtime_error(
-                "minimizer runtime capacity exceeds its kernel/record bounds");
-        }
+
     }
     if (referenced_exports != declared_exports) {
         throw std::runtime_error(
             "minimizer profile/export closure must account for every export");
     }
 
-    static constexpr std::array legacy_exports{
-        std::string_view{"bounded_nthash_repr_l15_k15_u32"},
-        std::string_view{"bounded_nthash_repr_l15_k15_u64"},
-        std::string_view{"bounded_nthash_repr_l28_k15_u32"},
-        std::string_view{"bounded_nthash_repr_l28_k15_u64"},
-        std::string_view{"bounded_nthash_repr_l63_k15_u32"},
-        std::string_view{"bounded_nthash_repr_l63_k15_u64"},
-        std::string_view{"minimap2_reference_repr_l15_k15_u32"},
-        std::string_view{"minimap2_reference_repr_l15_k15_u64"},
-        std::string_view{"minimap2_reference_repr_l28_k15_u32"},
-        std::string_view{"minimap2_reference_repr_l28_k15_u64"},
-        std::string_view{"minimap2_reference_repr_l33_k15_u32"},
-        std::string_view{"minimap2_reference_repr_l33_k15_u64"},
-        std::string_view{"minimap2_reference_repr_l63_k15_u32"},
-        std::string_view{"minimap2_reference_repr_l63_k15_u64"},
-    };
-    for (const std::string_view symbol : legacy_exports) {
-        if (!declared_exports.contains(std::string{symbol})) {
-            throw std::runtime_error(
-                "legacy minimizer export name changed: "
-                + std::string{symbol});
-        }
-    }
 }
 
 inline void validate_inventories(

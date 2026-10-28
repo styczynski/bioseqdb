@@ -104,7 +104,7 @@ class SanitizerPresetContractTest(unittest.TestCase):
                     preset["binaryDir"], "${sourceDir}/build/${presetName}")
                 self.assertEqual(
                     variables["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                    "dna4_uint64",
+                    "all_alphabets_uint64",
                 )
                 self.assertEqual(
                     variables["PostgreSQL_CONFIG"],

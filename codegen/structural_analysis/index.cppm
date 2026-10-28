@@ -1,6 +1,7 @@
 module;
 
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,18 @@ export namespace bioseq::codegen::structural_analysis {
 
 [[nodiscard]] translation_unit scan_token_slice(
     const std::filesystem::path& source_path);
+
+/// Reads only the constrained authored registry spelling; geometry remains unresolved.
+[[nodiscard]] std::vector<alphabet_manifest_entry> scan_biological_alphabet_registry(
+    const std::filesystem::path& source_path,
+    std::string_view source);
+
+/// Validate the versioned, compiler-resolved alphabet collection shared by generators.
+void validate_biological_alphabet_manifest(std::span<const alphabet_manifest_entry> entries);
+
+/// Read alphabet records from the existing minimizer registry manifest.
+[[nodiscard]] std::vector<alphabet_manifest_entry> read_biological_alphabet_manifest(
+    const std::filesystem::path& path);
 
 /// Uses Clang to check a generated declaration-only  source
 /// Rejects remaining function bodies or default member initializers, then

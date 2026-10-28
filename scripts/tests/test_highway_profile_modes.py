@@ -57,7 +57,7 @@ class HighwayProfilePresetContractTest(unittest.TestCase):
         self.assertEqual(
             self.presets["test-opt"]["cacheVariables"][
                 "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-            "dna4_uint64",
+            "all_alphabets_uint64",
         )
         for preset_name, profile in PROFILE_MODES.values():
             with self.subTest(preset=preset_name):

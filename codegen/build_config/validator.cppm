@@ -385,11 +385,12 @@ inline void validate_cross_policy(const std::vector<resolved_entry>& entries) {
     const resolved_entry* heavy = find_resolved(entries, "bioseq_scheduler_typed_heavy_unit_count");
     if (profile && all_alphabets && all_coordinates && adaptive && extended && full && heavy) {
         const std::int64_t ordinal = profile->value;
-        const std::int64_t expected_heavy = ordinal == 0 ? 7 : ordinal == 1 ? 14 : 56;
+        const std::int64_t scheduler_axes = 7 * (ordinal == 0 ? 1 : 4);
         const bool consistent =
-            all_alphabets->value == (ordinal >= 1) && all_coordinates->value == (ordinal >= 2) &&
-            adaptive->value == (ordinal >= 3) && extended->value == (ordinal >= 4) &&
-            full->value == (ordinal >= 5) && heavy->value == expected_heavy;
+            all_alphabets->value == 1 && all_coordinates->value == (ordinal >= 1) &&
+            adaptive->value == (ordinal >= 2) && extended->value == (ordinal >= 3) &&
+            full->value == (ordinal >= 4) && heavy->value >= scheduler_axes &&
+            heavy->value % scheduler_axes == 0;
         if (!consistent) {
             throw std::runtime_error(
                 "template-flatten capability overrides do not match the selected profile");

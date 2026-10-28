@@ -15,7 +15,7 @@ if(DEFINED BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE)
   elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_duplicate")
     set(_profile_declaration [=[
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0U;
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..4")]] = 0U;
 ]=])
     string(CONCAT _duplicate_source
       "${_profile_declaration}" "${_profile_declaration}")
@@ -24,21 +24,21 @@ inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_co
   elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_malformed")
     set(_malformed_source [=[
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "ordinal", "0..5")]] = 0U;
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "ordinal", "0..4")]] = 0U;
 ]=])
     _bioseq_build_config_parse_template_flatten_default(
       "malformed fixture" "${_malformed_source}" ordinal profile)
   elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_nondecimal")
     set(_nondecimal_source [=[
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0x0U;
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..4")]] = 0x0U;
 ]=])
     _bioseq_build_config_parse_template_flatten_default(
       "nondecimal fixture" "${_nondecimal_source}" ordinal profile)
   elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_out_of_range")
     set(_out_of_range_source [=[
 inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
-    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 6U;
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..4")]] = 6U;
 ]=])
     _bioseq_build_config_parse_template_flatten_default(
       "out-of-range fixture" "${_out_of_range_source}" ordinal profile)
@@ -134,7 +134,6 @@ endfunction()
 
 _bioseq_build_config_profiles(_profiles)
 set(_expected_profiles
-  dna4_uint64
   all_alphabets_uint64
   all_coordinates
   all_coordinates_adaptive_lengths
@@ -143,21 +142,22 @@ set(_expected_profiles
 _require_equal("${_profiles}" "${_expected_profiles}"
   "canonical template-profile order")
 
-_verify_profile(dna4_uint64 0 0 0 0 0 0 7)
-_verify_profile(all_alphabets_uint64 1 1 0 0 0 0 14)
-_verify_profile(all_coordinates 2 1 1 0 0 0 56)
-_verify_profile(all_coordinates_adaptive_lengths 3 1 1 1 0 0 56)
-_verify_profile(extended_kmer_coordinates 4 1 1 1 1 0 56)
-_verify_profile(full_specialization 5 1 1 1 1 1 56)
+_bioseq_biological_alphabet_entries(_registry_entries)
+list(LENGTH _registry_entries _registry_field_count)
+math(EXPR _native_units "${_registry_field_count} / 2 * 7")
+math(EXPR _all_width_units "${_native_units} * 4")
+_verify_profile(all_alphabets_uint64 0 1 0 0 0 0 ${_native_units})
+_verify_profile(all_coordinates 1 1 1 0 0 0 ${_all_width_units})
+_verify_profile(all_coordinates_adaptive_lengths 2 1 1 1 0 0 ${_all_width_units})
+_verify_profile(extended_kmer_coordinates 3 1 1 1 1 0 ${_all_width_units})
+_verify_profile(full_specialization 4 1 1 1 1 1 ${_all_width_units})
 
 _verify_profile_enabled(0 dna4 w8 TRUE)
-_verify_profile_enabled(0 dna5 w8 FALSE)
+_verify_profile_enabled(0 dna5 w8 TRUE)
 _verify_profile_enabled(0 dna4 w4 FALSE)
-_verify_profile_enabled(1 dna5 w8 TRUE)
-_verify_profile_enabled(1 aminoacid w8 FALSE)
-_verify_profile_enabled(1 dna4 w4 FALSE)
-_verify_profile_enabled(2 aminoacid w4 TRUE)
-_verify_profile_enabled(5 aminoacid w4 TRUE)
+_verify_profile_enabled(0 aminoacid w8 TRUE)
+_verify_profile_enabled(1 dna4 w4 TRUE)
+_verify_profile_enabled(4 aminoacid w4 TRUE)
 
 foreach(_true_value IN ITEMS 1 ON TRUE YES Y 2 -1)
   _verify_boolean("${_true_value}" 1)
@@ -175,13 +175,14 @@ _verify_cache_testing(ON ON 1)
 _verify_cache_testing(TRUE YES 1)
 _verify_cache_testing(invalid ON 0)
 
+math(EXPR _native_units_missing "${_native_units} - 1")
+math(EXPR _all_width_units_missing "${_all_width_units} - 1")
 foreach(_scheduler_case IN ITEMS
-    "dna4_uint64|7|6"
-    "all_alphabets_uint64|14|13"
-    "all_coordinates|56|55"
-    "all_coordinates_adaptive_lengths|56|55"
-    "extended_kmer_coordinates|56|55"
-    "full_specialization|56|55")
+    "all_alphabets_uint64|${_native_units}|${_native_units_missing}"
+    "all_coordinates|${_all_width_units}|${_all_width_units_missing}"
+    "all_coordinates_adaptive_lengths|${_all_width_units}|${_all_width_units_missing}"
+    "extended_kmer_coordinates|${_all_width_units}|${_all_width_units_missing}"
+    "full_specialization|${_all_width_units}|${_all_width_units_missing}")
   string(REPLACE "|" ";" _scheduler_fields "${_scheduler_case}")
   list(GET _scheduler_fields 0 _scheduler_profile)
   list(GET _scheduler_fields 1 _scheduler_expected)
@@ -203,7 +204,7 @@ _bioseq_build_config_template_flatten_default(
   "${_authored_config}" _authored_default_ordinal _authored_default_profile)
 _require_equal("${_authored_default_ordinal}" 0
   "authored template-flatten default ordinal")
-_require_equal("${_authored_default_profile}" dna4_uint64
+_require_equal("${_authored_default_profile}" all_alphabets_uint64
   "authored template-flatten default profile")
 set(_authored_annotation_marker "[[bioseq::build_config(")
 string(LENGTH "${_authored_config_source}" _authored_source_length)
@@ -223,13 +224,13 @@ if("${_authored_config_source}" MATCHES "(^|\n)[ \t]*#")
 endif()
 
 set(_canonical_build_config_entries
-  "bioseq_template_flatten_profile^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE^unsigned int^profile_ordinal^0..5^0U"
-  "bioseq_template_flatten_has_all_alphabets_uint64^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64^bool^boolean^false|true^false"
+  "bioseq_template_flatten_profile^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE^unsigned int^profile_ordinal^0..4^0U"
+  "bioseq_template_flatten_has_all_alphabets_uint64^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64^bool^boolean^false|true^true"
   "bioseq_template_flatten_has_all_coordinates^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES^bool^boolean^false|true^false"
   "bioseq_template_flatten_has_adaptive_lengths^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS^bool^boolean^false|true^false"
   "bioseq_template_flatten_has_extended_kmer_coordinates^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES^bool^boolean^false|true^false"
   "bioseq_template_flatten_has_full_specialization^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION^bool^boolean^false|true^false"
-  "bioseq_scheduler_typed_heavy_unit_count^BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT^unsigned int^count^7|14|56^7U"
+  "bioseq_scheduler_typed_heavy_unit_count^BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT^unsigned int^count^7..7168^7U"
   "bioseq_test_indexes_enabled^BIOSEQ_BUILD_CONFIG_TEST_INDEXES_ENABLED^bool^boolean^false|true^false"
   "bioseq_cache_testing_enabled^BIOSEQ_BUILD_CONFIG_CACHE_TESTING_ENABLED^bool^boolean^false|true^false"
   "bioseq_external_api_clients_enabled^BIOSEQ_BUILD_CONFIG_EXTERNAL_API_CLIENTS_ENABLED^bool^boolean^false|true^false"
@@ -407,7 +408,7 @@ foreach(_bioseq_authored_cpp_source IN LISTS _bioseq_authored_cpp_sources)
     "#include <bioseq/pg_build_profile.h>"
     "removed profile-header include in ${_bioseq_authored_cpp_source}")
   _require_not_contains("${_bioseq_authored_cpp_text}"
-    "#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64"
+    "#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE all_alphabets_uint64"
     "removed profile-header default literal in ${_bioseq_authored_cpp_source}")
 endforeach()
 file(READ "${_repository_root}/bioseq_caching/CMakeLists.txt"

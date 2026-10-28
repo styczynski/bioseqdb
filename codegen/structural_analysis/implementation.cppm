@@ -64,6 +64,8 @@ module;
 #include <optional>
 #include <set>
 #include <sstream>
+#include <span>
+#include <charconv>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -4104,6 +4106,158 @@ inline void validate_body_free_probe_syntax(
     return detail::canonical_repository_source_identity(source_path);
 }
 
+[[nodiscard]] std::vector<alphabet_manifest_entry> scan_biological_alphabet_registry(
+    const std::filesystem::path& source_path,
+    const std::string_view source) {
+    const auto tokens = detail::clang_raw_tokens(source_path, source);
+    std::optional<std::size_t> registry_position;
+    for (std::size_t index = 1u; index + 1u < tokens.size(); ++index) {
+        if (tokens[index - 1u].spelling != "using"
+            || tokens[index].spelling != "supported_biological_alphabets") continue;
+        if (registry_position) {
+            throw std::runtime_error(source_path.string() + ": biological alphabet registry must have one authored alias");
+        }
+        registry_position = index;
+    }
+    if (!registry_position) {
+        throw std::runtime_error(source_path.string() + ": biological alphabet registry is missing");
+    }
+    std::size_t position = *registry_position + 1u;
+    const auto expect = [&tokens, &position, &source_path](const std::string_view spelling) {
+        if (position == tokens.size() || tokens[position++].spelling != spelling) {
+            throw std::runtime_error(source_path.string() + ": unsupported biological alphabet registry syntax; expected " + std::string{spelling});
+        }
+    };
+    expect("=");
+    expect("supported_alphabets");
+    expect("<");
+    std::vector<alphabet_manifest_entry> result;
+    std::set<std::string> names;
+    std::set<std::string> types;
+    const std::string digest = bioseq::common::sha256_hex(source);
+    for (;;) {
+        expect("alphabet_entry");
+        expect("<");
+        std::string cpp_type;
+        bool expect_identifier = true;
+        while (position < tokens.size() && tokens[position].spelling != ",") {
+            const std::string& part = tokens[position++].spelling;
+            const bool identifier = !part.empty() && (std::isalpha(static_cast<unsigned char>(part.front())) || part.front() == '_')
+                && std::ranges::all_of(part, [](const unsigned char value) { return std::isalnum(value) || value == '_'; });
+            if (part == "::" && cpp_type.empty()) {
+                cpp_type = part;
+                continue;
+            }
+            if ((expect_identifier && !identifier) || (!expect_identifier && part != "::")) {
+                throw std::runtime_error(source_path.string() + ": registry alphabet type must be a qualified identifier");
+            }
+            expect_identifier = !expect_identifier;
+            cpp_type += part;
+        }
+        expect(",");
+        if (cpp_type.empty() || expect_identifier || position == tokens.size()) {
+            throw std::runtime_error(source_path.string() + ": incomplete registry entry");
+        }
+        const std::string name_token = tokens[position++].spelling;
+        if (name_token.size() < 3u || name_token.front() != '"' || name_token.back() != '"') {
+            throw std::runtime_error(source_path.string() + ": registry name must be one literal");
+        }
+        const std::string name = name_token.substr(1u, name_token.size() - 2u);
+        if (!std::ranges::all_of(name, [](const unsigned char value) { return std::islower(value) || std::isdigit(value) || value == '_'; })
+            || !std::islower(static_cast<unsigned char>(name.front()))
+            || !names.insert(name).second || !types.insert(cpp_type).second || result.size() >= 256u) {
+            throw std::runtime_error(source_path.string() + ": invalid or duplicate biological alphabet identity");
+        }
+        if (!cpp_type.starts_with("::")) cpp_type.insert(0u, "::");
+        result.push_back(alphabet_manifest_entry{
+            .qualified_cpp_type = std::move(cpp_type), .literal_name = name,
+            .ordinal = static_cast<std::uint16_t>(result.size()), .source_digest = digest});
+        // The lexer combines the final two template closers into one token.
+        if (position < tokens.size() && tokens[position].spelling == ">>") {
+            ++position;
+            break;
+        }
+        expect(">");
+        if (position < tokens.size() && tokens[position].spelling == ">") {
+            ++position;
+            break;
+        }
+        expect(",");
+    }
+    expect(";");
+    return result;
+}
+
+void validate_biological_alphabet_manifest(const std::span<const alphabet_manifest_entry> entries) {
+    if (entries.empty() || entries.size() > 256u) throw std::runtime_error("invalid biological alphabet manifest count");
+    std::set<std::string> names;
+    std::set<std::string> types;
+    for (std::size_t index = 0u; index < entries.size(); ++index) {
+        const auto& entry = entries[index];
+        std::uint8_t expected_bits{};
+        for (auto rank = entry.cardinality == 0u ? 0u : entry.cardinality - 1u; rank != 0u; rank >>= 1u) ++expected_bits;
+        if (entry.ordinal != index || entry.cardinality < 2u || entry.cardinality > 256u
+            || entry.rank_bits != expected_bits || entry.exact_seed_rank_bits == 0u
+            || entry.exact_seed_rank_bits > entry.rank_bits
+            || (entry.is_amino_acid && entry.exact_seed_rank_bits != entry.rank_bits)
+            || entry.is_amino_acid == entry.is_complementable
+            || entry.literal_name.empty() || !entry.qualified_cpp_type.starts_with("::")
+            || !names.insert(entry.literal_name).second || !types.insert(entry.qualified_cpp_type).second
+            || entry.source_digest.size() != 64u
+            || !std::ranges::all_of(entry.source_digest, [](const unsigned char value) { return std::isxdigit(value); })) {
+            throw std::runtime_error("invalid biological alphabet identity, geometry, family or provenance");
+        }
+    }
+}
+
+[[nodiscard]] std::vector<alphabet_manifest_entry> read_biological_alphabet_manifest(
+    const std::filesystem::path& path) {
+    std::istringstream input{read_artifact_bytes(path)};
+    std::string line;
+    if (!std::getline(input, line) || line != "bioseq-minimizer-physical-registry") {
+        throw std::runtime_error("alphabet collection requires the minimizer registry manifest");
+    }
+    bool revision{};
+    bool collection{};
+    std::vector<alphabet_manifest_entry> result;
+    while (std::getline(input, line)) {
+        std::vector<std::string> fields;
+        std::istringstream row{line};
+        std::string field;
+        while (std::getline(row, field, '\t')) fields.push_back(field);
+        if (fields.empty()) continue;
+        if (fields[0u] == "revision") {
+            if (revision || fields.size() != 2u || fields[1u] != "2") throw std::runtime_error("unsupported registry revision");
+            revision = true;
+        } else if (fields[0u] == "alphabet-collection") {
+            if (collection || fields.size() != 2u || fields[1u] != "2") throw std::runtime_error("unsupported alphabet collection revision");
+            collection = true;
+        } else if (fields[0u] == "alphabet") {
+            if (!revision || !collection || fields.size() != 10u) throw std::runtime_error("malformed biological alphabet record");
+            const auto number = [&fields](const std::size_t index, const unsigned maximum) {
+                unsigned value{};
+                const auto parsed = std::from_chars(fields[index].data(), fields[index].data() + fields[index].size(), value);
+                if (parsed.ec != std::errc{} || parsed.ptr != fields[index].data() + fields[index].size() || value > maximum) {
+                    throw std::runtime_error("invalid biological alphabet numeric metadata");
+                }
+                return value;
+            };
+            result.push_back(alphabet_manifest_entry{
+                .qualified_cpp_type = fields[1u], .literal_name = fields[2u],
+                .ordinal = static_cast<std::uint16_t>(number(3u, 255u)),
+                .cardinality = static_cast<std::uint16_t>(number(4u, 256u)),
+                .rank_bits = static_cast<std::uint8_t>(number(5u, 8u)),
+                .exact_seed_rank_bits = static_cast<std::uint8_t>(number(6u, 8u)),
+                .is_amino_acid = number(7u, 1u) != 0u, .is_complementable = number(8u, 1u) != 0u,
+                .source_digest = fields[9u],
+            });
+        }
+    }
+    if (!revision || !collection) throw std::runtime_error("missing versioned biological alphabet collection");
+    validate_biological_alphabet_manifest(result);
+    return result;
+}
+
 [[nodiscard]] translation_unit scan_token_slice(
     const std::filesystem::path& source_path,
     std::string_view source) {
@@ -5458,6 +5612,7 @@ class structural_visitor final
             || function->isDeleted()
             || function->isDefaulted();
         record.specifiers.is_function = true;
+        record.specifiers.has_previous_declaration = function->getPreviousDecl() != nullptr;
         record.specifiers.is_static =
             function->getStorageClass() == clang::SC_Static;
         record.specifiers.is_constexpr =
@@ -5651,8 +5806,92 @@ class structural_visitor final
         return true;
     }
 
+    /// Resolve the registry through the instantiated entry declarations, never a name/cardinality map.
+    void collect_biological_alphabets(const clang::TypeAliasDecl& declaration) {
+        const auto* registry = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+            declaration.getUnderlyingType()->getAsCXXRecordDecl());
+        if (registry == nullptr || registry->getSpecializedTemplate()->getName() != "supported_alphabets") {
+            throw std::runtime_error("biological registry must instantiate supported_alphabets");
+        }
+        output_.biological_alphabets = scan_biological_alphabet_registry(
+            output_.source_path, read_artifact_bytes(output_.source_path));
+        std::vector<clang::QualType> entries;
+        for (const auto& argument : registry->getTemplateArgs().asArray()) {
+            if (argument.getKind() == clang::TemplateArgument::Pack) {
+                for (const auto& entry : argument.pack_elements()) {
+                    if (entry.getKind() != clang::TemplateArgument::Type) {
+                        throw std::runtime_error("biological registry entries must be types");
+                    }
+                    entries.push_back(entry.getAsType());
+                }
+            } else if (argument.getKind() == clang::TemplateArgument::Type) {
+                entries.push_back(argument.getAsType());
+            } else {
+                throw std::runtime_error("unsupported biological registry template argument");
+            }
+        }
+        if (entries.size() != output_.biological_alphabets.size()) {
+            throw std::runtime_error("semantic and source biological registry arity differ");
+        }
+        std::set<std::string> resolved_types;
+        for (std::size_t index = 0u; index < entries.size(); ++index) {
+            const auto* entry = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+                entries[index]->getAsCXXRecordDecl());
+            if (entry == nullptr || entry->getSpecializedTemplate()->getName() != "alphabet_entry") {
+                throw std::runtime_error("biological registry accepts alphabet_entry specializations only");
+            }
+            const clang::CXXRecordDecl* definition = entry->getDefinition();
+            if (definition == nullptr) {
+                throw std::runtime_error("biological registry metadata was not instantiated");
+            }
+            const auto constant = [definition](const std::string_view name) -> std::uint64_t {
+                for (const auto* member : definition->decls()) {
+                    const auto* variable = llvm::dyn_cast<clang::VarDecl>(member);
+                    if (variable == nullptr || variable->getNameAsString() != name) continue;
+                    const clang::APValue* value = variable->evaluateValue();
+                    if (value == nullptr || !value->isInt() || value->getInt().isNegative()
+                        || value->getInt().getActiveBits() > 64u) {
+                        throw std::runtime_error("unresolved biological alphabet constexpr metadata: " + std::string{name});
+                    }
+                    return value->getInt().getZExtValue();
+                }
+                throw std::runtime_error("missing biological alphabet constexpr metadata: " + std::string{name});
+            };
+            auto& metadata = output_.biological_alphabets[index];
+            const auto cardinality = constant("cardinality");
+            const auto rank_bits = constant("rank_bits");
+            const auto amino_acid = constant("is_amino_acid");
+            const auto complementable = constant("is_complementable");
+            std::uint8_t expected_bits{};
+            for (auto rank = cardinality == 0u ? 0u : cardinality - 1u; rank != 0u; rank >>= 1u) ++expected_bits;
+            if (cardinality < 2u || cardinality > 256u || rank_bits != expected_bits
+                || amino_acid > 1u || complementable > 1u || amino_acid == complementable) {
+                throw std::runtime_error("invalid biological alphabet geometry or family capability");
+            }
+            const clang::QualType alphabet = entry->getTemplateArgs().get(0u).getAsType();
+            const std::string canonical_type = alphabet.getCanonicalType().getAsString(policy_);
+            if (!resolved_types.insert(canonical_type).second) {
+                throw std::runtime_error("biological registry repeats one resolved alphabet type");
+            }
+            metadata.cardinality = static_cast<std::uint16_t>(cardinality);
+            metadata.rank_bits = static_cast<std::uint8_t>(rank_bits);
+            metadata.is_amino_acid = amino_acid != 0u;
+            metadata.is_complementable = complementable != 0u;
+            const auto* alphabet_definition = alphabet->getAsCXXRecordDecl();
+            if (alphabet_definition == nullptr) throw std::runtime_error("alphabet has no record definition");
+            const auto definition_path = sources_.getFilename(sources_.getSpellingLoc(alphabet_definition->getLocation())).str();
+            if (definition_path.empty()) throw std::runtime_error("alphabet definition lacks source identity");
+            metadata.source_digest = bioseq::common::sha256_hex(
+                metadata.source_digest + "\n" + canonical_type + "\n"
+                + bioseq::common::sha256_hex(read_artifact_bytes(definition_path)));
+        }
+    }
+
     bool VisitTypeAliasDecl(clang::TypeAliasDecl* declaration) {
         if (eligible(declaration)) {
+            if (declaration->getName() == "supported_biological_alphabets") {
+                collect_biological_alphabets(*declaration);
+            }
             const std::size_t index =
                 add_named(declaration, declaration_kind::alias);
             output_.declarations[index].return_type =
@@ -5698,6 +5937,33 @@ class structural_visitor final
     }
 
     bool VisitVarDecl(clang::VarDecl* declaration) {
+        if (eligible(declaration) && declaration->getName() == "rank_widths") {
+            const auto* function = llvm::dyn_cast<clang::FunctionDecl>(declaration->getDeclContext());
+            if (function != nullptr && function->getQualifiedNameAsString()
+                    == "bioseq::minimizers::exact_rank_bits_for_alphabet_code") {
+                if (!output_.minimizer_exact_rank_widths.empty() || !declaration->isConstexpr()) {
+                    throw std::runtime_error("exact minimizer rank metadata must have one constexpr authority");
+                }
+                const clang::APValue* value = declaration->evaluateValue();
+                while (value != nullptr && value->isStruct()
+                       && value->getStructNumBases() == 0u && value->getStructNumFields() == 1u) {
+                    value = &value->getStructField(0u);
+                }
+                if (value == nullptr || !value->isArray() || value->getArraySize() == 0u
+                    || value->getArraySize() != value->getArrayInitializedElts()) {
+                    throw std::runtime_error("exact minimizer rank metadata did not resolve to a complete array");
+                }
+                for (unsigned index = 0u; index < value->getArraySize(); ++index) {
+                    const auto& width = value->getArrayInitializedElt(index);
+                    if (!width.isInt() || width.getInt().isNegative()
+                        || width.getInt().getActiveBits() > 8u || width.getInt().isZero()) {
+                        throw std::runtime_error("invalid compiler-resolved exact minimizer rank width");
+                    }
+                    output_.minimizer_exact_rank_widths.push_back(
+                        static_cast<std::uint8_t>(width.getInt().getZExtValue()));
+                }
+            }
+        }
         if (!eligible(declaration)
             || declaration->isLocalVarDeclOrParm()) {
             return true;

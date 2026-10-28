@@ -1814,21 +1814,10 @@ parse_configure_cases(
 [[nodiscard]] inline bool configure_coordinate_enabled(
     const configure_coordinate_record& coordinate,
     const std::string_view profile) {
-    const configure_assignment_record* alphabet = nullptr;
-    const configure_assignment_record* width = nullptr;
-    for (const configure_assignment_record& assignment :
-         coordinate.assignments) {
-        if (assignment.group == "alphabet") alphabet = &assignment;
-        if (assignment.group == "width") width = &assignment;
-    }
-    if (profile == "dna4_uint64") {
-        return (alphabet == nullptr || alphabet->case_label == "dna4")
-            && (width == nullptr || width->case_label == "w8");
-    }
-    if (profile == "all_alphabets_uint64") {
-        return (alphabet == nullptr || alphabet->case_label == "dna4"
-                || alphabet->case_label == "dna5")
-            && (width == nullptr || width->case_label == "w8");
+    for (const auto& assignment : coordinate.assignments) {
+        if (profile == "all_alphabets_uint64" && assignment.group == "width") {
+            return assignment.case_label == "w8";
+        }
     }
     return true;
 }

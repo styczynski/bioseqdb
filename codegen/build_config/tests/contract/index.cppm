@@ -136,7 +136,7 @@ inline void verify_default_and_override_rendering() {
                                "bioseq_template_flatten_profile",
                                "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE",
                                "profile_ordinal",
-                               "0..5",
+                               "0..4",
                                "0U") +
            "\n" +
            documented_variable("bool",
@@ -178,7 +178,7 @@ inline void verify_default_and_override_rendering() {
                                "bioseq_scheduler_typed_heavy_unit_count",
                                "BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT",
                                "count",
-                               "7|14|56",
+                               "7..7168",
                                "7U");
 }
 
@@ -188,28 +188,24 @@ inline void verify_default_and_override_rendering() {
     };
     return {
         {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", std::to_string(ordinal)},
-        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64", enabled(1)},
-        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES", enabled(2)},
-        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS", enabled(3)},
-        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES", enabled(4)},
-        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION", enabled(5)},
+        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64", "1"},
+        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES", enabled(1)},
+        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS", enabled(2)},
+        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES", enabled(3)},
+        {"BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION", enabled(4)},
         {"BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT",
-         ordinal == 0   ? "7"
-         : ordinal == 1 ? "14"
-                        : "56"},
+         ordinal == 0 ? "7" : "28"},
     };
 }
 
 inline void verify_profile_contracts() {
     const config_model model = collect_config_model(
         "codegen/build_config/tests/profile_fixture.cppm", fixture(profile_declarations()));
-    for (int ordinal = 0; ordinal <= 5; ++ordinal) {
+    for (int ordinal = 0; ordinal <= 4; ++ordinal) {
         const generation_result generated = generate(model, profile_overrides(ordinal));
         require(generated.entries.front().value == ordinal,
                 "each semantic profile maps to its exact ordinal");
-        require(generated.entries.back().value == (ordinal == 0   ? 7
-                                                   : ordinal == 1 ? 14
-                                                                  : 56),
+        require(generated.entries.back().value == (ordinal == 0 ? 7 : 28),
                 "each semantic profile maps to its exact scheduler width");
     }
     require_rejected(

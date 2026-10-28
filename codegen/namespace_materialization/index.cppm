@@ -40,7 +40,8 @@ namespace detail {
 parse_options(
     std::span<std::string_view const> args,
     const std::set<std::string_view, std::less<>>& allowed,
-    std::string_view command) {
+    std::string_view command,
+    const std::set<std::string_view, std::less<>>& optional = {}) {
     std::map<std::string, std::string, std::less<>> result;
     for (std::size_t index = 0; index < args.size(); ++index) {
         const std::string_view option = args[index];
@@ -61,13 +62,13 @@ parse_options(
                 + "' must occur once with a non-empty value");
         }
     }
-    if (result.size() != allowed.size()) {
-        std::string missing;
-        for (const std::string_view option : allowed) {
-            if (result.contains(option)) continue;
-            if (!missing.empty()) missing += ", ";
-            missing += option;
-        }
+    std::string missing;
+    for (const std::string_view option : allowed) {
+        if (result.contains(option) || optional.contains(option)) continue;
+        if (!missing.empty()) missing += ", ";
+        missing += option;
+    }
+    if (!missing.empty()) {
         throw std::runtime_error(
             "missing namespace_materialization " + std::string{command}
             + " option(s): " + missing);
@@ -153,6 +154,7 @@ parse_options(
 [[nodiscard]] inline command_line parse_generate_command_line(
     std::span<std::string_view const> args) {
     static const std::set<std::string_view, std::less<>> allowed{
+        "--alphabet-registry-manifest",
         "--artifact-manifest",
         "--clang-binary",
         "--clang-scan-deps",
@@ -183,8 +185,11 @@ parse_options(
         "--topology-manifest",
     };
     const std::map<std::string, std::string, std::less<>> options =
-        parse_options(args, allowed, "generate");
+        parse_options(args, allowed, "generate", {"--alphabet-registry-manifest"});
     return command_line{
+        .alphabet_registry_manifest = options.contains("--alphabet-registry-manifest")
+            ? std::filesystem::path{options.at("--alphabet-registry-manifest")}
+            : std::filesystem::path{},
         .name = options.at("--name"),
         .source = options.at("--source"),
         .repository_root = options.at("--repository-root"),
@@ -289,6 +294,7 @@ inline void require_regular_file(
     std::ostringstream output;
     output << depfile_escape(target) << ':';
     for (const std::filesystem::path& dependency : dependencies) {
+        if (dependency.empty()) continue;
         output << ' ' << depfile_escape(dependency);
     }
     output << '\n';
@@ -1114,8 +1120,11 @@ inline void validate_configure_handshake(
             command.configure_topology_manifest);
     const structural_analysis::translation_unit sliced =
         structural_analysis::scan_token_slice(command.source, source);
+    const auto alphabets = command.alphabet_registry_manifest.empty()
+        ? std::vector<structural_analysis::alphabet_manifest_entry>{}
+        : structural_analysis::read_biological_alphabet_manifest(command.alphabet_registry_manifest);
     materialization_region region = extract_materialization_region(
-        sliced, command.output_module, command.policy, source);
+        sliced, command.output_module, command.policy, source, alphabets);
     topology_plan topology = build_topology_plan(std::move(region));
     validate_configure_handshake(
         command, configure, source_sha256, topology);
@@ -1263,6 +1272,7 @@ inline void validate_configure_handshake(
                 command.source,
                 command.signature_source,
                 command.configure_topology_manifest,
+                command.alphabet_registry_manifest,
                 command.compile_database,
                 command.pcm_manifest,
                 command.prepare_action_trace,

@@ -190,7 +190,8 @@ target_sources(bioseq_modules_nopg
     BASE_DIRS "${BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT}"
     FILES
       "${BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE}"
-      "${BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE}")
+      "${BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE}"
+      "${BIOSEQ_PIPELINE_OWNED_ENTRIES_MODULE}")
 add_dependencies(bioseq_modules_nopg bioseq_minimizer_registry_modules)
 
 bioseq_add_highway_codegen(
@@ -249,12 +250,14 @@ bioseq_add_highway_codegen(
     "indexing|${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
   SLOT_RECORDS
     "simd_utils|common|count_equal_rank_chunk|&::bioseq::simd::{target_namespace}::count_equal_rank_chunk"
+    "sequence_ops|common|transform_sequence_rank_chunk|&::bioseq::simd::{target_namespace}::transform_sequence_rank_chunk"
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
     "prefilter|common|sneaky_snake_simd_batch|&bioseq::prefilter::{target_namespace}::sneaky_snake_simd_batch"
     "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
   REQUIRED_SLOT_RECORDS
     "common|count_equal_rank_chunk"
+    "common|transform_sequence_rank_chunk"
     ${BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
     "common|sneaky_snake_simd_batch"

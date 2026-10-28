@@ -4829,7 +4829,7 @@ def launch_remote_build(
         "/usr/bin/env",
         "AWS_DEFAULT_REGION=" + region,
         f"BIOSEQ_PRODUCTION_OPTIMIZATION={PRODUCTION_OPTIMIZATION}",
-        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=all_alphabets_uint64",
         "BIOSEQ_PACKAGE_PARALLELISM=4",
         f"BIOSEQ_POETRY_VERSION={poetry_environment.poetry_version}",
         "BIOSEQ_COMPILER_RT_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher",
@@ -5608,7 +5608,7 @@ def validate_manifest(
             "six_artifacts": True,
             "rpath_absent": True,
             "compiler_runtime_safe": True,
-            "template_flatten_profile": "dna4_uint64",
+            "template_flatten_profile": "all_alphabets_uint64",
         }
         if any(validation.get(name) != value for name, value in required_validation.items()):
             raise PackageBuilderError(

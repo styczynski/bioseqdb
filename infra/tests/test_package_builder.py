@@ -3821,7 +3821,7 @@ class ManifestTests(unittest.TestCase):
                         "six_artifacts": True,
                         "rpath_absent": True,
                         "compiler_runtime_safe": True,
-                        "template_flatten_profile": "dna4_uint64",
+                        "template_flatten_profile": "all_alphabets_uint64",
                         "binaries": [
                             {
                                 "path": "/tmp/bioseq.so",
@@ -3868,7 +3868,7 @@ class ManifestTests(unittest.TestCase):
                             "six_artifacts": True,
                             "rpath_absent": True,
                             "compiler_runtime_safe": True,
-                            "template_flatten_profile": "dna4_uint64",
+                            "template_flatten_profile": "all_alphabets_uint64",
                         },
                         "download_smoke": {
                             "passed": True,
@@ -3999,7 +3999,7 @@ class ManifestTests(unittest.TestCase):
                 python_environment=python_environment,
             )
         manifest["cells"][0]["validation"]["template_flatten_profile"] = (
-            "dna4_uint64"
+            "all_alphabets_uint64"
         )
         manifest["cells"][0]["upload"]["download_smoke"]["fresh_container"] = False
         with self.assertRaisesRegex(package_builder.PackageBuilderError, "S3-download smoke"):

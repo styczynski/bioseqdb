@@ -347,13 +347,11 @@ inline void replace_all(
     }
     output << "\nnamespace bioseq::simd::"
            << coordinate.identity_namespace << " {\n\n";
-    for (const generic_reference_alphabet_spec& alphabet :
-         generic_reference_alphabets) {
-        output
-            << "static_assert(minimap2_reference_state_bits_per_rank<"
-            << alphabet.cpp_type << "> == "
-            << static_cast<unsigned>(alphabet.state_bits_per_rank)
-            << "u);\n";
+    for (const auto& alphabet : registry.alphabets) {
+        output << "static_assert(::seqan3::alphabet_size<" << alphabet.qualified_cpp_type
+               << "> == " << alphabet.cardinality << "u);\n"
+               << "static_assert(::std::bit_width(::seqan3::alphabet_size<" << alphabet.qualified_cpp_type
+               << "> - 1u) == " << static_cast<unsigned>(alphabet.rank_bits) << "u);\n";
     }
     output << '\n';
     for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
@@ -371,17 +369,9 @@ inline void replace_all(
                 << "{\n"
                 << "    static_assert(::bioseq::minimizers::minimizer_layout<"
                 << static_cast<unsigned>(record.position_log2) << "u,"
-                << static_cast<unsigned>(record.physical_kmer_size)
+                << static_cast<unsigned>(record.hash_bits)
                 << "u>::k_storage_bits == "
                 << static_cast<unsigned>(record.storage_bits) << "u);\n"
-                << "    static_assert(\n"
-                << "        ::bioseq::minimizers::minimizer_position_bucket("
-                << static_cast<unsigned>(record.position_log2) << "u,"
-                << static_cast<unsigned>(record.physical_kmer_size)
-                << "u) == " << static_cast<unsigned>(record.position_log2)
-                << "u\n        || ::bioseq::minimizers::minimizer_fixed_u32_position_bucket("
-                << static_cast<unsigned>(record.position_log2) << "u) == "
-                << static_cast<unsigned>(record.position_log2) << "u);\n"
                 << "    return ";
             if (owner.algorithm == "minimap2_reference") {
                 output << "minimizer_kernel_detail::run_reference<\n"
@@ -1146,6 +1136,7 @@ inline void render_minimizer_wrapper(
     if (owner == "ksw2_batched") return "alignment_ksw2_batched";
     if (owner == "block_aligner") return "alignment_block_aligner";
     if (owner == "simd_utils") return "sequence_rank_equality";
+    if (owner == "sequence_ops") return "sequence_rank_transform";
     throw std::runtime_error(
         "Highway table slot owner '" + std::string{owner}
         + "' has no highway_kernel mapping");
@@ -1858,6 +1849,79 @@ inline void validate_rendered_artifact(
 
 }  // namespace detail
 
+/** Emit public overloads from the authored owner heads before their module is scanned. */
+[[nodiscard]] inline std::string render_pipeline_owned_entries_module(
+    const minimizer_registry_spec& registry,
+    const std::filesystem::path& source_path,
+    const std::string_view source) {
+    const auto sliced = structural_analysis::scan_token_slice(source_path, source);
+    std::vector<const structural_analysis::declaration_record*> entries;
+    std::set<std::string> names;
+    for (const auto& declaration : sliced.declarations) {
+        const bool marked = std::ranges::any_of(declaration.attributes, [](const auto& attribute) {
+            return attribute.vendor_namespace == "bioseq" && attribute.name == "template_flatten_when";
+        });
+        if (!marked) continue;
+        if (declaration.kind != structural_analysis::declaration_kind::function
+            || declaration.enclosing_qualified_name != "bioseq::simd"
+            || !declaration.specifiers.is_definition || declaration.specifiers.is_static
+            || declaration.specifiers.is_template || declaration.specifiers.has_default_arguments
+            || declaration.specifiers.has_deduced_type || !names.insert(declaration.name).second) {
+            throw std::runtime_error("pipeline owned-entry bootstrap requires distinct ordinary function definitions without defaults");
+        }
+        entries.push_back(&declaration);
+    }
+    if (entries.empty()) throw std::runtime_error("pipeline owner source has no marked public entries");
+    std::ostringstream output;
+    output << "// Generated from the biological registry and authored pipeline owner heads.\n"
+           << "export module bioseq.pipeline.pipe:owned_entries;\n\n"
+           << "import std;\nimport :stage_graph;\n"
+           << "import bioseq.common.seqan_adapter;\n"
+           << "import bioseq.pipeline.minimap_port;\n"
+           << "import bioseq.pipeline.minimap_parameters_contract;\n"
+           << "import bioseq.storage.lazy_sequence;\n"
+           << "import bioseq.sequences.kmers;\n"
+           << "import bioseq.sequences.kmers.highway_minimizer_contract;\n"
+           << "import bioseq.indexing.minimizer_hashmap;\n"
+           << "import bioseq.indexing.gpu_minimizer_index;\n\n"
+           << "export namespace bioseq::simd {\n\n";
+    for (const auto& alphabet : registry.alphabets) {
+        for (const auto* declaration : entries) {
+            const auto& head = declaration->declaration_head_range;
+            std::vector<namespace_materialization::source_edit> edits;
+            for (const auto& attribute : declaration->attributes) {
+                if (attribute.vendor_namespace == "bioseq") {
+                    if (attribute.name != "template_flatten_when") {
+                        throw std::runtime_error("unsupported pipeline owned-entry bootstrap attribute");
+                    }
+                    edits.push_back({.begin_byte = attribute.removal_range.begin.byte_offset,
+                        .end_byte = attribute.removal_range.end.byte_offset,
+                        .source_identity = declaration->source_identity,
+                        .purpose = "remove owner route marker"});
+                }
+            }
+            std::size_t alphabet_references{};
+            for (const auto& token : sliced.tokens) {
+                if (token.range.begin.byte_offset < head.begin.byte_offset
+                    || token.range.end.byte_offset > head.end.byte_offset
+                    || token.spelling != "owner_alphabet") continue;
+                edits.push_back({.begin_byte = token.range.begin.byte_offset,
+                    .end_byte = token.range.end.byte_offset,
+                    .replacement = alphabet.qualified_cpp_type,
+                    .source_identity = declaration->source_identity,
+                    .purpose = "bind public owner alphabet"});
+                ++alphabet_references;
+            }
+            if (alphabet_references == 0u) throw std::runtime_error("owned entry does not expose its registry alphabet");
+            output << namespace_materialization::apply_exact_edits(
+                std::string{source.substr(head.begin.byte_offset, head.end.byte_offset - head.begin.byte_offset)},
+                std::move(edits), head.begin.byte_offset) << ";\n\n";
+        }
+    }
+    output << "} // namespace bioseq::simd\n";
+    return output.str();
+}
+
 /** Generates minimizer layout IDs and runtime bindings shared by all CPU targets. */
 [[nodiscard]] inline std::string render_minimizer_physical_records_module(
     const minimizer_registry_spec& registry,
@@ -1909,7 +1973,7 @@ inline void validate_rendered_artifact(
         << "    minimizer_physical_record_id record_id;\n"
         << "    ::std::string_view record_key;\n"
         << "    ::std::uint8_t position_log2;\n"
-        << "    ::std::uint8_t physical_kmer_size;\n"
+        << "    ::std::uint8_t hash_bits;\n"
         << "    ::std::uint8_t storage_bits;\n"
         << "    ::std::uint8_t available_hash_bits;\n"
         << "    ::std::uint8_t record_bytes;\n"
@@ -1944,8 +2008,8 @@ inline void validate_rendered_artifact(
         << minimizer_registry_profile_name(registry.profile) << "\";\n"
         << "inline constexpr ::std::string_view minimizer_runtime_profile_manifest_identity = \""
         << manifest_identity << "\";\n"
-        << "inline constexpr ::std::uint16_t minimizer_profile_payload_layout_abi_revision = 1u;\n"
-        << "inline constexpr ::std::uint16_t minimizer_profile_producer_identity_revision = 1u;\n\n"
+        << "inline constexpr ::std::uint16_t minimizer_profile_payload_layout_abi_revision = 2u;\n"
+        << "inline constexpr ::std::uint16_t minimizer_profile_producer_identity_revision = 2u;\n\n"
         << "namespace minimizer_registry_detail {\n"
         << "template <class> inline constexpr bool dependent_false = false;\n"
         << "}\n\n"
@@ -1990,7 +2054,7 @@ inline void validate_rendered_artifact(
             << "minimizer_physical_record_id::" << record.key << ", \""
             << record.key << "\", "
             << static_cast<unsigned>(record.position_log2) << "u, "
-            << static_cast<unsigned>(record.physical_kmer_size) << "u, "
+            << static_cast<unsigned>(record.hash_bits) << "u, "
             << static_cast<unsigned>(record.storage_bits) << "u, "
             << static_cast<unsigned>(record.available_hash_bits) << "u, "
             << static_cast<unsigned>(record.storage_bits / 8u) << "u},\n";
@@ -2092,11 +2156,18 @@ inline void validate_rendered_artifact(
         output << "static_assert(minimizer_profile_has_alphabet<"
                << alphabet_cpp_type << ">());\n"
                << "static_assert(minimizer_profile_alphabet_id<"
+               << alphabet_cpp_type << ">() == " << alphabet_id << "u);\n"
+               << "static_assert(::supported_biological_alphabets::index_of<"
                << alphabet_cpp_type << ">() == " << alphabet_id << "u);\n";
     }
+    for (const auto& alphabet : registry.alphabets) {
+        output << "static_assert(::supported_biological_alphabets::name_of<"
+               << alphabet.qualified_cpp_type << ">().view() == ::std::string_view{\""
+               << alphabet.literal_name << "\"});\n";
+    }
     output
-        << "static_assert(minimizer_profile_payload_layout_abi_revision == 1u);\n"
-        << "static_assert(minimizer_profile_producer_identity_revision == 1u);\n\n"
+        << "static_assert(minimizer_profile_payload_layout_abi_revision == 2u);\n"
+        << "static_assert(minimizer_profile_producer_identity_revision == 2u);\n\n"
         << "} // namespace bioseq::minimizers\n";
     return output.str();
 }
@@ -2125,7 +2196,7 @@ inline void validate_rendered_artifact(
         << "        selection.record_position_log2, selection.packed_storage_bits);\n"
         << "    if (descriptor == nullptr || binding == nullptr\n"
         << "        || descriptor->position_log2 != selection.record_position_log2\n"
-        << "        || descriptor->physical_kmer_size != selection.physical_kmer_size\n"
+        << "        || descriptor->hash_bits != selection.hash_bits\n"
         << "        || binding->requested_algorithm != selection.requested_algorithm\n"
         << "        || binding->effective_algorithm != selection.effective_algorithm\n"
         << "        || binding->alphabet_id != selection.alphabet_id\n"
@@ -2152,7 +2223,17 @@ inline void validate_rendered_artifact(
         << "    }\n"
         << "    throw ::std::invalid_argument(\"unregistered minimizer physical record\");\n"
         << "}\n\n"
-        << "} // namespace bioseq::minimizers\n";
+        << "/** Visit one registered physical output geometry; false means unavailable. */\n"
+        << "template<class p_callable>\n[[nodiscard]] inline bool visit_minimizer_output_layout(\n"
+        << "    const minimizer_output_layout layout, p_callable&& callable) {\n"
+        << "    switch (layout) {\n";
+    for (const auto& record : registry.records) {
+        output << "        case k_minimizer_output_layout<" << record.representation_type << ">:\n"
+               << "            ::std::forward<p_callable>(callable).template operator()<"
+               << record.representation_type << ">();\n            return true;\n";
+    }
+    output << "        default: return false;\n    }\n}\n\n"
+           << "} // namespace bioseq::minimizers\n";
     return output.str();
 }
 

@@ -325,6 +325,9 @@ function(bioseq_private_packed_access_scope_names
       run_packed_kernel
       collect_minimizers_bounded_nthash_simd_checked)
   elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/indexing/minimizer_hashmap/exact_simd.cppm")
+    set(_bioseq_scopes exact_simd_index_admitted_fragments)
+  elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm")
     set(_bioseq_scopes
       two_stack_simd_iteration_resident_kernel)
@@ -428,6 +431,13 @@ function(bioseq_private_packed_access_line_allowed
         "collect_minimizers_bounded_nthash_simd_checked"
         AND ("${_bioseq_line}" STREQUAL "traits::letters_per_unit;"
           OR "${_bioseq_line}" STREQUAL "sequence.read_cptr(begin));"))
+      set(_bioseq_allowed TRUE)
+    endif()
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/indexing/minimizer_hashmap/exact_simd.cppm")
+    if("${_bioseq_scope}" STREQUAL "exact_simd_index_admitted_fragments"
+        AND "${_bioseq_line}" STREQUAL
+          "static constexpr std::size_t fragment_units = bioseq::storage::default_fragment_storage_units;")
       set(_bioseq_allowed TRUE)
     endif()
   elseif("${_bioseq_source}" STREQUAL

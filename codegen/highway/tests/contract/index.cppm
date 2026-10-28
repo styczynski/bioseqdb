@@ -63,6 +63,18 @@ inline void require_rejected(
     return count;
 }
 
+/// Synthetic alphabet metadata isolates generator contracts from production registry contents.
+[[nodiscard]] inline std::vector<structural_analysis::alphabet_manifest_entry> fixture_alphabets() {
+    return {
+        {.qualified_cpp_type = "::seq::dna4", .literal_name = "dna4", .ordinal = 0u,
+         .cardinality = 4u, .rank_bits = 2u, .exact_seed_rank_bits = 2u, .is_amino_acid = false, .is_complementable = true,
+         .source_digest = std::string(64u, '0')},
+        {.qualified_cpp_type = "::seq::dna5", .literal_name = "dna5", .ordinal = 1u,
+         .cardinality = 5u, .rank_bits = 3u, .exact_seed_rank_bits = 2u, .is_amino_acid = false, .is_complementable = true,
+         .source_digest = std::string(64u, '1')},
+    };
+}
+
 [[nodiscard]] inline generation_plan two_target_plan() {
     const source_spec source{
         .key = "prefilter",
@@ -1398,7 +1410,7 @@ inline void verify_typed_minimizer_binder() {
     plan.source_inventory.required_slots.clear();
     plan.source_inventory.slots.clear();
     plan.source_inventory.minimizer_registry =
-        make_minimizer_registry(minimizer_registry_profile::baseline);
+        make_minimizer_registry(minimizer_registry_profile::baseline, fixture_alphabets());
     append_fixture_source(plan, "minimizer_minimap2_reference", "minimizers");
     append_fixture_source(plan, "minimizer_two_stack_nthash", "minimizers");
     append_fixture_source(plan, "minimizer_bounded_nthash", "minimizers");
@@ -1790,10 +1802,50 @@ inline void verify_bounded_minimizer_representation_owners() {
     append_fixture_source(plan, "minimizer_minimap2_reference", "minimizers");
     append_fixture_source(plan, "minimizer_bounded_nthash", "minimizers");
     plan.source_inventory.minimizer_registry =
-        make_minimizer_registry(minimizer_registry_profile::baseline);
+        make_minimizer_registry(minimizer_registry_profile::baseline, fixture_alphabets());
     validate_minimizer_registry(*plan.source_inventory.minimizer_registry);
     const minimizer_registry_spec& baseline_registry =
         *plan.source_inventory.minimizer_registry;
+    for (std::uint16_t kmer = 15u; kmer <= 31u; ++kmer) {
+        if (kmer > 15u && kmer < 22u) continue;
+        std::size_t admitted = 0u;
+        for (const auto& binding : baseline_registry.runtime_profiles) {
+            if (binding.alphabet_cpp_type != "::seq::dna5"
+                || binding.requested_algorithm != "simd_minimap2_reference"
+                || binding.packed_storage != "u64"
+                || binding.minimum_position_log2 > 28u || binding.maximum_position_log2 < 28u) continue;
+            const auto limits = minimizer_runtime_profile_capabilities_for(baseline_registry, binding);
+            if (limits.minimum_runtime_kmer_size <= kmer && kmer <= limits.maximum_runtime_kmer_size) {
+                ++admitted;
+                const auto record = std::ranges::find(baseline_registry.records, binding.record_key,
+                    &minimizer_physical_record_spec::key);
+                require(record != baseline_registry.records.end() && record->hash_bits >= kmer * 2u
+                    && (kmer != 15u || record->hash_bits == 32u),
+                    "DNA5 exact seeding uses the compiler-resolved nucleotide scheme width");
+            }
+        }
+        require(admitted == 1u, "DNA5 exact k15 and k22..31 each have one physical runtime profile");
+    }
+    const auto old_short_shape = std::ranges::find_if(baseline_registry.records, [](const auto& record) {
+        return record.hash_bits == 14u && record.position_log2 == 17u && record.storage_bits == 32u;
+    });
+    require(old_short_shape != baseline_registry.records.end(), "exact k7 retains its 32-bit physical record");
+    const std::string owner_source = R"cpp(export module fixture.owner;
+namespace bioseq { namespace simd {
+[[bioseq::template_flatten_when("route", "raw")]]
+[[nodiscard]] match_result_collection native_owned(
+    lazy_sequence_view<owner_alphabet> query,
+    lazy_sequence_view<owner_alphabet> target) { return {}; }
+}}
+)cpp";
+    const auto owner_declarations = render_pipeline_owned_entries_module(
+        baseline_registry, "bioseq/backend/pipeline/pipe_owners_template.cppm", owner_source);
+    require(occurrences(owner_declarations, "native_owned(") == baseline_registry.alphabets.size()
+        && owner_declarations.contains("lazy_sequence_view<::seq::dna5>")
+        && !owner_declarations.contains("template_flatten_when")
+        && !owner_declarations.contains("return {}")
+        && !owner_declarations.contains("owner_alphabet"),
+        "early public overloads reuse exact authored heads and every registry alphabet");
     std::size_t baseline_exports = 0u;
     std::size_t baseline_reference_exports = 0u;
     std::size_t baseline_bounded_exports = 0u;
@@ -1816,18 +1868,18 @@ inline void verify_bounded_minimizer_representation_owners() {
     const std::string visitor = render_minimizer_physical_registry_module(
         baseline_registry, registry_identity);
     require(
-        occurrences(registry_manifest, "\nrecord\t") == 7u
+        occurrences(registry_manifest, "\nrecord\t") == baseline_registry.records.size()
             && occurrences(registry_manifest, "\nhighway-owner\t")
                 == baseline_registry.highway_owners.size()
             && occurrences(
                    registry_manifest,
                    "\tsimd_minimap2_reference\tsimd_minimap2_reference\t"
                    "::seq::dna5\t")
-                == 28u
+                == baseline_registry.records.size() * 2u
             && occurrences(
                    registry_manifest,
                    "\tvulkan_minimap_integer\tvulkan_minimap_integer\t")
-                == 56u
+                == baseline_bounded_exports
             && records.contains(
                 "constexpr ::std::uint16_t minimizer_profile_alphabet_id()")
             && records.contains(
@@ -1859,7 +1911,7 @@ inline void verify_bounded_minimizer_representation_owners() {
             && visitor.contains(
                 "binding->hash_width != selection.hash_width")
             && occurrences(visitor, "case minimizer_physical_record_id::")
-                == 8u,
+                == baseline_registry.records.size() + 1u,
         "early generated records expose the exact alphabet, lookup, identity, "
         "and exhaustive visitor contracts");
 
@@ -1882,8 +1934,7 @@ inline void verify_bounded_minimizer_representation_owners() {
                 && artifact.content.contains(
                     "import bioseq.sequences.kmers.highway_minimizer_contract;")
                 && artifact.content.contains(
-                    "static_assert(minimap2_reference_state_bits_per_rank<"
-                    "::seq::dna5> == 3u);")
+                    "static_assert(::seqan3::alphabet_size<::seq::dna5> == 5u);")
                 && occurrences(artifact.content, ") -> bool")
                     == baseline_exports
                 && !artifact.content.contains("std::uint16_t")
@@ -1900,48 +1951,13 @@ inline void verify_bounded_minimizer_representation_owners() {
         "closure per target");
 
     minimizer_registry_spec extended =
-        make_minimizer_registry(minimizer_registry_profile::extended);
+        make_minimizer_registry(minimizer_registry_profile::extended, fixture_alphabets());
     validate_minimizer_registry(extended);
-    std::size_t extended_exports = 0u;
-    std::size_t extended_dna5_reference_owners = 0u;
-    std::size_t extended_dna5_reference_exports = 0u;
-    std::set<std::uint16_t> legacy_owner_ids;
-    bool legacy_owner_identities_preserved = true;
-    for (const minimizer_highway_owner_spec& owner : extended.highway_owners) {
-        extended_exports += owner.storage_types.size();
-        if (owner.id <= 19u) {
-            legacy_owner_ids.insert(owner.id);
-            const bool dna4_reference =
-                (owner.id <= 4u || owner.id >= 11u)
-                && owner.algorithm == "minimap2_reference"
-                && owner.alphabet_cpp_type == "::seq::dna4";
-            const bool dna4_bounded = owner.id >= 5u && owner.id <= 7u
-                && owner.algorithm == "bounded_nthash"
-                && owner.alphabet_cpp_type == "::seq::dna4";
-            const bool dna5_bounded = owner.id >= 8u && owner.id <= 10u
-                && owner.algorithm == "bounded_nthash"
-                && owner.alphabet_cpp_type == "::seq::dna5";
-            legacy_owner_identities_preserved =
-                legacy_owner_identities_preserved
-                && (dna4_reference || dna4_bounded || dna5_bounded);
-        }
-        if (owner.algorithm == "minimap2_reference"
-            && owner.alphabet_cpp_type == "::seq::dna5") {
-            ++extended_dna5_reference_owners;
-            extended_dna5_reference_exports += owner.storage_types.size();
-        }
-    }
-    require(
-        extended.records.size() == 13u
-            && extended.highway_owners.size()
-                > baseline_registry.highway_owners.size()
-            && extended_exports > baseline_exports
-            && extended_dna5_reference_owners == 13u
-            && extended_dna5_reference_exports == 26u
-            && legacy_owner_ids.size() == 19u
-            && legacy_owner_identities_preserved,
-        "extended minimizer registry retains legacy owner IDs and generates "
-        "the complete trait-ranked DNA5 reference closure");
+    require(extended.alphabets == baseline_registry.alphabets
+            && extended.records == baseline_registry.records
+            && extended.highway_owners == baseline_registry.highway_owners,
+        "availability profiles share compiler-resolved alphabets and hash-capacity owners");
+
 }
 
 }  // namespace contract_detail

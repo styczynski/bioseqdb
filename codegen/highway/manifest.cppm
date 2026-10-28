@@ -17,6 +17,7 @@ module;
 export module bioseq.codegen.highway:manifest;
 
 import :model;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::highway {
@@ -261,17 +262,27 @@ inline void require_field_count(
     const minimizer_registry_spec& registry) {
     std::ostringstream output;
     output << "bioseq-minimizer-physical-registry\n"
-           << "revision\t1\n"
+           << "revision\t2\n"
            << "profile\t" << minimizer_registry_profile_name(registry.profile)
            << "\n"
-           << "payload-layout-abi\t1\n"
-           << "producer-identity-revision\t1\n";
+           << "payload-layout-abi\t2\n"
+           << "producer-identity-revision\t2\n";
+    structural_analysis::validate_biological_alphabet_manifest(registry.alphabets);
+    output << "alphabet-collection\t2\n";
+    for (const auto& alphabet : registry.alphabets) {
+        output << "alphabet\t" << alphabet.qualified_cpp_type << '\t' << alphabet.literal_name
+               << '\t' << alphabet.ordinal << '\t' << alphabet.cardinality
+               << '\t' << static_cast<unsigned>(alphabet.rank_bits)
+               << '\t' << static_cast<unsigned>(alphabet.exact_seed_rank_bits)
+               << '\t' << alphabet.is_amino_acid << '\t' << alphabet.is_complementable
+               << '\t' << alphabet.source_digest << '\n';
+    }
     for (const minimizer_physical_record_spec& record : registry.records) {
         output << "record\t" << record.id << '\t' << record.key << '\t'
                << record.representation_type << '\t'
                << record.hash_output_width << '\t'
                << static_cast<unsigned>(record.position_log2) << '\t'
-               << static_cast<unsigned>(record.physical_kmer_size) << '\t'
+               << static_cast<unsigned>(record.hash_bits) << '\t'
                << static_cast<unsigned>(record.storage_bits) << '\t'
                << static_cast<unsigned>(record.available_hash_bits) << '\n';
     }
@@ -307,6 +318,7 @@ inline void require_field_count(
 [[nodiscard]] inline minimizer_registry_spec parse_minimizer_registry_manifest(
     const std::filesystem::path& path) {
     minimizer_registry_spec result;
+    result.alphabets = structural_analysis::read_biological_alphabet_manifest(path);
     bool saw_revision = false;
     bool saw_profile = false;
     bool saw_payload_abi = false;
@@ -315,13 +327,13 @@ inline void require_field_count(
              path, "bioseq-minimizer-physical-registry")) {
         if (!saw_revision && fields.front() != "revision") {
             throw std::runtime_error(
-                path.string() + ": minimizer registry must begin with revision 1");
+                path.string() + ": minimizer registry must begin with revision 2");
         }
         if (fields.front() == "revision") {
             detail::require_field_count(path, fields.front(), fields.size(), 2u);
-            if (saw_revision || fields[1] != "1") {
+            if (saw_revision || fields[1] != "2") {
                 throw std::runtime_error(
-                    path.string() + ": minimizer registry requires revision 1 exactly once");
+                    path.string() + ": minimizer registry requires revision 2 exactly once");
             }
             saw_revision = true;
         } else if (fields.front() == "profile") {
@@ -333,18 +345,20 @@ inline void require_field_count(
             saw_profile = true;
         } else if (fields.front() == "payload-layout-abi") {
             detail::require_field_count(path, fields.front(), fields.size(), 2u);
-            if (saw_payload_abi || fields[1] != "1") {
+            if (saw_payload_abi || fields[1] != "2") {
                 throw std::runtime_error(
-                    path.string() + ": payload layout ABI must remain 1");
+                    path.string() + ": payload layout ABI must be 2");
             }
             saw_payload_abi = true;
         } else if (fields.front() == "producer-identity-revision") {
             detail::require_field_count(path, fields.front(), fields.size(), 2u);
-            if (saw_producer_revision || fields[1] != "1") {
+            if (saw_producer_revision || fields[1] != "2") {
                 throw std::runtime_error(
-                    path.string() + ": producer identity revision must remain 1");
+                    path.string() + ": producer identity revision must be 2");
             }
             saw_producer_revision = true;
+        } else if (fields.front() == "alphabet-collection" || fields.front() == "alphabet") {
+            // Parsed and validated by the shared structural frontend manifest reader.
         } else if (fields.front() == "record") {
             detail::require_field_count(path, fields.front(), fields.size(), 9u);
             result.records.push_back(minimizer_physical_record_spec{
@@ -355,8 +369,8 @@ inline void require_field_count(
                 .hash_output_width = fields[4],
                 .position_log2 = detail::parse_bounded_integer<std::uint8_t>(
                     fields[5], path, "record position bits"),
-                .physical_kmer_size = detail::parse_bounded_integer<std::uint8_t>(
-                    fields[6], path, "record physical k"),
+                .hash_bits = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[6], path, "record hash capacity"),
                 .storage_bits = detail::parse_bounded_integer<std::uint8_t>(
                     fields[7], path, "record storage bits"),
                 .available_hash_bits = detail::parse_bounded_integer<std::uint8_t>(

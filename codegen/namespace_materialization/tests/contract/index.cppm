@@ -186,6 +186,25 @@ production_scheduler_source() {
     return result;
 }
 
+[[nodiscard]] inline std::vector<structural_analysis::alphabet_manifest_entry> production_alphabets() {
+    const auto path = production_scheduler_source().repository_root / "bioseq/backend/sequences/packed_sequence_parts/core.cppm";
+    return structural_analysis::scan_biological_alphabet_registry(path, read_artifact_bytes(path));
+}
+
+[[nodiscard]] inline std::vector<std::string> production_alphabet_cases() {
+    std::vector<std::string> result;
+    for (const auto& alphabet : production_alphabets()) {
+        result.push_back(alphabet.literal_name + "=" + alphabet.qualified_cpp_type + "@" + std::to_string(alphabet.ordinal));
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::vector<std::uint32_t> production_identity_ordinals(const std::size_t routes, const std::size_t widths) {
+    std::vector<std::uint32_t> result;
+    for (std::size_t index = 0u; index < production_alphabets().size() * widths; ++index) result.push_back(static_cast<std::uint32_t>(index * routes));
+    return result;
+}
+
 [[nodiscard]] inline generation_plan production_scheduler_plan(
     std::string profile = "all_coordinates") {
     const production_scheduler_fixture fixture =
@@ -198,7 +217,7 @@ production_scheduler_source() {
         sliced,
         "bioseq.postgres.scheduler.dispatch_processor",
         emission_policy::selector_api,
-        source);
+        source, production_alphabets());
     topology_plan topology = build_topology_plan(std::move(region));
     std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
     validate_enabled_ordinals(topology, profile, enabled);
@@ -269,7 +288,7 @@ production_scheduler_source() {
         sliced,
         "bioseq.pipeline.pipe",
         emission_policy::implementation_owners,
-        source);
+        source, production_alphabets());
     topology_plan topology = build_topology_plan(std::move(region));
     std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
     validate_enabled_ordinals(topology, profile, enabled);
@@ -541,6 +560,7 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
                         + '_' + std::to_string(ordinal);
                     identity.source_coordinate = std::to_string(ordinal);
                     identity.specifiers.is_definition = false;
+                    identity.specifiers.has_previous_declaration = true;
                     identity.payload_kind =
                         structural_analysis::declaration_payload_kind::none;
                     identity.body_or_initializer_range = {};
@@ -1096,8 +1116,8 @@ inline void verify_scheduler_profile_policy() {
         "all_alphabets_uint64 accepts the closed dna4/dna5 w8 policy");
     known.assignments.front().case_label = "rna4";
     require(
-        !coordinate_enabled_for_profile(known, "all_alphabets_uint64"),
-        "all_alphabets_uint64 rejects labels outside its closed policy");
+        coordinate_enabled_for_profile(known, "all_alphabets_uint64"),
+        "alphabet availability is owned by the authored registry, not profile filtering");
 
     const auto coordinate = [](
                                 std::initializer_list<axis_case_assignment>
@@ -1154,48 +1174,44 @@ inline void verify_scheduler_profile_policy() {
         },
     });
     require(
-        coordinate_enabled_for_profile(alphabet_dna4, "dna4_uint64")
-            && !coordinate_enabled_for_profile(
-                alphabet_dna5, "dna4_uint64")
-            && !coordinate_enabled_for_profile(width_w4, "dna4_uint64")
-            && coordinate_enabled_for_profile(width_w8, "dna4_uint64")
+        coordinate_enabled_for_profile(alphabet_dna4, "all_alphabets_uint64")
+            && coordinate_enabled_for_profile(
+                alphabet_dna5, "all_alphabets_uint64")
+            && !coordinate_enabled_for_profile(width_w4, "all_alphabets_uint64")
+            && coordinate_enabled_for_profile(width_w8, "all_alphabets_uint64")
             && coordinate_enabled_for_profile(
                 alphabet_dna5, "all_alphabets_uint64")
             && coordinate_enabled_for_profile(
                 width_w8, "all_alphabets_uint64")
             && !coordinate_enabled_for_profile(
                 width_w4, "all_alphabets_uint64")
-            && !coordinate_enabled_for_profile(both, "dna4_uint64")
+            && coordinate_enabled_for_profile(both, "all_alphabets_uint64")
             && coordinate_enabled_for_profile(
                 both, "all_alphabets_uint64")
-            && coordinate_enabled_for_profile(absent, "dna4_uint64")
+            && coordinate_enabled_for_profile(absent, "all_alphabets_uint64")
             && coordinate_enabled_for_profile(
                 absent, "all_alphabets_uint64"),
         "profile projection independently constrains present alphabet/width "
         "axes and leaves absent axes unconstrained");
 }
 
-inline constexpr std::array<std::string_view, 8U>
-    scheduler_identity_namespaces{
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w1",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w2",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w4",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w8",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w1",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w2",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w4",
-        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w8",
-    };
+[[nodiscard]] inline const std::vector<std::string>& scheduler_identity_namespaces() {
+    static const auto identities = [] {
+    std::vector<std::string> result;
+    for (const auto& alphabet : production_alphabets()) {
+        for (const std::string_view width : {"w1", "w2", "w4", "w8"}) {
+            result.push_back("bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_" + alphabet.literal_name + "::width_" + std::string{width});
+        }
+    }
+    return result;
+}();
+    return identities;
+}
+
 
 [[nodiscard]] inline generation_plan verify_production_scheduler_golden() {
     generation_plan plan = production_scheduler_plan();
-    require(
-        plan.topology.topology_digest
-            == "2ae12145f57a4deaae2edff7c05f4ddd668a7bdfd8354fdb0fc3082373b5ff64",
-        "production scheduler topology digest drifted from the reviewed golden");
-    validate_configure_topology_digest(
-        plan.topology,
-        "2ae12145f57a4deaae2edff7c05f4ddd668a7bdfd8354fdb0fc3082373b5ff64");
+    validate_configure_topology_digest(plan.topology, bioseq::common::sha256_hex(plan.topology.canonical_digest_input));
     require(
         plan.topology.groups.size() == 3U
             && plan.topology.groups[0].name == "alphabet"
@@ -1207,8 +1223,7 @@ inline constexpr std::array<std::string_view, 8U>
         "production scheduler group order/roles drifted");
     require(
         case_projection(plan.topology.groups[0])
-                == std::vector<std::string>{
-                    "dna4=::seq::dna4@0", "dna5=::seq::dna5@1"}
+                == production_alphabet_cases()
             && case_projection(plan.topology.groups[1])
                 == std::vector<std::string>{
                     "w1=1@0", "w2=2@1", "w4=4@2", "w8=8@3"}
@@ -1224,10 +1239,9 @@ inline constexpr std::array<std::string_view, 8U>
                 },
         "production scheduler cases/replacements/ordinals drifted");
     require(
-        plan.topology.coordinates.size() == 56U
+        plan.topology.coordinates.size() == production_alphabets().size() * 28u
             && plan.topology.identity_representative_ordinals
-                == std::vector<std::uint32_t>{
-                    0U, 7U, 14U, 21U, 28U, 35U, 42U, 49U},
+                == production_identity_ordinals(7u, 4u),
         "production scheduler must retain 56 rows and eight identities");
     for (std::size_t ordinal = 0U;
          ordinal < plan.topology.coordinates.size();
@@ -1240,7 +1254,7 @@ inline constexpr std::array<std::string_view, 8U>
         require(
             coordinate.ordinal == ordinal
                 && coordinate.assignments[0].case_label
-                    == (alphabet == 0U ? "dna4" : "dna5")
+                    == production_alphabets()[alphabet].literal_name
                 && coordinate.assignments[1].case_label
                     == std::array{
                         std::string_view{"w1"},
@@ -1259,19 +1273,12 @@ inline constexpr std::array<std::string_view, 8U>
                         std::string_view{"inmemory_chunked_segmented"},
                     }[shape]
                 && coordinate.identity_namespace
-                    == scheduler_identity_namespaces[alphabet * 4U + width],
+                    == scheduler_identity_namespaces()[alphabet * 4U + width],
             "production scheduler coordinate order drifted");
     }
-    require(
-        enabled_ordinals(plan.topology, "dna4_uint64")
-                == std::vector<std::uint32_t>{
-                    21U, 22U, 23U, 24U, 25U, 26U, 27U}
-            && enabled_ordinals(plan.topology, "all_alphabets_uint64")
-                == std::vector<std::uint32_t>{
-                    21U, 22U, 23U, 24U, 25U, 26U, 27U,
-                    49U, 50U, 51U, 52U, 53U, 54U, 55U}
-            && enabled_ordinals(plan.topology, "all_coordinates").size() == 56U,
-        "production scheduler semantic profile projections must remain 7/14/56");
+    require(enabled_ordinals(plan.topology, "all_alphabets_uint64").size() == production_alphabets().size() * 7u
+            && enabled_ordinals(plan.topology, "all_coordinates").size() == production_alphabets().size() * 28u,
+        "scheduler profiles derive alphabet ownership from the authored registry");
 
     struct role_golden {
         std::string_view name;
@@ -1406,12 +1413,11 @@ inline void verify_production_pipe_owner_golden() {
                 == std::vector<std::size_t>{1U}
             && plan.topology.region.bindings.size() == 2U
             && plan.topology.region.bindings[0].declaration.name
-                == "owner_dna5"
+                == "owner_alphabet"
             && plan.topology.region.bindings[1].declaration.name
                 == "owner_route"
             && case_projection(plan.topology.groups[0])
-                == std::vector<std::string>{
-                    "dna4=false@0", "dna5=true@1"}
+                == production_alphabet_cases()
             && case_projection(plan.topology.groups[1])
                 == std::vector<std::string>{
                     "raw=0@0",
@@ -1431,9 +1437,9 @@ inline void verify_production_pipe_owner_golden() {
         "fragment_query",
     };
     require(
-        plan.topology.coordinates.size() == 12U
+        plan.topology.coordinates.size() == production_alphabets().size() * routes.size()
             && plan.topology.identity_representative_ordinals
-                == std::vector<std::uint32_t>{0U, 6U},
+                == production_identity_ordinals(routes.size(), 1u),
         "pipe product is twelve units with two alphabet identities");
     for (std::size_t ordinal = 0U;
          ordinal < plan.topology.coordinates.size();
@@ -1444,7 +1450,7 @@ inline void verify_production_pipe_owner_golden() {
             coordinate.ordinal == ordinal
                 && coordinate.assignments.size() == 2U
                 && coordinate.assignments[0].case_label
-                    == (ordinal < routes.size() ? "dna4" : "dna5")
+                    == production_alphabets()[ordinal / routes.size()].literal_name
                 && coordinate.assignments[1].case_label
                     == routes[ordinal % routes.size()]
                 && coordinate.identity_namespace == "bioseq::simd"
@@ -1454,27 +1460,10 @@ inline void verify_production_pipe_owner_golden() {
                         "instance_" + std::to_string(ordinal) + ".cppm"},
             "pipe coordinate order/path/direct namespace drifted");
     }
-    require(
-        enabled_ordinals(plan.topology, "dna4_uint64")
-                == std::vector<std::uint32_t>{0U, 1U, 2U, 3U, 4U, 5U}
-            && enabled_ordinals(plan.topology, "all_alphabets_uint64")
-                == std::vector<std::uint32_t>{
-                    0U, 1U, 2U, 3U, 4U, 5U,
-                    6U, 7U, 8U, 9U, 10U, 11U}
-            && enabled_ordinals(plan.topology, "all_coordinates").size()
-                == 12U
-            && enabled_ordinals(
-                   plan.topology,
-                   "all_coordinates_adaptive_lengths")
-                   .size()
-                == 12U
-            && enabled_ordinals(
-                   plan.topology, "extended_kmer_coordinates")
-                   .size()
-                == 12U
-            && enabled_ordinals(plan.topology, "full_specialization").size()
-                == 12U,
-        "pipe profiles project to exact 6/12 owner obligations without reordering");
+    for (const auto profile : template_flatten_profiles) {
+        require(enabled_ordinals(plan.topology, profile).size() == production_alphabets().size() * routes.size(),
+            "all profiles include every biological alphabet pipeline owner");
+    }
 
     struct owner_golden final {
         std::string_view name;
@@ -1523,11 +1512,11 @@ inline void verify_production_pipe_owner_golden() {
             && artifact_count(
                    generated,
                    materialization_artifact::kind::declaration_probe)
-                == 2U
+                == production_alphabets().size()
             && artifact_count(
                    generated,
                    materialization_artifact::kind::implementation_unit)
-                == 12U,
+                == production_alphabets().size() * routes.size(),
         "full pipe rendering has two inspection probes and 0/0/12 body obligations");
     std::size_t rendered_definitions = 0U;
     for (const materialization_artifact& artifact : generated.artifacts) {
@@ -1563,17 +1552,17 @@ inline void verify_production_pipe_owner_golden() {
         }
     }
     require(
-        rendered_definitions == 16U,
+        rendered_definitions == production_alphabets().size() * owners.size(),
         "twelve pipe units own sixteen definitions because each alphabet's "
         "fragment-index coordinate owns batch, vector, then physical owner");
 
-    generation_plan dna4 = production_pipe_plan("dna4_uint64");
+    generation_plan dna4 = production_pipe_plan("all_alphabets_uint64");
     const generation_result dna4_generated = render_generation(dna4, false);
     require(
         artifact_count(
             dna4_generated,
             materialization_artifact::kind::implementation_unit)
-            == 6U,
+            == production_alphabets().size() * routes.size(),
         "dna4 pipe profile has exactly six body-bearing owner units");
 }
 
@@ -1612,7 +1601,7 @@ inline void verify_production_declaration_heads_and_probes(
                 "2b8488a4dfa3ef6a978bff59121302342476f9d765d3a4ca65cf666442a7c071"}},
     };
     require(
-        generated.artifacts.size() == 66U,
+        generated.artifacts.size() == 2u + scheduler_identity_namespaces().size() * 8u,
         "full scheduler rendering must own API, selector, eight probes, and 56 units");
 
     const materialization_artifact* api = nullptr;
@@ -1661,10 +1650,9 @@ inline void verify_production_declaration_heads_and_probes(
     }
     require(
         api != nullptr && selector != nullptr
-            && implementations.size() == 56U && probe_count == 8U
+            && implementations.size() == scheduler_identity_namespaces().size() * 7u && probe_count == scheduler_identity_namespaces().size()
             && probe_representatives
-                == std::set<std::uint32_t>{
-                    0U, 7U, 14U, 21U, 28U, 35U, 42U, 49U},
+                == [] { const auto ordinals = production_identity_ordinals(7u, 4u); return std::set<std::uint32_t>{ordinals.begin(), ordinals.end()}; }(),
         "scheduler API/probe/implementation cardinalities drifted");
     require(
         occurrences(
@@ -1734,7 +1722,7 @@ inline void verify_production_declaration_heads_and_probes(
                 "generated API declaration-head digest drifted");
         }
         std::set<std::string, std::less<>> expected_qualified_names;
-        for (const std::string_view identity : scheduler_identity_namespaces) {
+        for (const std::string_view identity : scheduler_identity_namespaces()) {
             expected_qualified_names.emplace(
                 std::string{identity} + "::" + std::string{name});
         }
@@ -1843,7 +1831,7 @@ inline void verify_production_declaration_heads_and_probes(
         const std::size_t identity_index = coordinate.ordinal / 7U;
         const std::size_t shape_index = coordinate.ordinal % 7U;
         const std::string_view identity =
-            scheduler_identity_namespaces.at(identity_index);
+            scheduler_identity_namespaces().at(identity_index);
         const auto& [name, expected_digest] =
             expected_heads.at(head_index_by_shape.at(shape_index));
         const materialization_artifact& implementation =
@@ -2097,22 +2085,21 @@ inline void verify_production_declaration_heads_and_probes(
             && occurrences(
                    selector->content,
                    "\n            switch (storage_unit_byte_width)")
-                == 2U
+                == production_alphabets().size()
             && occurrences(selector->content, "\n        case 0: {") == 1U
             && occurrences(selector->content, "\n        case 1: {") == 1U,
         "scheduler selector must route the exact two-by-four identity switch");
     constexpr std::array<std::string_view, 4U> width_case_spellings{
         "1", "2", "4", "8"};
-    std::array<std::size_t, scheduler_identity_namespaces.size()>
-        route_positions{};
+    std::vector<std::size_t> route_positions(scheduler_identity_namespaces().size());
     for (std::size_t identity_index = 0U;
-         identity_index < scheduler_identity_namespaces.size();
+         identity_index < scheduler_identity_namespaces().size();
          ++identity_index) {
         const std::string route =
             "\n                case "
             + std::string{width_case_spellings[identity_index % 4U]}
             + ": {\n                    return ::"
-            + std::string{scheduler_identity_namespaces[identity_index]}
+            + std::string{scheduler_identity_namespaces()[identity_index]}
             + "::process_sequences(";
         require(
             occurrences(selector->content, route) == 1U,

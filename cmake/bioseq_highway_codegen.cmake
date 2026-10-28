@@ -1369,6 +1369,7 @@ function(bioseq_add_minimizer_registry_codegen)
     PROFILE
     OUTPUT_RECORDS_MODULE
     OUTPUT_VISITOR_MODULE
+    OUTPUT_PIPELINE_ENTRIES_MODULE
     OUTPUT_MANIFEST
     OUTPUT_STAMP)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
@@ -1398,19 +1399,36 @@ function(bioseq_add_minimizer_registry_codegen)
   get_filename_component(_output_root "${ARG_OUTPUT_ROOT}" ABSOLUTE)
   set(_records_module "${_output_root}/minimizer_physical_records.cppm")
   set(_visitor_module "${_output_root}/minimizer_physical_registry.cppm")
+  set(_pipeline_entries_module "${_output_root}/pipeline_owned_entries.cppm")
   set(_manifest "${_output_root}/minimizer_registry.tsv")
   set(_stamp "${_output_root}/minimizer_registry.stamp")
   set_source_files_properties(
-    "${_records_module}" "${_visitor_module}" PROPERTIES GENERATED TRUE)
+    "${_records_module}" "${_visitor_module}" "${_pipeline_entries_module}" PROPERTIES GENERATED TRUE)
   add_custom_command(
     OUTPUT
       "${_records_module}"
       "${_visitor_module}"
+      "${_pipeline_entries_module}"
       "${_manifest}"
       "${_stamp}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_output_root}"
     COMMAND "$<TARGET_FILE:bioseq_codegen>" highway minimizer-registry
       --profile "${ARG_PROFILE}"
+      --registry-source "${PROJECT_SOURCE_DIR}/bioseq/backend/sequences/packed_sequence_parts/core.cppm"
+      --seed-policy-source "${PROJECT_SOURCE_DIR}/bioseq/backend/sequences/kmers/hashers/base.cppm"
+      --pipeline-owner-source "${PROJECT_SOURCE_DIR}/bioseq/backend/pipeline/pipe_owners_template.cppm"
+      --pipeline-entries-output "${_pipeline_entries_module}"
+      --raw-compile-database "${CMAKE_BINARY_DIR}/compile_commands.json"
+      --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
+      --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
+      --llvm-config "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
+      --compiler-module-inventory "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+      --clang-sha256 "${BIOSEQ_CODEGEN_CLANG_SHA256}"
+      --clang-scan-deps-sha256 "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
+      --llvm-config-sha256 "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
+      --compiler-module-inventory-sha256 "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
+      --pcm-root "${_output_root}/pcm"
+      --depfile "${_output_root}/registry.d"
       --records-output "${_records_module}"
       --visitor-output "${_visitor_module}"
       --manifest-output "${_manifest}"
@@ -1418,6 +1436,12 @@ function(bioseq_add_minimizer_registry_codegen)
     DEPENDS
       bioseq_codegen_project
       "${BIOSEQ_CODEGEN_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/bioseq/backend/sequences/packed_sequence_parts/core.cppm"
+      "${PROJECT_SOURCE_DIR}/bioseq/backend/sequences/kmers/hashers/base.cppm"
+      "${PROJECT_SOURCE_DIR}/bioseq/backend/pipeline/pipe_owners_template.cppm"
+      "${BIOSEQ_CODEGEN_CLANG_BINARY}"
+      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+    DEPFILE "${_output_root}/registry.d"
     COMMENT
       "Generating ${ARG_PROFILE} minimizer physical-record/profile registry"
     VERBATIM)
@@ -1425,12 +1449,14 @@ function(bioseq_add_minimizer_registry_codegen)
     DEPENDS
       "${_records_module}"
       "${_visitor_module}"
+      "${_pipeline_entries_module}"
       "${_manifest}"
       "${_stamp}")
   add_dependencies("${ARG_TARGET}" bioseq_codegen_project)
   foreach(_output_pair IN ITEMS
       "${ARG_OUTPUT_RECORDS_MODULE}|${_records_module}"
       "${ARG_OUTPUT_VISITOR_MODULE}|${_visitor_module}"
+      "${ARG_OUTPUT_PIPELINE_ENTRIES_MODULE}|${_pipeline_entries_module}"
       "${ARG_OUTPUT_MANIFEST}|${_manifest}"
       "${ARG_OUTPUT_STAMP}|${_stamp}")
     if(_output_pair MATCHES "^([^|]*)\\|(.*)$"

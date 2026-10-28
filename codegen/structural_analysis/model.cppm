@@ -12,7 +12,7 @@ export namespace bioseq::codegen::structural_analysis {
 
 /// Model format shared by the host generator and Clang tooling.
 /// Increment this when a field is removed or changes meaning.
-inline constexpr std::uint32_t k_model_schema_revision = 2;
+inline constexpr std::uint32_t k_model_schema_revision = 4;
 
 /// How a source file was inspected. Token slicing reads syntax only.
 /// Declaration probes let Clang check declarations after their bodies are removed
@@ -152,6 +152,7 @@ struct attribute_record {
 struct declaration_specifier_state {
     bool direct_namespace_member{};
     bool is_definition{};
+    bool has_previous_declaration{};
     bool is_using_alias{};
     bool is_variable{};
     bool is_function{};
@@ -359,6 +360,21 @@ struct preprocessor_directive_record {
     bool active{};
 };
 
+/// Compiler-resolved identity and geometry of one authored biological alphabet.
+struct alphabet_manifest_entry {
+    std::string qualified_cpp_type;
+    std::string literal_name;
+    std::uint16_t ordinal{};
+    std::uint16_t cardinality{};
+    std::uint8_t rank_bits{};
+    std::uint8_t exact_seed_rank_bits{};
+    bool is_amino_acid{};
+    bool is_complementable{};
+    std::string source_digest;
+
+    [[nodiscard]] bool operator==(const alphabet_manifest_entry&) const = default;
+};
+
 /// Scanner results for one source file.
 struct translation_unit {
     std::uint32_t schema_revision{k_model_schema_revision};
@@ -370,6 +386,8 @@ struct translation_unit {
     std::vector<lexical_token> tokens;
     std::vector<declaration_record> declarations;
     std::vector<aggregate_record> aggregate_records;
+    std::vector<alphabet_manifest_entry> biological_alphabets;
+    std::vector<std::uint8_t> minimizer_exact_rank_widths;
     std::vector<marked_namespace_record> marked_namespaces;
     collection_mode mode{collection_mode::lexical_scan};
     module_record source_module;

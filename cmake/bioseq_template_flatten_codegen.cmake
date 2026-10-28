@@ -204,19 +204,8 @@ endfunction()
 function(_bioseq_template_flatten_profile_enabled
     profile_ordinal alphabet_label width_label output_variable)
   set(_enabled TRUE)
-  if(profile_ordinal EQUAL 0)
-    if((NOT alphabet_label STREQUAL "" AND
-        NOT alphabet_label STREQUAL "dna4") OR
-       (NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8"))
-      set(_enabled FALSE)
-    endif()
-  elseif(profile_ordinal EQUAL 1)
-    if((NOT alphabet_label STREQUAL "" AND
-        NOT (alphabet_label STREQUAL "dna4" OR
-             alphabet_label STREQUAL "dna5")) OR
-       (NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8"))
-      set(_enabled FALSE)
-    endif()
+  if(profile_ordinal EQUAL 0 AND NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8")
+    set(_enabled FALSE)
   endif()
   set(${output_variable} ${_enabled} PARENT_SCOPE)
 endfunction()
@@ -326,6 +315,16 @@ function(bioseq_template_flatten_probe)
     _bioseq_template_flatten_parse_string_arguments(
       "${_argument_text}" _arguments)
     list(LENGTH _arguments _argument_count)
+    if(_argument_count EQUAL 3)
+      list(GET _arguments 2 _registry_name)
+      if(NOT _registry_name STREQUAL "supported_biological_alphabets")
+        _bioseq_template_flatten_fail("unknown registry axis '${_registry_name}'")
+      endif()
+      _bioseq_biological_alphabet_entries(_alphabet_entries)
+      list(REMOVE_AT _arguments 2)
+      list(APPEND _arguments ${_alphabet_entries})
+      list(LENGTH _arguments _argument_count)
+    endif()
     if(_argument_count LESS 4)
       _bioseq_template_flatten_fail(
         "template_flatten requires role, group, and at least one "
@@ -1023,6 +1022,14 @@ function(bioseq_add_template_flatten_codegen)
     endif()
   endforeach()
 
+  set(_alphabet_registry_arguments)
+  set(_alphabet_registry_dependencies)
+  if(BIOSEQ_MINIMIZER_REGISTRY_MANIFEST)
+    set(_alphabet_registry_arguments
+      --alphabet-registry-manifest "${BIOSEQ_MINIMIZER_REGISTRY_MANIFEST}")
+    set(_alphabet_registry_dependencies "${BIOSEQ_MINIMIZER_REGISTRY_MANIFEST}")
+  endif()
+
   file(READ "${_signature_source}" _signature_contents)
   string(REPLACE "." "\\." _output_module_regex "${ARG_OUTPUT_MODULE}")
   string(REGEX MATCH
@@ -1119,6 +1126,7 @@ function(bioseq_add_template_flatten_codegen)
       "${_configure_manifest}"
       "${_compile_database}"
       ${ARG_PREPARE_DEPENDS}
+      ${_alphabet_registry_dependencies}
       "${BIOSEQ_CODEGEN_CLANG_BINARY}"
       "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
       "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
@@ -1147,6 +1155,7 @@ function(bioseq_add_template_flatten_codegen)
       --output-module "${ARG_OUTPUT_MODULE}"
       --emission-policy "${_emission_policy}"
       --profile "${_profile}"
+      ${_alphabet_registry_arguments}
       --configure-topology-manifest "${_configure_manifest}"
       --expected-topology-digest "${ARG_EXPECTED_TOPOLOGY_DIGEST}"
       --enabled-ordinals "${_enabled_csv}"
@@ -1178,6 +1187,7 @@ function(bioseq_add_template_flatten_codegen)
       "${_source_path}"
       "${_signature_source}"
       "${_configure_manifest}"
+      ${_alphabet_registry_dependencies}
       "${_prepare_stamp}"
       "${_prepared_compile_database}"
       "${_pcm_manifest}"

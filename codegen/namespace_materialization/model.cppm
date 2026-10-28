@@ -325,6 +325,7 @@ inline void invoke_prepare_publication_test_checkpoint(
 
 /// Parsed arguments for generating namespace specializations.
 struct command_line {
+    std::filesystem::path alphabet_registry_manifest;
     std::string name;
     std::filesystem::path source;
     std::filesystem::path repository_root;

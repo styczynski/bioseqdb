@@ -11,6 +11,7 @@ module;
 #include <optional>
 #include <set>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -573,9 +574,20 @@ attributes_named(
 
 [[nodiscard]] inline binding_record parse_binding_attribute(
     const structural_analysis::declaration_record& declaration,
-    const structural_analysis::attribute_record& attribute) {
-    const std::vector<std::string> arguments =
+    const structural_analysis::attribute_record& attribute,
+    const std::span<const structural_analysis::alphabet_manifest_entry> alphabets = {}) {
+    std::vector<std::string> arguments =
         parse_closed_string_arguments(attribute.argument_text);
+    if (arguments.size() == 3u) {
+        if (arguments[2u] != "supported_biological_alphabets" || alphabets.empty()) {
+            throw std::runtime_error("registry axis requires compiler-resolved supported_biological_alphabets");
+        }
+        arguments.resize(2u);
+        for (const auto& alphabet : alphabets) {
+            arguments.push_back(alphabet.literal_name);
+            arguments.push_back(alphabet.qualified_cpp_type);
+        }
+    }
     if (arguments.size() < 4u || arguments.size() % 2u != 0u) {
         throw std::runtime_error(
             "template_flatten requires role, group, and one or more label/replacement pairs");
@@ -846,9 +858,8 @@ void validate_coordinate_axis_domain(
 }
 
 /// Supported template-flatten build profiles.
-inline constexpr std::array<std::string_view, 6u>
+inline constexpr std::array<std::string_view, 5u>
     template_flatten_profiles{
-        "dna4_uint64",
         "all_alphabets_uint64",
         "all_coordinates",
         "all_coordinates_adaptive_lengths",
@@ -871,26 +882,9 @@ inline constexpr std::array<std::string_view, 6u>
         throw std::runtime_error(
             "template_flatten profile is not in the closed semantic vocabulary");
     }
-    const std::vector<axis_case_assignment>::const_iterator alphabet =
-        std::ranges::find(
-        coordinate.assignments, std::string_view{"alphabet"},
-        &axis_case_assignment::group);
-    const std::vector<axis_case_assignment>::const_iterator width =
-        std::ranges::find(
-        coordinate.assignments, std::string_view{"width"},
-        &axis_case_assignment::group);
-    if (profile == "dna4_uint64") {
-        return (alphabet == coordinate.assignments.end()
-                || alphabet->case_label == "dna4")
-            && (width == coordinate.assignments.end()
-                || width->case_label == "w8");
-    }
+    const auto width = std::ranges::find(coordinate.assignments, std::string_view{"width"}, &axis_case_assignment::group);
     if (profile == "all_alphabets_uint64") {
-        return (alphabet == coordinate.assignments.end()
-                || alphabet->case_label == "dna4"
-                || alphabet->case_label == "dna5")
-            && (width == coordinate.assignments.end()
-                || width->case_label == "w8");
+        return width == coordinate.assignments.end() || width->case_label == "w8";
     }
     return true;
 }
@@ -1283,6 +1277,7 @@ inline void validate_implementation_owner_declaration_probes(
                 || declaration.linkage
                     == structural_analysis::entity_linkage::none
                 || declaration.specifiers.is_definition
+                || !declaration.specifiers.has_previous_declaration
                 || declaration.payload_kind
                     != structural_analysis::declaration_payload_kind::none
                 || detail::nonempty_range(
@@ -1888,7 +1883,8 @@ inline void validate_scheduler_highway_prepared_closure(
     const structural_analysis::translation_unit& unit,
     std::string configured_output_module_name,
     const emission_policy policy,
-    std::string_view source_text) {
+    std::string_view source_text,
+    const std::span<const structural_analysis::alphabet_manifest_entry> alphabets = {}) {
     if (unit.mode != structural_analysis::collection_mode::token_slice) {
         throw std::runtime_error(
             unit.source_path.string()
@@ -1926,7 +1922,7 @@ inline void validate_scheduler_highway_prepared_closure(
         boundary_names.insert(declaration.enclosing_qualified_name);
         try {
             region.bindings.push_back(
-                parse_binding_attribute(declaration, *flatten.front()));
+                parse_binding_attribute(declaration, *flatten.front(), alphabets));
         } catch (const std::exception& error) {
             detail::reject(
                 unit.source_path,

@@ -357,10 +357,11 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # allocation helper. The heap module belongs to the small runtime-core closure.
 # The generic bounded ntHash seed policy is one shared, target-neutral module.
 # The CIGAR alphabet and RLE range partition are target-neutral sequence owners.
+# Native biological conversion is one additional target-neutral sequence owner.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 351)
+if(NOT _bioseq_nopg_module_count EQUAL 352)
   message(FATAL_ERROR
-        "Domain-neutral module inventory must contain exactly 351 authored units; "
+        "Domain-neutral module inventory must contain exactly 352 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -717,40 +718,22 @@ bioseq_template_flatten_probe(
   OUT_ENABLED_SOURCES
     BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS)
 
-set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS)
-foreach(_bioseq_pipeline_dispatch_owner_ordinal RANGE 0 5)
-  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
-    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/instance_${_bioseq_pipeline_dispatch_owner_ordinal}.cppm")
-endforeach()
-set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS)
-foreach(_bioseq_pipeline_dispatch_owner_ordinal RANGE 6 11)
-  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
-    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/instance_${_bioseq_pipeline_dispatch_owner_ordinal}.cppm")
-endforeach()
-unset(_bioseq_pipeline_dispatch_owner_ordinal)
 set(BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
-  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS}
-  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
-
-list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
-  _bioseq_pipeline_dispatch_owner_dna4_count)
-list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
-  _bioseq_pipeline_dispatch_owner_dna5_count)
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS})
+_bioseq_biological_alphabet_entries(_bioseq_pipeline_alphabet_entries)
+list(LENGTH _bioseq_pipeline_alphabet_entries _bioseq_pipeline_alphabet_fields)
+math(EXPR _bioseq_pipeline_dispatch_owner_expected_count "${_bioseq_pipeline_alphabet_fields} / 2 * 6")
 list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
   _bioseq_pipeline_dispatch_owner_all_count)
-if(NOT _bioseq_pipeline_dispatch_owner_dna4_count EQUAL 6
-    OR NOT _bioseq_pipeline_dispatch_owner_dna5_count EQUAL 6
-    OR NOT _bioseq_pipeline_dispatch_owner_all_count EQUAL 12)
-  message(FATAL_ERROR
-    "Post-erasure pipeline owner registry must contain exactly six dna4 and "
-    "six dna5 units (12 total)")
+if(NOT _bioseq_pipeline_dispatch_owner_all_count EQUAL _bioseq_pipeline_dispatch_owner_expected_count)
+  message(FATAL_ERROR "Pipeline owner registry differs from biological alphabet x route topology")
 endif()
 set(_bioseq_pipeline_dispatch_owner_unique
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS})
 list(REMOVE_DUPLICATES _bioseq_pipeline_dispatch_owner_unique)
 list(LENGTH _bioseq_pipeline_dispatch_owner_unique
   _bioseq_pipeline_dispatch_owner_unique_count)
-if(NOT _bioseq_pipeline_dispatch_owner_unique_count EQUAL 12)
+if(NOT _bioseq_pipeline_dispatch_owner_unique_count EQUAL _bioseq_pipeline_dispatch_owner_expected_count)
   message(FATAL_ERROR
     "Post-erasure pipeline owner registry contains duplicate paths")
 endif()
@@ -769,8 +752,9 @@ unset(_bioseq_pipeline_dispatch_owner_in_generated_root)
 unset(_bioseq_pipeline_dispatch_owner_unique_count)
 unset(_bioseq_pipeline_dispatch_owner_unique)
 unset(_bioseq_pipeline_dispatch_owner_all_count)
-unset(_bioseq_pipeline_dispatch_owner_dna5_count)
-unset(_bioseq_pipeline_dispatch_owner_dna4_count)
+unset(_bioseq_pipeline_alphabet_entries)
+unset(_bioseq_pipeline_alphabet_fields)
+unset(_bioseq_pipeline_dispatch_owner_expected_count)
 
 # Generated scheduler sources and their imported typed-support closure must
 # reach the heavy pipeline only through the distinct scheduler-owned entries.
@@ -893,20 +877,6 @@ unset(_bioseq_pipeline_dispatch_owner_boundary_text)
 unset(_bioseq_pipeline_dispatch_owner_boundary_support_root)
 unset(_bioseq_pipeline_dispatch_owner_boundary_root)
 
-set(_bioseq_pipeline_dispatch_owner_expected_implementation_units
-  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS})
-if(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-  list(APPEND _bioseq_pipeline_dispatch_owner_expected_implementation_units
-    ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
-endif()
-if(NOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS}"
-    STREQUAL
-    "${_bioseq_pipeline_dispatch_owner_expected_implementation_units}")
-  message(FATAL_ERROR
-    "Pipeline-owner profile projection diverges from the canonical "
-    "alphabet x route topology")
-endif()
-
 # Define the target-neutral registry before passing its stamp to PREPARE.
 # Defining it later in the Highway target graph made this dependency expand
 # to an empty string on cold builds, so the generated provider was missing
@@ -924,6 +894,7 @@ bioseq_add_minimizer_registry_codegen(
   PROFILE "${BIOSEQ_MINIMIZER_REGISTRY_PROFILE}"
   OUTPUT_RECORDS_MODULE BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE
   OUTPUT_VISITOR_MODULE BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE
+  OUTPUT_PIPELINE_ENTRIES_MODULE BIOSEQ_PIPELINE_OWNED_ENTRIES_MODULE
   OUTPUT_MANIFEST BIOSEQ_MINIMIZER_REGISTRY_MANIFEST
   OUTPUT_STAMP BIOSEQ_MINIMIZER_REGISTRY_STAMP)
 
@@ -956,11 +927,8 @@ endif()
 
 list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
   _bioseq_pipeline_dispatch_owner_count)
-if(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-  set(_bioseq_expected_pipeline_dispatch_owner_count 12)
-else()
-  set(_bioseq_expected_pipeline_dispatch_owner_count 6)
-endif()
+list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
+  _bioseq_expected_pipeline_dispatch_owner_count)
 if(NOT _bioseq_pipeline_dispatch_owner_count EQUAL
     _bioseq_expected_pipeline_dispatch_owner_count)
   message(FATAL_ERROR

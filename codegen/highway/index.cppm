@@ -192,6 +192,21 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
 parse_minimizer_registry_command_line(
     std::span<std::string_view const> args) {
     static const std::set<std::string_view, std::less<>> allowed{
+        "--registry-source",
+        "--seed-policy-source",
+        "--pipeline-owner-source",
+        "--pipeline-entries-output",
+        "--raw-compile-database",
+        "--clang-binary",
+        "--clang-scan-deps",
+        "--llvm-config",
+        "--compiler-module-inventory",
+        "--clang-sha256",
+        "--clang-scan-deps-sha256",
+        "--llvm-config-sha256",
+        "--compiler-module-inventory-sha256",
+        "--pcm-root",
+        "--depfile",
         "--manifest-output",
         "--profile",
         "--records-output",
@@ -201,9 +216,25 @@ parse_minimizer_registry_command_line(
     const parsed_options parsed = parse_options(args, allowed);
     const auto& options = parsed.singleton;
     return minimizer_registry_command_line{
+        .registry_source = options.at("--registry-source"),
+        .seed_policy_source = options.at("--seed-policy-source"),
+        .pipeline_owner_source = options.at("--pipeline-owner-source"),
+        .raw_compile_database = options.at("--raw-compile-database"),
+        .clang_binary = options.at("--clang-binary"),
+        .clang_scan_deps = options.at("--clang-scan-deps"),
+        .llvm_config = options.at("--llvm-config"),
+        .compiler_module_inventory = options.at("--compiler-module-inventory"),
+        .clang_sha256 = options.at("--clang-sha256"),
+        .clang_scan_deps_sha256 = options.at("--clang-scan-deps-sha256"),
+        .llvm_config_sha256 = options.at("--llvm-config-sha256"),
+        .compiler_module_inventory_sha256 = options.at("--compiler-module-inventory-sha256"),
+        .pcm_root = options.at("--pcm-root"),
+        .depfile = options.at("--depfile"),
+
         .profile = parse_minimizer_registry_profile(options.at("--profile")),
         .records_output = options.at("--records-output"),
         .visitor_output = options.at("--visitor-output"),
+        .pipeline_entries_output = options.at("--pipeline-entries-output"),
         .manifest_output = options.at("--manifest-output"),
         .stamp = options.at("--stamp"),
     };
@@ -358,6 +389,7 @@ parse_minimizer_registry_command_line(
     const std::array outputs{
         command.records_output,
         command.visitor_output,
+        command.pipeline_entries_output,
         command.manifest_output,
         command.stamp,
     };
@@ -371,13 +403,50 @@ parse_minimizer_registry_command_line(
     }
     if (command.records_output.extension() != ".cppm"
         || command.visitor_output.extension() != ".cppm"
+        || command.pipeline_entries_output.extension() != ".cppm"
         || command.manifest_output.extension() != ".tsv") {
         throw std::runtime_error(
             "minimizer registry requires .cppm module outputs and a .tsv manifest");
     }
 
-    const minimizer_registry_spec registry =
-        make_minimizer_registry(command.profile);
+    const auto prepared = structural_analysis::prepare_compilation_environment(
+        {command.registry_source, command.seed_policy_source}, command.raw_compile_database,
+        command.clang_binary, command.clang_scan_deps, command.llvm_config,
+        command.compiler_module_inventory, command.clang_sha256,
+        command.clang_scan_deps_sha256, command.llvm_config_sha256,
+        command.compiler_module_inventory_sha256, command.pcm_root,
+        "production", "core");
+    const auto compile_database = command.pcm_root / "metadata" / "registry_compile_commands.json";
+    publish_artifact_if_changed(compile_database, prepared.compile_database_json);
+    const auto structural = structural_analysis::scan_translation_units_from_database(
+        {command.registry_source, command.seed_policy_source}, compile_database, "production", command.pcm_root);
+    std::vector<structural_analysis::alphabet_manifest_entry> alphabets;
+    std::vector<std::uint8_t> exact_widths;
+    std::string seed_policy_digest;
+    for (const auto& unit : structural.translation_units) {
+        if (!unit.biological_alphabets.empty()) {
+            if (!alphabets.empty()) throw std::runtime_error("duplicate biological registry source");
+            alphabets = unit.biological_alphabets;
+        }
+        if (!unit.minimizer_exact_rank_widths.empty()) {
+            if (!exact_widths.empty()) throw std::runtime_error("duplicate exact seed policy source");
+            exact_widths = unit.minimizer_exact_rank_widths;
+            seed_policy_digest = unit.source_sha256;
+        }
+    }
+    if (alphabets.empty() || exact_widths.size() != alphabets.size()) {
+        throw std::runtime_error("compiler-resolved exact seed policy does not cover the biological registry");
+    }
+    for (std::size_t index = 0u; index < alphabets.size(); ++index) {
+        alphabets[index].exact_seed_rank_bits = exact_widths[index];
+        alphabets[index].source_digest = bioseq::common::sha256_hex(
+            alphabets[index].source_digest + "\n" + seed_policy_digest);
+    }
+    structural_analysis::validate_biological_alphabet_manifest(alphabets);
+    const minimizer_registry_spec registry = make_minimizer_registry(command.profile, alphabets);
+    auto dependencies = prepared.dependencies;
+    dependencies.push_back(command.pipeline_owner_source);
+    publish_artifact_if_changed(command.depfile, render_depfile(command.stamp, std::move(dependencies)));
     validate_minimizer_registry(registry);
     const std::string manifest = render_minimizer_registry_manifest(registry);
     const std::string identity = bioseq::common::sha256_hex(manifest);
@@ -385,8 +454,12 @@ parse_minimizer_registry_command_line(
         registry, identity);
     const std::string visitor = render_minimizer_physical_registry_module(
         registry, identity);
+    const std::string pipeline_entries = render_pipeline_owned_entries_module(
+        registry, command.pipeline_owner_source,
+        read_artifact_bytes(command.pipeline_owner_source));
     publish_artifact_if_changed(command.records_output, records);
     publish_artifact_if_changed(command.visitor_output, visitor);
+    publish_artifact_if_changed(command.pipeline_entries_output, pipeline_entries);
     publish_artifact_if_changed(command.manifest_output, manifest);
     publish_artifact_if_changed(
         command.stamp,
