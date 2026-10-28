@@ -29,6 +29,7 @@ struct spirv_binding_layout {
     std::uint32_t array_stride = 0;
     std::uint32_t element_struct_id = 0;
     std::vector<std::uint32_t> member_offsets;
+    std::vector<std::uint32_t> block_member_offsets;
 };
 
 /// @brief Buffer and push-parameter layouts read from SPIR-V. Callers can
@@ -118,6 +119,17 @@ struct spirv_layout_scan {
             if (layout->member_offsets[i] != offsets[i])
                 return false;
         }
+        return true;
+    }
+
+    /** Check the enclosing storage block offsets independently of its array element layout. */
+    [[nodiscard]] bool has_binding_block_offsets(
+        std::uint32_t descriptor_set, std::uint32_t binding,
+        std::span<const std::uint32_t> offsets) const noexcept {
+        const auto* layout = binding_layout(descriptor_set, binding);
+        if (layout == nullptr || layout->block_member_offsets.size() != offsets.size()) return false;
+        for (std::size_t index = 0; index < offsets.size(); ++index)
+            if (layout->block_member_offsets[index] != offsets[index]) return false;
         return true;
     }
 
@@ -389,6 +401,8 @@ struct spirv_layout_scan {
                                     ? variable_decoration->descriptor_set
                                     : k_spirv_layout_unknown;
         layout.binding = variable_decoration->binding;
+        if (const auto* offsets = find_member_offsets(pointer->pointee_type))
+            layout.block_member_offsets = *offsets;
         layout.array_stride = array_decoration != nullptr && array_decoration->has_array_stride
                                   ? array_decoration->array_stride
                                   : 0u;

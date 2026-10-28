@@ -22,6 +22,7 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 import std;
+import bioseq.alignment.utils;
 
 export namespace bioseq::gpu::vulkan {
 
@@ -334,41 +335,45 @@ class runtime {
 
     /// @brief Computes banded local alignment with affine gap penalties.
     /// Returns scores and endpoints for, each job.
-    [[nodiscard]] std::vector<gpu_alignment_extension_result_wire>
-    run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_symbols,
-                                      std::span<const std::uint32_t> target_symbols,
+    [[nodiscard]] std::expected<std::vector<gpu_alignment_extension_result_wire>, bioseq::simd::alignment_contract_error>
+    run_alignment_extension_roundtrip(const gpu_packed_sequence_upload& query_symbols,
+                                      const gpu_packed_sequence_upload& target_symbols,
                                       std::span<const gpu_alignment_extension_job_wire> jobs,
-                                      const gpu_alignment_extension_params& params);
+                                      const gpu_alignment_extension_params& params,
+    const gpu_substitution_matrix& matrix);
 
     /// @brief Runs SneakySnake to rule out sequence pairs beyond the edit limit.
     /// Each result includes a lower bound and status. Unsupported cases are kept
     /// for later alignment, and invalid ranges are checked before reading sequence data.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
-    run_sneaky_snake_rank_batch_roundtrip(std::span<const std::uint8_t> query_ranks,
-                                          std::span<const std::uint8_t> target_ranks,
+    run_sneaky_snake_rank_batch_roundtrip(std::span<const gpu_packed_sequence_upload> queries,
+                                          std::span<const gpu_packed_sequence_upload> targets,
+        const vulkan_rank_lut& rank_lut,
                                           std::span<const bioseq::prefilter::prefilter_job> jobs);
 
     /// @brief Runs GateKeeper to filter pairs before alignment.
     /// A mask-based rejection needs confirmation from the bounded-distance  check.
     /// Unsupported cases are kept, and invalid ranges are checkhd before reading data.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
-    run_gatekeeper_rank_batch_roundtrip(std::span<const std::uint8_t> query_ranks,
-                                        std::span<const std::uint8_t> target_ranks,
+    run_gatekeeper_rank_batch_roundtrip(std::span<const gpu_packed_sequence_upload> queries,
+                                        std::span<const gpu_packed_sequence_upload> targets,
+        const vulkan_rank_lut& rank_lut,
                                         std::span<const bioseq::prefilter::prefilter_job> jobs);
 
-    /// @brief Aligns expanded symbol arrays on the GPU and returns packed CIGAR strings.
+    /// @brief Aligns native packed sequence windows on the GPU and returns packed CIGAR strings.
     /// Large batches run in waves to limit traceback memory.
-    [[nodiscard]] alignment_cigar_batch_result
-    run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> query_symbols,
-                                         std::span<const std::uint32_t> target_symbols,
+    [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error>
+    run_alignment_simple_cigar_roundtrip(const gpu_packed_sequence_upload& query_symbols,
+                                         const gpu_packed_sequence_upload& target_symbols,
                                          std::span<const gpu_alignment_cigar_job_wire> jobs,
                                          const gpu_alignment_cigar_params& params,
+        const gpu_substitution_matrix& matrix,
                                          std::uint32_t packed_cigar_capacity);
 
     /// @brief Aligns packed sequence windows and attaches completion records to the coordinate receipt.
     /// Each job must match a recorded coordinate candidate. Returns alignment
     /// results and the packed CIGAR strings read from the GPU.
-    [[nodiscard]] alignment_cigar_batch_result run_persisted_alignment_cigar_roundtrip(
+    [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> run_persisted_alignment_cigar_roundtrip(
         std::span<const std::byte> query_packed,
         std::span<const std::byte> target_packed,
         std::span<const gpu_alignment_cigar_job_wire> jobs,
@@ -376,6 +381,7 @@ class runtime {
         std::span<const gpu_chain_candidate_header_wire> candidate_headers,
         std::span<const gpu_chain_candidate_wire> candidates,
         const gpu_alignment_cigar_params& params,
+        const gpu_substitution_matrix& matrix,
         std::uint32_t packed_cigar_capacity,
         persisted_grouped_soa_coordinate_operation_receipt& coordinate_receipt);
 
@@ -393,11 +399,12 @@ class runtime {
 #ifdef BIOSEQ_TEST_INDEXES
     /// @brief Tests packed-input alignment with a chosen target for traceback memory per submission.
     /// Returns CIGAR results and submission counts without attaching an operation receipt
-    [[nodiscard]] alignment_cigar_batch_result run_alignment_packed_cigar_roundtrip_for_test(
+    [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> run_alignment_packed_cigar_roundtrip_for_test(
         std::span<const std::byte> query_packed,
         std::span<const std::byte> target_packed,
         std::span<const gpu_alignment_cigar_job_wire> jobs,
         const gpu_alignment_cigar_params& params,
+        const gpu_substitution_matrix& matrix,
         std::uint32_t packed_cigar_capacity,
         std::uint64_t preferred_traceback_wave_bytes);
 #endif
@@ -492,6 +499,7 @@ class runtime {
     [[nodiscard]] grouped_soa_seed_anchor_result run_grouped_soa_seed_anchor_roundtrip(
         const gpu_grouped_soa_resident_view& target,
         const gpu_seed_query_inputs& query_inputs,
+        const gpu_native_sequence_provider& native_target,
         std::int32_t max_occ,
         std::uint32_t kmer_size,
         device_query_sketch_authorization query_authorization);
@@ -739,13 +747,15 @@ class runtime {
                                         runtime_pipeline_use_collector* collector = nullptr,
                                         std::size_t collector_job_index = 0u);
     /// @brief Uploads and aligns one CIGAR batch, thes reads its results under the runtime lock.
-    /// Accepts packed bytes or, expanded ranks. The caller supplies a reservation
-    /// covering this batch's buffers.
-    [[nodiscard]] alignment_cigar_batch_result run_alignment_cigar_payload_roundtrip_locked(
+    /// Accepts native packed windows and a batch-owned prepared matrix buffer.
+    /// The caller supplies the exact reservation for the wave-local buffers.
+    [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> run_alignment_cigar_payload_roundtrip_locked(
         std::span<const std::byte> query_payload,
         std::span<const std::byte> target_payload,
         std::span<const gpu_alignment_cigar_job_wire> jobs,
         const gpu_alignment_cigar_params& params,
+        const gpu_substitution_matrix& matrix,
+        const buffer& matrix_buf,
         std::uint32_t packed_cigar_capacity,
         std::span<const std::size_t> collector_job_indices,
         bool allow_unsupported_geometry,
@@ -754,11 +764,12 @@ class runtime {
     /// @brief Splits a CIGAR batch into submissions with memory reserved before allocation.
     /// Groups jobs around the preferred traceback size. Jobs can first run without
     /// traceback storage, then retry with storage when needed.
-    [[nodiscard]] alignment_cigar_batch_result
+    [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error>
     run_alignment_cigar_payload_waved_locked(std::span<const std::byte> query_payload,
                                              std::span<const std::byte> target_payload,
                                              std::span<const gpu_alignment_cigar_job_wire> jobs,
                                              const gpu_alignment_cigar_params& params,
+                                             const gpu_substitution_matrix& matrix,
                                              std::uint32_t packed_cigar_capacity,
                                              std::uint64_t preferred_traceback_wave_bytes,
                                              runtime_pipeline_use_collector* collector);
@@ -828,6 +839,15 @@ class runtime {
         std::uint32_t hash_shift,
         std::uint32_t pos_bits) const;
 #endif
+    /** Verifies native seed spans on device and compacts valid sorted anchors. */
+    [[nodiscard]] gpu_verified_seed_buffer verify_seed_anchors_locked(
+        const buffer& candidates, std::uint64_t candidate_byte_offset, std::uint32_t candidate_count,
+        const gpu_native_sequence_upload& query, const gpu_native_sequence_upload& target,
+        const vulkan_rank_lut& rank_policy, std::uint32_t query_length,
+        std::uint32_t kmer_size, std::uint64_t target_position_bias = 0u,
+        const gpu_native_sequence_provider& target_provider = {},
+        runtime_pipeline_use_collector* collector = nullptr, std::size_t job_index = 0u);
+
     /// @brief Returns the device-memory bytes held by the reusable prefilter buffers.
     [[nodiscard]] std::uint64_t prefilter_workspace_allocation_bytes_locked() const noexcept;
     /// @brief Grows a prefilter buffer if needed, reserving memory before, allocation.
@@ -843,8 +863,9 @@ class runtime {
         shader_kind kind,
         std::uint32_t push_mode,
         std::size_t replay_index,
-        std::span<const std::uint8_t> query_ranks,
-        std::span<const std::uint8_t> target_ranks,
+        std::span<const gpu_packed_sequence_upload> queries,
+        std::span<const gpu_packed_sequence_upload> targets,
+        const vulkan_rank_lut& rank_lut,
         std::span<const bioseq::prefilter::prefilter_job> jobs);
     /// @brief Returns the memory charge for metadata held by both pipeline caches.
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked() const noexcept;
@@ -891,7 +912,7 @@ class runtime {
     };
 
     struct prefilter_descriptor_binding_cache {
-        std::array<VkBuffer, 4> buffers{}; ///< Last bound query, target, job, and result buffers for one algorithm.
+        std::array<VkBuffer, 6> buffers{}; ///< Last bound packed input, record, job, result and policy buffers for one algorithm.
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Descriptor set updated with `buffers`.
     };
 
@@ -928,6 +949,8 @@ class runtime {
     buffer prefilter_target_buffer_;
     buffer prefilter_jobs_buffer_;
     buffer prefilter_results_buffer_;
+    buffer prefilter_target_records_buffer_;
+    buffer prefilter_rank_lut_buffer_;
     // Keep separate descriptor caches for SneakySnake and GateKeeper. Switching
     // algorithms then preserves each set's bindings when the buffers are unchanged.
     std::array<prefilter_descriptor_binding_cache, 2> prefilter_descriptor_binding_cache_{};

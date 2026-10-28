@@ -80,6 +80,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     out.ownership.count_submit_admissions = peak_permit != nullptr ? 1u : 0u;
     if (!features_.available)
         throw vulkan_runtime_error("build_target_index on unavailable device");
+    validate_native_sketch_contract(rank_lut, params);
+    validate_native_sketch_window(packed_sequence, rank_lut, params, params.bp_size, params.seq_word_offset);
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t window_size = params.window_size;
     const std::uint32_t kmer_size = params.kmer_size;
@@ -1094,6 +1096,8 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
         throw vulkan_runtime_error("run_sketch_sort_pairs_roundtrip on unavailable device");
     }
 
+    validate_native_sketch_contract(rank_lut, params);
+    validate_native_sketch_window(packed_sequence, rank_lut, params, params.bp_size, params.seq_word_offset);
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t window_size = params.window_size;
     const std::uint32_t kmer_size = params.kmer_size;

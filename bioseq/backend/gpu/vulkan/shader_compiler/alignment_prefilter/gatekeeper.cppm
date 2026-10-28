@@ -62,10 +62,10 @@ uvec4 mismatch_mask_segment(
     uvec4 mask = uvec4(0u);
     uint position = 0u;
     while (count - position >= 4u) {
-        uint query_word = query_rank_quad_unchecked(
-            job.query_offset + query_relative + position);
-        uint target_word = target_rank_quad_unchecked(
-            job.target_offset + target_relative + position);
+        uint query_word = query_rank_quad_unchecked(job,
+            job.query_start + query_relative + position);
+        uint target_word = target_rank_quad_unchecked(job,
+            job.target_start + target_relative + position);
         append_mismatch_quad(
             mask,
             output_position + position,
@@ -73,10 +73,10 @@ uvec4 mismatch_mask_segment(
         position += 4u;
     }
     while (position < count) {
-        if (query_rank_unchecked(
-                job.query_offset + query_relative + position)
-            != target_rank_unchecked(
-                job.target_offset + target_relative + position)) {
+        if (query_rank_unchecked(job,
+                job.query_start + query_relative + position)
+            != target_rank_unchecked(job,
+                job.target_start + target_relative + position)) {
             set_mask_bit(mask, output_position + position);
         }
         ++position;
@@ -127,62 +127,62 @@ uint pack_mismatch_nibbles(uvec4 nibbles) {
 }
 
 packed_ranks_32 load_query_ranks_32(prefilter_job job) {
-    uint base = job.query_offset >> 2u;
+    uint base = job.query_start;
     packed_ranks_32 ranks;
     ranks.first = uvec4(
-        query_rank_words[base], query_rank_words[base + 1u],
-        query_rank_words[base + 2u], query_rank_words[base + 3u]);
+        query_rank_quad_unchecked(job, base + 0u), query_rank_quad_unchecked(job, base + 4u),
+        query_rank_quad_unchecked(job, base + 8u), query_rank_quad_unchecked(job, base + 12u));
     ranks.second = uvec4(
-        query_rank_words[base + 4u], query_rank_words[base + 5u],
-        query_rank_words[base + 6u], query_rank_words[base + 7u]);
+        query_rank_quad_unchecked(job, base + 16u), query_rank_quad_unchecked(job, base + 20u),
+        query_rank_quad_unchecked(job, base + 24u), query_rank_quad_unchecked(job, base + 28u));
     return ranks;
 }
 
 packed_ranks_32 load_target_ranks_32(prefilter_job job) {
-    uint base = job.target_offset >> 2u;
+    uint base = job.target_start;
     packed_ranks_32 ranks;
     ranks.first = uvec4(
-        target_rank_words[base], target_rank_words[base + 1u],
-        target_rank_words[base + 2u], target_rank_words[base + 3u]);
+        target_rank_quad_unchecked(job, base + 0u), target_rank_quad_unchecked(job, base + 4u),
+        target_rank_quad_unchecked(job, base + 8u), target_rank_quad_unchecked(job, base + 12u));
     ranks.second = uvec4(
-        target_rank_words[base + 4u], target_rank_words[base + 5u],
-        target_rank_words[base + 6u], target_rank_words[base + 7u]);
+        target_rank_quad_unchecked(job, base + 16u), target_rank_quad_unchecked(job, base + 20u),
+        target_rank_quad_unchecked(job, base + 24u), target_rank_quad_unchecked(job, base + 28u));
     return ranks;
 }
 
 packed_ranks_64 load_query_ranks_64(prefilter_job job) {
-    uint base = job.query_offset >> 2u;
+    uint base = job.query_start;
     packed_ranks_64 ranks;
     ranks.first = uvec4(
-        query_rank_words[base], query_rank_words[base + 1u],
-        query_rank_words[base + 2u], query_rank_words[base + 3u]);
+        query_rank_quad_unchecked(job, base + 0u), query_rank_quad_unchecked(job, base + 4u),
+        query_rank_quad_unchecked(job, base + 8u), query_rank_quad_unchecked(job, base + 12u));
     ranks.second = uvec4(
-        query_rank_words[base + 4u], query_rank_words[base + 5u],
-        query_rank_words[base + 6u], query_rank_words[base + 7u]);
+        query_rank_quad_unchecked(job, base + 16u), query_rank_quad_unchecked(job, base + 20u),
+        query_rank_quad_unchecked(job, base + 24u), query_rank_quad_unchecked(job, base + 28u));
     ranks.third = uvec4(
-        query_rank_words[base + 8u], query_rank_words[base + 9u],
-        query_rank_words[base + 10u], query_rank_words[base + 11u]);
+        query_rank_quad_unchecked(job, base + 32u), query_rank_quad_unchecked(job, base + 36u),
+        query_rank_quad_unchecked(job, base + 40u), query_rank_quad_unchecked(job, base + 44u));
     ranks.fourth = uvec4(
-        query_rank_words[base + 12u], query_rank_words[base + 13u],
-        query_rank_words[base + 14u], query_rank_words[base + 15u]);
+        query_rank_quad_unchecked(job, base + 48u), query_rank_quad_unchecked(job, base + 52u),
+        query_rank_quad_unchecked(job, base + 56u), query_rank_quad_unchecked(job, base + 60u));
     return ranks;
 }
 
 packed_ranks_64 load_target_ranks_64(prefilter_job job) {
-    uint base = job.target_offset >> 2u;
+    uint base = job.target_start;
     packed_ranks_64 ranks;
     ranks.first = uvec4(
-        target_rank_words[base], target_rank_words[base + 1u],
-        target_rank_words[base + 2u], target_rank_words[base + 3u]);
+        target_rank_quad_unchecked(job, base + 0u), target_rank_quad_unchecked(job, base + 4u),
+        target_rank_quad_unchecked(job, base + 8u), target_rank_quad_unchecked(job, base + 12u));
     ranks.second = uvec4(
-        target_rank_words[base + 4u], target_rank_words[base + 5u],
-        target_rank_words[base + 6u], target_rank_words[base + 7u]);
+        target_rank_quad_unchecked(job, base + 16u), target_rank_quad_unchecked(job, base + 20u),
+        target_rank_quad_unchecked(job, base + 24u), target_rank_quad_unchecked(job, base + 28u));
     ranks.third = uvec4(
-        target_rank_words[base + 8u], target_rank_words[base + 9u],
-        target_rank_words[base + 10u], target_rank_words[base + 11u]);
+        target_rank_quad_unchecked(job, base + 32u), target_rank_quad_unchecked(job, base + 36u),
+        target_rank_quad_unchecked(job, base + 40u), target_rank_quad_unchecked(job, base + 44u));
     ranks.fourth = uvec4(
-        target_rank_words[base + 12u], target_rank_words[base + 13u],
-        target_rank_words[base + 14u], target_rank_words[base + 15u]);
+        target_rank_quad_unchecked(job, base + 48u), target_rank_quad_unchecked(job, base + 52u),
+        target_rank_quad_unchecked(job, base + 56u), target_rank_quad_unchecked(job, base + 60u));
     return ranks;
 }
 
@@ -752,8 +752,8 @@ bool exact_edit_distance_is_above_threshold(prefilter_job job) {
                 uint deletion = saturated_increment(previous[slot + 1u], cap);
                 uint insertion = saturated_increment(current[slot - 1u], cap);
                 uint substitution = previous[slot];
-                if (query_rank(job.query_offset + row - 1u)
-                    != target_rank(job.target_offset + column - 1u)) {
+                if (query_rank(job, job.query_start + row - 1u)
+                    != target_rank(job, job.target_start + column - 1u)) {
                     substitution = saturated_increment(substitution, cap);
                 }
                 current[slot] = min(deletion, min(insertion, substitution));
@@ -890,8 +890,8 @@ void solve_gatekeeper_job(uint job_index) {
     if (pc.mode != 0u || uint(compile_time_maximum_span) != k_maximum_gatekeeper_length
         || job.query_length != uint(gatekeeper_specialized_length)
         || job.max_edits != uint(gatekeeper_specialized_edits)
-        || (job.query_offset & 3u) != 0u
-        || (job.target_offset & 3u) != 0u) {
+        || (job.query_start & 3u) != 0u
+        || (job.target_start & 3u) != 0u) {
         write_prefilter_result(
             job_index, 0u, k_status_unsupported, true, 0u);
         return;

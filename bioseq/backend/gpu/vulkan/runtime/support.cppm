@@ -25,11 +25,57 @@ import :metal_archive;
 import bioseq.gpu.vulkan.shader_cache;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
+import bioseq.alignment.utils;
+import bioseq.common.seqan_adapter;
+import bioseq.sequences;
 import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
 
 namespace bioseq::gpu::vulkan {
+
+/** Reject incompatible native hash, physical packing and rank-policy contracts. */
+inline void validate_native_sketch_contract(const vulkan_rank_lut& policy,
+                                             const vulkan_sketch_params& params) {
+    if (params.kmer_size == 0u || params.kmer_size > 31u || params.window_size == 0u ||
+        params.window_size > 64u || params.hash_bits < 32u || params.hash_bits > 64u ||
+        params.pos_bits == 0u || params.pos_bits > 63u ||
+        (params.unit_bits != 8u && params.unit_bits != 16u && params.unit_bits != 32u && params.unit_bits != 64u) ||
+        params.bits_per_char == 0u || params.bits_per_char > 8u ||
+        params.letters_per_unit != params.unit_bits / params.bits_per_char ||
+        params.char_mask != (std::uint32_t{1u} << params.bits_per_char) - 1u ||
+        policy.alphabet_size == 0u || policy.alphabet_size > policy.rank_to_code.size() ||
+        policy.alphabet_size > params.char_mask + 1u || params.alphabet_size != policy.alphabet_size ||
+        policy.seed_policy_id == 0u || policy.canonical_reverse_complement > 1u ||
+        (params.minimizer_word_kind != 2u && params.minimizer_word_kind != 3u) ||
+        (params.minimizer_word_kind == 2u && (params.minimizer_words32 != 2u ||
+            params.hash_shift != params.pos_bits + 1u || params.hash_bits + params.pos_bits + 1u > 64u)) ||
+        (params.minimizer_word_kind == 3u && (params.minimizer_words32 != 4u || params.hash_shift != 0u)))
+        throw vulkan_runtime_error("GPU sketch native rank/hash contract is invalid");
+    for (std::size_t rank = 0u; rank < policy.alphabet_size; ++rank)
+        if (policy.rank_to_code[rank] != rank || (policy.canonical_reverse_complement != 0u &&
+            policy.rank_to_rc_code[rank] >= policy.alphabet_size))
+            throw vulkan_runtime_error("GPU sketch native rank policy is invalid");
+}
+
+/** Check one borrowed packed logical source without expanding symbol ranks. */
+inline void validate_native_sketch_window(std::span<const std::byte> packed,
+    const vulkan_rank_lut& policy, const vulkan_sketch_params& params,
+    std::uint32_t symbol_count, std::uint32_t word_offset) {
+    const auto units = bioseq::common::ceil_div(std::uint64_t{symbol_count},
+                                               std::uint64_t{params.letters_per_unit});
+    const auto bytes = units * (params.unit_bits / 8u);
+    const auto offset = std::uint64_t{word_offset} * sizeof(std::uint32_t);
+    if (offset > packed.size() || bytes > packed.size() - offset)
+        throw vulkan_runtime_error("GPU sketch packed source is truncated");
+    const gpu_sequence_view_wire descriptor{0u, bytes, (bytes + 3u) / 4u * 4u, units,
+        0u, symbol_count, params.letters_per_unit, params.bits_per_char, params.unit_bits,
+        policy.alphabet_size, params.char_mask,
+        static_cast<std::uint32_t>(units * params.letters_per_unit - symbol_count),
+        params.alphabet_kind, 0u, policy.alphabet_code, policy.seed_policy_id};
+    if (!packed_sequence_upload_is_valid({descriptor, packed.subspan(offset, bytes)}))
+        throw vulkan_runtime_error("GPU sketch packed source contains invalid native ranks");
+}
 
 #ifdef BIOSEQ_TEST_INDEXES
 /// @brief Counters and pause controls for tests that inject a submission  failure.
@@ -573,6 +619,14 @@ alignment_extension_push(std::uint32_t job_count,
 /// @param[in] params Validated scoring and tile settings.
 [[nodiscard]] alignment_cigar_push_constants
 alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& params) noexcept {
+    auto canonical = params;
+    if (canonical.gap_open_short <= canonical.gap_open_long && canonical.gap_extend_short <= canonical.gap_extend_long) {
+        canonical.gap_open_long = canonical.gap_open_short;
+        canonical.gap_extend_long = canonical.gap_extend_short;
+    } else if (canonical.gap_open_long <= canonical.gap_open_short && canonical.gap_extend_long <= canonical.gap_extend_short) {
+        canonical.gap_open_short = canonical.gap_open_long;
+        canonical.gap_extend_short = canonical.gap_extend_long;
+    }
     return alignment_cigar_push_constants{job_count,
                                           params.alphabet_size,
                                           params.max_band_width,
@@ -580,10 +634,10 @@ alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& 
                                           params.tile_target,
                                           params.match_score,
                                           params.mismatch_penalty,
-                                          params.gap_open_short,
-                                          params.gap_extend_short,
-                                          params.gap_open_long,
-                                          params.gap_extend_long,
+                                          canonical.gap_open_short,
+                                          canonical.gap_extend_short,
+                                          canonical.gap_open_long,
+                                          canonical.gap_extend_long,
                                           params.z_drop,
                                           params.end_bonus,
                                           params.flags,
@@ -591,153 +645,187 @@ alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& 
                                           params.complement_rank_words};
 }
 
-/// @brief Rejects negative or  oversized alignment scores and penalties.
-void validate_alignment_extension_score(const char* name, std::int32_t value) {
-    constexpr std::int32_t k_max_absolute_score = 1'000'000;
-    if (value < 0 || value > k_max_absolute_score) {
-        throw vulkan_runtime_error(fmt::format(
-            "alignment extension {} {} out of range (0..{})", name, value, k_max_absolute_score));
+/** Check wire layout, registered identity and signed scores against prepared metadata. */
+[[nodiscard]] std::expected<bioseq::simd::substitution_summary, bioseq::simd::alignment_contract_error> validate_gpu_substitution_matrix(
+    const gpu_substitution_matrix& matrix, std::uint32_t alphabet_size,
+    std::int32_t match_score, std::int32_t mismatch_penalty) {
+    const auto& header = matrix.header();
+    if (header.model > 1 || header.reserved != 0 || header.rank_count != alphabet_size
+        || header.alphabet_code >= supported_biological_alphabets::alphabet_count)
+        return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+    bool identity_matches = false;
+    supported_biological_alphabets::dispatch_alphabet_by_code(
+        static_cast<supported_biological_alphabets::alphabet_code_t>(header.alphabet_code),
+        [&identity_matches, alphabet_size]<class Alphabet>() {
+            identity_matches = seqan3::alphabet_size<Alphabet> == alphabet_size;
+        });
+    if (!identity_matches) return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+    const auto& summary = matrix.summary();
+    if (summary.minimum < -127 || summary.maximum > 127 || summary.minimum > summary.maximum)
+        return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+    if (header.model == 0) {
+        if (header.row_stride != 0 || header.element_count != 0 || matrix.values().size() != 1
+            || matrix.values().front() != 0 || !summary.uniform_diagonal || !summary.uniform_off_diagonal
+            || !summary.uniform_unknown || match_score != summary.equal_score
+            || std::int64_t{mismatch_penalty} != -std::int64_t{summary.unequal_score})
+            return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+    } else {
+        const std::uint64_t count = std::uint64_t{header.rank_count} * header.rank_count;
+        if (header.row_stride != header.rank_count || header.element_count != count || matrix.values().size() != count)
+            return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+        for (const auto value : matrix.values())
+            if (value < summary.minimum || value > summary.maximum || value < -127 || value > 127)
+                return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
     }
+    return summary;
 }
 
-/// @brief Checks that a sequence slice fits its buffer and all symbols belong to the alphabet.
-void validate_alignment_extension_symbols(std::span<const std::uint32_t> symbols,
-                                          std::uint32_t offset,
-                                          std::uint32_t length,
-                                          std::uint32_t alphabet_size,
-                                          const char* label,
-                                          std::size_t job_index) {
-    const std::uint64_t begin = offset;
-    const std::uint64_t end = begin + static_cast<std::uint64_t>(length);
-    if (begin > symbols.size() || end > symbols.size()) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment extension job {} {} range [{}, {}) exceeds symbol count {}",
-                        job_index,
-                        label,
-                        begin,
-                        end,
-                        symbols.size()));
-    }
-    for (std::uint32_t i = 0; i < length; ++i) {
-        const std::uint32_t symbol = symbols[static_cast<std::size_t>(offset) + i];
-        if (symbol >= alphabet_size) {
-            throw vulkan_runtime_error(fmt::format("alignment extension job {} {} symbol {} at "
-                                                   "local offset {} exceeds alphabet_size {}",
-                                                   job_index,
-                                                   label,
-                                                   symbol,
-                                                   i,
-                                                   alphabet_size));
-        }
-    }
+/** Check the shared int32 accumulation envelope before any GPU allocation. */
+[[nodiscard]] std::expected<void, bioseq::simd::alignment_contract_error> validate_gpu_alignment_numeric(
+    const bioseq::simd::substitution_summary& summary,
+    std::size_t query_length, std::size_t target_length,
+    std::int32_t gap_open, std::int32_t gap_extend, std::int32_t end_bonus = 0,
+    std::int32_t z_drop = -1, std::int32_t gap_open_long = -1, std::int32_t gap_extend_long = -1) {
+    return bioseq::simd::validate_alignment_numeric_contract(summary, query_length, target_length,
+        gap_open, gap_extend, end_bonus, z_drop, gap_open_long, gap_extend_long, false);
+}
+
+/** Borrow one job's native packed window for the shared descriptor upload. */
+[[nodiscard]] std::expected<gpu_packed_sequence_upload, bioseq::simd::alignment_contract_error> alignment_packed_upload(
+    std::span<const std::byte> payload, const gpu_alignment_cigar_job_wire& job,
+    bool query, const gpu_substitution_matrix& matrix) {
+    const std::size_t offset = query ? job.query_symbol_offset : job.target_symbol_offset;
+    const std::size_t bytes = query ? job.query_packed_byte_count : job.target_packed_byte_count;
+    const std::uint32_t unit_bytes = query ? job.query_storage_unit_width : job.target_storage_unit_width;
+    const std::uint32_t leading = query ? job.query_leading_symbol_offset : job.target_leading_symbol_offset;
+    const std::uint32_t length = query ? job.query_len : job.target_len;
+    if (offset > payload.size() || bytes > payload.size() - offset || (unit_bytes != 1 && unit_bytes != 2 && unit_bytes != 4 && unit_bytes != 8)
+        || job.bits_per_symbol == 0 || job.bits_per_symbol > 8)
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    const std::uint32_t letters = unit_bytes * 8u / job.bits_per_symbol;
+    if (letters == 0 || bytes % unit_bytes != 0 || bytes / unit_bytes * letters < std::uint64_t{leading} + length)
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    gpu_packed_sequence_upload upload{};
+    upload.bytes = payload.subspan(offset, bytes);
+    upload.sequence = {
+        .byte_count = bytes, .padded_byte_count = (bytes + 3u) / 4u * 4u,
+        .unit_count = bytes / unit_bytes,
+        .bp_offset = query ? job.query_global_start : job.target_global_start,
+        .bp_count = length, .letters_per_unit = letters, .bits_per_char = job.bits_per_symbol,
+        .unit_bits = unit_bytes * 8u, .alphabet_size = matrix.header().rank_count,
+        .char_mask = (std::uint32_t{1} << job.bits_per_symbol) - 1u,
+        .padding_letters = static_cast<std::uint32_t>(bytes / unit_bytes * letters - leading - length),
+        .alphabet_kind = static_cast<std::uint32_t>(alphabet_kernel_kind::generic),
+        .leading_symbol_offset = leading, .alphabet_code = matrix.header().alphabet_code,
+    };
+    if (!packed_sequence_upload_is_valid(upload)) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    return upload;
 }
 
 /// @brief Checks score-only alignment jobs and their sequence slices before GPU submission.
-void validate_alignment_extension_inputs(std::span<const std::uint32_t> query_symbols,
-                                         std::span<const std::uint32_t> target_symbols,
+[[nodiscard]] std::expected<void, bioseq::simd::alignment_contract_error> validate_alignment_extension_inputs(const gpu_packed_sequence_upload& query_symbols,
+                                         const gpu_packed_sequence_upload& target_symbols,
                                          std::span<const gpu_alignment_extension_job_wire> jobs,
-                                         const gpu_alignment_extension_params& params) {
+                                         const gpu_alignment_extension_params& params,
+                                         const gpu_substitution_matrix& matrix) {
     if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error("alignment extension job_count exceeds uint32");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
-    if (query_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            "alignment extension query symbol stream exceeds uint32 offsets");
+    if (query_symbols.sequence.bp_count > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
-    if (target_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            "alignment extension target symbol stream exceeds uint32 offsets");
+    if (target_symbols.sequence.bp_count > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
     if (params.max_query_len == 0 || params.max_query_len > k_gpu_alignment_extension_max_len) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment extension max_query_len {} out of range (1..{})",
-                        params.max_query_len,
-                        k_gpu_alignment_extension_max_len));
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
     if (params.max_target_len == 0 || params.max_target_len > k_gpu_alignment_extension_max_len) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment extension max_target_len {} out of range (1..{})",
-                        params.max_target_len,
-                        k_gpu_alignment_extension_max_len));
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
     if (params.max_band_width > k_gpu_alignment_extension_max_band_width) {
-        throw vulkan_runtime_error(fmt::format("alignment extension max_band_width {} exceeds {}",
-                                               params.max_band_width,
-                                               k_gpu_alignment_extension_max_band_width));
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
     if (params.alphabet_size == 0 || params.alphabet_size > 256u) {
-        throw vulkan_runtime_error(fmt::format(
-            "alignment extension alphabet_size {} out of range (1..256)", params.alphabet_size));
-    }
-    validate_alignment_extension_score("match_score", params.match_score);
-    validate_alignment_extension_score("mismatch_penalty", params.mismatch_penalty);
-    validate_alignment_extension_score("gap_open_penalty", params.gap_open_penalty);
-    validate_alignment_extension_score("gap_extend_penalty", params.gap_extend_penalty);
-    if (params.match_score == 0) {
-        throw vulkan_runtime_error("alignment extension match_score must be positive");
-    }
-    if (params.flags != 0 || params.reserved0 != 0) {
-        throw vulkan_runtime_error("alignment extension params flags/reserved must be zero");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
 
+    if (params.flags != 0 || params.reserved0 != 0) {
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    }
+
+    const auto summary = validate_gpu_substitution_matrix(matrix, params.alphabet_size, params.match_score, params.mismatch_penalty);
+    if (!summary) return std::unexpected(summary.error());
+    if (!packed_sequence_upload_is_valid(query_symbols) || !packed_sequence_upload_is_valid(target_symbols)
+        || query_symbols.sequence.alphabet_code != matrix.header().alphabet_code
+        || target_symbols.sequence.alphabet_code != matrix.header().alphabet_code)
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     for (std::size_t i = 0; i < jobs.size(); ++i) {
         const gpu_alignment_extension_job_wire& job = jobs[i];
         if (job.query_len > params.max_query_len) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment extension job {} query_len {} exceeds max_query_len {}",
-                            i,
-                            job.query_len,
-                            params.max_query_len));
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
         if (job.target_len > params.max_target_len) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment extension job {} target_len {} exceeds max_target_len {}",
-                            i,
-                            job.target_len,
-                            params.max_target_len));
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
         if (job.band_width > params.max_band_width) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment extension job {} band_width {} exceeds max_band_width {}",
-                            i,
-                            job.band_width,
-                            params.max_band_width));
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
         if (job.flags != 0 || job.reserved0 != 0 || job.reserved1 != 0) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment extension job {} flags/reserved must be zero", i));
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
-        validate_alignment_extension_symbols(
-            query_symbols, job.query_offset, job.query_len, params.alphabet_size, "query", i);
-        validate_alignment_extension_symbols(
-            target_symbols, job.target_offset, job.target_len, params.alphabet_size, "target", i);
+        if (job.query_offset > query_symbols.sequence.bp_count
+            || job.query_len > query_symbols.sequence.bp_count - job.query_offset
+            || job.target_offset > target_symbols.sequence.bp_count
+            || job.target_len > target_symbols.sequence.bp_count - job.target_offset)
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+        const auto numeric = validate_gpu_alignment_numeric(*summary, job.query_len, job.target_len,
+            params.gap_open_penalty, params.gap_extend_penalty);
+        if (!numeric) return std::unexpected(numeric.error());
     }
+    return {};
 }
 
-/// @brief Checks that prefilter job and rank counts fit the shader's 32-bit fields.
+/** Validates native packed geometry, ranks, record identity and job coordinates before dispatch. */
 void validate_prefilter_inputs(const char* algorithm,
-                               std::span<const std::uint8_t> query_ranks,
-                               std::span<const std::uint8_t> target_ranks,
+                               std::span<const gpu_packed_sequence_upload> queries,
+                               std::span<const gpu_packed_sequence_upload> targets,
+                               const vulkan_rank_lut& rank_lut,
                                std::span<const bioseq::prefilter::prefilter_job> jobs) {
-    if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(fmt::format("{} job_count exceeds uint32", algorithm));
+    constexpr auto limit = std::numeric_limits<std::uint32_t>::max();
+    if (jobs.size() > limit || queries.size() > limit || targets.size() > limit ||
+        rank_lut.alphabet_size == 0u || rank_lut.alphabet_size > vulkan_rank_lut::rank_capacity) {
+        throw vulkan_runtime_error(fmt::format("{} invalid record counts or alphabet", algorithm));
     }
-    if (query_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            fmt::format("{} query rank stream exceeds uint32 offsets", algorithm));
-    }
-    if (target_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            fmt::format("{} target rank stream exceeds uint32 offsets", algorithm));
+    const auto validate_records = [algorithm, &rank_lut](auto records) {
+        for (const auto& upload : records) {
+            const auto& sequence = upload.sequence;
+            if (!packed_sequence_upload_is_valid(upload) ||
+                sequence.alphabet_code != rank_lut.alphabet_code ||
+                sequence.alphabet_size != rank_lut.alphabet_size ||
+                sequence.seed_policy_id != rank_lut.seed_policy_id) {
+                throw vulkan_runtime_error(fmt::format("{} invalid native packed sequence", algorithm));
+            }
+        }
+    };
+    validate_records(queries);
+    validate_records(targets);
+    for (const auto& job : jobs) {
+        if (job.query_record_index >= queries.size() || job.target_record_index >= targets.size() ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(queries[job.query_record_index].sequence.bp_count,
+                                                         job.query_start, job.query_length) ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(targets[job.target_record_index].sequence.bp_count,
+                                                         job.target_start, job.target_length) ||
+            (job.orientation != 0u && (job.orientation != 3u || rank_lut.canonical_reverse_complement == 0u))) {
+            throw vulkan_runtime_error(fmt::format("{} invalid packed job coordinates or orientation", algorithm));
+        }
     }
 }
 
 /// @brief Checks SneakySnake results against each job's supported shape and edit limit.
 /// Unsupported jobs must remain accepted so the filter cannot discard them.
 void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_job> jobs,
-                                   std::span<const bioseq::prefilter::prefilter_result> results,
-                                   std::size_t query_rank_count,
-                                   std::size_t target_rank_count) {
+                                   std::span<const bioseq::prefilter::prefilter_result> results) {
     using bioseq::prefilter::prefilter_status;
     if (results.size() != jobs.size()) {
         throw vulkan_runtime_error("SneakySnake result count mismatch");
@@ -745,10 +833,7 @@ void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_
     for (std::size_t i = 0; i < jobs.size(); ++i) {
         const bioseq::prefilter::prefilter_job& job = jobs[i];
         const bioseq::prefilter::prefilter_result& result = results[i];
-        const bool in_bounds = bioseq::prefilter::prefilter_slice_in_bounds(
-                                   query_rank_count, job.query_offset, job.query_length) &&
-                               bioseq::prefilter::prefilter_slice_in_bounds(
-                                   target_rank_count, job.target_offset, job.target_length);
+        const bool in_bounds = true; // Input geometry is checked before dispatch.
         if (result.is_accepted > 1u || result.diagnostics != 0u) {
             throw vulkan_runtime_error(
                 fmt::format("SneakySnake shader returned malformed flags for job {}", i));
@@ -802,9 +887,7 @@ void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_
 /// edit-distance check, or the zero-edit Hamming check. Unsupported jobs
 /// must remain accepted.
 void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_job> jobs,
-                                 std::span<const bioseq::prefilter::prefilter_result> results,
-                                 std::size_t query_rank_count,
-                                 std::size_t target_rank_count) {
+                                 std::span<const bioseq::prefilter::prefilter_result> results) {
     using bioseq::prefilter::gatekeeper_diagnostic_estimate;
     using bioseq::prefilter::is_gatekeeper_exact_guard_activated;
     using bioseq::prefilter::is_gatekeeper_guard_confirmed_rejection;
@@ -831,10 +914,7 @@ void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_jo
         const std::uint32_t unequal =
             static_cast<std::uint32_t>(prefilter_status::conservative_unequal);
         const std::uint32_t success = static_cast<std::uint32_t>(prefilter_status::success);
-        const bool in_bounds = bioseq::prefilter::prefilter_slice_in_bounds(
-                                   query_rank_count, job.query_offset, job.query_length) &&
-                               bioseq::prefilter::prefilter_slice_in_bounds(
-                                   target_rank_count, job.target_offset, job.target_length);
+        const bool in_bounds = true; // Input geometry is checked before dispatch.
         if (!in_bounds) {
             if (result.status != unsupported || result.lower_bound != 0u ||
                 result.is_accepted != 1u || result.diagnostics != 0u) {
@@ -905,245 +985,61 @@ void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_jo
     }
 }
 
-/// @brief Rejects negative or oversized CIGAR alignment scores and penalties.
-void validate_alignment_cigar_score(const char* name, std::int32_t value) {
-    constexpr std::int32_t k_max_absolute_score = 1'000'000;
-    if (value < 0 || value > k_max_absolute_score) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment CIGAR extension {} {} out of range (0..{})",
-                        name,
-                        value,
-                        k_max_absolute_score));
-    }
-}
-
-/// @brief Checks unpacked, alignment jobs, sequence bounds, and space for traceback and CIGAR output.
-void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbols,
-                                     std::span<const std::uint32_t> target_symbols,
-                                     std::span<const gpu_alignment_cigar_job_wire> jobs,
-                                     const gpu_alignment_cigar_params& params,
-                                     std::uint32_t packed_cigar_capacity) {
-    if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error("alignment CIGAR extension job_count exceeds uint32");
-    }
-    if (query_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            "alignment CIGAR extension query symbol stream exceeds uint32 offsets");
-    }
-    if (target_symbols.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error(
-            "alignment CIGAR extension target symbol stream exceeds uint32 offsets");
-    }
-    if (params.alphabet_size == 0 || params.alphabet_size > 256u) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment CIGAR extension alphabet_size {} out of range (1..256)",
-                        params.alphabet_size));
-    }
-    if (params.max_band_width > k_gpu_alignment_extension_max_band_width) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment CIGAR extension max_band_width {} exceeds {}",
-                        params.max_band_width,
-                        k_gpu_alignment_extension_max_band_width));
-    }
-    if (params.tile_query == 0 || params.tile_query > k_gpu_alignment_extension_max_len ||
-        params.tile_target == 0 || params.tile_target > k_gpu_alignment_extension_max_len) {
-        throw vulkan_runtime_error(
-            fmt::format("alignment CIGAR extension tile geometry {}x{} out of range (1..{})",
-                        params.tile_query,
-                        params.tile_target,
-                        k_gpu_alignment_extension_max_len));
-    }
-    validate_alignment_cigar_score("match_score", params.match_score);
-    validate_alignment_cigar_score("mismatch_penalty", params.mismatch_penalty);
-    validate_alignment_cigar_score("gap_open_short", params.gap_open_short);
-    validate_alignment_cigar_score("gap_extend_short", params.gap_extend_short);
-    validate_alignment_cigar_score("gap_open_long", params.gap_open_long);
-    validate_alignment_cigar_score("gap_extend_long", params.gap_extend_long);
-    validate_alignment_cigar_score("z_drop", params.z_drop);
-    validate_alignment_cigar_score("end_bonus", params.end_bonus);
-    if (params.match_score == 0) {
-        throw vulkan_runtime_error("alignment CIGAR extension match_score must be positive");
-    }
-    if (params.flags != 0 || params.reserved != 0 ||
-        std::ranges::any_of(params.complement_rank_words,
-                            [](const std::uint32_t word) { return word != 0u; })) {
-        throw vulkan_runtime_error("alignment CIGAR extension params flags/reserved must be zero");
-    }
-    if (packed_cigar_capacity == 0) {
-        throw vulkan_runtime_error("alignment CIGAR extension packed CIGAR capacity is zero");
-    }
-
-    std::uint64_t prior_cigar_end = 0u;
-    for (std::size_t i = 0; i < jobs.size(); ++i) {
-        const gpu_alignment_cigar_job_wire& job = jobs[i];
-        if (job.query_len == 0u || job.target_len == 0u ||
-            job.query_len > k_gpu_alignment_cigar_operation_max_len ||
-            job.target_len > k_gpu_alignment_cigar_operation_max_len) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment CIGAR extension job {} length {}x{} exceeds {}",
-                            i,
-                            job.query_len,
-                            job.target_len,
-                            k_gpu_alignment_cigar_operation_max_len));
-        }
-        if (job.band_width > params.max_band_width) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} band_width {} exceeds max_band_width {}",
-                i,
-                job.band_width,
-                params.max_band_width));
-        }
-        const std::uint32_t length_delta = job.query_len > job.target_len
-                                               ? job.query_len - job.target_len
-                                               : job.target_len - job.query_len;
-        if (length_delta > job.band_width) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} length delta {} exceeds band_width {}",
-                i,
-                length_delta,
-                job.band_width));
-        }
-        if (job.cigar_capacity == 0) {
-            throw vulkan_runtime_error(
-                fmt::format("alignment CIGAR extension job {} CIGAR capacity is zero", i));
-        }
-        if (job.flags != 0u || job.query_packed_byte_count != 0u ||
-            job.target_packed_byte_count != 0u || job.query_leading_symbol_offset != 0u ||
-            job.target_leading_symbol_offset != 0u || job.query_storage_unit_width != 0u ||
-            job.target_storage_unit_width != 0u || job.bits_per_symbol != 0u ||
-            job.problem_index != 0u) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension legacy job {} contains packed-input metadata", i));
-        }
-        const bool bounded_dp_candidate = job.query_len <= k_gpu_alignment_extension_max_len &&
-                                          job.target_len <= k_gpu_alignment_extension_max_len;
-        const std::uint64_t traceback_cells =
-            bounded_dp_candidate ? (static_cast<std::uint64_t>(job.query_len) + 1u) *
-                                       (static_cast<std::uint64_t>(job.target_len) + 1u)
-                                 : gpu_alignment_cigar_gridded_traceback_words(job.query_len,
-                                                                               job.target_len,
-                                                                               params.tile_query,
-                                                                               params.tile_target,
-                                                                               job.band_width);
-        const std::uint64_t traceback_end = static_cast<std::uint64_t>(job.traceback_tile_offset) +
-                                            static_cast<std::uint64_t>(job.traceback_tile_count);
-        if (traceback_cells == 0u ||
-            traceback_cells > (std::numeric_limits<std::uint32_t>::max)() ||
-            (job.traceback_tile_count != 0u && job.traceback_tile_count < traceback_cells)) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} traceback capacity {} below required {}",
-                i,
-                job.traceback_tile_count,
-                traceback_cells));
-        }
-        if (traceback_end > std::numeric_limits<std::uint32_t>::max()) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} traceback range [{}, {}) exceeds uint32",
-                i,
-                job.traceback_tile_offset,
-                traceback_end));
-        }
-        const std::uint64_t cigar_end = static_cast<std::uint64_t>(job.cigar_offset) +
-                                        static_cast<std::uint64_t>(job.cigar_capacity);
-        if (job.cigar_offset != prior_cigar_end || cigar_end > packed_cigar_capacity ||
-            job.query_global_start > (std::numeric_limits<std::uint32_t>::max)() - job.query_len ||
-            job.target_global_start >
-                (std::numeric_limits<std::uint32_t>::max)() - job.target_len) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} has invalid CIGAR/coordinate geometry [{}, {}) "
-                "for capacity {}",
-                i,
-                job.cigar_offset,
-                cigar_end,
-                packed_cigar_capacity));
-        }
-        prior_cigar_end = cigar_end;
-        validate_alignment_extension_symbols(query_symbols,
-                                             job.query_symbol_offset,
-                                             job.query_len,
-                                             params.alphabet_size,
-                                             "query",
-                                             i);
-        validate_alignment_extension_symbols(target_symbols,
-                                             job.target_symbol_offset,
-                                             job.target_len,
-                                             params.alphabet_size,
-                                             "target",
-                                             i);
-    }
-}
-
 /// @brief Checks packed sequence windows and alignment output sizes before submission.
 /// Uses packing metadata to check byte ranges without unpacking the sequences.
-void validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_packed,
+[[nodiscard]] std::expected<void, bioseq::simd::alignment_contract_error> validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_packed,
                                             std::span<const std::byte> target_packed,
                                             std::span<const gpu_alignment_cigar_job_wire> jobs,
                                             const gpu_alignment_cigar_params& params,
+                                            const gpu_substitution_matrix& matrix,
                                             std::uint32_t packed_cigar_capacity) {
     if (jobs.empty() || jobs.size() > std::numeric_limits<std::uint32_t>::max() ||
         query_packed.empty() || target_packed.empty() ||
         query_packed.size() > std::numeric_limits<std::uint32_t>::max() ||
         target_packed.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw vulkan_runtime_error("packed alignment CIGAR batch shape is invalid");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
-    if (params.alphabet_size == 0u || params.alphabet_size > 32u ||
+    if (params.alphabet_size == 0u || params.alphabet_size > std::numeric_limits<std::uint8_t>::max() ||
         params.max_band_width > k_gpu_alignment_extension_max_band_width ||
         params.tile_query == 0u || params.tile_query > k_gpu_alignment_extension_max_len ||
         params.tile_target == 0u || params.tile_target > k_gpu_alignment_extension_max_len ||
-        params.match_score == 0 || params.flags != 0u || params.reserved != 0u ||
+        params.flags != 0u || params.reserved != 0u ||
         packed_cigar_capacity == 0u) {
-        throw vulkan_runtime_error("packed alignment CIGAR parameters are invalid");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
-    validate_alignment_cigar_score("match_score", params.match_score);
-    validate_alignment_cigar_score("mismatch_penalty", params.mismatch_penalty);
-    validate_alignment_cigar_score("gap_open_short", params.gap_open_short);
-    validate_alignment_cigar_score("gap_extend_short", params.gap_extend_short);
-    validate_alignment_cigar_score("gap_open_long", params.gap_open_long);
-    validate_alignment_cigar_score("gap_extend_long", params.gap_extend_long);
-    validate_alignment_cigar_score("z_drop", params.z_drop);
-    validate_alignment_cigar_score("end_bonus", params.end_bonus);
-    for (std::uint32_t rank = 0u; rank < params.alphabet_size; ++rank) {
+
+    const auto summary = validate_gpu_substitution_matrix(matrix, params.alphabet_size, params.match_score, params.mismatch_penalty);
+    if (!summary) return std::unexpected(summary.error());
+    const bool reverse_requested = std::ranges::any_of(jobs, [](const auto& job) {
+        return (job.flags & k_gpu_alignment_cigar_job_flag_reverse_target) != 0;
+    });
+    if (reverse_requested) {
+        bool complementable = false;
+        supported_biological_alphabets::dispatch_alphabet_by_code(
+            static_cast<supported_biological_alphabets::alphabet_code_t>(matrix.header().alphabet_code),
+            [&complementable]<class Alphabet>() { complementable = seqan3::nucleotide_alphabet<Alphabet>; });
+        if (!complementable || params.alphabet_size > params.complement_rank_words.size() * sizeof(std::uint32_t))
+            return std::unexpected(bioseq::simd::alignment_contract_error::orientation);
+    }
+    for (std::uint32_t rank = 0u; reverse_requested && rank < params.alphabet_size; ++rank) {
         const std::uint32_t word = params.complement_rank_words[rank / 4u];
         const std::uint32_t complement = (word >> ((rank % 4u) * 8u)) & 0xffu;
         if (complement >= params.alphabet_size) {
-            throw vulkan_runtime_error("packed alignment CIGAR complement table is invalid");
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
     }
 
-    const auto validate_window = [](const std::span<const std::byte> payload,
-                                    const std::uint32_t offset,
-                                    const std::uint32_t byte_count,
-                                    const std::uint32_t leading,
-                                    const std::uint32_t unit_width,
-                                    const std::uint32_t bits_per_symbol,
-                                    const std::uint32_t logical_length,
-                                    const std::size_t job_index,
-                                    const char* side) {
-        const bool width_valid =
-            unit_width == 1u || unit_width == 2u || unit_width == 4u || unit_width == 8u;
-        const std::uint32_t letters_per_unit =
-            !width_valid || bits_per_symbol == 0u || bits_per_symbol > 8u
-                ? 0u
-                : (unit_width * 8u) / bits_per_symbol;
-        const std::uint64_t occupied = static_cast<std::uint64_t>(leading) + logical_length;
-        const std::uint64_t units =
-            letters_per_unit == 0u
-                ? 0u
-                : bioseq::common::ceil_div(occupied, static_cast<std::uint64_t>(letters_per_unit));
-        const std::uint64_t expected_bytes = units * unit_width;
-        const std::uint64_t end = static_cast<std::uint64_t>(offset) + byte_count;
-        if (logical_length == 0u || letters_per_unit == 0u || leading >= letters_per_unit ||
-            expected_bytes == 0u || expected_bytes != byte_count || end > payload.size()) {
-            throw vulkan_runtime_error(fmt::format(
-                "packed alignment CIGAR job {} has invalid {} window geometry", job_index, side));
-        }
-    };
-
-    std::uint32_t prior_problem_index = 0u;
     std::uint64_t prior_cigar_end = 0u;
-    bool have_prior_problem_index = false;
     for (std::size_t i = 0u; i < jobs.size(); ++i) {
         const gpu_alignment_cigar_job_wire& job = jobs[i];
+        const auto numeric = validate_gpu_alignment_numeric(*summary, job.query_len, job.target_len,
+            params.gap_open_short, params.gap_extend_short, params.end_bonus, params.z_drop,
+            params.gap_open_long, params.gap_extend_long);
+        if (!numeric) return std::unexpected(numeric.error());
+        const auto query_upload = alignment_packed_upload(query_packed, job, true, matrix);
+        if (!query_upload) return std::unexpected(query_upload.error());
+        const auto target_upload = alignment_packed_upload(target_packed, job, false, matrix);
+        if (!target_upload) return std::unexpected(target_upload.error());
         const std::uint32_t length_delta = job.query_len > job.target_len
                                                ? job.query_len - job.target_len
                                                : job.target_len - job.query_len;
@@ -1152,31 +1048,9 @@ void validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_pac
             job.target_len == 0u || job.query_len > k_gpu_alignment_cigar_operation_max_len ||
             job.target_len > k_gpu_alignment_cigar_operation_max_len ||
             length_delta > job.band_width || job.band_width > params.max_band_width ||
-            job.cigar_capacity == 0u ||
-            (have_prior_problem_index && job.problem_index <= prior_problem_index)) {
-            throw vulkan_runtime_error(
-                fmt::format("packed alignment CIGAR job {} metadata is invalid", i));
+            job.cigar_capacity == 0u) {
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
-        prior_problem_index = job.problem_index;
-        have_prior_problem_index = true;
-        validate_window(query_packed,
-                        job.query_symbol_offset,
-                        job.query_packed_byte_count,
-                        job.query_leading_symbol_offset,
-                        job.query_storage_unit_width,
-                        job.bits_per_symbol,
-                        job.query_len,
-                        i,
-                        "query");
-        validate_window(target_packed,
-                        job.target_symbol_offset,
-                        job.target_packed_byte_count,
-                        job.target_leading_symbol_offset,
-                        job.target_storage_unit_width,
-                        job.bits_per_symbol,
-                        job.target_len,
-                        i,
-                        "target");
         const std::uint64_t required_traceback =
             job.query_len <= k_gpu_alignment_extension_max_len &&
                     job.target_len <= k_gpu_alignment_extension_max_len
@@ -1199,14 +1073,14 @@ void validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_pac
             job.query_global_start > (std::numeric_limits<std::uint32_t>::max)() - job.query_len ||
             job.target_global_start >
                 (std::numeric_limits<std::uint32_t>::max)() - job.target_len) {
-            throw vulkan_runtime_error(
-                fmt::format("packed alignment CIGAR job {} output geometry is invalid", i));
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         }
         prior_cigar_end = cigar_end;
     }
     if (prior_cigar_end != packed_cigar_capacity) {
-        throw vulkan_runtime_error("packed alignment CIGAR capacity is not fully partitioned");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
+    return {};
 }
 
 /// @brief Returns the device buffer size for a eiven minimizer count and encoding.

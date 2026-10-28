@@ -6,6 +6,8 @@
  */
 module;
 
+#include <cstddef>
+
 export module bioseq.gpu.vulkan.abi:sequence_batch;
 
 import std;
@@ -49,7 +51,9 @@ struct gpu_sequence_view_wire {
     std::uint32_t char_mask;         ///< Mask for one  symbol rank, truncated to 32 bits.
     std::uint32_t padding_letters;   ///< Unused symbol slots in the final packed unit.
     std::uint32_t alphabet_kind;     ///< `alphabet_kernel_kind` from the upload view.
-    std::uint32_t reserved;          ///< Reserved. Set to zero on upload.
+    std::uint32_t leading_symbol_offset; ///< First logical slot within the first unit.
+    std::uint32_t alphabet_code;     ///< Stable registered alphabet identity.
+    std::uint32_t seed_policy_id;    ///< Native seed policy identity.
 };
 
 /**
@@ -85,6 +89,106 @@ struct gpu_target_record_wire {
     std::uint32_t flags;                   ///< `gpu_sequence_record_flags` bit mask.
 };
 static_assert(std::is_standard_layout_v<gpu_sequence_view_wire>);
+static_assert(sizeof(gpu_sequence_view_wire) == 88u);
+static_assert(offsetof(gpu_sequence_view_wire, alphabet_code) == 80u);
+
+/** Borrowed native packed bytes retained by the caller through synchronous upload. */
+struct gpu_packed_sequence_upload {
+    gpu_sequence_view_wire sequence{};
+    std::span<const std::byte> bytes{};
+};
+/** Borrows sorted bounded packed windows covering selected regions of one logical sequence. */
+struct gpu_native_sequence_upload {
+    std::span<const gpu_packed_sequence_upload> windows{};
+    std::uint64_t symbol_count{};
+};
+
+/** Half-open original sequence coordinates requested by device seed coverage. */
+struct sequence_upload_interval {
+    std::uint64_t begin{};
+    std::uint64_t end{};
+};
+static_assert(sizeof(sequence_upload_interval) == 2u * sizeof(std::uint64_t));
+
+/**
+ * Borrows a caller-owned source and prepares only device-requested native windows.
+ * The caller retains the returned windows until the next prepare call or return
+ * from the synchronous runtime operation. No callback runs in a device kernel.
+ */
+struct gpu_native_sequence_provider {
+    void* context = nullptr;
+    gpu_native_sequence_upload (*prepare)(void*, std::span<const sequence_upload_interval>) = nullptr;
+    std::uint64_t symbol_count{};
+};
+
+/** Checks packed geometry and every logical rank without expanding input storage. */
+[[nodiscard]] inline bool packed_sequence_upload_is_valid(const gpu_packed_sequence_upload& upload) noexcept {
+    const auto& sequence = upload.sequence;
+    // Reject fractional-byte and unsupported widths before any division or rank read.
+    if (!std::has_single_bit(sequence.unit_bits) ||
+        sequence.unit_bits < std::numeric_limits<unsigned char>::digits ||
+        sequence.unit_bits > std::numeric_limits<std::uint64_t>::digits) return false;
+    const auto unit_bytes = sequence.unit_bits / std::numeric_limits<unsigned char>::digits;
+    if ((unit_bytes != 1u && unit_bytes != 2u && unit_bytes != 4u && unit_bytes != 8u) ||
+        sequence.bits_per_char == 0u || sequence.bits_per_char > 8u ||
+        sequence.letters_per_unit != sequence.unit_bits / sequence.bits_per_char ||
+        sequence.alphabet_size == 0u || sequence.alphabet_size > 256u ||
+        sequence.char_mask != (std::uint32_t{1u} << sequence.bits_per_char) - 1u ||
+        sequence.alphabet_size > sequence.char_mask + 1u ||
+        sequence.leading_symbol_offset >= sequence.letters_per_unit ||
+        sequence.padding_letters >= sequence.letters_per_unit ||
+        sequence.unit_count > std::numeric_limits<std::uint64_t>::max() / sequence.letters_per_unit ||
+        sequence.unit_count > std::numeric_limits<std::uint64_t>::max() / unit_bytes ||
+        sequence.byte_count != sequence.unit_count * unit_bytes ||
+        sequence.byte_count != upload.bytes.size() ||
+        sequence.byte_count > std::numeric_limits<std::uint64_t>::max() - 3u ||
+        sequence.padded_byte_count != (sequence.byte_count + 3u) / 4u * 4u) return false;
+    const auto slots = sequence.unit_count * sequence.letters_per_unit;
+    if (sequence.padding_letters > slots || sequence.leading_symbol_offset > slots - sequence.padding_letters ||
+        sequence.bp_count > slots - sequence.padding_letters - sequence.leading_symbol_offset) return false;
+    // Every encoding is valid for a full-cardinality alphabet, including DNA4.
+    if (sequence.alphabet_size == sequence.char_mask + 1u) return true;
+    for (std::uint64_t position = 0u; position < sequence.bp_count; ++position) {
+        const auto slot = sequence.leading_symbol_offset + position;
+        const auto bit = slot % sequence.letters_per_unit * sequence.bits_per_char;
+        const auto byte = slot / sequence.letters_per_unit * unit_bytes + bit / 8u;
+        auto rank = std::to_integer<std::uint32_t>(upload.bytes[byte]) >> (bit % 8u);
+        if (bit % 8u + sequence.bits_per_char > 8u)
+            rank |= std::to_integer<std::uint32_t>(upload.bytes[byte + 1u]) << (8u - bit % 8u);
+        if ((rank & sequence.char_mask) >= sequence.alphabet_size) return false;
+    }
+    return true;
+}
+
+/** A packed upload can fail before touching destination storage. */
+enum class gpu_packed_sequence_error : std::uint8_t {
+    invalid_geometry, invalid_rank, arena_bounds,
+};
+
+/** Copies one validated native packed window directly into an aligned mapped arena.
+ * The returned descriptor addresses the arena in u32 words; only transport tail
+ * padding is zeroed. Source bytes and storage-unit packing are preserved.
+ */
+[[nodiscard]] inline std::expected<gpu_sequence_view_wire, gpu_packed_sequence_error>
+place_packed_sequence_upload(const gpu_packed_sequence_upload& upload,
+                              std::size_t byte_offset,
+                              std::span<std::byte> destination) noexcept {
+    if (!packed_sequence_upload_is_valid(upload))
+        return std::unexpected{gpu_packed_sequence_error::invalid_geometry};
+    if (byte_offset % sizeof(std::uint32_t) != 0u || byte_offset > destination.size() ||
+        upload.sequence.padded_byte_count > destination.size() - byte_offset)
+        return std::unexpected{gpu_packed_sequence_error::arena_bounds};
+    if (!upload.bytes.empty())
+        std::memcpy(destination.data() + byte_offset, upload.bytes.data(), upload.bytes.size());
+    const auto padding_bytes = upload.sequence.padded_byte_count - upload.bytes.size();
+    if (padding_bytes != 0u)
+        std::memset(destination.data() + byte_offset + upload.bytes.size(), 0,
+                    static_cast<std::size_t>(padding_bytes));
+    auto descriptor = upload.sequence;
+    descriptor.seq_word_offset = byte_offset / sizeof(std::uint32_t);
+    return descriptor;
+}
+
 static_assert(std::is_standard_layout_v<gpu_query_record_wire>);
 static_assert(std::is_standard_layout_v<gpu_target_record_wire>);
 

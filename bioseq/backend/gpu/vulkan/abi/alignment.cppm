@@ -15,8 +15,69 @@ export module bioseq.gpu.vulkan.abi:alignment;
 import :seed_anchor_sort;
 import std;
 import bioseq.common.checked_arithmetic;
+export import bioseq.alignment.utils;
+import bioseq.common.seqan_adapter;
+import bioseq.sequences;
 
 export namespace bioseq::gpu::vulkan {
+
+/** std430 prefix for the homogeneous batch's prepared substitution table. */
+struct gpu_substitution_matrix_wire {
+    std::uint32_t model{};
+    std::uint32_t alphabet_code{};
+    std::uint32_t rank_count{};
+    std::uint32_t row_stride{};
+    std::uint64_t semantic_identity{};
+    std::uint32_t element_count{};
+    std::uint32_t reserved{};
+};
+static_assert(sizeof(gpu_substitution_matrix_wire) == 32);
+static_assert(offsetof(gpu_substitution_matrix_wire, semantic_identity) == 16);
+static_assert(std::is_trivially_copyable_v<gpu_substitution_matrix_wire>);
+
+/** Batch-owned immutable biological scores widened from the prepared CPU authority. */
+class gpu_substitution_matrix {
+    gpu_substitution_matrix_wire header_{};
+    std::vector<std::int32_t> values_{};
+    bioseq::simd::substitution_summary summary_{};
+
+public:
+    /** Read the std430 header without permitting identity or model changes. */
+    [[nodiscard]] const gpu_substitution_matrix_wire& header() const noexcept { return header_; }
+    /** Read the target-major biological scores, or the uniform model's unused zero. */
+    [[nodiscard]] std::span<const std::int32_t> values() const noexcept { return values_; }
+    /** Read the checked CPU authority's extrema and uniform-score proof. */
+    [[nodiscard]] const bioseq::simd::substitution_summary& summary() const noexcept { return summary_; }
+
+    /** Prepare biological scores; synthetic CPU sentinel ranks stay on the CPU. */
+    template<sequence_alphabet Alphabet, std::size_t Dimension>
+    [[nodiscard]] static std::expected<gpu_substitution_matrix, bioseq::simd::alignment_contract_error>
+    from_prepared(const bioseq::simd::scoring_matrix_storage<Alphabet, Dimension>& matrix) {
+        if (!matrix.is_block_layout_valid())
+            return std::unexpected(bioseq::simd::alignment_contract_error::invalid_matrix_layout);
+        constexpr std::size_t rank_count = seqan3::alphabet_size<Alphabet>;
+        static_assert(Dimension == rank_count + 1);
+        gpu_substitution_matrix prepared{};
+        prepared.summary_ = matrix.summary();
+        prepared.header_ = {
+            .model = static_cast<std::uint32_t>(matrix.kind()),
+            .alphabet_code = supported_biological_alphabets::template index_of<Alphabet>(),
+            .rank_count = static_cast<std::uint32_t>(rank_count),
+            .semantic_identity = matrix.block_semantic_identity(),
+        };
+        if (matrix.kind() == bioseq::simd::substitution_kind::dense) {
+            prepared.header_.row_stride = static_cast<std::uint32_t>(rank_count);
+            prepared.header_.element_count = static_cast<std::uint32_t>(rank_count * rank_count);
+            prepared.values_.reserve(rank_count * rank_count);
+            for (std::size_t target = 0; target < rank_count; ++target)
+                for (std::size_t query = 0; query < rank_count; ++query)
+                    prepared.values_.push_back(matrix.at(target, query));
+        } else {
+            prepared.values_.push_back(0);
+        }
+        return prepared;
+    }
+};
 
 /** @brief Maximum sequence length handled by the extension kernel. */
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_len = 512u;
@@ -33,6 +94,8 @@ inline constexpr std::uint32_t k_gpu_alignment_simple_cigar_gap_op_max = 64u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 /** @brief Shader status indicating successful alignment extension. */
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
+/** Numeric preflight rejected a device job before recurrence execution. */
+inline constexpr std::uint32_t k_gpu_alignment_extension_status_score_range = 3u;
 /** @brief The alignment inputs or dimensions are unsupported. */
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 /** @brief Shader status indicating insufficient CIGAR output capacity. */

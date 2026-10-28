@@ -28,18 +28,21 @@ enum class minimizer_word_kind : std::uint8_t {
     u64x2 = 3,
 };
 
-/**
- * @brief Maps alphabet ranks to forward and reverse-complement DNA codes.
- *
- * Codes 0 through 3 represent bases. Larger codes mark ambiguous symbols
- * and restart the rolling k-mer calculation. The table is copied directly
- * to the GPU.
+/** Native rank identities, complement ranks and shared rolling-hash seeds.
+ * The byte-rank transport capacity is independent of any biological alphabet.
  */
 struct vulkan_rank_lut {
-    std::uint32_t rank_to_code[256]{};
-    std::uint32_t rank_to_rc_code[256]{};
+    static constexpr std::size_t rank_capacity =
+        static_cast<std::size_t>(std::numeric_limits<std::uint8_t>::max()) + 1u;
+    std::array<std::uint32_t, rank_capacity> rank_to_code{};
+    std::array<std::uint32_t, rank_capacity> rank_to_rc_code{};
+    std::array<std::uint32_t, rank_capacity> forward_seeds{};
+    std::uint32_t alphabet_size{};
+    std::uint32_t alphabet_code{};
+    std::uint32_t seed_policy_id{};
+    std::uint32_t canonical_reverse_complement{};
 };
-static_assert(sizeof(vulkan_rank_lut) == 2048);
+static_assert(sizeof(vulkan_rank_lut) == 3u * 256u * sizeof(std::uint32_t) + 16u);
 
 /** @brief Carries packed-sequence and minimizer parameters to sketch shaders. */
 struct vulkan_sketch_params {
@@ -176,7 +179,8 @@ target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_si
     if (kmer_size == 0u || bp_count < kmer_size) {
         return 0u;
     }
-    return bp_count - static_cast<std::uint64_t>(kmer_size) + 1u;
+    return bioseq::common::saturating_mul(
+        bp_count - static_cast<std::uint64_t>(kmer_size) + 1u, std::uint64_t{2u});
 }
 
 /**

@@ -31,7 +31,7 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and stats are exa
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
     auto query_data = dna4_from_ascii("TTTTTTTTAAAAAAATTTTTTTTT");
     auto reference_data = dna4_from_ascii("TTAAAAAAATTTTTTTTTTTT");
     range_t query_range(query_data);
@@ -61,13 +61,13 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and stats are exa
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
         fixed_alignment_kernels<seq::dna4>(), first_params,
-        block_alignment_stage::gap_extension, &first_stats);
+        block_alignment_stage::gap_extension, &first_stats).value();
     block_aligner_execution_stats changed_stats;
     const ksw_alignment_result changed = block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
         fixed_alignment_kernels<seq::dna4>(), dormant_changed,
-        block_alignment_stage::gap_extension, &changed_stats);
+        block_alignment_stage::gap_extension, &changed_stats).value();
 
     CHECK(first.score == 7);
     CHECK(changed.score == first.score);
@@ -81,36 +81,40 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and stats are exa
     CHECK(first_stats.is_internally_consistent());
 
     const auto changed_scoring =
-        scoring_matrix<dna4_u64>::generate(2, 1, 1);
+        scoring_matrix<dna4_u64>::generate(2, 1, 1).value();
     block_aligner_execution_stats scoring_stats;
     (void)block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), changed_scoring,
         fixed_alignment_kernels<seq::dna4>(), first_params,
-        block_alignment_stage::gap_extension, &scoring_stats);
+        block_alignment_stage::gap_extension, &scoring_stats).value();
     CHECK(scoring_stats.configuration_identity_xor
           != first_stats.configuration_identity_xor);
     CHECK(scoring_stats.configuration_identity_sum
           != first_stats.configuration_identity_sum);
     CHECK(scoring_stats.is_internally_consistent());
 
-    auto invalid_layout = nw1;
-    invalid_layout.simd_scores[0] = static_cast<std::int8_t>(
-        invalid_layout.simd_scores[0] + 1);
-    CHECK_FALSE(invalid_layout.is_block_layout_valid());
+    const scoring_matrix<dna4_u64> unprepared_matrix{};
+    CHECK_FALSE(unprepared_matrix.is_block_layout_valid());
+    std::array<std::int32_t, scoring_matrix<dna4_u64>::k_entry_count> invalid_entries{};
+    std::ranges::copy(nw1.score_entries(), invalid_entries.begin());
+    invalid_entries[0] = std::numeric_limits<std::int8_t>::min();
+    const auto invalid_matrix = scoring_matrix<dna4_u64>::from_entries(invalid_entries);
+    REQUIRE_FALSE(invalid_matrix.has_value());
+    CHECK(invalid_matrix.error() == alignment_contract_error::score_range);
 
     block_aligner_execution_stats left_stats;
     const ksw_alignment_result projected_left = block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
         fixed_alignment_kernels<seq::dna4>(), first_params,
-        block_alignment_stage::left_extension, &left_stats);
+        block_alignment_stage::left_extension, &left_stats).value();
     block_aligner_execution_stats right_stats;
     const ksw_alignment_result projected_right = block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
         fixed_alignment_kernels<seq::dna4>(), first_params,
-        block_alignment_stage::right_extension, &right_stats);
+        block_alignment_stage::right_extension, &right_stats).value();
     CHECK(projected_left.score >= 0);
     CHECK(projected_right.score >= 0);
     CHECK(left_stats.left_executed == 1);
@@ -190,7 +194,7 @@ TEST_CASE("Block production router executes left global-gap and right routes",
     auto lazy_target = bioseq::storage::make_resident_lazy_sequence(target_range);
     const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_query);
     const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_target);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
 
     std::vector<::bioseq::chaining::anchor> anchors{
         make_anchor(64), make_anchor(120)};
@@ -217,7 +221,7 @@ TEST_CASE("Block production router executes left global-gap and right routes",
         std::span<const ::bioseq::chaining::anchor>{
             anchors.data(), anchors.size()},
         query_view, target_view, scoring,
-        fixed_alignment_kernels<seq::dna4>(), params, &stats);
+        fixed_alignment_kernels<seq::dna4>(), params, &stats).value();
 
     CHECK(regions[0].has_alignment);
     CHECK_FALSE(regions[0].cigar.empty());
@@ -253,7 +257,7 @@ TEST_CASE("Block production stats reduction is deterministic in parallel",
     auto lazy_target = bioseq::storage::make_resident_lazy_sequence(target_range);
     const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_query);
     const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_target);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
 
     std::vector<::bioseq::chaining::anchor> anchors;
     std::vector<alignment_region> fixture_regions(4);
@@ -302,7 +306,7 @@ TEST_CASE("Block production stats reduction is deterministic in parallel",
             std::span<const ::bioseq::chaining::anchor>{
                 anchors.data(), anchors.size()},
             query_view, target_view, scoring,
-            fixed_alignment_kernels<seq::dna4>(), params, &stats);
+            fixed_alignment_kernels<seq::dna4>(), params, &stats).value();
         return std::pair{std::move(regions), stats};
     };
 
@@ -355,7 +359,7 @@ TEST_CASE("Block native L16 path matches the cross-lane golden",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 1, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 1, 1).value();
     const auto params = global_params(16, 32);
     const std::size_t lanes =
         fixed_alignment_kernels<seq::dna4>()
@@ -381,7 +385,7 @@ TEST_CASE("Block native L16 path matches the cross-lane golden",
 
 TEST_CASE("Block native contract rejects unsupported geometry/mode claims",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 1, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 1, 1).value();
     const std::size_t lanes =
         fixed_alignment_kernels<seq::dna4>()
             .prepare_block_global_gap_certificate(scoring, global_params()).simd_lane_count;
@@ -391,29 +395,32 @@ TEST_CASE("Block native contract rejects unsupported geometry/mode claims",
     CHECK_FALSE(is_block_aligner_lane_shape_supported(32));
 
     block_aligner_parameters valid = global_params();
-    CHECK(validate_block_aligner_contract(valid, lanes)
-          == block_aligner_contract_error::none);
+    CHECK(validate_block_aligner_contract(valid, lanes).has_value());
 
     block_aligner_parameters bad_gap = valid;
-    bad_gap.gap_open = 0;
-    CHECK(validate_block_aligner_contract(bad_gap, lanes)
-          == block_aligner_contract_error::gap_penalty);
+    bad_gap.gap_extend = 0;
+    const auto bad_gap_contract = validate_block_aligner_contract(bad_gap, lanes);
+    REQUIRE_FALSE(bad_gap_contract.has_value());
+    CHECK(bad_gap_contract.error() == alignment_contract_error::gap_penalty);
 
     block_aligner_parameters bad_geometry = valid;
     bad_geometry.minimum_block_size = 24;
     bad_geometry.maximum_block_size = 32;
-    CHECK(validate_block_aligner_contract(bad_geometry, lanes)
-          == block_aligner_contract_error::block_geometry);
+    const auto bad_geometry_contract = validate_block_aligner_contract(bad_geometry, lanes);
+    REQUIRE_FALSE(bad_geometry_contract.has_value());
+    CHECK(bad_geometry_contract.error() == alignment_contract_error::block_geometry);
 
     block_aligner_parameters ksw_like_zdrop_claim = valid;
     ksw_like_zdrop_claim.x_drop_threshold = 400;
-    CHECK(validate_block_aligner_contract(ksw_like_zdrop_claim, lanes)
-          == block_aligner_contract_error::x_drop_threshold);
+    const auto ksw_like_zdrop_claim_contract = validate_block_aligner_contract(ksw_like_zdrop_claim, lanes);
+    REQUIRE_FALSE(ksw_like_zdrop_claim_contract.has_value());
+    CHECK(ksw_like_zdrop_claim_contract.error() == alignment_contract_error::x_drop_threshold);
 
     block_aligner_parameters wrong_stage_mode = valid;
     wrong_stage_mode.stage = block_alignment_stage::left_extension;
-    CHECK(validate_block_aligner_contract(wrong_stage_mode, lanes)
-          == block_aligner_contract_error::stage_mode);
+    const auto wrong_stage_mode_contract = validate_block_aligner_contract(wrong_stage_mode, lanes);
+    REQUIRE_FALSE(wrong_stage_mode_contract.has_value());
+    CHECK(wrong_stage_mode_contract.error() == alignment_contract_error::stage_mode);
 
     block_aligner_execution_stats no_calls;
     CHECK(no_calls.is_internally_consistent());

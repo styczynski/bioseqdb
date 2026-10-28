@@ -39,7 +39,7 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
 
     // Reference traceback fixture with a 16-cell block and gap scores -2/-1.
     const reference_run first = run_block(
@@ -98,7 +98,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     block_aligner_parameters params = global_params(16, 32);
     params.gap_open = 4;
     params.gap_extend = 2;
@@ -228,9 +228,10 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(tie_optimized.stats.simd_dp_cells > 0);
 
     // This custom matrix is valid for alignment but unsupported by the diagonal shortcut.
-    auto unsupported_scoring = scoring;
-    unsupported_scoring.at(0, 1) = 3;
-    unsupported_scoring.simd_scores[1] = 3;
+    std::array<std::int32_t, scoring_matrix<dna4_u64>::k_entry_count> dense_entries{};
+    std::ranges::copy(scoring.score_entries(), dense_entries.begin());
+    dense_entries[1] = 3;
+    const auto unsupported_scoring = scoring_matrix<dna4_u64>::from_entries(dense_entries).value();
     REQUIRE(unsupported_scoring.is_block_layout_valid());
     const reference_run unsupported_optimized =
         run_block_mode<false, true, dna4_u64>(
@@ -243,7 +244,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(unsupported_optimized.stats.simd_diagonal_certificate_calls == 0);
     CHECK(unsupported_optimized.stats.simd_dp_cells > 0);
 
-    const auto dna5_scoring = scoring_matrix<dna5_u64>::generate(2, 4, 1);
+    const auto dna5_scoring = scoring_matrix<dna5_u64>::generate(2, 4, 1).value();
     const std::string dna5_sequence =
         "ACGTNACGTACGTACGTACGTACGTACGTACG"
         "TGCATGCATGCATGCATGCATGCATGCATGCA";
@@ -335,7 +336,7 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     block_aligner_parameters params = global_params(16, 64);
     params.gap_open = 4;
     params.gap_extend = 2;
@@ -575,7 +576,7 @@ TEST_CASE("Packed gap executor matches forced scalar DP on a mixed production re
     auto lazy_target = bioseq::storage::make_resident_lazy_sequence(target_range);
     const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_query);
     const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_target);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     std::vector<::bioseq::chaining::anchor> anchors{
         make_anchor_at(0u, 0u),
         make_anchor_at(32u, 32u),
@@ -607,7 +608,7 @@ TEST_CASE("Packed gap executor matches forced scalar DP on a mixed production re
         std::span<const ::bioseq::chaining::anchor>{
             anchors.data(), anchors.size()},
         query_view, target_view, scoring,
-        fixed_alignment_kernels<seq::dna4>(), params, &optimized_stats);
+        fixed_alignment_kernels<seq::dna4>(), params, &optimized_stats).value();
     alignment_region forced_dp = fixture;
     block_aligner_execution_stats forced_stats;
     align_regions<base_alignment_algorithm::block_aligner, false>(
@@ -615,7 +616,7 @@ TEST_CASE("Packed gap executor matches forced scalar DP on a mixed production re
         std::span<const ::bioseq::chaining::anchor>{
             anchors.data(), anchors.size()},
         query_view, target_view, scoring,
-        fixed_alignment_kernels<seq::dna4>(), params, &forced_stats);
+        fixed_alignment_kernels<seq::dna4>(), params, &forced_stats).value();
     check_region_alignment_identical(optimized, forced_dp);
     CHECK(optimized_stats.is_internally_consistent());
     CHECK(forced_stats.is_internally_consistent());
@@ -635,7 +636,7 @@ TEST_CASE("Packed gap executor matches forced scalar DP on a mixed production re
             anchors.data(), anchors.size()},
         query_view, target_view, scoring,
         fixed_alignment_kernels<seq::dna4>(), params,
-        &score_only_optimized_stats);
+        &score_only_optimized_stats).value();
     alignment_region score_only_forced = fixture;
     block_aligner_execution_stats score_only_forced_stats;
     align_regions<base_alignment_algorithm::block_aligner, false>(
@@ -644,7 +645,7 @@ TEST_CASE("Packed gap executor matches forced scalar DP on a mixed production re
             anchors.data(), anchors.size()},
         query_view, target_view, scoring,
         fixed_alignment_kernels<seq::dna4>(), params,
-        &score_only_forced_stats);
+        &score_only_forced_stats).value();
     check_region_alignment_identical(score_only_optimized, score_only_forced);
     CHECK(score_only_optimized.cigar.empty());
     CHECK(score_only_optimized_stats.simd_diagonal_certificate_calls == 2u);
@@ -656,7 +657,7 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     block_aligner_parameters params = global_params(16, 64);
     params.gap_open = 4;
     params.gap_extend = 2;
@@ -693,13 +694,13 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         fixed_alignment_kernels<seq::dna4>().align_block(
             false, true, fragmented_query_view, fragmented_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
-            &fragmented_current_stats, nullptr);
+            &fragmented_current_stats, nullptr).value();
     block_aligner_execution_stats fragmented_forced_stats;
     const ksw_alignment_result fragmented_forced =
         fixed_alignment_kernels<seq::dna4>().align_block(
             false, false, fragmented_query_view, fragmented_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
-            &fragmented_forced_stats, nullptr);
+            &fragmented_forced_stats, nullptr).value();
     check_align_result_identical(fragmented_current, fragmented_forced);
     CHECK(fragmented_current_stats.simd_diagonal_certificate_calls == 1u);
     CHECK(fragmented_forced_stats.simd_diagonal_certificate_calls == 0u);
@@ -732,18 +733,18 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         fixed_alignment_kernels<seq::dna4>().align_block(
             true, true, reverse_query_view, reverse_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
-            &reverse_current_stats, nullptr);
+            &reverse_current_stats, nullptr).value();
     block_aligner_execution_stats reverse_forced_stats;
     const ksw_alignment_result reverse_forced =
         fixed_alignment_kernels<seq::dna4>().align_block(
             true, false, reverse_query_view, reverse_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
-            &reverse_forced_stats, nullptr);
+            &reverse_forced_stats, nullptr).value();
     check_align_result_identical(reverse_current, reverse_forced);
     CHECK(reverse_current_stats.simd_diagonal_certificate_calls == 1u);
     CHECK(reverse_forced_stats.simd_diagonal_certificate_calls == 0u);
 
-    const auto dna5_scoring = scoring_matrix<dna5_u64>::generate(2, 4, 1);
+    const auto dna5_scoring = scoring_matrix<dna5_u64>::generate(2, 4, 1).value();
     const std::string dna5_text = "ACGTNACGTACGTACGTACGTACGTACGTACG";
     std::vector<seq::dna5> dna5_data(dna5_text.size());
     for (std::size_t i = 0; i < dna5_text.size(); ++i) {
@@ -769,9 +770,10 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
     CHECK(dna5_attempt.decision
           == block_packed_certificate_decision::not_eligible);
 
-    auto unsupported_scoring = scoring;
-    unsupported_scoring.at(0, 1) = 3;
-    unsupported_scoring.simd_scores[1] = 3;
+    std::array<std::int32_t, scoring_matrix<dna4_u64>::k_entry_count> dense_entries{};
+    std::ranges::copy(scoring.score_entries(), dense_entries.begin());
+    dense_entries[1] = 3;
+    const auto unsupported_scoring = scoring_matrix<dna4_u64>::from_entries(dense_entries).value();
     REQUIRE(unsupported_scoring.is_block_layout_valid());
     const auto unsupported_plan =
         fixed_alignment_kernels<seq::dna4>().prepare_block_global_gap_certificate(

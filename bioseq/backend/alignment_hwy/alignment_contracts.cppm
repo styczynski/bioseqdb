@@ -7,6 +7,8 @@
  */
 module;
 
+#include <expected>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -692,19 +694,18 @@ struct chain_order {
 struct ksw_flags {
     bool score_only    : 1 = false;  ///< Suppress traceback generation.
     bool right_align   : 1 = false;  ///< Prefer rightmost equivalent traceback.
-    bool generic_score : 1 = false;  ///< Look up  each substitution score in the fll scoring matrix.
     bool approx_max    : 1 = false;  ///< Follow an approximate best path instead of reconstructing every full score.
     bool approx_zdrop  : 1 = false;  ///< Apply Z-drop to the approximate path when approx_max is enabled.
     bool extz_only     : 1 = false;  ///< Trace back an extension endpoint, using end_bonus when the query end is reached.
     bool reverse_cigar : 1 = false;  ///< Read intervals backward and keep CIGAR operations in reverse order.
-    bool reserved      : 1 = false;  ///< Reserved layout bit. Keep false.
+    bool reserved      : 2 = false;  ///< Reserved layout bit. Keep false.
 };
 static_assert(sizeof(ksw_flags) == 1);
 
 /** KSW2 parameters with one affine gap cost: gap_open + length * gap_extend. */
 struct ksw_single_affine_parameters {
-    int8_t    gap_open   = 0;   ///< Positive gap-open penalty.
-    int8_t    gap_extend = 0;   ///< Positive gap-extension penalty.
+    int32_t   gap_open   = 0;   ///< Positive gap-open penalty.
+    int32_t   gap_extend = 0;   ///< Positive gap-extension penalty.
     int       band_width = -1;  ///< Band width, or negative for unrestricted.
     int       z_drop     = -1;  ///< Z-drop threshold, or negative to disable.
     int       end_bonus  = 0;   ///< Bonus used when choosing traceback through the query  end.
@@ -713,10 +714,10 @@ struct ksw_single_affine_parameters {
 
 /** KSW2 parameters that use the cheaper of the short-gap and long-gap affine costs. */
 struct ksw_dual_affine_parameters {
-    int8_t gap_open_short   = 0;   ///< Positive short-gap open penalty.
-    int8_t gap_extend_short = 0;   ///< Positive short-gap extension penalty.
-    int8_t gap_open_long    = 0;   ///< Positive long-gap open penalty.
-    int8_t gap_extend_long  = 0;   ///< Positive long-gap extension penalty.
+    int32_t gap_open_short   = 0;   ///< Positive short-gap open penalty.
+    int32_t gap_extend_short = 0;   ///< Positive short-gap extension penalty.
+    int32_t gap_open_long    = 0;   ///< Positive long-gap open penalty.
+    int32_t gap_extend_long  = 0;   ///< Positive long-gap extension penalty.
     int    band_width       = -1;  ///< Band width, or negative for unrestricted.
     int    z_drop           = -1;  ///< Z-drop threshold, or negative to disable.
     int    end_bonus        = 0;   ///< Bonus used when choosing traceback through the query end.
@@ -1060,8 +1061,8 @@ struct block_aligner_construction_stats {
 };
 /** Parameters checked before a  Block Aligner call starts. */
 struct block_aligner_parameters {
-    int8_t gap_open = 0;  ///< Positive gap-open penalty q A gap of length l costs q + e*l.
-    int8_t gap_extend = 0;  ///< Positive penalty e for each symbol in a gap.
+    int32_t gap_open = 0;  ///< Positive gap-open penalty q A gap of length l costs q + e*l.
+    int32_t gap_extend = 0;  ///< Positive penalty e for each symbol in a gap.
     size_t minimum_block_size = 32;  ///< Minimum adaptive block size.
     size_t maximum_block_size = 256;  ///< Maximum adaptive block size.
     int32_t x_drop_threshold = 0;  ///< Allowed score loss during X-drop extension. Use zero in global mode.
@@ -1083,7 +1084,7 @@ enum class block_packed_certificate_decision : std::uint8_t {
     certified,
 };
 
-/// Prepare scoring and parameters once for a region's packed DNA4 gap checks.
+/// Prepare scoring and parameters once for a region's packed alphabet gap checks.
 /// Each gap supplies its own coordinates and sequence data. Keeping the shared
 /// checks here avoids repeating them for every adjacent seed pair.
 struct block_global_gap_certificate_plan {
@@ -1109,19 +1110,6 @@ struct block_packed_certificate_attempt {
     block_packed_certificate_decision decision =
         block_packed_certificate_decision::not_eligible;
     block_diagonal_certificate certificate{};  ///< Exact result when certified.
-};
-
-/** Why Block Aligner rejected a call. */
-enum class block_aligner_contract_error : std::uint8_t {
-    none,
-    gap_penalty,
-    block_geometry,
-    x_drop_threshold,
-    stage_mode,
-    lane_shape,
-    coordinates,
-    scoring_matrix,
-    trace_accounting,
 };
 
 /** Return whether Block Aligner supports this number of SIMD lanes. */
@@ -1168,7 +1156,7 @@ struct ksw2_storage_plan {
     }
     const auto target_vectors = bioseq::common::ceil_div(reference_length, vector_bytes);
     const auto query_vectors = bioseq::common::ceil_div(query_length, vector_bytes);
-    const std::size_t state_arrays = is_dual_affine ? 7u : 5u;
+    const std::size_t state_arrays = is_dual_affine ? 6u : 4u;
     const auto target_slots = bioseq::common::checked_mul(state_arrays + 1u, target_vectors);
     const auto with_query = target_slots
         ? bioseq::common::checked_add(*target_slots, query_vectors)
@@ -1373,25 +1361,25 @@ derive_block_aligner_storage_plan(
 /** Check gap costs, block sizes, extension mode and SIMD width before  alignment. */
 [[nodiscard]] constexpr auto
 validate_block_aligner_contract(const block_aligner_parameters& parameters, size_t lanes) noexcept
-    -> block_aligner_contract_error {
-    if (parameters.gap_open <= 0 || parameters.gap_extend <= 0
-        || static_cast<int>(parameters.gap_open) + parameters.gap_extend
-             > -static_cast<int>(std::numeric_limits<int8_t>::min())) {
-        return block_aligner_contract_error::gap_penalty;
+    -> std::expected<void, alignment_contract_error> {
+    if (parameters.gap_open < 0 || parameters.gap_extend <= 0
+        || static_cast<int64_t>(parameters.gap_open) + parameters.gap_extend
+             > std::numeric_limits<int16_t>::max()) {
+        return std::unexpected(alignment_contract_error::gap_penalty);
     }
     if (!is_block_aligner_lane_shape_supported(lanes)) {
-        return block_aligner_contract_error::lane_shape;
+        return std::unexpected(alignment_contract_error::lane_shape);
     }
     const size_t minimum_block_size = std::max(parameters.minimum_block_size, lanes);
     const size_t maximum_block_size = std::max(parameters.maximum_block_size, lanes);
     if (!std::has_single_bit(minimum_block_size) || !std::has_single_bit(maximum_block_size)
         || minimum_block_size > maximum_block_size
         || maximum_block_size >= std::numeric_limits<std::uint16_t>::max()) {
-        return block_aligner_contract_error::block_geometry;
+        return std::unexpected(alignment_contract_error::block_geometry);
     }
     if ((parameters.mode == block_alignment_mode::x_drop && parameters.x_drop_threshold < 0)
         || (parameters.mode == block_alignment_mode::global && parameters.x_drop_threshold != 0)) {
-        return block_aligner_contract_error::x_drop_threshold;
+        return std::unexpected(alignment_contract_error::x_drop_threshold);
     }
     const bool stage_mode_valid =
         (parameters.stage == block_alignment_stage::left_extension
@@ -1404,12 +1392,12 @@ validate_block_aligner_contract(const block_aligner_parameters& parameters, size
             && parameters.mode == block_alignment_mode::x_drop
             && parameters.input_order == block_input_order::forward);
     if (!stage_mode_valid) {
-        return block_aligner_contract_error::stage_mode;
+        return std::unexpected(alignment_contract_error::stage_mode);
     }
     if (parameters.should_compute_edit_distance && !parameters.is_trace_enabled) {
-        return block_aligner_contract_error::trace_accounting;
+        return std::unexpected(alignment_contract_error::trace_accounting);
     }
-    return block_aligner_contract_error::none;
+    return {};
 }
 
 /** Hash the alignment parameters, scoring rules and query strand for execution checks. */
@@ -1422,8 +1410,8 @@ block_aligner_configuration_identity(const block_aligner_parameters& parameters,
         hash ^= value;
         hash *= 1099511628211ULL;
     };
-    mix(static_cast<std::uint8_t>(parameters.gap_open));
-    mix(static_cast<std::uint8_t>(parameters.gap_extend));
+    mix(static_cast<std::uint32_t>(parameters.gap_open));
+    mix(static_cast<std::uint32_t>(parameters.gap_extend));
     mix(parameters.minimum_block_size);
     mix(parameters.maximum_block_size);
     mix(static_cast<std::uint32_t>(parameters.x_drop_threshold));

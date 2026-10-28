@@ -9,6 +9,119 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/** Native collision verification and dense compaction, shared by every seed lookup route. */
+/// Emits original target k-span intervals from device-produced candidates.
+inline constexpr std::string_view k_seed_native_coverage_body = R"GLSL(
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct gpu_anchor_wire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+struct sequence_upload_interval { uint64_t begin; uint64_t end; };
+layout(std430, set=0, binding=0) readonly buffer candidate_buffer { gpu_anchor_wire candidates[]; };
+layout(std430, set=0, binding=1) writeonly buffer coverage_buffer { sequence_upload_interval intervals[]; };
+layout(std430, set=0, binding=2) buffer status_buffer { uint status[]; };
+layout(push_constant) uniform coverage_push {
+    uint candidate_count; uint kmer_size; uint64_t target_position_bias; uint64_t symbol_count;
+    uint candidate_index_bias; uint reserved;
+} pc;
+void main() {
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint index = gl_GlobalInvocationID.x; index < pc.candidate_count;) {
+        gpu_anchor_wire anchor = candidates[pc.candidate_index_bias + index];
+        uint64_t end = anchor.ref_position + pc.target_position_bias;
+        if (end < anchor.ref_position || end >= pc.symbol_count ||
+            end + uint64_t(1) < uint64_t(pc.kmer_size) ||
+            (anchor.span_flags_segment & 255u) != pc.kmer_size) {
+            atomicOr(status[0], 1u);
+            intervals[index] = sequence_upload_interval(uint64_t(0), uint64_t(0));
+        } else intervals[index] = sequence_upload_interval(
+            end + uint64_t(1) - uint64_t(pc.kmer_size), end + uint64_t(1));
+        if (pc.candidate_count - index <= stride) break;
+        index += stride;
+    }
+}
+)GLSL";
+
+inline constexpr std::string_view k_seed_verify_body = R"GLSL(
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct gpu_anchor_wire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+layout(std430, set=0, binding=0) readonly buffer candidate_buffer { gpu_anchor_wire candidates[]; };
+layout(std430, set=0, binding=1) readonly buffer native_words_buffer { uint native_words[]; };
+layout(std430, set=0, binding=2) readonly buffer native_records_buffer { gpu_sequence_view native_records[]; };
+layout(std430, set=0, binding=3) readonly buffer rank_policy_buffer {
+    uint rank_to_code[256]; uint rank_to_rc_code[256]; uint forward_seeds[256];
+    uint rank_count; uint alphabet_code; uint seed_policy_id; uint canonical_reverse_complement;
+};
+layout(std430, set=0, binding=4) buffer valid_buffer { uint valid[]; };
+layout(std430, set=0, binding=5) readonly buffer prefix_buffer { uint prefix[]; };
+layout(std430, set=0, binding=6) writeonly buffer verified_buffer { gpu_anchor_wire verified[]; };
+layout(std430, set=0, binding=7) buffer counters_buffer { uint counters[]; };
+layout(push_constant) uniform verify_push {
+    uint candidate_count; uint mode; uint kmer_size; uint query_length;
+    uint64_t target_position_bias; uint verified_count; uint query_window_count;
+    uint target_window_count; uint candidate_index_bias;
+} pc;
+uint packed_sequence_byte(uint64_t byte_index, bool query) {
+    return (native_words[uint(byte_index >> 2u)] >> ((uint(byte_index) & 3u) * 8u)) & 255u;
+}
+uint find_native_window(uint64_t end, uint span, uint begin, uint count) {
+    if (end == ~uint64_t(0) || end + uint64_t(1) < uint64_t(span)) return 0xffffffffu;
+    uint64_t start = end + uint64_t(1) - uint64_t(span);
+    uint lo = begin;
+    uint hi = begin + count;
+    while (lo < hi) {
+        uint mid = lo + (hi - lo) / 2u;
+        if (native_records[mid].bp_offset <= start) lo = mid + 1u;
+        else hi = mid;
+    }
+    if (lo == begin) return 0xffffffffu;
+    gpu_sequence_view found = native_records[lo - 1u];
+    return end >= found.bp_offset && end - found.bp_offset < found.bp_count ? lo - 1u : 0xffffffffu;
+}
+bool matches_native_seed(gpu_anchor_wire anchor) {
+    uint span = anchor.span_flags_segment & 255u;
+    uint64_t target_end = anchor.ref_position + pc.target_position_bias;
+    uint64_t reverse_base = uint64_t(pc.query_length) + uint64_t(pc.kmer_size) - uint64_t(2);
+    if (target_end < anchor.ref_position || anchor.is_reverse > 1u || span != pc.kmer_size ||
+        (anchor.is_reverse != 0u && canonical_reverse_complement == 0u) ||
+        (anchor.is_reverse != 0u && anchor.query_position > reverse_base)) {
+        atomicOr(counters[0], 1u); return false;
+    }
+    uint64_t query_end = anchor.is_reverse != 0u ? reverse_base - anchor.query_position : anchor.query_position;
+    uint query_record = find_native_window(query_end, pc.kmer_size, 0u, pc.query_window_count);
+    uint target_record = find_native_window(target_end, pc.kmer_size,
+                                           pc.query_window_count, pc.target_window_count);
+    if (query_record == 0xffffffffu || target_record == 0xffffffffu) {
+        atomicOr(counters[0], 1u); return false;
+    }
+    gpu_sequence_view query = native_records[query_record];
+    gpu_sequence_view target = native_records[target_record];
+    uint target_start = uint(target_end - target.bp_offset) + 1u - pc.kmer_size;
+    uint query_start = uint(query_end - query.bp_offset) + 1u - pc.kmer_size;
+    for (uint offset = 0u; offset < pc.kmer_size; ++offset) {
+        uint query_offset = anchor.is_reverse != 0u ? pc.kmer_size - 1u - offset : offset;
+        uint query_rank = native_packed_rank(query, query_start + query_offset, true);
+        uint target_rank = native_packed_rank(target, target_start + offset, false);
+        if (query_rank >= rank_count || target_rank >= rank_count) {
+            atomicOr(counters[0], 1u); return false;
+        }
+        if (anchor.is_reverse != 0u) query_rank = rank_to_rc_code[query_rank];
+        if (query_rank != target_rank) return false;
+    }
+    return true;
+}
+void main() {
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint index = gl_GlobalInvocationID.x; index < pc.candidate_count;) {
+        if (pc.mode == 0u) valid[index] = matches_native_seed(candidates[pc.candidate_index_bias + index]) ? 1u : 0u;
+        else if (valid[index] != 0u) {
+            if (valid[index] != 1u || prefix[index] >= pc.verified_count) atomicOr(counters[0], 2u);
+            else { verified[prefix[index]] = candidates[pc.candidate_index_bias + index]; atomicAdd(counters[1], 1u); }
+        }
+        if (pc.candidate_count - index <= stride) break;
+        index += stride;
+    }
+}
+)GLSL";
+
 /// @brief Emit anchors from the minimizer index into ranges assigned by the
 /// prefix counts. Each query minimizer looks up its target positions and writes
 /// the matching  strand and coordinates.
@@ -73,7 +186,7 @@ uint64_t minimizer_fragment_hash(uint index) {
     }
     uint64_t high = uint64_t(minimizer_words[base + 2u])
                   | (uint64_t(minimizer_words[base + 3u]) << 32);
-    return high >> 8;
+    return high;
 }
 
 uint64_t minimizer_fragment_position(uint index) {
@@ -333,7 +446,7 @@ uint64_t minimizer_fragment_hash(uint index) {
     }
     uint64_t high = uint64_t(minimizer_words[base + 2u])
         | (uint64_t(minimizer_words[base + 3u]) << 32);
-    return high >> 8;
+    return high;
 }
 uint64_t minimizer_fragment_position(uint index) {
     if (pc.word_kind == 0u) {
@@ -764,7 +877,7 @@ uint64_t minimizer_fragment_hash(uint index) {
     }
     uint64_t high = uint64_t(minimizer_words[base + 2u])
         | (uint64_t(minimizer_words[base + 3u]) << 32u);
-    return high >> 8u;
+    return high;
 }
 
 uint64_t minimizer_fragment_position(uint index) {
@@ -1892,7 +2005,7 @@ uint64_t shape_v5_minimizer_hash(uint index) {
     }
     uint64_t high = uint64_t(shape_v5_minimizer_words[base + 2u])
         | (uint64_t(shape_v5_minimizer_words[base + 3u]) << 32u);
-    return high >> 8u;
+    return high;
 }
 
 uint64_t shape_v5_minimizer_position(uint index) {

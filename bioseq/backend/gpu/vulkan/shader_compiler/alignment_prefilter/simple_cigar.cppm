@@ -20,6 +20,7 @@ const int k_negative_infinity = -1073741824;
 const uint k_status_ok = 0u;
 const uint k_status_unsupported_geometry = 1u;
 const uint k_status_cigar_overflow = 2u;
+const uint k_status_score_range = 3u;
 const uint k_cigar_match = 0u;
 const uint k_cigar_insert = 1u;
 const uint k_cigar_delete = 2u;
@@ -109,29 +110,10 @@ void write_reject(uint job_index, uint status) {
     results[job_index].block_length = 0u;
 }
 
-uint packed_byte(bool query_side, uint byte_index) {
-    uint word = query_side ? query_symbols[byte_index >> 2u]
-                           : target_symbols[byte_index >> 2u];
-    return (word >> ((byte_index & 3u) * 8u)) & 255u;
-}
-
-uint packed_rank(bool query_side,
-                 uint byte_offset,
-                 uint storage_unit_width,
-                 uint leading_symbol_offset,
-                 uint bits_per_symbol,
-                 uint logical_index) {
-    uint letters_per_unit = (storage_unit_width * 8u) / bits_per_symbol;
-    uint packed_index = leading_symbol_offset + logical_index;
-    uint unit_index = packed_index / letters_per_unit;
-    uint symbol_in_unit = packed_index - unit_index * letters_per_unit;
-    uint bit_offset = symbol_in_unit * bits_per_symbol;
-    uint source_byte = byte_offset + unit_index * storage_unit_width + (bit_offset >> 3u);
-    uint pair = packed_byte(query_side, source_byte);
-    if ((bit_offset & 7u) + bits_per_symbol > 8u) {
-        pair |= packed_byte(query_side, source_byte + 1u) << 8u;
-    }
-    return (pair >> (bit_offset & 7u)) & ((1u << bits_per_symbol) - 1u);
+uint active_job_index;
+uint packed_sequence_byte(uint64_t byte_index, bool query) {
+    uint word = query ? query_symbols[uint(byte_index >> 2u)] : target_symbols[uint(byte_index >> 2u)];
+    return (word >> ((uint(byte_index) & 3u) * 8u)) & 255u;
 }
 
 uint complement_rank(uint rank) {
@@ -140,34 +122,19 @@ uint complement_rank(uint rank) {
 }
 
 uint query_symbol_at(alignment_cigar_job job, uint logical_index) {
-    if ((job.flags & k_job_packed_inputs) == 0u) {
-        return query_symbols[job.query_symbol_offset + logical_index];
-    }
-    return packed_rank(true,
-                       job.query_symbol_offset,
-                       job.query_storage_unit_width,
-                       job.query_leading_symbol_offset,
-                       job.bits_per_symbol,
-                       logical_index);
+    return native_packed_rank(sequence_descriptors[active_job_index * 2u], logical_index, true);
 }
-
 uint target_symbol_at(alignment_cigar_job job, uint logical_index) {
-    if ((job.flags & k_job_packed_inputs) == 0u) {
-        return target_symbols[job.target_symbol_offset + logical_index];
-    }
     bool reverse = (job.flags & k_job_reverse_target) != 0u;
     uint source_index = reverse ? job.target_len - 1u - logical_index : logical_index;
-    uint rank = packed_rank(false,
-                            job.target_symbol_offset,
-                            job.target_storage_unit_width,
-                            job.target_leading_symbol_offset,
-                            job.bits_per_symbol,
-                            source_index);
+    uint rank = native_packed_rank(sequence_descriptors[active_job_index * 2u + 1u], source_index, false);
     return reverse ? complement_rank(rank) : rank;
 }
 
 int substitution_score(uint query_symbol, uint target_symbol) {
-    return query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty;
+    return substitution.model == 0u
+        ? (query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty)
+        : substitution.values[target_symbol * substitution.row_stride + query_symbol];
 }
 
 int gap_cost_short(uint len) {
@@ -379,6 +346,19 @@ bool better_greedy_gap_candidate(
                 || (gap_len == best_len && op < best_op)));
 }
 
+// Every global path has at most min(Q,T) aligned pairs and pays at least the
+// cheapest affine cost for its net length difference. Reaching that upper bound
+// certifies this script independently of alphabet, gap placement, or tie shape.
+bool uniform_shortcut_is_optimal(alignment_cigar_job job, int score) {
+    if (substitution.model != 0u || pc.match_score < 0 || -pc.mismatch_penalty > pc.match_score)
+        return false;
+    uint length_delta = job.query_len > job.target_len
+        ? job.query_len - job.target_len : job.target_len - job.query_len;
+    int minimum_gap_cost = length_delta == 0u ? 0 : best_gap_cost_value(length_delta);
+    int upper_bound = int(min(job.query_len, job.target_len)) * pc.match_score - minimum_gap_cost;
+    return score == upper_bound;
+}
+
 bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
     uint query_pos = 0u;
     uint target_pos = 0u;
@@ -394,8 +374,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
         }
         if (run_len != 0u) {
             if (!append_forward_cigar(job, cigar_length, run_len, k_cigar_match)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             query_pos += run_len;
             target_pos += run_len;
@@ -410,8 +389,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
         if (query_pos == job.query_len) {
             uint gap_len = job.target_len - target_pos;
             if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_delete)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
             target_pos = job.target_len;
@@ -424,8 +402,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
         if (target_pos == job.target_len) {
             uint gap_len = job.query_len - query_pos;
             if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_insert)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
             query_pos = job.query_len;
@@ -440,8 +417,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             && query_symbol_at(job, query_pos)
                 == target_symbol_at(job, target_pos + 1u)) {
             if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_delete)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(1u));
             ++target_pos;
@@ -455,8 +431,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             && query_symbol_at(job, query_pos + 1u)
                 == target_symbol_at(job, target_pos)) {
             if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_insert)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(1u));
             ++query_pos;
@@ -471,6 +446,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
     }
 
     int score = int(match_count) * pc.match_score - int(gap_cost);
+    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }
@@ -490,8 +466,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
         }
         if (run_len != 0u) {
             if (!append_forward_cigar(job, cigar_length, run_len, k_cigar_match)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             query_pos += run_len;
             target_pos += run_len;
@@ -502,8 +477,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
         if (query_pos == job.query_len) {
             uint gap_len = job.target_len - target_pos;
             if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_delete)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
             target_pos = job.target_len;
@@ -516,8 +490,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
         if (target_pos == job.target_len) {
             uint gap_len = job.query_len - query_pos;
             if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_insert)) {
-                write_reject(job_index, k_status_cigar_overflow);
-                return true;
+                return false;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
             query_pos = job.query_len;
@@ -565,8 +538,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
             return false;
         }
         if (!append_forward_cigar(job, cigar_length, best_len, best_op)) {
-            write_reject(job_index, k_status_cigar_overflow);
-            return true;
+            return false;
         }
         gap_cost += uint(best_gap_cost_value(best_len));
         ++gap_count;
@@ -581,6 +553,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
     }
 
     int score = int(match_count) * pc.match_score - int(gap_cost);
+    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }
@@ -614,6 +587,7 @@ bool emit_simple_script_success(
     if (gap_count >= 2u) {
         score -= best_gap_cost_value(second_len);
     }
+    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }
@@ -1254,11 +1228,15 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
 }
 
 void solve_bounded_dp(uint job_index) {
+    active_job_index = job_index;
     alignment_cigar_job job = jobs[job_index];
     uint length_delta = job.query_len > job.target_len
         ? job.query_len - job.target_len
         : job.target_len - job.query_len;
-    if (pc.alphabet_size == 0u || pc.flags != 0u || pc.reserved != 0u
+    if (substitution.rank_count != pc.alphabet_size
+        || sequence_descriptors[job_index * 2u].alphabet_code != substitution.alphabet_code
+        || sequence_descriptors[job_index * 2u + 1u].alphabet_code != substitution.alphabet_code
+        || pc.alphabet_size == 0u || pc.flags != 0u || pc.reserved != 0u
         || (job.flags & ~k_job_flag_mask) != 0u
         || ((job.flags & k_job_reverse_target) != 0u
             && (job.flags & k_job_packed_inputs) == 0u)
@@ -1266,6 +1244,11 @@ void solve_bounded_dp(uint job_index) {
         || length_delta > job.band_width
         || job.band_width > pc.max_band_width) {
         write_reject(job_index, k_status_unsupported_geometry);
+        return;
+    }
+    if (!alignment_numeric_contract(job.query_len, job.target_len, pc.match_score, pc.mismatch_penalty,
+        pc.gap_open_short, pc.gap_extend_short, pc.gap_open_long, pc.gap_extend_long, pc.end_bonus, pc.z_drop)) {
+        write_reject(job_index, k_status_score_range);
         return;
     }
     if (job.cigar_capacity == 0u) {
@@ -1286,7 +1269,8 @@ void solve_bounded_dp(uint job_index) {
         }
     }
 
-    if (try_emit_simple_cigar(job_index, job)) {
+    if (substitution.model == 0u && pc.match_score >= 0
+        && -pc.mismatch_penalty <= pc.match_score && try_emit_simple_cigar(job_index, job)) {
         return;
     }
 

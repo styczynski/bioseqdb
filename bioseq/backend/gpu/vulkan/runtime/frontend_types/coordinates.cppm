@@ -32,6 +32,8 @@ export namespace bioseq::gpu::vulkan {
  * batch uses one resident index generation and view.
  */
 struct gpu_seed_query_inputs {
+    std::span<const gpu_native_sequence_upload> native_queries{};
+    const vulkan_rank_lut* native_rank_policy = nullptr;
     std::span<const std::byte> host_minimizer_bytes{};
     const buffer* device_minimizer_words = nullptr;
     std::uint32_t minimizer_count = 0;
@@ -83,6 +85,8 @@ enum class gpu_seed_index_representation : std::uint8_t {
  * Missing or mixed representations are rejected.
  */
 struct gpu_seed_coordinate_job {
+    gpu_native_sequence_upload native_target{};
+    gpu_native_sequence_provider native_target_provider{};
     const buffer* slots = nullptr;
     const buffer* positions = nullptr;
     std::uint64_t target_len = 0;
@@ -473,6 +477,10 @@ struct persisted_grouped_soa_coordinate_job_audit {
     std::uint64_t direct_scan_dispatches = 0;
     std::uint64_t direct_emit_dispatches = 0;
     std::uint64_t anchor_count = 0;
+    std::uint64_t seed_candidate_count = 0u;
+    std::uint64_t seed_verified_count = 0u;
+    std::uint64_t seed_emitted_count = 0u;
+    std::uint64_t seed_coverage_interval_count = 0u;
     std::uint64_t sort_operations = 0;
     std::uint64_t range_build_dispatches = 0;
     std::uint64_t range_count = 0;
@@ -482,7 +490,11 @@ struct persisted_grouped_soa_coordinate_job_audit {
     std::uint64_t chain_candidate_dispatches = 0;
     std::uint64_t count_submit_wait_identity = 0;
     std::uint64_t emit_submit_wait_identity = 0;
-    std::uint64_t sort_range_submit_wait_identity = 0;
+    std::uint64_t sort_submit_wait_identity = 0u;
+    std::uint64_t seed_coverage_submit_wait_identity = 0u;
+    std::uint64_t seed_verify_count_submit_wait_identity = 0u;
+    std::uint64_t seed_verify_emit_submit_wait_identity = 0u;
+    std::uint64_t range_submit_wait_identity = 0u;
     std::uint64_t chain_coordinate_submit_wait_identity = 0;
     std::uint64_t count_status_checks = 0;
     std::uint64_t emit_status_checks = 0;
@@ -514,6 +526,15 @@ struct persisted_grouped_soa_coordinate_job_audit {
                static_cast<std::size_t>(benchmark_e2e_grouped_soa_count_trace_word::word_count)>
         device_count_trace_words{};
 #endif
+
+    /// Returns fence identities in the shared phase order; skipped phases are zero.
+    [[nodiscard]] constexpr auto submission_wait_identities() const noexcept {
+        return std::array<std::uint64_t, k_seed_coordinate_submission_phase_count>{
+            count_submit_wait_identity, emit_submit_wait_identity, sort_submit_wait_identity,
+            seed_coverage_submit_wait_identity, seed_verify_count_submit_wait_identity,
+            seed_verify_emit_submit_wait_identity, range_submit_wait_identity,
+            chain_coordinate_submit_wait_identity};
+    }
 
     /**
      * @brief Checks that job identities, dispatch counts, and result bounds agree.
@@ -570,26 +591,34 @@ struct persisted_grouped_soa_coordinate_job_audit {
                                       count_submit_wait_identity != 0u && count_status_checks == 1u;
         if (!direct_front_end)
             return false;
-        if (anchor_count == 0u) {
-            return direct_emit_dispatches == 0u && sort_operations == 0u &&
-                   range_build_dispatches == 0u && range_count == 0u && chain_dispatches == 0u &&
-                   chain_backtrack_dispatches == 0u && coordinate_dispatches == 0u &&
-                   chain_candidate_dispatches == 0u && candidate_readbacks == 0u &&
-                   candidate_digest == 0u &&
-                   are_chain_candidate_headers_equal(candidate_header, {}) &&
-                   emit_submit_wait_identity == 0u && sort_range_submit_wait_identity == 0u &&
-                   chain_coordinate_submit_wait_identity == 0u && emit_status_checks == 0u &&
-                   result_readbacks == 0u &&
-                   are_coordinate_result_wires_equal(result, gpu_coordinate_result_wire{});
+        if (seed_verified_count > seed_candidate_count ||
+            seed_verified_count != seed_emitted_count || anchor_count != seed_verified_count ||
+            (seed_coverage_interval_count != 0u &&
+             seed_coverage_interval_count != seed_candidate_count))
+            return false;
+        const bool candidates_present = seed_candidate_count != 0u;
+        const bool coverage_present = seed_coverage_interval_count != 0u;
+        if (direct_emit_dispatches != (candidates_present ? binding_window_count : 0u) ||
+            sort_operations != (candidates_present ? 1u : 0u) ||
+            emit_status_checks != (candidates_present ? 1u : 0u) ||
+            (emit_submit_wait_identity != 0u) != candidates_present ||
+            (sort_submit_wait_identity != 0u) != candidates_present ||
+            (seed_verify_count_submit_wait_identity != 0u) != candidates_present ||
+            (seed_verify_emit_submit_wait_identity != 0u) != candidates_present ||
+            (seed_coverage_submit_wait_identity != 0u) != coverage_present ||
+            range_build_dispatches != (anchor_count != 0u ? 1u : 0u) ||
+            (range_submit_wait_identity != 0u) != (anchor_count != 0u))
+            return false;
+        const auto identities = submission_wait_identities();
+        for (std::size_t index = 0u; index < identities.size(); ++index) {
+            if (identities[index] == 0u)
+                continue;
+            for (std::size_t prior = 0u; prior < index; ++prior) {
+                if (identities[prior] == identities[index])
+                    return false;
+            }
         }
-        const bool emitted_and_ranged =
-            direct_emit_dispatches == binding_window_count && sort_operations == 1u && range_build_dispatches == 1u &&
-            emit_submit_wait_identity != 0u && sort_range_submit_wait_identity != 0u &&
-            count_submit_wait_identity != emit_submit_wait_identity &&
-            count_submit_wait_identity != sort_range_submit_wait_identity &&
-            emit_submit_wait_identity != sort_range_submit_wait_identity &&
-            emit_status_checks == 1u;
-        if (!emitted_and_ranged)
+        if (anchor_count == 0u && range_count != 0u)
             return false;
         if (range_count == 0u) {
             return chain_dispatches == 0u && chain_backtrack_dispatches == 0u &&
@@ -616,9 +645,6 @@ struct persisted_grouped_soa_coordinate_job_audit {
                                 are_chain_candidate_headers_equal(candidate_header, {});
         return chain_dispatches == 1u && chain_backtrack_dispatches == 1u && reducer_shape &&
                coordinate_dispatches == 1u && chain_coordinate_submit_wait_identity != 0u &&
-               chain_coordinate_submit_wait_identity != sort_range_submit_wait_identity &&
-               chain_coordinate_submit_wait_identity != emit_submit_wait_identity &&
-               chain_coordinate_submit_wait_identity != count_submit_wait_identity &&
                result_readbacks == 1u &&
                is_coordinate_result_wire_well_formed(result, query_record.query_len, target_len) &&
                (!mapq_selected ||
@@ -724,7 +750,9 @@ struct persisted_grouped_soa_coordinate_operation_acceptance_audit {
         return operation_identity != 0u && expected_job_count != 0u &&
                consumed_count == expected_job_count && accepted_count == expected_job_count &&
                burned_count == 0u && query_pipeline_receipt_count == 3u &&
-               shape_pipeline_receipt_count >= 7u && shape_pipeline_receipt_count <= 10u &&
+               (shape_pipeline_receipt_count == grouped_soa_coordinate_required_shaders.size() ||
+                shape_pipeline_receipt_count == k_verified_coordinate_pipeline_count ||
+                shape_pipeline_receipt_count == k_verified_coordinate_pipeline_count + 1u) &&
                alignment_pipeline_receipt_count <= 1u &&
                ((alignment_pipeline_receipt_count == 0u) == (alignment_submission_count == 0u)) &&
                mapq_pipeline_receipt_count <= 1u &&
@@ -805,24 +833,36 @@ struct persisted_grouped_soa_coordinate_operation_receipt_preview {
         const persisted_grouped_soa_coordinate_operation_receipt_preview&) const noexcept = default;
 };
 
-/// @brief A job record with the four submissions used for seeding and chaining.
+/// A job record with the completed submission ordinals used for seeding and chaining.
 struct persisted_grouped_soa_coordinate_job_receipt_preview {
     persisted_grouped_soa_coordinate_job_audit audit{};
     std::uint64_t shape_pipeline_operation_identity = 0u;
-    std::array<std::uint64_t, 4> shape_submission_ordinals{};
+    std::array<std::uint64_t, k_seed_coordinate_submission_phase_count> shape_submission_ordinals{};
+    std::uint64_t shape_submission_count = 0u;
 
     /**
-     * @brief Checks a completed job and its four distinct submission IDs.
+     * @brief Checks a completed job and its distinct submission IDs, allowing skipped phases.
      * @return True for a valid coordinate result with nonempty anchors and ranges.
      */
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         if (!audit.is_internally_consistent() || audit.anchor_count == 0u ||
             audit.range_count == 0u || audit.result.is_valid != 1u ||
-            shape_pipeline_operation_identity == 0u) {
+            shape_pipeline_operation_identity == 0u ||
+            shape_submission_count > shape_submission_ordinals.size()) {
             return false;
         }
+        const auto identities = audit.submission_wait_identities();
+        if (shape_submission_count != static_cast<std::uint64_t>(std::ranges::count_if(
+                identities, [](const auto identity) { return identity != 0u; })))
+            return false;
         for (std::size_t i = 0u; i < shape_submission_ordinals.size(); ++i) {
-            if (shape_submission_ordinals[i] == 0u)
+            if (i >= shape_submission_count) {
+                if (shape_submission_ordinals[i] != 0u)
+                    return false;
+                continue;
+            }
+            if (shape_submission_ordinals[i] == 0u ||
+                (i != 0u && shape_submission_ordinals[i - 1u] >= shape_submission_ordinals[i]))
                 return false;
             for (std::size_t prior = 0u; prior < i; ++prior) {
                 if (shape_submission_ordinals[prior] == shape_submission_ordinals[i]) {
@@ -846,7 +886,7 @@ struct persisted_grouped_soa_coordinate_job_failure_diagnostic {
     std::uint64_t shape_operation_identity = 0u;
     std::uint64_t job_submission_operation_identity = 0u;
     std::uint64_t job_committed_submissions = 0u;
-    std::array<std::uint64_t, 4> job_submission_ordinals{};
+    std::array<std::uint64_t, k_seed_coordinate_submission_phase_count> job_submission_ordinals{};
     bool zero_anchor_sample_attempted = false;
     bool query_buffer_identity_matches = false;
     bool query_buffer_mapped_coherent = false;
@@ -1244,7 +1284,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
                    : persisted_grouped_soa_coordinate_operation_receipt_preview{};
     }
     /**
-     * @brief Copies a completed job and its four  submission IDs.
+     * @brief Copies a completed job and its completed submission IDs.
      * @return A preview for an accepted job with a valid coordinate result.
      */
     [[nodiscard]] std::optional<persisted_grouped_soa_coordinate_job_receipt_preview>
@@ -1257,14 +1297,14 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         if (problem_index >= shape.jobs.size())
             return std::nullopt;
         const runtime_pipeline_job_use_audit& use = shape.jobs[problem_index];
-        if (use.committed_submissions != 4u ||
-            use.submission_operation_identity != shape.operation_identity) {
+        if (use.submission_operation_identity != shape.operation_identity) {
             return std::nullopt;
         }
         persisted_grouped_soa_coordinate_job_receipt_preview result{
             .audit = records_[problem_index].audit,
             .shape_pipeline_operation_identity = use.submission_operation_identity,
             .shape_submission_ordinals = use.submission_ordinals,
+            .shape_submission_count = use.committed_submissions,
         };
         return result.is_internally_consistent()
                    ? std::optional<persisted_grouped_soa_coordinate_job_receipt_preview>{result}

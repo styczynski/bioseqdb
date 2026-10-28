@@ -60,6 +60,9 @@ struct chaining_pipeline_key {
     case static_cast<std::uint32_t>(shader_kind::sketch_emit_words):
     case static_cast<std::uint32_t>(shader_kind::seed_count):
     case static_cast<std::uint32_t>(shader_kind::seed_emit):
+    case static_cast<std::uint32_t>(shader_kind::seed_verify_count):
+    case static_cast<std::uint32_t>(shader_kind::seed_verify_emit):
+    case static_cast<std::uint32_t>(shader_kind::seed_native_coverage):
     case static_cast<std::uint32_t>(shader_kind::grouped_soa_seed_count):
     case static_cast<std::uint32_t>(shader_kind::grouped_soa_seed_emit):
     case static_cast<std::uint32_t>(shader_kind::radix_sort_histogram):
@@ -223,6 +226,9 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     case shader_kind::prefix_scan_add:
     case shader_kind::seed_count:
     case shader_kind::seed_emit:
+    case shader_kind::seed_verify_count:
+    case shader_kind::seed_verify_emit:
+    case shader_kind::seed_native_coverage:
     case shader_kind::target_index_mark_runs:
     case shader_kind::target_index_emit_buckets:
         return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
@@ -318,6 +324,9 @@ inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& i
     emit(make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_count, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_emit, 384u, 128u, 1u));
+    emit(make_shader_key(shader_kind::seed_verify_count, 384u, 128u, 1u));
+    emit(make_shader_key(shader_kind::seed_verify_emit, 384u, 128u, 1u));
+    emit(make_shader_key(shader_kind::seed_native_coverage, 384u, 128u, 1u));
     emit(make_shader_key(
         shader_kind::grouped_soa_seed_count, 384u, 128u, k_grouped_soa_seed_cache_abi_revision));
     emit(make_shader_key(

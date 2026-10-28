@@ -20,6 +20,8 @@ import bioseq.chaining.core;         // anchor / chain / chaining_parameters
 import bioseq.chaining.vulkan;       // chain_anchors_vulkan / is_vulkan_chaining_supported
 import bioseq.gpu.vulkan.runtime;    // Vulkan runtime and SPIR-V  layout checks
 import bioseq.gpu.vulkan.shader_compiler;
+import bioseq.sequences.kmers.vulkan_minimizers;
+import bioseq.alignment.utils;
 import bioseq.storage.lazy_sequence; // make_resident_lazy_sequence
 import bioseq.parallelism.memory_admission;
 
@@ -35,6 +37,60 @@ namespace gv = ::bioseq::gpu::vulkan;
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using sequence_range_type = compact_sequence_range<dna4_u64>;
+
+/** Owns native packed fixture ranks for one synchronous GPU invocation. */
+template <sequence_alphabet Alphabet>
+struct packed_alignment_fixture {
+    using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, std::uint32_t>>;
+    using traits = typename range_type::traits;
+    range_type sequence;
+
+    /** Packs supplied logical ranks with the normal compact-sequence implementation. */
+    explicit packed_alignment_fixture(std::span<const std::uint32_t> ranks) {
+        std::vector<Alphabet> letters(ranks.size());
+        for (std::size_t index = 0; index < ranks.size(); ++index) {
+            REQUIRE(ranks[index] < seqan3::alphabet_size<Alphabet>);
+            seqan3::assign_rank_to(ranks[index], letters[index]);
+        }
+        sequence = range_type{letters};
+    }
+
+    /** Borrows packed bytes with the same traits-derived layout used by production uploads. */
+    [[nodiscard]] gv::gpu_packed_sequence_upload upload() const {
+        auto begin = sequence.cbegin();
+        const auto bytes = std::as_bytes(std::span{sequence.read_cptr(begin), sequence.size()});
+        const auto rank_lut = gv::make_vulkan_rank_lut<range_type>();
+        return {.sequence = {
+            .seq_word_offset = 0u,
+            .byte_count = bytes.size(),
+            .padded_byte_count = gv::aligned_upload_bytes(bytes.size()),
+            .unit_count = sequence.size(),
+            .bp_offset = 0u,
+            .bp_count = sequence.bp_size(),
+            .letters_per_unit = traits::letters_per_unit,
+            .bits_per_char = traits::bits_per_char,
+            .unit_bits = sizeof(typename traits::storage_unit) * std::numeric_limits<unsigned char>::digits,
+            .alphabet_size = seqan3::alphabet_size<Alphabet>,
+            .char_mask = traits::char_mask,
+            .padding_letters = static_cast<std::uint32_t>(sequence.padding()),
+            .alphabet_kind = static_cast<std::uint32_t>(gv::choose_alphabet_kernel<range_type>()),
+            .leading_symbol_offset = 0u,
+            .alphabet_code = rank_lut.alphabet_code,
+            .seed_policy_id = rank_lut.seed_policy_id,
+        }, .bytes = bytes};
+    }
+};
+
+/** Prepares the immutable scalar/dense authority required by every GPU DP entry. */
+template <sequence_alphabet Alphabet, class Parameters>
+[[nodiscard]] gv::gpu_substitution_matrix fixture_matrix(const Parameters& parameters) {
+    const auto matrix = scoring_matrix<Alphabet>::generate(
+        parameters.match_score, parameters.mismatch_penalty, 1);
+    REQUIRE(matrix.has_value());
+    const auto prepared = gv::gpu_substitution_matrix::from_prepared(*matrix);
+    REQUIRE(prepared.has_value());
+    return *prepared;
+}
 
 /** Selects DNA4 kernels for the test CPU rarget, failing if its alphabet entry is missing. */
 void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
@@ -502,12 +558,16 @@ TEST_CASE("Vulkan simple extension emits CIGAR",
     };
 
     const std::uint64_t before = runtime.alignment_extension_dispatch_count();
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/1u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/1u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
     REQUIRE(after > before);
@@ -575,12 +635,16 @@ TEST_CASE("Vulkan 20kb exact CIGAR has no legacy span ceiling",
         .reserved = 0,
     };
 
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/1u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/1u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 1);
@@ -705,14 +769,17 @@ TEST_CASE("Vulkan packed reverse 20kb mutations preserve compact CIGAR across fo
     };
 
     const std::uint64_t before = runtime.alignment_extension_dispatch_count();
-    const gv::alignment_cigar_batch_result result =
+    const auto attempted =
         runtime.run_alignment_packed_cigar_roundtrip_for_test(
             std::as_bytes(std::span{query_packed}),
             std::as_bytes(std::span{target_packed}),
             jobs,
             params,
+            fixture_matrix<seq::dna4>(params),
             k_job_count * k_cigar_capacity,
             k_test_wave_bytes);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
     REQUIRE(result.committed_submission_count == 4u);
@@ -789,8 +856,15 @@ TEST_CASE("Vulkan oversized exact CIGAR batch uses trace-free GPU screening",
     };
 
     const std::uint64_t before = runtime.alignment_extension_dispatch_count();
-    const gv::alignment_cigar_batch_result result = runtime.run_alignment_simple_cigar_roundtrip(
-        query_symbols, target_symbols, jobs, params, k_job_count);
+    const auto attempted = runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            k_job_count);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
     REQUIRE(after == before + 1u);
@@ -863,12 +937,16 @@ TEST_CASE("Vulkan simple CIGAR scores mismatches",
         .reserved = 0,
     };
 
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/1u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/1u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 1);
@@ -963,12 +1041,16 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
         .reserved = 0,
     };
 
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/6u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/6u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
 
     REQUIRE(result.results.size() == 2);
     REQUIRE(result.packed_cigar.size() == 6);
@@ -1043,12 +1125,16 @@ TEST_CASE("Vulkan bounded DP CIGAR emits multiple gaps",
         .reserved = 0,
     };
 
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/5u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/5u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 5);
@@ -1131,12 +1217,16 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
         .reserved = 0,
     };
 
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/6u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/6u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 6);
@@ -1231,12 +1321,16 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
     };
 
     const std::uint64_t before = runtime.alignment_extension_dispatch_count();
-    const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
-                                                     target_symbols,
-                                                     jobs,
-                                                     params,
-                                                     /*packed_cigar_capacity=*/256u);
+    const auto attempted =
+        runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            jobs,
+            params,
+            fixture_matrix<seq::dna4>(params),
+            /*packed_cigar_capacity=*/256u);
+    REQUIRE(attempted.has_value());
+    const auto& result = *attempted;
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
     REQUIRE(after == before + 2u);

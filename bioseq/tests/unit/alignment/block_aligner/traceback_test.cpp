@@ -31,7 +31,7 @@ TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
 
     // The public gap settings charge opening plus extension for the firqt base.
     // q=10 and e=1 therefore match the reference's opening score of -11.
@@ -59,7 +59,7 @@ TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",
     CHECK(empty_reference.result.max_t == -1);
     CHECK(packed_cigar_string(empty_reference.result.cigar) == "4I");
 
-    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
+    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1).value();
     const reference_run empty_xdrop = run_block(
         "AAAA", "", aa_ar,
         xdrop_params(block_alignment_stage::right_extension,
@@ -76,7 +76,7 @@ TEST_CASE("Block packed traceback coalesces mismatch-rich diagonals",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(4, 1, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(4, 1, 1).value();
     const std::string query(64, 'A');
     std::string reference;
     reference.reserve(query.size());
@@ -106,7 +106,7 @@ TEST_CASE("Block Aligner native XDrop matches scan_block.rs and reports terminat
     context::installed_context_scope scope(ctx);
     // Scores +4 for A/A and -1 for A/C reproduce the A/A and A/R comparisons
     // in the reference X-drop fixture.
-    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
+    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1).value();
     const block_aligner_parameters right = xdrop_params(
         block_alignment_stage::right_extension, block_input_order::forward);
 
@@ -142,7 +142,7 @@ TEST_CASE("Block left extension reverses compact input without scalar fallback",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
+    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1).value();
     const std::string query(44, 'A');
 
     // Left extension reads the target backwards: 15 A bases, 16 C bases, then 13 A.
@@ -172,7 +172,7 @@ TEST_CASE("Block reversed packed traceback preserves multi-run source order",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(4, 6, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(4, 6, 1).value();
 
     // Reading backwards gives 4M4I4M4D6M. Returning the CIGAR in source order
     // reverses the runs to 6M4D4M4I4M while keeping I and D unchanged.
@@ -206,8 +206,8 @@ TEST_CASE("Block padding and admitted subregion boundaries are exact",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
-    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1);
+    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
+    const auto aa_ar = scoring_matrix<dna4_u64>::generate(4, 1, 1).value();
     constexpr std::array<std::size_t, 13> lengths{
         0, 1, 7, 8, 9, 15, 16, 17, 23, 31, 32, 33, 41};
 
@@ -255,7 +255,7 @@ TEST_CASE("Block adaptive path grows then shrinks with upstream semantics",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
     context::installed_context_scope scope(ctx);
-    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1);
+    const auto nw1 = scoring_matrix<dna4_u64>::generate(1, 1, 1).value();
     const std::string query = std::string(32, 'A')
         + std::string(40, 'C') + std::string(256, 'A');
     const std::string reference(288, 'A');

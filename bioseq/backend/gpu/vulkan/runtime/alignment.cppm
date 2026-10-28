@@ -21,8 +21,40 @@ import bioseq.common.hashing;
 import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
+import bioseq.alignment.utils;
 
 namespace bioseq::gpu::vulkan {
+
+/** Aligned native byte extents admitted for one CIGAR wave. */
+struct alignment_packed_payload_sizes {
+    std::uint64_t query_bytes = 0;
+    std::uint64_t target_bytes = 0;
+};
+/** Count packed bytes with per-window word padding, without expanding ranks. */
+[[nodiscard]] alignment_packed_payload_sizes alignment_packed_arena_sizes(
+    std::span<const gpu_alignment_cigar_job_wire> jobs) {
+    alignment_packed_payload_sizes sizes{};
+    for (const auto& job : jobs) {
+        sizes.query_bytes = bioseq::common::saturating_add(sizes.query_bytes,
+            (std::uint64_t{job.query_packed_byte_count} + 3u) / 4u * 4u);
+        sizes.target_bytes = bioseq::common::saturating_add(sizes.target_bytes,
+            (std::uint64_t{job.target_packed_byte_count} + 3u) / 4u * 4u);
+    }
+    sizes.query_bytes = std::max(sizes.query_bytes, std::uint64_t{4});
+    sizes.target_bytes = std::max(sizes.target_bytes, std::uint64_t{4});
+    return sizes;
+}
+/** Wire prefix and prepared biological values occupy one immutable upload buffer. */
+[[nodiscard]] std::uint64_t alignment_matrix_bytes(const gpu_substitution_matrix& matrix) noexcept {
+    return sizeof(gpu_substitution_matrix_wire) + matrix.values().size() * sizeof(std::int32_t);
+}
+/** Copy the prepared scoring authority into an already admitted mapped buffer. */
+void write_alignment_matrix(std::span<std::byte> destination, const gpu_substitution_matrix& matrix) {
+    if (destination.size() < alignment_matrix_bytes(matrix))
+        throw vulkan_runtime_error("alignment matrix upload extent changed");
+    std::memcpy(destination.data(), &matrix.header(), sizeof(matrix.header()));
+    std::memcpy(destination.data() + sizeof(matrix.header()), matrix.values().data(), matrix.values().size() * sizeof(std::int32_t));
+}
 
 /// @brief Reserves memory budget before growing the host result  and packed-CIGAR vectors.
 void reserve_alignment_cigar_result_capacity(alignment_cigar_batch_result& result,
@@ -198,11 +230,12 @@ mapq_result_digest(const std::span<const gpu_chain_candidate_header_wire> header
  * Inputs are validated before upload. The call waits for completion and rejects
  * the batch if any shader result reports an error
  */
-std::vector<gpu_alignment_extension_result_wire>
-runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_symbols,
-                                           std::span<const std::uint32_t> target_symbols,
+std::expected<std::vector<gpu_alignment_extension_result_wire>, bioseq::simd::alignment_contract_error>
+runtime::run_alignment_extension_roundtrip(const gpu_packed_sequence_upload& query_symbols,
+                                           const gpu_packed_sequence_upload& target_symbols,
                                            std::span<const gpu_alignment_extension_job_wire> jobs,
-                                           const gpu_alignment_extension_params& params) {
+                                           const gpu_alignment_extension_params& params,
+    const gpu_substitution_matrix& matrix) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
         throw vulkan_runtime_error("run_alignment_extension_roundtrip on unavailable device");
@@ -210,11 +243,14 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
     if (jobs.empty()) {
         return {};
     }
-    validate_alignment_extension_inputs(query_symbols, target_symbols, jobs, params);
+    const auto admission = validate_alignment_extension_inputs(query_symbols, target_symbols, jobs, params, matrix);
+    if (!admission) return std::unexpected(admission.error());
     if (features_.max_workgroup_count_x == 0) {
         throw vulkan_runtime_error("alignment extension device reports zero max workgroup count");
     }
 
+    if (features_.max_stage_storage_buffers < 8 || features_.max_descriptor_storage_buffers < 8)
+        return std::unexpected(bioseq::simd::alignment_contract_error::device_capability);
     constexpr std::uint32_t k_alignment_extension_local_size = 1u;
     const compute_pipeline pipe =
         get_compute_pipeline_locked(shader_kind::align_extend_banded_affine,
@@ -222,40 +258,60 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
                                     k_gpu_alignment_extension_max_len);
 
     const std::uint64_t query_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(query_symbols.size()) * sizeof(std::uint32_t), 4u);
+        query_symbols.sequence.padded_byte_count, 4u);
     const std::uint64_t target_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(target_symbols.size()) * sizeof(std::uint32_t), 4u);
+        target_symbols.sequence.padded_byte_count, 4u);
     const std::uint64_t job_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(jobs.size()) * sizeof(gpu_alignment_extension_job_wire), 4u);
     const std::uint64_t result_bytes =
         static_cast<std::uint64_t>(jobs.size()) * sizeof(gpu_alignment_extension_result_wire);
 
+    const auto matrix_bytes = alignment_matrix_bytes(matrix);
+    constexpr std::uint64_t descriptor_bytes = 2u * sizeof(gpu_sequence_view_wire);
+    std::uint64_t admitted_bytes = 0;
+    for (const auto bytes : {query_bytes, target_bytes, job_bytes, result_bytes, matrix_bytes, descriptor_bytes}) {
+        if (bytes > features_.max_storage_buffer_range) return std::unexpected(bioseq::simd::alignment_contract_error::device_capability);
+        admitted_bytes = bioseq::common::saturating_add(admitted_bytes,
+            buffer_memory_requirement_locked(bytes, k_compute_buffer_usage));
+    }
+    auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(admitted_bytes);
+    if (!permit) return std::unexpected(bioseq::simd::alignment_contract_error::memory_admission);
     buffer query_buf = create_device_buffer(query_bytes, k_compute_buffer_usage);
     buffer target_buf = create_device_buffer(target_bytes, k_compute_buffer_usage);
     buffer jobs_buf = create_device_buffer(job_bytes, k_compute_buffer_usage);
     buffer results_buf = create_device_buffer(result_bytes, k_compute_buffer_usage);
-    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr || jobs_buf.mapped == nullptr ||
+    buffer matrix_buf = create_device_buffer(matrix_bytes, k_compute_buffer_usage);
+    buffer descriptors_buf = create_device_buffer(descriptor_bytes, k_compute_buffer_usage);
+    if (matrix_buf.mapped == nullptr || descriptors_buf.mapped == nullptr || query_buf.mapped == nullptr || target_buf.mapped == nullptr || jobs_buf.mapped == nullptr ||
         results_buf.mapped == nullptr) {
         throw vulkan_runtime_error("run_alignment_extension_roundtrip: device buffer alloc failed");
     }
-    if (!query_symbols.empty()) {
-        std::memcpy(
-            query_buf.mapped, query_symbols.data(), query_symbols.size() * sizeof(std::uint32_t));
-    }
-    if (!target_symbols.empty()) {
-        std::memcpy(target_buf.mapped,
-                    target_symbols.data(),
-                    target_symbols.size() * sizeof(std::uint32_t));
-    }
+    std::uint64_t actual_bytes = 0;
+    for (const auto bytes : {query_buf.allocation_bytes, target_buf.allocation_bytes, jobs_buf.allocation_bytes,
+            results_buf.allocation_bytes, matrix_buf.allocation_bytes, descriptors_buf.allocation_bytes})
+        actual_bytes = bioseq::common::saturating_add(actual_bytes, bytes);
+    if (actual_bytes != admitted_bytes) throw vulkan_runtime_error("alignment extension allocation exceeded admission");
+    const auto query_descriptor = place_packed_sequence_upload(query_symbols, 0,
+        std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)});
+    const auto target_descriptor = place_packed_sequence_upload(target_symbols, 0,
+        std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)});
+    if (!query_descriptor || !target_descriptor) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    const std::array descriptors{*query_descriptor, *target_descriptor};
+    std::memcpy(descriptors_buf.mapped, descriptors.data(), sizeof(descriptors));
+    write_alignment_matrix(std::span{static_cast<std::byte*>(matrix_buf.mapped), static_cast<std::size_t>(matrix_bytes)}, matrix);
     std::memcpy(
         jobs_buf.mapped, jobs.data(), jobs.size() * sizeof(gpu_alignment_extension_job_wire));
     std::memset(results_buf.mapped, 0, static_cast<std::size_t>(result_bytes));
 
-    const std::array<VkDescriptorBufferInfo, 4> infos{{
+    const std::array<VkDescriptorBufferInfo, 8> infos{{
         {query_buf.buffer_handle, 0, query_buf.bytes},
         {target_buf.buffer_handle, 0, target_buf.bytes},
         {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
         {results_buf.buffer_handle, 0, results_buf.bytes},
+        {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
+        {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
+        {matrix_buf.buffer_handle, 0, matrix_buf.bytes},
+        {descriptors_buf.buffer_handle, 0, descriptors_buf.bytes},
     }};
     const alignment_extension_push_constants push =
         alignment_extension_push(static_cast<std::uint32_t>(jobs.size()), params);
@@ -277,6 +333,8 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
     std::vector<gpu_alignment_extension_result_wire> results(jobs.size());
     std::memcpy(results.data(), results_buf.mapped, static_cast<std::size_t>(result_bytes));
     for (std::size_t i = 0; i < results.size(); ++i) {
+        if (results[i].status == k_gpu_alignment_extension_status_score_range)
+            return std::unexpected(bioseq::simd::alignment_contract_error::score_range);
         if (results[i].status != k_gpu_alignment_extension_status_ok) {
             throw vulkan_runtime_error(fmt::format(
                 "alignment extension shader rejected job {} with status {}", i, results[i].status));
@@ -289,15 +347,17 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
 /**
  * @brief Executes one validated CIGAR batch whiie the caller holds `mu_`.
  *
- * The supplied permit must cover the six Vulkan allocations. After the dispatch,
+ * The wave permit covers its seven allocations; the batch retains the matrix permit. After the dispatch,
  * successful CIGARs are copied into one compact host vector and their offsets are
  * adjusted. Unsupported geometry may be  returned for a later retry when requested.
  */
-alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_locked(
+std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> runtime::run_alignment_cigar_payload_roundtrip_locked(
     std::span<const std::byte> query_payload,
     std::span<const std::byte> target_payload,
     std::span<const gpu_alignment_cigar_job_wire> jobs,
     const gpu_alignment_cigar_params& params,
+    const gpu_substitution_matrix& matrix,
+    const buffer& matrix_buf,
     std::uint32_t packed_cigar_capacity,
     std::span<const std::size_t> collector_job_indices,
     bool allow_unsupported_geometry,
@@ -318,10 +378,10 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_lock
         collector->prepare(pipeline_key, pipe.metal_archive_receipt);
     }
 
-    const std::uint64_t query_bytes =
-        std::max<std::uint64_t>(static_cast<std::uint64_t>(query_payload.size()), 4u);
-    const std::uint64_t target_bytes =
-        std::max<std::uint64_t>(static_cast<std::uint64_t>(target_payload.size()), 4u);
+    const auto packed_sizes = alignment_packed_arena_sizes(jobs);
+    const std::uint64_t query_bytes = packed_sizes.query_bytes;
+    const std::uint64_t target_bytes = packed_sizes.target_bytes;
+    const std::uint64_t descriptor_bytes = jobs.size() * 2u * sizeof(gpu_sequence_view_wire);
     const std::uint64_t job_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(jobs.size()) * sizeof(gpu_alignment_cigar_job_wire), 4u);
     const std::uint64_t result_bytes =
@@ -339,7 +399,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_lock
 
     std::uint64_t admitted_allocation_bytes = 0u;
     const std::array logical_buffer_bytes{
-        query_bytes, target_bytes, job_bytes, result_bytes, cigar_bytes, traceback_bytes};
+        query_bytes, target_bytes, job_bytes, result_bytes, cigar_bytes, traceback_bytes, descriptor_bytes};
     for (const std::uint64_t logical_bytes : logical_buffer_bytes) {
         admitted_allocation_bytes = bioseq::common::saturating_add(
             admitted_allocation_bytes,
@@ -356,42 +416,50 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_lock
     buffer results_buf = create_device_buffer(result_bytes, k_compute_buffer_usage);
     buffer cigar_buf = create_device_buffer(cigar_bytes, k_compute_buffer_usage);
     buffer traceback_buf = create_device_buffer(traceback_bytes, k_compute_buffer_usage);
-    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr || jobs_buf.mapped == nullptr ||
+    buffer descriptors_buf = create_device_buffer(descriptor_bytes, k_compute_buffer_usage);
+    if (matrix_buf.mapped == nullptr || descriptors_buf.mapped == nullptr || query_buf.mapped == nullptr || target_buf.mapped == nullptr || jobs_buf.mapped == nullptr ||
         results_buf.mapped == nullptr || cigar_buf.mapped == nullptr ||
         traceback_buf.mapped == nullptr) {
         throw vulkan_runtime_error(
             "alignment CIGAR payload roundtrip device buffer allocation failed");
     }
-    const std::uint64_t actual_allocation_bytes = bioseq::common::saturating_add(
-        query_buf.allocation_bytes,
-        bioseq::common::saturating_add(
-            target_buf.allocation_bytes,
-            bioseq::common::saturating_add(
-                jobs_buf.allocation_bytes,
-                bioseq::common::saturating_add(
-                    results_buf.allocation_bytes,
-                    bioseq::common::saturating_add(cigar_buf.allocation_bytes,
-                                                   traceback_buf.allocation_bytes)))));
+    std::uint64_t actual_allocation_bytes = 0;
+    for (const auto bytes : {query_buf.allocation_bytes, target_buf.allocation_bytes, jobs_buf.allocation_bytes,
+            results_buf.allocation_bytes, cigar_buf.allocation_bytes, traceback_buf.allocation_bytes,
+            descriptors_buf.allocation_bytes})
+        actual_allocation_bytes = bioseq::common::saturating_add(actual_allocation_bytes, bytes);
     if (actual_allocation_bytes != admitted_allocation_bytes) {
         throw vulkan_runtime_error("alignment CIGAR allocation exceeded its exact admission");
     }
-    if (!query_payload.empty()) {
-        std::memcpy(query_buf.mapped, query_payload.data(), query_payload.size());
-    }
-    if (!target_payload.empty()) {
-        std::memcpy(target_buf.mapped, target_payload.data(), target_payload.size());
+    std::size_t query_cursor = 0, target_cursor = 0;
+    for (std::size_t job_index = 0; job_index < jobs.size(); ++job_index) {
+        const auto query_upload = alignment_packed_upload(query_payload, jobs[job_index], true, matrix);
+        const auto target_upload = alignment_packed_upload(target_payload, jobs[job_index], false, matrix);
+        if (!query_upload) return std::unexpected(query_upload.error());
+        if (!target_upload) return std::unexpected(target_upload.error());
+        const auto query_descriptor = place_packed_sequence_upload(*query_upload, query_cursor,
+            std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)});
+        const auto target_descriptor = place_packed_sequence_upload(*target_upload, target_cursor,
+            std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)});
+        if (!query_descriptor || !target_descriptor) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+        const std::array descriptors{*query_descriptor, *target_descriptor};
+        std::memcpy(static_cast<std::byte*>(descriptors_buf.mapped) + job_index * sizeof(descriptors), descriptors.data(), sizeof(descriptors));
+        query_cursor += query_upload->sequence.padded_byte_count;
+        target_cursor += target_upload->sequence.padded_byte_count;
     }
     std::memcpy(jobs_buf.mapped, jobs.data(), jobs.size() * sizeof(gpu_alignment_cigar_job_wire));
     std::memset(results_buf.mapped, 0, static_cast<std::size_t>(result_bytes));
     std::memset(cigar_buf.mapped, 0, static_cast<std::size_t>(cigar_bytes));
 
-    const std::array<VkDescriptorBufferInfo, 6> infos{{
+    const std::array<VkDescriptorBufferInfo, 8> infos{{
         {query_buf.buffer_handle, 0, query_buf.bytes},
         {target_buf.buffer_handle, 0, target_buf.bytes},
         {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
         {results_buf.buffer_handle, 0, results_buf.bytes},
         {cigar_buf.buffer_handle, 0, cigar_buf.bytes},
         {traceback_buf.buffer_handle, 0, traceback_buf.bytes},
+        {matrix_buf.buffer_handle, 0, matrix_buf.bytes},
+        {descriptors_buf.buffer_handle, 0, descriptors_buf.bytes},
     }};
     const alignment_cigar_push_constants push =
         alignment_cigar_push(static_cast<std::uint32_t>(jobs.size()), params);
@@ -438,6 +506,8 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_lock
     std::uint64_t actual_cigar_words = 0u;
     for (std::size_t i = 0u; i < jobs.size(); ++i) {
         const gpu_alignment_cigar_result_wire& device_result = device_results[i];
+        if (device_result.status == k_gpu_alignment_extension_status_score_range)
+            return std::unexpected(bioseq::simd::alignment_contract_error::score_range);
         if (device_result.status != k_gpu_alignment_extension_status_ok &&
             !(allow_unsupported_geometry &&
               device_result.status == k_gpu_alignment_extension_status_unsupported_geometry)) {
@@ -508,19 +578,33 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_roundtrip_lock
  * pass handles jobs that need no traceback, and only the remaining jobs are retried
  * with traceback storage. Results keep their original job order.
  */
-alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
+std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> runtime::run_alignment_cigar_payload_waved_locked(
     std::span<const std::byte> query_payload,
     std::span<const std::byte> target_payload,
     std::span<const gpu_alignment_cigar_job_wire> jobs,
     const gpu_alignment_cigar_params& params,
+    const gpu_substitution_matrix& matrix,
     std::uint32_t packed_cigar_capacity,
     const std::uint64_t preferred_traceback_wave_bytes,
     runtime_pipeline_use_collector* collector) {
     if (preferred_traceback_wave_bytes < sizeof(std::uint32_t)) {
-        throw vulkan_runtime_error("alignment CIGAR traceback wave limit is invalid");
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     }
     const std::uint64_t preferred_traceback_wave_words =
         preferred_traceback_wave_bytes / sizeof(std::uint32_t);
+
+    if (features_.max_stage_storage_buffers < 8 || features_.max_descriptor_storage_buffers < 8)
+        return std::unexpected(bioseq::simd::alignment_contract_error::device_capability);
+    const auto matrix_bytes = alignment_matrix_bytes(matrix);
+    if (matrix_bytes > features_.max_storage_buffer_range)
+        return std::unexpected(bioseq::simd::alignment_contract_error::device_capability);
+    const auto matrix_allocation_bytes = buffer_memory_requirement_locked(matrix_bytes, k_compute_buffer_usage);
+    auto matrix_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(matrix_allocation_bytes);
+    if (!matrix_permit) return std::unexpected(bioseq::simd::alignment_contract_error::memory_admission);
+    buffer matrix_buf = create_device_buffer(matrix_bytes, k_compute_buffer_usage);
+    if (matrix_buf.mapped == nullptr || matrix_buf.allocation_bytes != matrix_allocation_bytes)
+        throw vulkan_runtime_error("prepared alignment matrix allocation differs from admission");
+    write_alignment_matrix(std::span{static_cast<std::byte*>(matrix_buf.mapped), static_cast<std::size_t>(matrix_bytes)}, matrix);
 
     enum class traceback_mode : std::uint8_t { none, required };
     struct wave_plan {
@@ -573,7 +657,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
             return plan;
         };
 
-    const auto reserve_wave = [this, query_payload, target_payload](
+    const auto reserve_wave = [this](
                                   const wave_plan& plan,
                                   bioseq::parallelism::memory_admission_failure* failure)
         -> std::optional<bioseq::parallelism::memory_permit> {
@@ -581,13 +665,15 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
             plan.jobs.size() > static_cast<std::uint64_t>(features_.max_workgroup_count_x) * 64u) {
             return std::nullopt;
         }
+        const auto packed_sizes = alignment_packed_arena_sizes(plan.jobs);
         const std::array logical_bytes{
-            std::max<std::uint64_t>(query_payload.size(), 4u),
-            std::max<std::uint64_t>(target_payload.size(), 4u),
+            packed_sizes.query_bytes,
+            packed_sizes.target_bytes,
             std::max<std::uint64_t>(plan.jobs.size() * sizeof(gpu_alignment_cigar_job_wire), 4u),
             static_cast<std::uint64_t>(plan.jobs.size()) * sizeof(gpu_alignment_cigar_result_wire),
             static_cast<std::uint64_t>(plan.cigar_capacity) * sizeof(std::uint32_t),
             std::max<std::uint64_t>(plan.traceback_words * sizeof(std::uint32_t), 4u),
+            static_cast<std::uint64_t>(plan.jobs.size()) * 2u * sizeof(gpu_sequence_view_wire),
         };
         std::uint64_t physical_bytes = 0u;
         for (const std::uint64_t bytes : logical_bytes) {
@@ -607,10 +693,14 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
     std::vector<std::size_t> all_indices(jobs.size());
     std::iota(all_indices.begin(), all_indices.end(), std::size_t{0});
 
+    const bool has_uniform_shortcuts = matrix.header().model == 0u
+        && matrix.summary().equal_score >= 0
+        && matrix.summary().unequal_score <= matrix.summary().equal_score;
+
     // Run the complete batch once when every job requests traceback and its
     // storage fits. Otherwise, first, try jobs without traceback storage and
     // allocate it only for the jobs the shader cannot finish that way.
-    const bool caller_requested_traceback =
+    const bool caller_requested_traceback = !has_uniform_shortcuts ||
         std::ranges::all_of(jobs, [](const gpu_alignment_cigar_job_wire& job) {
             return job.traceback_tile_count != 0u;
         });
@@ -627,6 +717,8 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
                                                                 target_payload,
                                                                 full_plan.jobs,
                                                                 params,
+                                                                matrix,
+                                                                matrix_buf,
                                                                 full_plan.cigar_capacity,
                                                                 collector_indices,
                                                                 false,
@@ -712,9 +804,10 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
         ++final.committed_submission_count;
     };
 
-    // First run jobs without traceback storage. Exact matches and simple gaps
-    // can finish here. Save unoupported jobs for a retry with traceback.
-    for (std::size_t cursor = 0u; cursor < all_indices.size();) {
+    // Models without the uniform upper-bound proof go directly to admitted traceback waves.
+    if (!has_uniform_shortcuts) retry_indices = all_indices;
+    // Uniform scoring can first finish exact matches and simple gaps without traceback storage.
+    for (std::size_t cursor = 0u; has_uniform_shortcuts && cursor < all_indices.size();) {
         std::size_t wave_size = all_indices.size() - cursor;
         wave_plan plan{};
         std::optional<bioseq::parallelism::memory_permit> permit;
@@ -729,10 +822,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
             wave_size /= 2u;
         }
         if (!permit || wave_size == 0u) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR zero-trace wave admission denied: reason={} requested={}",
-                bioseq::parallelism::memory_admission_failure_reason_name(failure.reason),
-                failure.requested_bytes));
+            return std::unexpected(bioseq::simd::alignment_contract_error::memory_admission);
         }
         const std::span indices{all_indices.data() + cursor, wave_size};
         const std::span<const std::size_t> collector_indices =
@@ -741,12 +831,15 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
                                                                               target_payload,
                                                                               plan.jobs,
                                                                               params,
+                                                                              matrix,
+                                                                              matrix_buf,
                                                                               plan.cigar_capacity,
                                                                               collector_indices,
                                                                               true,
                                                                               std::move(*permit),
                                                                               collector);
-        merge_wave(wave_result, plan, indices, true);
+        if (!wave_result) return std::unexpected(wave_result.error());
+        merge_wave(*wave_result, plan, indices, true);
         cursor += wave_size;
     }
 
@@ -784,10 +877,7 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
             wave_size /= 2u;
         }
         if (!permit || wave_size == 0u) {
-            throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR traceback wave admission denied: reason={} requested={}",
-                bioseq::parallelism::memory_admission_failure_reason_name(failure.reason),
-                failure.requested_bytes));
+            return std::unexpected(bioseq::simd::alignment_contract_error::memory_admission);
         }
         const std::span indices{retry_indices.data() + cursor, wave_size};
         const std::span<const std::size_t> collector_indices =
@@ -796,12 +886,15 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
                                                                               target_payload,
                                                                               plan.jobs,
                                                                               params,
+                                                                              matrix,
+                                                                              matrix_buf,
                                                                               plan.cigar_capacity,
                                                                               collector_indices,
                                                                               false,
                                                                               std::move(*permit),
                                                                               collector);
-        merge_wave(wave_result, plan, indices, false);
+        if (!wave_result) return std::unexpected(wave_result.error());
+        merge_wave(*wave_result, plan, indices, false);
         cursor += wave_size;
     }
 
@@ -811,12 +904,13 @@ alignment_cigar_batch_result runtime::run_alignment_cigar_payload_waved_locked(
     return final;
 }
 
-/// @brief Runs alignment and returns CIGARs from one 32-bit rank per sequence symbol.
-alignment_cigar_batch_result
-runtime::run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> query_symbols,
-                                              std::span<const std::uint32_t> target_symbols,
+/// @brief Runs native packed sequence intervals through the shared GPU CIGAR wave planner.
+std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error>
+runtime::run_alignment_simple_cigar_roundtrip(const gpu_packed_sequence_upload& query_symbols,
+                                              const gpu_packed_sequence_upload& target_symbols,
                                               std::span<const gpu_alignment_cigar_job_wire> jobs,
                                               const gpu_alignment_cigar_params& params,
+                                              const gpu_substitution_matrix& matrix,
                                               std::uint32_t packed_cigar_capacity) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -825,16 +919,55 @@ runtime::run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> que
     if (jobs.empty()) {
         return {};
     }
-    validate_alignment_cigar_inputs(
-        query_symbols, target_symbols, jobs, params, packed_cigar_capacity);
+    if (!packed_sequence_upload_is_valid(query_symbols) || !packed_sequence_upload_is_valid(target_symbols)
+        || query_symbols.sequence.alphabet_code != matrix.header().alphabet_code
+        || target_symbols.sequence.alphabet_code != matrix.header().alphabet_code)
+        return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+    std::vector<gpu_alignment_cigar_job_wire> packed_jobs(jobs.begin(), jobs.end());
+    for (auto& job : packed_jobs) {
+        if (job.query_symbol_offset > query_symbols.sequence.bp_count
+            || job.query_len > query_symbols.sequence.bp_count - job.query_symbol_offset
+            || job.target_symbol_offset > target_symbols.sequence.bp_count
+            || job.target_len > target_symbols.sequence.bp_count - job.target_symbol_offset
+            || query_symbols.sequence.bits_per_char != target_symbols.sequence.bits_per_char)
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+        const auto query_slot = std::uint64_t{query_symbols.sequence.leading_symbol_offset} + job.query_symbol_offset;
+        const auto target_slot = std::uint64_t{target_symbols.sequence.leading_symbol_offset} + job.target_symbol_offset;
+        const auto query_unit_bytes = query_symbols.sequence.unit_bits / 8u;
+        const auto target_unit_bytes = target_symbols.sequence.unit_bits / 8u;
+        const auto query_offset = query_slot / query_symbols.sequence.letters_per_unit * query_unit_bytes;
+        const auto target_offset = target_slot / target_symbols.sequence.letters_per_unit * target_unit_bytes;
+        if (query_offset > std::numeric_limits<std::uint32_t>::max() || target_offset > std::numeric_limits<std::uint32_t>::max())
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+        job.query_symbol_offset = static_cast<std::uint32_t>(query_offset);
+        job.target_symbol_offset = static_cast<std::uint32_t>(target_offset);
+        job.query_leading_symbol_offset = query_slot % query_symbols.sequence.letters_per_unit;
+        job.target_leading_symbol_offset = target_slot % target_symbols.sequence.letters_per_unit;
+        job.query_storage_unit_width = query_unit_bytes;
+        job.target_storage_unit_width = target_unit_bytes;
+        job.bits_per_symbol = query_symbols.sequence.bits_per_char;
+        const auto query_bytes = bioseq::common::ceil_div(std::uint64_t{job.query_leading_symbol_offset} + job.query_len,
+            std::uint64_t{query_symbols.sequence.letters_per_unit}) * query_unit_bytes;
+        const auto target_bytes = bioseq::common::ceil_div(std::uint64_t{job.target_leading_symbol_offset} + job.target_len,
+            std::uint64_t{target_symbols.sequence.letters_per_unit}) * target_unit_bytes;
+        if (query_bytes > std::numeric_limits<std::uint32_t>::max() || target_bytes > std::numeric_limits<std::uint32_t>::max())
+            return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
+        job.query_packed_byte_count = static_cast<std::uint32_t>(query_bytes);
+        job.target_packed_byte_count = static_cast<std::uint32_t>(target_bytes);
+        job.flags |= k_gpu_alignment_cigar_job_flag_packed_inputs;
+    }
+    const auto admission = validate_alignment_packed_cigar_inputs(query_symbols.bytes, target_symbols.bytes, packed_jobs,
+        params, matrix, packed_cigar_capacity);
+    if (!admission) return std::unexpected(admission.error());
     if (features_.max_workgroup_count_x == 0u) {
         throw vulkan_runtime_error(
             "alignment CIGAR extension device reports zero max workgroup count");
     }
-    return run_alignment_cigar_payload_waved_locked(std::as_bytes(query_symbols),
-                                                    std::as_bytes(target_symbols),
-                                                    jobs,
+    return run_alignment_cigar_payload_waved_locked(query_symbols.bytes,
+                                                    target_symbols.bytes,
+                                                    packed_jobs,
                                                     params,
+                                                    matrix,
                                                     packed_cigar_capacity,
                                                     std::uint64_t{512} << 20u,
                                                     nullptr);
@@ -842,11 +975,12 @@ runtime::run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> que
 
 #ifdef BIOSEQ_TEST_INDEXES
 /// @brief Runs the packed-input wave planner for tests without attaching an operation  receipt.
-alignment_cigar_batch_result runtime::run_alignment_packed_cigar_roundtrip_for_test(
+std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> runtime::run_alignment_packed_cigar_roundtrip_for_test(
     std::span<const std::byte> query_packed,
     std::span<const std::byte> target_packed,
     std::span<const gpu_alignment_cigar_job_wire> jobs,
     const gpu_alignment_cigar_params& params,
+    const gpu_substitution_matrix& matrix,
     std::uint32_t packed_cigar_capacity,
     const std::uint64_t preferred_traceback_wave_bytes) {
     std::lock_guard<std::mutex> guard(mu_);
@@ -854,8 +988,9 @@ alignment_cigar_batch_result runtime::run_alignment_packed_cigar_roundtrip_for_t
         throw vulkan_runtime_error(
             "run_alignment_packed_cigar_roundtrip_for_test on unavailable device");
     }
-    validate_alignment_packed_cigar_inputs(
-        query_packed, target_packed, jobs, params, packed_cigar_capacity);
+    const auto admission = validate_alignment_packed_cigar_inputs(
+        query_packed, target_packed, jobs, params, matrix, packed_cigar_capacity);
+    if (!admission) return std::unexpected(admission.error());
     if (features_.max_workgroup_count_x == 0u) {
         throw vulkan_runtime_error(
             "packed alignment CIGAR test device reports zero max workgroup count");
@@ -864,6 +999,7 @@ alignment_cigar_batch_result runtime::run_alignment_packed_cigar_roundtrip_for_t
                                                     target_packed,
                                                     jobs,
                                                     params,
+                                                    matrix,
                                                     packed_cigar_capacity,
                                                     preferred_traceback_wave_bytes,
                                                     nullptr);
@@ -876,7 +1012,8 @@ packed_alignment_job_identity(const std::span<const std::byte> query_packed,
                               const std::span<const std::byte> target_packed,
                               const gpu_alignment_cigar_job_wire& job,
                               const gpu_alignment_candidate_binding_wire& binding,
-                              const gpu_alignment_cigar_params& params) noexcept {
+                              const gpu_alignment_cigar_params& params,
+    const gpu_substitution_matrix& matrix) noexcept {
     std::uint64_t identity = bioseq::common::k_fnv1a_64_standard_offset_basis;
     const auto mix = [&identity](const auto& value) noexcept {
         identity = bioseq::common::extend_fnv1a_64(
@@ -902,6 +1039,10 @@ packed_alignment_job_identity(const std::span<const std::byte> query_packed,
     mix(job.problem_index);
     mix(binding.problem_index);
     mix(binding.candidate_index);
+    mix(matrix.header().semantic_identity);
+    mix(matrix.header().alphabet_code);
+    mix(matrix.header().model);
+    for (const auto value : matrix.values()) mix(value);
     mix(params.alphabet_size);
     mix(params.max_band_width);
     mix(params.tile_query);
@@ -934,7 +1075,7 @@ packed_alignment_job_identity(const std::span<const std::byte> query_packed,
  * call returns compact CIGARs and records the submissions under the same operation
  * ID for later acceptance.
  */
-alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
+std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> runtime::run_persisted_alignment_cigar_roundtrip(
     std::span<const std::byte> query_packed,
     std::span<const std::byte> target_packed,
     std::span<const gpu_alignment_cigar_job_wire> jobs,
@@ -942,6 +1083,7 @@ alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
     std::span<const gpu_chain_candidate_header_wire> candidate_headers,
     std::span<const gpu_chain_candidate_wire> candidates,
     const gpu_alignment_cigar_params& params,
+    const gpu_substitution_matrix& matrix,
     std::uint32_t packed_cigar_capacity,
     persisted_grouped_soa_coordinate_operation_receipt& coordinate_receipt) {
     std::lock_guard<std::mutex> guard(mu_);
@@ -955,8 +1097,9 @@ alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
          (!candidate_bindings.empty() || !candidate_headers.empty() || !candidates.empty()))) {
         throw vulkan_runtime_error("persisted packed alignment candidate binding count changed");
     }
-    validate_alignment_packed_cigar_inputs(
-        query_packed, target_packed, jobs, params, packed_cigar_capacity);
+    const auto admission = validate_alignment_packed_cigar_inputs(
+        query_packed, target_packed, jobs, params, matrix, packed_cigar_capacity);
+    if (!admission) return std::unexpected(admission.error());
     if (features_.max_workgroup_count_x == 0u || !coordinate_receipt.is_sealed() ||
         !coordinate_receipt.are_all_jobs_accepted() ||
         coordinate_receipt.has_alignment_cigar_receipt() ||
@@ -1085,21 +1228,24 @@ alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
                 "persisted packed alignment job does not match its coordinate receipt");
         }
         const std::uint64_t input_identity =
-            packed_alignment_job_identity(query_packed, target_packed, job, binding, params);
+            packed_alignment_job_identity(query_packed, target_packed, job, binding, params, matrix);
         collector->set_shape_input(job_index, job.query_len, job.target_len, input_identity);
         collector->set_shape_outcome(job_index,
                                      static_cast<std::uint64_t>(binding.problem_index) + 1u,
                                      static_cast<std::uint64_t>(binding.candidate_index) + 1u);
     }
 
-    alignment_cigar_batch_result out =
+    auto attempted =
         run_alignment_cigar_payload_waved_locked(query_packed,
                                                  target_packed,
                                                  jobs,
                                                  params,
+                                                    matrix,
                                                  packed_cigar_capacity,
                                                  std::uint64_t{512} << 20u,
                                                  collector.get());
+    if (!attempted) return std::unexpected(attempted.error());
+    alignment_cigar_batch_result out = std::move(*attempted);
     runtime_pipeline_operation_token token = collector->seal();
     if (!token.is_valid_for_persisted_alignment_cigar() ||
         token.audit().operation_identity != coordinate_receipt.operation_identity_ ||
@@ -1116,7 +1262,7 @@ alignment_cigar_batch_result runtime::run_persisted_alignment_cigar_roundtrip(
         const runtime_pipeline_job_use_audit& audit = token.audit().jobs[job_index];
         if (audit.minimizer_count != job.query_len || audit.target_len != job.target_len ||
             audit.target_position_offset !=
-                packed_alignment_job_identity(query_packed, target_packed, job, binding, params) ||
+                packed_alignment_job_identity(query_packed, target_packed, job, binding, params, matrix) ||
             audit.anchor_count != static_cast<std::uint64_t>(binding.problem_index) + 1u ||
             audit.range_count != static_cast<std::uint64_t>(binding.candidate_index) + 1u) {
             throw vulkan_runtime_error("persisted packed alignment input receipt changed");

@@ -159,6 +159,8 @@ struct vulkan_feature_set {
     std::uint32_t max_workgroup_size_z = 0;      ///< Maximum local size along Z.
     std::uint32_t max_workgroup_count_x = 0;     ///< Maximum dispatched workgroups along X.
     std::uint32_t max_shared_memory_bytes = 0;   ///< Maximum shared memory per workgroup in bytes.
+    std::uint32_t max_stage_storage_buffers = 0; ///< Per-stage storage descriptor limit.
+    std::uint32_t max_descriptor_storage_buffers = 0; ///< Per-set storage descriptor limit.
     std::uint64_t max_storage_buffer_range = 0;  ///< Largest storage-buffer range a shader can bind, in bytes.
     std::uint64_t min_storage_buffer_offset_alignment =
         1;                                ///< Required storage-buffer offset alignment.
@@ -231,7 +233,7 @@ struct gatekeeper_rank_batch_route {
         homogeneous_aligned_production =
             homogeneous_aligned_production && job.query_length == length &&
             job.target_length == length && job.max_edits == max_edits &&
-            (job.query_offset & 3u) == 0u && (job.target_offset & 3u) == 0u;
+            (job.query_start & 3u) == 0u && (job.target_start & 3u) == 0u;
     }
     if (!homogeneous_aligned_production)
         return {};

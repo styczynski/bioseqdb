@@ -855,6 +855,45 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                         static_cast<std::uint32_t>(active_states.size()));
                     run.stats.seed_emit_dispatches += 1u;
                     record_compute_barrier(command_buffer_);
+                    record_shader_to_host(command_buffer_);
+                    submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_mrec_emit)");
+                    for (auto* state : active_states) {
+                        if (!state->has_anchors) continue;
+                        if (query_inputs.native_rank_policy == nullptr ||
+                            state->job.query_index >= query_inputs.native_queries.size())
+                            throw vulkan_runtime_error("multi-record voting lacks native source bindings");
+                        state->verified = verify_seed_anchors_locked(batch_anchors_buf,
+                            std::uint64_t{state->anchor_offset} * sizeof(gpu_anchor_wire),
+                            state->total_anchors_u32, query_inputs.native_queries[state->job.query_index],
+                            state->job.native_target, *query_inputs.native_rank_policy,
+                            static_cast<std::uint32_t>(state->query_len), kmer_size, 0u,
+                            state->job.native_target_provider);
+                        vote_jobs[state->vote_result_index].anchor_count =
+                            static_cast<std::uint32_t>(state->verified.verified_count);
+                    }
+                    std::memcpy(vote_jobs_buf.mapped, vote_jobs.data(),
+                                vote_jobs.size() * sizeof(gpu_coordinate_vote_job_wire));
+                    reset_dispatch_descriptor_pool_locked();
+                    check_vk(vkResetCommandBuffer(command_buffer_, 0u), "reset(pc_seed_coord_mrec_vote)");
+                    begin = VkCommandBufferBeginInfo{};
+                    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_mrec_vote)");
+                    record_host_to_shader(command_buffer_);
+                    for (const auto* state : active_states) {
+                        if (state->verified.verified_count == 0u) continue;
+                        const VkBufferCopy copy{0u,
+                            std::uint64_t{state->anchor_offset} * sizeof(gpu_anchor_wire),
+                            state->verified.verified_count * sizeof(gpu_anchor_wire)};
+                        vkCmdCopyBuffer(command_buffer_, state->verified.anchors.buffer_handle,
+                                        batch_anchors_buf.buffer_handle, 1u, &copy);
+                    }
+                    VkMemoryBarrier copies_ready{};
+                    copies_ready.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                    copies_ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    copies_ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 1u, &copies_ready, 0u, nullptr, 0u, nullptr);
                     const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
                         {batch_anchors_buf.buffer_handle, 0, batch_anchors_buf.bytes},
                         {vote_jobs_buf.buffer_handle, 0, vote_jobs_buf.bytes},
@@ -1516,11 +1555,48 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 shape_pipeline_collector->begin(command_buffer_);
             }
             if (coordinate_vote_selected) {
+                if (!grouped_soa_selected) {
+                    record_shader_to_host(command_buffer_);
+                    submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_vote_emit)",
+                                    shape_pipeline_collector.get());
+                } else if (shape_pipeline_collector != nullptr) {
+                    shape_pipeline_collector->burn_before_reset(command_buffer_);
+                }
+                for (auto& state : states) {
+                    if (!state.has_anchors) continue;
+                    if (query_inputs.native_rank_policy == nullptr ||
+                        state.job.query_index >= query_inputs.native_queries.size())
+                        throw vulkan_runtime_error("coordinate voting lacks native source bindings");
+                    state.verified = verify_seed_anchors_locked(state.anchors_buf, 0u,
+                        state.total_anchors_u32, query_inputs.native_queries[state.job.query_index],
+                        state.job.native_target, *query_inputs.native_rank_policy,
+                        static_cast<std::uint32_t>(state.query_len), kmer_size, 0u,
+                        state.job.native_target_provider, shape_pipeline_collector.get(), state.result_index);
+                    state.total_anchors = state.verified.verified_count;
+                    state.total_anchors_u32 = static_cast<std::uint32_t>(state.total_anchors);
+                    state.has_anchors = state.total_anchors != 0u;
+                }
+                if (std::ranges::none_of(states, [](const auto& state) { return state.has_anchors; })) {
+                    arena.rewind(mark);
+                    submitted_waves += 1u;
+                    run.stats.wave_count += 1u;
+                    wave_begin = next_wave_begin;
+                    continue;
+                }
+                reset_dispatch_descriptor_pool_locked();
+                check_vk(vkResetCommandBuffer(command_buffer_, 0u), "reset(pc_seed_coord_vote_verified)");
+                begin = VkCommandBufferBeginInfo{};
+                begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_vote_verified)");
+                if (shape_pipeline_collector != nullptr) shape_pipeline_collector->begin(command_buffer_);
+                record_host_to_shader(command_buffer_);
+                record_compute_barrier(command_buffer_);
                 for (gpu_seed_coordinate_wave_state& state : states) {
                     if (!state.has_anchors) {
                         continue;
                     }
-                    gpu_arena_slice anchors_s = state.anchors_slice();
+                    gpu_arena_slice anchors_s = state.verified_anchors_slice();
                     gpu_arena_slice anchor_keys_s = state.anchor_keys_slice();
                     const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
                         {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
@@ -1599,8 +1675,60 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 if (grouped_soa_selected) {
                     state.operation_audit.sort_operations += 1u;
                 }
-                const gpu_arena_slice sorted_anchors =
-                    state.sorted_in_scratch ? anchors_scratch_s : anchors_s;
+            }
+            record_shader_to_host(command_buffer_);
+            submit_and_wait(device_, queue_, command_buffer_, fence_,
+                            "submit(pc_seed_coord_sort)", shape_pipeline_collector.get());
+            const auto sort_identity = next_operation_identity_locked();
+            for (auto& state : states) {
+                if (!state.has_anchors) continue;
+                if (query_inputs.native_rank_policy == nullptr ||
+                    state.job.query_index >= query_inputs.native_queries.size())
+                    throw vulkan_runtime_error("coordinate batch lacks native source bindings");
+                const auto candidates = state.sorted_in_scratch ? state.anchors_scratch_slice() : state.anchors_slice();
+                state.verified = verify_seed_anchors_locked(*candidates.buffer, candidates.offset,
+                    state.total_anchors_u32, query_inputs.native_queries[state.job.query_index],
+                    state.job.native_target, *query_inputs.native_rank_policy,
+                    static_cast<std::uint32_t>(state.query_len), kmer_size, 0u,
+                    state.job.native_target_provider, shape_pipeline_collector.get(), state.result_index);
+                state.operation_audit.sort_submit_wait_identity = sort_identity;
+                state.operation_audit.seed_candidate_count = state.verified.candidate_count;
+                state.operation_audit.seed_verified_count = state.verified.verified_count;
+                state.operation_audit.seed_emitted_count = state.verified.emitted_count;
+                state.operation_audit.seed_coverage_interval_count = state.verified.coverage_interval_count;
+                state.operation_audit.seed_coverage_submit_wait_identity = state.verified.coverage_submit_wait_identity;
+                state.operation_audit.seed_verify_count_submit_wait_identity = state.verified.verify_count_submit_wait_identity;
+                state.operation_audit.seed_verify_emit_submit_wait_identity = state.verified.verify_emit_submit_wait_identity;
+                state.total_anchors = state.verified.verified_count;
+                state.total_anchors_u32 = static_cast<std::uint32_t>(state.total_anchors);
+                state.operation_audit.anchor_count = state.total_anchors;
+                state.has_anchors = state.total_anchors != 0u;
+                if (shape_pipeline_collector != nullptr)
+                    shape_pipeline_collector->set_shape_outcome(state.result_index, state.total_anchors, 0u);
+                if (grouped_soa_selected && !state.has_anchors)
+                    run.operation_receipt.records_[state.result_index].audit = state.operation_audit;
+                const gpu_chain_range_build_span_wire span{0u, state.total_anchors_u32, 0u, 0u};
+                std::memcpy(state.span_buf.mapped, &span, sizeof(span));
+            }
+            if (std::ranges::none_of(states, [](const auto& state) { return state.has_anchors; })) {
+                arena.rewind(mark);
+                submitted_waves += 1u;
+                run.stats.wave_count += 1u;
+                wave_begin = next_wave_begin;
+                continue;
+            }
+            reset_dispatch_descriptor_pool_locked();
+            check_vk(vkResetCommandBuffer(command_buffer_, 0u), "reset(pc_seed_coord_ranges)");
+            begin = VkCommandBufferBeginInfo{};
+            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_ranges)");
+            if (shape_pipeline_collector != nullptr) shape_pipeline_collector->begin(command_buffer_);
+            record_host_to_shader(command_buffer_);
+            record_compute_barrier(command_buffer_);
+            for (auto& state : states) {
+                if (!state.has_anchors) continue;
+                const auto sorted_anchors = state.verified_anchors_slice();
                 const gpu_arena_slice compacted_anchors_s = state.compacted_anchors_slice();
                 const std::array<VkDescriptorBufferInfo, 6> range_infos{{
                     {sorted_anchors.buffer->buffer_handle,
@@ -1643,7 +1771,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 const std::uint64_t receipt_identity = next_operation_identity_locked();
                 for (gpu_seed_coordinate_wave_state& state : states) {
                     if (state.has_anchors) {
-                        state.operation_audit.sort_range_submit_wait_identity = receipt_identity;
+                        state.operation_audit.range_submit_wait_identity = receipt_identity;
                     }
                 }
             }
@@ -1822,7 +1950,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 const gpu_arena_slice active_anchors =
                     use_compacted_anchors
                         ? compacted_anchors_s
-                        : (state.sorted_in_scratch ? anchors_scratch_s : anchors_s);
+                        : state.verified_anchors_slice();
                 const std::array<VkDescriptorBufferInfo, 4> chain_infos{{
                     {active_anchors.buffer->buffer_handle,
                      active_anchors.offset,
@@ -1900,7 +2028,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 const gpu_arena_slice active_anchors =
                     use_compacted_anchors
                         ? compacted_anchors_s
-                        : (state.sorted_in_scratch ? anchors_scratch_s : anchors_s);
+                        : state.verified_anchors_slice();
                 if (mapq_selected) {
                     const std::array<VkDescriptorBufferInfo, 10> candidate_infos{{
                         {active_anchors.buffer->buffer_handle,
@@ -2300,6 +2428,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
 grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
     const gpu_grouped_soa_resident_view& target,
     const gpu_seed_query_inputs& query_inputs,
+    const gpu_native_sequence_provider& native_target,
     std::int32_t max_occ,
     std::uint32_t kmer_size,
     device_query_sketch_authorization query_authorization) {
@@ -2317,6 +2446,10 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
             (std::numeric_limits<std::uint32_t>::max)()) {
         throw vulkan_runtime_error("grouped-SoA seed-only input shape is invalid");
     }
+
+    if (query_inputs.native_rank_policy == nullptr || native_target.prepare == nullptr ||
+        query_inputs.native_queries.size() != query_inputs.host_query_records.size())
+        throw vulkan_runtime_error("grouped seed lookup lacks native source bindings");
 
     const coordinate_pipeline_detail::coordinate_batch_shape target_shape{
         .representation = gpu_seed_index_representation::grouped_soa,
@@ -2991,9 +3124,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                         !append_mps_device_extent(
                             exact_emit_arena_bytes, *key_bytes) ||
                         !append_mps_device_extent(
-                            exact_emit_arena_bytes, *histogram_bytes) ||
-                        !append_mps_download_extent(
-                            exact_download_arena_bytes, *anchor_bytes)) {
+                            exact_emit_arena_bytes, *histogram_bytes)) {
                         throw vulkan_runtime_error(
                             "grouped-SoA seed-only exact emit arena plan is invalid");
                     }
@@ -3035,8 +3166,6 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                 throw vulkan_runtime_error(
                     "grouped-SoA seed-only completed host anchor count overflow");
             }
-            ensure_mps_host_anchor_capacity(
-                run, static_cast<std::size_t>(*required_host_anchor_count));
 
             if (!emit_arena.ensure_admitted_capacity(
                     exact_emit_arena_bytes, 0u, exact_download_arena_bytes)) {
@@ -3064,13 +3193,10 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                     emit_arena.allocate_device(key_bytes, 16u);
                 state.histogram =
                     emit_arena.allocate_device(histogram_bytes, 16u);
-                state.download =
-                    emit_arena.allocate_download(anchor_bytes, 16u);
                 if (!state.anchors.is_valid() || !state.anchor_keys.is_valid() ||
                     !state.anchors_scratch.is_valid() ||
                     !state.anchor_keys_scratch.is_valid() ||
-                    !state.histogram.is_valid() || !state.download.is_valid() ||
-                    state.download.buffer->mapped == nullptr) {
+                    !state.histogram.is_valid()) {
                     throw vulkan_runtime_error(
                         "grouped-SoA seed-only exact emit arena was oversubscribed");
                 }
@@ -3163,55 +3289,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                                          state.job_index);
             }
 
-            VkMemoryBarrier compute_output{};
-            compute_output.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            compute_output.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            compute_output.dstAccessMask =
-                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-            vkCmdPipelineBarrier(command_buffer_,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                                 0u,
-                                 1u,
-                                 &compute_output,
-                                 0u,
-                                 nullptr,
-                                 0u,
-                                 nullptr);
-            bool copied_anchors = false;
-            for (const mps_seed_wave_state& state : states) {
-                if (state.total_anchors == 0u)
-                    continue;
-                const gpu_arena_slice& sorted =
-                    state.sorted_in_scratch ? state.anchors_scratch : state.anchors;
-                const VkBufferCopy copy{
-                    sorted.offset,
-                    state.download.offset,
-                    state.total_anchors * sizeof(gpu_anchor_wire),
-                };
-                vkCmdCopyBuffer(command_buffer_,
-                                sorted.buffer->buffer_handle,
-                                state.download.buffer->buffer_handle,
-                                1u,
-                                &copy);
-                copied_anchors = true;
-            }
-            if (copied_anchors) {
-                VkMemoryBarrier transfer_to_host{};
-                transfer_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                transfer_to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                transfer_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-                vkCmdPipelineBarrier(command_buffer_,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_HOST_BIT,
-                                     0u,
-                                     1u,
-                                     &transfer_to_host,
-                                     0u,
-                                     nullptr,
-                                     0u,
-                                     nullptr);
-            }
+            record_shader_to_host(command_buffer_);
             submit_and_wait(device_,
                             queue_,
                             command_buffer_,
@@ -3242,17 +3320,22 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                         status));
                 }
 
-                const std::size_t host_offset = run.anchor_wires.size();
-                const std::size_t job_anchor_count =
-                    static_cast<std::size_t>(state.total_anchors);
-                run.anchor_wires.resize(host_offset + job_anchor_count);
-                if (job_anchor_count != 0u) {
-                    std::memcpy(run.anchor_wires.data() + host_offset,
-                                static_cast<const std::byte*>(
-                                    state.download.buffer->mapped) +
-                                    state.download.offset,
-                                job_anchor_count * sizeof(gpu_anchor_wire));
+                gpu_verified_seed_buffer verified{};
+                if (state.total_anchors != 0u) {
+                    const gpu_arena_slice& sorted = state.sorted_in_scratch ? state.anchors_scratch : state.anchors;
+                    verified = verify_seed_anchors_locked(*sorted.buffer, sorted.offset,
+                        state.total_anchors_u32, query_inputs.native_queries[state.job_index], {},
+                        *query_inputs.native_rank_policy, state.query_record.query_len, kmer_size,
+                        0u, native_target, collector.get(), state.job_index);
                 }
+                collector->set_shape_outcome(state.job_index, verified.verified_count, 0u);
+                const std::size_t host_offset = run.anchor_wires.size();
+                const std::size_t job_anchor_count = static_cast<std::size_t>(verified.verified_count);
+                ensure_mps_host_anchor_capacity(run, host_offset + job_anchor_count);
+                run.anchor_wires.resize(host_offset + job_anchor_count);
+                if (job_anchor_count != 0u)
+                    std::memcpy(run.anchor_wires.data() + host_offset,
+                                verified.anchors.mapped, job_anchor_count * sizeof(gpu_anchor_wire));
                 const std::span<gpu_anchor_wire> all_wires{run.anchor_wires};
                 const std::span<gpu_anchor_wire> job_wires =
                     all_wires.subspan(host_offset, job_anchor_count);
@@ -3264,7 +3347,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                     !normalization.gpu_ref_order_accepted ||
                     !order_audit.canonical_order_checked ||
                     !order_audit.canonical_order_accepted ||
-                    order_audit.anchor_count != state.total_anchors) {
+                    order_audit.anchor_count != verified.verified_count) {
                     throw vulkan_runtime_error(fmt::format(
                         "grouped-SoA seed-only anchor order authentication failed for job {}",
                         state.job_index));

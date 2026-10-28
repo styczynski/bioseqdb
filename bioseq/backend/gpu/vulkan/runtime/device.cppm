@@ -448,6 +448,8 @@ void runtime::init() {
     features_.min_storage_buffer_offset_alignment = props.limits.minStorageBufferOffsetAlignment;
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
     features_.max_storage_buffer_range = props.limits.maxStorageBufferRange;
+    features_.max_stage_storage_buffers = props.limits.maxPerStageDescriptorStorageBuffers;
+    features_.max_descriptor_storage_buffers = props.limits.maxDescriptorSetStorageBuffers;
 
     VkPhysicalDeviceMemoryProperties mem_props{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &mem_props);
@@ -745,15 +747,19 @@ std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
 /// @brief Totals physical bytes held by the shared prefilter workspace.
 std::uint64_t runtime::prefilter_workspace_allocation_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
-    return saturating_add(
-        prefilter_query_buffer_.allocation_bytes,
-        saturating_add(prefilter_target_buffer_.allocation_bytes,
-                       saturating_add(prefilter_jobs_buffer_.allocation_bytes,
-                                      prefilter_results_buffer_.allocation_bytes)));
+    std::uint64_t bytes = 0u;
+    for (const auto* allocation : {&prefilter_query_buffer_, &prefilter_target_buffer_,
+                                  &prefilter_jobs_buffer_, &prefilter_results_buffer_,
+                                  &prefilter_target_records_buffer_, &prefilter_rank_lut_buffer_}) {
+        bytes = bioseq::common::saturating_add(bytes, allocation->allocation_bytes);
+    }
+    return bytes;
 }
 
 /// @brief Releases every shared prefilter buffer and its admission permit.
 void runtime::release_prefilter_workspace_locked() noexcept {
+    prefilter_rank_lut_buffer_.reset();
+    prefilter_target_records_buffer_.reset();
     prefilter_results_buffer_.reset();
     prefilter_jobs_buffer_.reset();
     prefilter_target_buffer_.reset();

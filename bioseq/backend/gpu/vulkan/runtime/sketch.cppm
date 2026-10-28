@@ -83,6 +83,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         throw vulkan_runtime_error("gpu sketch entered with live arena slices");
     }
     gpu_arena_trim_guard arena_trim{arena};
+    validate_native_sketch_contract(rank_lut, params);
+    validate_native_sketch_window(packed_sequence, rank_lut, params, params.bp_size, params.seq_word_offset);
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t window_size = params.window_size;
     const std::uint32_t kmer_size = params.kmer_size;
@@ -348,6 +350,16 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     if (materialization != vulkan_sketch_host_materialization::host_and_device &&
         materialization != vulkan_sketch_host_materialization::device_only) {
         throw vulkan_runtime_error("gpu sketch tile batch has invalid host materialization mode");
+    }
+    validate_native_sketch_contract(rank_lut, params);
+    std::uint32_t previous_word_offset = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t previous_symbol_count = 0u;
+    for (const auto& tile : tiles) {
+        if (tile.seq_word_offset != previous_word_offset || tile.bp_count != previous_symbol_count) {
+            validate_native_sketch_window(packed_sequence, rank_lut, params, tile.bp_count, tile.seq_word_offset);
+            previous_word_offset = tile.seq_word_offset;
+            previous_symbol_count = tile.bp_count;
+        }
     }
     result.dispatch_stats.materialization_ = materialization;
     const std::uint32_t window_size = params.window_size;

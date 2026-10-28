@@ -44,6 +44,11 @@ namespace {
         return std::string{k_prefix_scan_block_body};
     case shader_kind::prefix_scan_add:
         return std::string{k_prefix_scan_add_body};
+    case shader_kind::seed_native_coverage:
+        return std::string{k_seed_native_coverage_body};
+    case shader_kind::seed_verify_count:
+    case shader_kind::seed_verify_emit:
+        return std::string{k_native_packed_sequence_reader} + std::string{k_seed_verify_body};
     case shader_kind::seed_count:
     case shader_kind::seed_emit:
         return std::string{k_seed_count_emit_body};
@@ -99,9 +104,9 @@ namespace {
     case shader_kind::seq_sort_prefix_check_generic:
         return seq_sort_body(/*dna4=*/false, sequence_sort_stage::prefix_check);
     case shader_kind::align_extend_banded_affine:
-        return std::string{k_alignment_extension_banded_affine_body};
+        return native_alignment_body(k_alignment_extension_banded_affine_body);
     case shader_kind::align_extend_simple_cigar:
-        return std::string{k_alignment_extension_simple_cigar_body};
+        return native_alignment_body(k_alignment_extension_simple_cigar_body);
     case shader_kind::sneaky_snake_rank_batch:
         return rank_prefilter_body(k_sneaky_snake_rank_batch_body);
     case shader_kind::gatekeeper_rank_batch:

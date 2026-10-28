@@ -361,6 +361,8 @@ struct seed_lookup_result {
     std::vector<std::byte> host_bytes;
     std::uint64_t count = 0;
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    std::uint64_t candidate_count = 0u;
+    std::uint64_t native_verification_vulkan_allocation_bytes = 0u;
     seed_anchor_canonical_order_audit anchor_order_audit{};
     std::uint64_t canonical_tie_normalization_runs = 0u;
     std::uint64_t canonical_tie_normalization_anchors = 0u;
@@ -381,6 +383,9 @@ struct seed_lookup_result {
 /// lookup. The caller keeps the target index buffers alive on the device
 /// throughout the call.
 struct runtime_seed_lookup_inputs {
+    gpu_native_sequence_upload native_query{};
+    gpu_native_sequence_upload native_target{};
+    const vulkan_rank_lut* native_rank_policy = nullptr;
     std::span<const std::byte> host_minimizer_bytes{}; ///< Host minimizer bytes uploaded once when absent on device.
     const buffer* device_minimizer_words = nullptr;    ///< Existing device minimizers, when the sketch ran on Vulkan.
     const buffer* slots = nullptr;                     ///< Target hash buckets or an open-addressed slot table.

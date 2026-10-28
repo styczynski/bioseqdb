@@ -86,8 +86,8 @@ namespace detail_ksw2_batched {
 
 /** Widen the configured bandwidth for alignment, rejecting integer overflow. */
 [[nodiscard]] constexpr auto
-try_calculate_alignment_bandwidth(std::int32_t configured_bandwidth,
-                                  std::int32_t& alignment_bandwidth) noexcept -> bool {
+try_calculate_alignment_bandwidth(std::int32_t configured_bandwidth) noexcept
+    -> std::expected<std::int32_t, alignment_contract_error> {
     const std::int64_t scaled_bandwidth =
         static_cast<std::int64_t>(configured_bandwidth) * 3 / 2 + 1;
     if (scaled_bandwidth
@@ -96,10 +96,9 @@ try_calculate_alignment_bandwidth(std::int32_t configured_bandwidth,
         || scaled_bandwidth
             > static_cast<std::int64_t>(
                 (std::numeric_limits<std::int32_t>::max)())) {
-        return false;
+        return std::unexpected(alignment_contract_error::coordinates);
     }
-    alignment_bandwidth = static_cast<std::int32_t>(scaled_bandwidth);
-    return true;
+    return static_cast<std::int32_t>(scaled_bandwidth);
 }
 
 /** Check sequence lengths, region bounds and anchor ranges before batching. */
@@ -239,12 +238,10 @@ align_single_fill(fill_descriptor& fill,
                   const minimap2_parameters& params,
                   std::int32_t alignment_bandwidth,
                   ksw2_batched_execution_stats* execution_stats,
-                  bool is_long_fill) -> void {
-    if (fill.query_length <= 0 || fill.target_length <= 0) {
-        fill.fill_score = 0;
-        fill.is_z_dropped = false;
-        return;
-    }
+                  bool is_long_fill)
+    -> std::expected<void, alignment_contract_error> {
+    if (fill.query_length < 0 || fill.target_length < 0)
+        return std::unexpected(alignment_contract_error::coordinates);
 
     if (execution_stats != nullptr) {
         execution_stats->record_nonempty_fill(
@@ -280,29 +277,29 @@ align_single_fill(fill_descriptor& fill,
         params.compute_edit_distance && fill.kind == fill_kind::gap_between
             ? -1
             : params.zdrop;
-    ksw_alignment_result result;
+    std::expected<ksw_alignment_result, alignment_contract_error> aligned;
     if (params.gap_open1 == params.gap_open2
         && params.gap_ext1 == params.gap_ext2) {
-        result = align_ksw2_single_affine<p_alphabet>(
+        aligned = align_ksw2_single_affine<p_alphabet>(
             p_is_reversed, query_seq, target_seq, query_start, query_end, target_start, target_end,
             scoring_matrix,
             ksw_single_affine_parameters{
-                .gap_open = static_cast<std::int8_t>(params.gap_open1),
-                .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
+                .gap_open = params.gap_open1,
+                .gap_extend = params.gap_ext1,
                 .band_width = effective_bandwidth,
                 .z_drop = effective_zdrop,
                 .end_bonus = end_bonus_for_fill,
                 .flags = flags,
             });
     } else {
-        result = align_ksw2_dual_affine<p_alphabet>(
+        aligned = align_ksw2_dual_affine<p_alphabet>(
             p_is_reversed, query_seq, target_seq, query_start, query_end, target_start, target_end,
             scoring_matrix,
             ksw_dual_affine_parameters{
-                .gap_open_short = static_cast<std::int8_t>(params.gap_open1),
-                .gap_extend_short = static_cast<std::int8_t>(params.gap_ext1),
-                .gap_open_long = static_cast<std::int8_t>(params.gap_open2),
-                .gap_extend_long = static_cast<std::int8_t>(params.gap_ext2),
+                .gap_open_short = params.gap_open1,
+                .gap_extend_short = params.gap_ext1,
+                .gap_open_long = params.gap_open2,
+                .gap_extend_long = params.gap_ext2,
                 .band_width = effective_bandwidth,
                 .z_drop = effective_zdrop,
                 .end_bonus = end_bonus_for_fill,
@@ -310,6 +307,8 @@ align_single_fill(fill_descriptor& fill,
             });
     }
 
+    if (!aligned) return std::unexpected(aligned.error());
+    const auto& result = *aligned;
     fill.is_z_dropped = result.is_z_dropped;
     if (fill.kind == fill_kind::gap_between) {
         if (result.is_z_dropped) {
@@ -322,7 +321,7 @@ align_single_fill(fill_descriptor& fill,
             fill.fill_score = result.score;
         }
     } else {
-        fill.fill_score = result.max;
+        fill.fill_score = result.has_reached_end ? result.mqe : result.max;
         if (fill.kind == fill_kind::left_extension) {
             const std::int32_t reference_offset = result.has_reached_end
                 ? (result.mqe_t + 1) : (result.max_t + 1);
@@ -362,10 +361,7 @@ align_single_fill(fill_descriptor& fill,
                 exact_target_start, exact_target_end,
                 std::span<const std::uint32_t>(result.cigar), &count_equal_rank_chunk);
         if (!exact_edits) {
-            const auto error = exact_edits.error();
-            throw std::runtime_error{std::format(
-                "batched exact edit-distance CIGAR failed (code={}, run={})",
-                std::to_underlying(error.code), error.input_offset)};
+            return std::unexpected(alignment_contract_error::trace_accounting);
         }
         fill.fill_edit_distance = *exact_edits;
     }
@@ -375,9 +371,10 @@ align_single_fill(fill_descriptor& fill,
         if (!bioseq::decode_native_cigar(
                 std::span<const std::uint32_t>{result.cigar.data(), result.cigar.size()},
                 *fill.cigar_scratch)) {
-            throw std::runtime_error{"batched alignment produced an invalid CIGAR"};
+            return std::unexpected(alignment_contract_error::trace_accounting);
         }
     }
+    return {};
 }
 
 }  // namespace detail_ksw2_batched
@@ -399,78 +396,93 @@ auto align_ksw2_fill_batch(fill_descriptor* fills,
                            std::int32_t maximum_bucket_query_length,
                            std::int32_t maximum_bucket_target_length,
                            std::int32_t maximum_bucket_bandwidth,
-                           ksw2_batched_execution_stats* execution_stats) -> void {
+                           ksw2_batched_execution_stats* execution_stats)
+    -> std::expected<void, alignment_contract_error> {
     (void)maximum_bucket_query_length;
     (void)maximum_bucket_target_length;
     (void)maximum_bucket_bandwidth;
     for (std::size_t lane_index = 0;
          lane_index < fill_count && lane_index < p_lane_count;
          ++lane_index) {
-        detail_ksw2_batched::align_single_fill<p_is_reversed>(
+        const auto aligned = detail_ksw2_batched::align_single_fill<p_is_reversed>(
             fills[lane_index], query_seq, target_seq,
             scoring_matrix, params, alignment_bandwidth,
             execution_stats, /*is_long_fill=*/false);
+        if (!aligned) return std::unexpected(aligned.error());
     }
+    return {};
 }
 
-/** Run all fill buckets with the selected query orientation. */
-template <sequence_alphabet p_alphabet>
-auto align_fill_buckets(std::span<std::pair<fill_bucket_key, std::span<fill_descriptor>>> buckets,
-                        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
-                        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                        const scoring_matrix<p_alphabet>& scoring_matrix,
-                        const minimap2_parameters& params,
-                        std::int32_t alignment_bandwidth,
-                        ksw2_batched_execution_stats* execution_stats) -> void {
+/** Execute one geometry bucket with query orientation fixed at dispatch. */
+template<bool p_is_reversed, sequence_alphabet p_alphabet>
+[[nodiscard]] auto align_oriented_fill_bucket(
+    const fill_bucket_key& bucket_key, std::span<fill_descriptor> bucket_fills,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const minimap2_parameters& params, std::int32_t alignment_bandwidth,
+    ksw2_batched_execution_stats* execution_stats)
+    -> std::expected<void, alignment_contract_error> {
     using simd_tag_type = hn::ScalableTag<std::int16_t>;
-    constexpr std::size_t k_lane_count = hn::MaxLanes(simd_tag_type{});
-
-    for (auto& [bucket_key, bucket_fills] : buckets) {
-        const bool is_reversed = bucket_key.is_reversed;
-        if (bucket_key.is_long_fill) {
-            // Run each long fill through the single-pair KSW2 kernel.
-            for (auto& fill : bucket_fills) {
-                if (is_reversed) {
-                    detail_ksw2_batched::align_single_fill<true>(
-                        fill, query_seq, target_seq,
-                        scoring_matrix, params, alignment_bandwidth,
-                        execution_stats, /*is_long_fill=*/true);
-                } else {
-                    detail_ksw2_batched::align_single_fill<false>(
-                        fill, query_seq, target_seq,
-                        scoring_matrix, params, alignment_bandwidth,
-                        execution_stats, /*is_long_fill=*/true);
-                }
-            }
-            continue;
+    constexpr std::size_t maximum_lane_count = hn::MaxLanes(simd_tag_type{});
+    if (bucket_key.is_long_fill) {
+        for (auto& fill : bucket_fills) {
+            const auto aligned = detail_ksw2_batched::align_single_fill<p_is_reversed>(
+                fill, query_seq, target_seq, scoring_matrix, params,
+                alignment_bandwidth, execution_stats, /*is_long_fill=*/true);
+            if (!aligned) return std::unexpected(aligned.error());
         }
-        for (std::size_t fill_index = 0;
-             fill_index < bucket_fills.size();
-             fill_index += k_lane_count) {
-            const std::size_t lane_count = std::min(
-                k_lane_count,
-                bucket_fills.size() - fill_index);
-            if (execution_stats != nullptr) {
-                execution_stats->record_short_bucket_dispatch(
-                    static_cast<std::uint64_t>(lane_count));
-            }
-            if (is_reversed) {
-                align_ksw2_fill_batch<k_lane_count, true, p_alphabet>(
-                    bucket_fills.data() + fill_index, lane_count,
-                    query_seq, target_seq, scoring_matrix, params,
-                    alignment_bandwidth,
-                    bucket_key.maximum_query_length, bucket_key.maximum_target_length, bucket_key.maximum_bandwidth,
-                    execution_stats);
-            } else {
-                align_ksw2_fill_batch<k_lane_count, false, p_alphabet>(
-                    bucket_fills.data() + fill_index, lane_count,
-                    query_seq, target_seq, scoring_matrix, params,
-                    alignment_bandwidth,
-                    bucket_key.maximum_query_length, bucket_key.maximum_target_length, bucket_key.maximum_bandwidth,
-                    execution_stats);
-            }
-        }
+        return {};
     }
+    const std::size_t active_lane_count = hn::Lanes(simd_tag_type{});
+    for (std::size_t fill_index = 0; fill_index < bucket_fills.size();
+         fill_index += active_lane_count) {
+        const std::size_t fill_count = std::min(active_lane_count,
+                                               bucket_fills.size() - fill_index);
+        if (execution_stats != nullptr) {
+            execution_stats->record_short_bucket_dispatch(
+                static_cast<std::uint64_t>(fill_count));
+        }
+        const auto aligned = align_ksw2_fill_batch<maximum_lane_count,
+                                                   p_is_reversed, p_alphabet>(
+            bucket_fills.data() + fill_index, fill_count,
+            query_seq, target_seq, scoring_matrix, params, alignment_bandwidth,
+            bucket_key.maximum_query_length, bucket_key.maximum_target_length,
+            bucket_key.maximum_bandwidth, execution_stats);
+        if (!aligned) return std::unexpected(aligned.error());
+    }
+    return {};
+}
+
+/** Run fill buckets, instantiating reverse-complement only for capable alphabets. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] auto align_fill_buckets(
+    std::span<std::pair<fill_bucket_key, std::span<fill_descriptor>>> buckets,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const minimap2_parameters& params, std::int32_t alignment_bandwidth,
+    ksw2_batched_execution_stats* execution_stats)
+    -> std::expected<void, alignment_contract_error> {
+    for (auto& [bucket_key, bucket_fills] : buckets) {
+        if (bucket_key.is_reversed) {
+            if constexpr (bioseq::storage::lazy_sequence_detail::
+                          complementable_sequence_alphabet<p_alphabet>) {
+                const auto aligned = align_oriented_fill_bucket<true>(
+                    bucket_key, bucket_fills, query_seq, target_seq, scoring_matrix,
+                    params, alignment_bandwidth, execution_stats);
+                if (!aligned) return std::unexpected(aligned.error());
+                continue;
+            } else {
+                return std::unexpected(alignment_contract_error::orientation);
+            }
+        }
+        const auto aligned = align_oriented_fill_bucket<false>(
+            bucket_key, bucket_fills, query_seq, target_seq, scoring_matrix,
+            params, alignment_bandwidth, execution_stats);
+        if (!aligned) return std::unexpected(aligned.error());
+    }
+    return {};
 }
 
 /**
@@ -481,11 +493,12 @@ auto align_fill_buckets(std::span<std::pair<fill_bucket_key, std::span<fill_desc
  * A single-seed region also omits its right extension if the left one stops.
  * Convert  reverse-strand query coordinates back to the original sequence.
  */
-inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
+[[nodiscard]] inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                                        std::span<const ::bioseq::chaining::anchor> anchors,
                                        ::bioseq::chaining::arena_slab<fill_descriptor>& fills,
                                        std::int32_t query_length,
-                                       bool should_emit_cigar) -> void {
+                                       bool should_emit_cigar)
+    -> std::expected<void, alignment_contract_error> {
     std::stable_sort(fills.data(), fills.data() + fills.size(),
         ::bioseq::simd::detail_ksw2_batched_ordering::chain_order{});
 
@@ -532,7 +545,7 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                     region.cigar,
                     std::min(query_end, span),
                     std::min(target_end, span))) {
-                    throw std::length_error{"batched seed CIGAR run is not representable"};
+                    return std::unexpected(alignment_contract_error::trace_accounting);
                 }
                 implicit_seed_appended = true;
             }
@@ -549,11 +562,17 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                 const auto& scratch = *fill.cigar_scratch;
                 for (const bioseq::cigar_run op : scratch.as_const_span()) {
                     if (!bioseq::append_canonical_run(region.cigar, op)) {
-                        throw std::length_error{"stitched CIGAR run is not representable"};
+                        return std::unexpected(alignment_contract_error::trace_accounting);
                     }
                 }
             }
-            region.dp_score += fill.fill_score;
+            const std::int64_t accumulated_score =
+                static_cast<std::int64_t>(region.dp_score) + fill.fill_score;
+            if (accumulated_score < std::numeric_limits<std::int32_t>::min()
+                || accumulated_score > std::numeric_limits<std::int32_t>::max()) {
+                return std::unexpected(alignment_contract_error::score_accumulation);
+            }
+            region.dp_score = static_cast<std::int32_t>(accumulated_score);
             region.edit_distance += fill.fill_edit_distance;
 
             if (fill.kind == fill_kind::left_extension) {
@@ -586,7 +605,7 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
                 region.cigar,
                 std::min(query_end, span),
                 std::min(target_end, span))) {
-                throw std::length_error{"batched seed CIGAR run is not representable"};
+                return std::unexpected(alignment_contract_error::trace_accounting);
             }
         }
 
@@ -600,6 +619,7 @@ inline auto stitch_cigars_into_regions(std::span<alignment_region> regions,
             region.query_end = final_query_end;
         }
     }
+    return {};
 }
 
 // Collect fills in chain order before grouping them for execution.
@@ -649,18 +669,18 @@ append_fill(::bioseq::chaining::arena_slab<fill_descriptor>& fills,
  *
  * Collect the fills, group them by size and orientation, and run KSW2. Stitch
  * their results back, into each region in chain order, then update length
- * estimates from the CIGAR. Invalid coordinates or an overflowing bandwidth
- * clear the alignment outputs and return without  running the kernels.
+ * estimates from the CIGAR. Validation, source and numeric failures clear all
+ * alignment outputs and return a typed error before publishing the batch.
  */
 template <sequence_alphabet p_alphabet>
-auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
+[[nodiscard]] auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                                      std::span<const ::bioseq::chaining::anchor> anchors,
                                      bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                      bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                                      const scoring_matrix<p_alphabet>& scoring_matrix,
                                      const minimap2_parameters& params,
                                      ksw2_batched_execution_stats* execution_stats = nullptr)
-    -> void {
+    -> std::expected<void, alignment_contract_error> {
     if (execution_stats != nullptr) {
         *execution_stats = {};
         execution_stats->record_invocation(
@@ -671,13 +691,38 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         static_cast<std::uint64_t>(query_seq.bp_size());
     const std::uint64_t target_extent =
         static_cast<std::uint64_t>(target_seq.bp_size());
-    std::int32_t alignment_bandwidth = 0;
-    if (!detail_ksw2_batched::try_calculate_alignment_bandwidth(
-            params.bandwidth, alignment_bandwidth)
+    const auto bandwidth = detail_ksw2_batched::try_calculate_alignment_bandwidth(
+        params.bandwidth);
+    if (!bandwidth
         || !detail_ksw2_batched::are_alignment_coordinates_supported(
             regions, anchors, query_extent, target_extent)) {
         detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
-        return;
+        return std::unexpected(alignment_contract_error::coordinates);
+    }
+    const std::int32_t alignment_bandwidth = *bandwidth;
+    if (!scoring_matrix.is_block_layout_valid()) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return std::unexpected(alignment_contract_error::invalid_matrix_layout);
+    }
+    const auto numeric = validate_alignment_numeric_contract(scoring_matrix.summary(),
+        0u, 0u, params.gap_open1, params.gap_ext1, params.end_bonus, params.zdrop,
+        params.gap_open2, params.gap_ext2);
+    if (!numeric) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return std::unexpected(numeric.error());
+    }
+    if (params.max_gap < 0 || params.min_ksw_len < 0) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return std::unexpected(alignment_contract_error::coordinates);
+    }
+    if constexpr (!bioseq::storage::lazy_sequence_detail::
+                  complementable_sequence_alphabet<p_alphabet>) {
+        if (std::ranges::any_of(regions, [](const alignment_region& region) {
+                return region.is_reverse;
+            })) {
+            detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+            return std::unexpected(alignment_contract_error::orientation);
+        }
     }
 
     auto& alignment_context = ::context::current();
@@ -728,31 +773,40 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         std::int32_t outer_query_end   = seed_query_end;
 
         if (seed_query_start > 0 && seed_ref_start > 0) {
-            std::int32_t extension_length = std::min(seed_query_start, params.max_gap);
-            outer_query_start = seed_query_start - extension_length;
-            const std::int32_t bonus_extension =
-                (extension_length * params.match_score > params.gap_open1)
-                    ? (extension_length * params.match_score - params.gap_open1) / params.gap_ext1
-                    : 0;
+            std::int64_t extension_length = std::min(seed_query_start, params.max_gap);
+            outer_query_start = seed_query_start - static_cast<std::int32_t>(extension_length);
+            const std::int64_t bonus_extension = std::max<std::int64_t>(0,
+                extension_length * scoring_matrix.summary().maximum - params.gap_open1)
+                    / params.gap_ext1;
             extension_length += bonus_extension;
-            extension_length = std::min(extension_length, params.max_gap);
-            extension_length = std::min(extension_length, seed_ref_start);
-            outer_ref_start = seed_ref_start - extension_length;
+            extension_length = std::min<std::int64_t>(extension_length, params.max_gap);
+            extension_length = std::min<std::int64_t>(extension_length, seed_ref_start);
+            outer_ref_start = seed_ref_start - static_cast<std::int32_t>(extension_length);
         }
         if (seed_query_end < query_length && seed_ref_end < target_length) {
-            std::int32_t extension_length =
+            std::int64_t extension_length =
                 std::min(query_length - seed_query_end, params.max_gap);
-            outer_query_end = seed_query_end + extension_length;
-            const std::int32_t bonus_extension =
-                (extension_length * params.match_score > params.gap_open1)
-                    ? (extension_length * params.match_score - params.gap_open1) / params.gap_ext1
-                    : 0;
+            outer_query_end = seed_query_end + static_cast<std::int32_t>(extension_length);
+            const std::int64_t bonus_extension = std::max<std::int64_t>(0,
+                extension_length * scoring_matrix.summary().maximum - params.gap_open1)
+                    / params.gap_ext1;
             extension_length += bonus_extension;
-            extension_length = std::min(extension_length, params.max_gap);
-            extension_length = std::min(extension_length, target_length - seed_ref_end);
-            outer_ref_end = seed_ref_end + extension_length;
+            extension_length = std::min<std::int64_t>(extension_length, params.max_gap);
+            extension_length = std::min<std::int64_t>(extension_length, target_length - seed_ref_end);
+            outer_ref_end = seed_ref_end + static_cast<std::int32_t>(extension_length);
         }
         if (outer_query_end > query_length) outer_query_end = query_length;
+
+        const auto region_numeric = validate_alignment_numeric_contract(
+            scoring_matrix.summary(),
+            static_cast<std::size_t>(outer_query_end - outer_query_start),
+            static_cast<std::size_t>(outer_ref_end - outer_ref_start),
+            params.gap_open1, params.gap_ext1, params.end_bonus, params.zdrop,
+            params.gap_open2, params.gap_ext2);
+        if (!region_numeric) {
+            detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+            return std::unexpected(region_numeric.error());
+        }
 
         // Reserve CIGAR space for the full interval, including end extensions.
         region.cigar.reserve(
@@ -763,27 +817,41 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         region.dp_score = 0;
         region.edit_distance = 0;
 
-        if (params.compute_edit_distance && region.seed_count == 1) {
-            const auto exact_edits = region.is_reverse
-                ? exact_edit_distance_for_implicit_seed<true>(
+        if (region.seed_count == 1) {
+            const auto replay_seed = [&query_seq, &target_seq, &scoring_matrix, &params,
+                                      seed_query_start, seed_query_end,
+                                      seed_ref_start, seed_ref_end]<bool Reversed>() {
+                return replay_implicit_seed_alignment<Reversed>(
                     query_seq, target_seq,
                     static_cast<std::size_t>(seed_query_start),
                     static_cast<std::size_t>(seed_query_end),
                     static_cast<std::size_t>(seed_ref_start),
-                    static_cast<std::size_t>(seed_ref_end), &count_equal_rank_chunk)
-                : exact_edit_distance_for_implicit_seed<false>(
-                    query_seq, target_seq,
-                    static_cast<std::size_t>(seed_query_start),
-                    static_cast<std::size_t>(seed_query_end),
-                    static_cast<std::size_t>(seed_ref_start),
-                    static_cast<std::size_t>(seed_ref_end), &count_equal_rank_chunk);
-            if (!exact_edits) {
-                const auto error = exact_edits.error();
-                throw std::runtime_error{std::format(
-                    "batched implicit seed accounting failed (code={}, run={})",
-                    std::to_underlying(error.code), error.input_offset)};
+                    static_cast<std::size_t>(seed_ref_end), scoring_matrix,
+                    params.gap_open1, params.gap_ext1, params.gap_open2, params.gap_ext2,
+                    [](const std::uint8_t* query_ranks, const std::uint8_t* target_ranks,
+                       std::size_t count) {
+                        return count_equal_rank_chunk(query_ranks, target_ranks, count,
+                            sequence_rank_validation::upper_bound,
+                            seqan3::alphabet_size<p_alphabet>);
+                    });
+            };
+            std::expected<implicit_seed_alignment_summary, alignment_contract_error> replayed;
+            if (region.is_reverse) {
+                if constexpr (bioseq::storage::lazy_sequence_detail::
+                              complementable_sequence_alphabet<p_alphabet>) {
+                    replayed = replay_seed.template operator()<true>();
+                } else {
+                    replayed = std::unexpected(alignment_contract_error::orientation);
+                }
+            } else {
+                replayed = replay_seed.template operator()<false>();
             }
-            region.edit_distance += *exact_edits;
+            if (!replayed) {
+                detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+                return std::unexpected(replayed.error());
+            }
+            region.dp_score = replayed->score;
+            if (params.compute_edit_distance) region.edit_distance = replayed->edit_distance;
         }
 
         std::int32_t fill_order = 0;
@@ -829,11 +897,11 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                                  gap_reference_length < params.min_ksw_len)) {
                     continue;
                 }
-                if (gap_query_length <= 0 || gap_reference_length <= 0) {
-                    gap_query_start = gap_query_end;
-                    gap_reference_start = gap_reference_end;
-                    continue;
+                if (gap_query_length < 0 || gap_reference_length < 0) {
+                    detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+                    return std::unexpected(alignment_contract_error::coordinates);
                 }
+                if (gap_query_length == 0 && gap_reference_length == 0) continue;
                 cigar_scratch_pool.push_back(
                     ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
                 auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
@@ -888,11 +956,19 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
             static_cast<std::uint64_t>(fills.size()));
     }
     auto buckets = bucket_fills_by_geometry(fills, alignment_bandwidth);
-    align_fill_buckets<p_alphabet>(buckets, query_seq, target_seq,
+    const auto aligned = align_fill_buckets<p_alphabet>(buckets, query_seq, target_seq,
         scoring_matrix, params, alignment_bandwidth, execution_stats);
-    stitch_cigars_into_regions(
+    if (!aligned) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return std::unexpected(aligned.error());
+    }
+    const auto stitched = stitch_cigars_into_regions(
         regions, anchors, fills, query_length,
         params.do_cigar || params.compute_edit_distance);
+    if (!stitched) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return std::unexpected(stitched.error());
+    }
 
     // Mark aligned regions and count CIGAR M/= columns and block length.
     for (auto& region : regions) {
@@ -908,18 +984,20 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
             }
         }
     }
+    return {};
 }
 
-/** Run batched KSW2 using this CPU ingtruction set */
+/** Run batched KSW2 using this CPU instruction set; preserve typed failures. */
 template <sequence_alphabet p_alphabet>
-auto align_ksw2_batched(std::span<alignment_region> regions,
+[[nodiscard]] auto align_ksw2_batched(std::span<alignment_region> regions,
                         std::span<const ::bioseq::chaining::anchor> anchors,
                         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                         const scoring_matrix<p_alphabet>& scoring_matrix,
                         const minimap2_parameters& params,
-                        ksw2_batched_execution_stats* execution_stats) -> void {
-    align_regions_with_batched_ksw2<p_alphabet>(
+                        ksw2_batched_execution_stats* execution_stats)
+    -> std::expected<void, alignment_contract_error> {
+    return align_regions_with_batched_ksw2<p_alphabet>(
         regions, anchors, query_seq, target_seq, scoring_matrix, params,
         execution_stats);
 }

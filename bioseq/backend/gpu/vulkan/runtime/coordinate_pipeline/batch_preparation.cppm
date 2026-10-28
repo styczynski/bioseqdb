@@ -71,6 +71,7 @@ struct gpu_seed_coordinate_wave_state {
     buffer range_count_buf;
     buffer compacted_anchors_buf;
     buffer span_buf;
+    gpu_verified_seed_buffer verified{};
     bool sorted_in_scratch = false;
     std::uint32_t range_count = 0;
     std::uint32_t compacted_anchor_count = 0;
@@ -86,6 +87,11 @@ struct gpu_seed_coordinate_wave_state {
     bool has_anchors = false;
     bool has_ranges = false;
     bool chain_active = false;
+
+    /** Returns dense verified anchors after the native verification fence. */
+    [[nodiscard]] gpu_arena_slice verified_anchors_slice() noexcept {
+        return gpu_arena_slice{&verified.anchors, 0u, verified.anchors.bytes};
+    }
 
     /// @brief Views the complete primary anchor allocation.
     /// @return Arena slice spanning `anchors_buf`.

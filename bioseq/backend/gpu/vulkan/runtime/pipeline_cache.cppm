@@ -436,6 +436,8 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
 
     const descriptor_layout_kind layout_kind = descriptor_layout_for(kind);
     const std::uint32_t binding_count = descriptor_binding_count(layout_kind);
+    if (binding_count > features_.max_stage_storage_buffers || binding_count > features_.max_descriptor_storage_buffers)
+        throw vulkan_runtime_error("GPU pipeline storage descriptor count exceeds device capability");
     const std::uint32_t push_size = push_constant_size(kind);
 
     const std::size_t next_capacity =
@@ -653,6 +655,14 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                  0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u}))) {
             throw vulkan_runtime_error("SPIR-V mapping-quality reducer ABI mismatch");
         }
+        if ((kind == shader_kind::align_extend_banded_affine || kind == shader_kind::align_extend_simple_cigar)
+            && (!scan.has_binding_array_stride(0u, 6u, 4u)
+                || !scan.has_binding_block_offsets(0u, 6u,
+                    std::array<std::uint32_t, 8>{0u,4u,8u,12u,16u,24u,28u,32u})
+                || !scan.has_binding_array_stride(0u, 7u, 88u)
+                || !scan.has_binding_struct_offsets(0u, 7u,
+                    std::array<std::uint32_t, 16>{0u,8u,16u,24u,32u,40u,48u,52u,56u,60u,64u,68u,72u,76u,80u,84u})))
+            throw vulkan_runtime_error("SPIR-V native alignment matrix/descriptor ABI mismatch");
         if (kind == shader_kind::align_extend_banded_affine &&
             (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
              !scan.has_binding(3) || !scan.has_array_stride(4) || !scan.has_array_stride(16) ||
@@ -679,17 +689,36 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                  0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u}))) {
             throw vulkan_runtime_error("SPIR-V alignment CIGAR extension layout mismatch");
         }
+        if ((kind == shader_kind::seed_verify_count || kind == shader_kind::seed_verify_emit) &&
+            (!scan.has_binding_array_stride(0u, 0u, 24u) ||
+             !scan.has_binding_struct_offsets(0u, 0u, std::array<std::uint32_t, 4>{0u,8u,16u,20u}) ||
+             !scan.has_binding_array_stride(0u, 2u, 88u) ||
+             !scan.has_binding_struct_offsets(0u, 2u,
+                 std::array<std::uint32_t,16>{0u,8u,16u,24u,32u,40u,48u,52u,56u,60u,64u,68u,72u,76u,80u,84u}) ||
+             !scan.has_binding_array_stride(0u, 6u, 24u) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t,9>{0u,4u,8u,12u,16u,24u,28u,32u,36u}))) {
+            throw vulkan_runtime_error("SPIR-V native seed verification ABI mismatch");
+        }
+        if (kind == shader_kind::seed_native_coverage &&
+            (!scan.has_binding_array_stride(0u, 0u, 24u) ||
+             !scan.has_binding_array_stride(0u, 1u, 16u) ||
+             !scan.has_binding_struct_offsets(0u, 1u, std::array<std::uint32_t,2>{0u,8u}) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t,6>{0u,4u,8u,16u,24u,28u}))) {
+            throw vulkan_runtime_error("SPIR-V native seed verification ABI mismatch");
+        }
         if ((kind == shader_kind::sneaky_snake_rank_batch || is_gatekeeper_rank_batch_kind(kind)) &&
             (!scan.has_binding_array_stride(0u, 0u, 4u) ||
-             !scan.has_binding_array_stride(0u, 1u, 4u) ||
-             !scan.has_binding_array_stride(0u, 2u, 20u) ||
-             !scan.has_binding_struct_offsets(
-                 0u, 2u, std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}) ||
+             !scan.has_binding_array_stride(0u, 1u, 88u) ||
+             !scan.has_binding_array_stride(0u, 4u, 88u) ||
+             !scan.has_binding_array_stride(0u, 2u, 32u) ||
+             !scan.has_binding_struct_offsets(0u, 2u,
+                 std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}) ||
              !scan.has_binding_array_stride(0u, 3u, 16u) ||
              !scan.has_binding_struct_offsets(
                  0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}) ||
+             !scan.has_binding(5u) ||
              !scan.has_push_constant_offsets(std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}))) {
-            throw vulkan_runtime_error("SPIR-V rank-prefilter batch layout mismatch");
+            throw vulkan_runtime_error("SPIR-V packed-prefilter batch layout mismatch");
         }
 
         VkShaderModuleCreateInfo module_info{};

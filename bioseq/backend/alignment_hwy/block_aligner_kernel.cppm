@@ -31,6 +31,8 @@ import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.sources.alignment_utils;
+import bioseq.highway.sources.simd_utils;
+import bioseq.simd.utils;
 import bioseq.highway.sources.block_aligner_dp;
 import bioseq.highway.sources.block_aligner_traceback;
 import bioseq.highway.sources.block_aligner_certificates;
@@ -145,18 +147,6 @@ inline void record_block_aligner_execution(
     stats.executed_configuration_identity_sum += configuration_identity;
 }
 
-/**
- * Count and abort an  attempt to run BlockAligner with an unswpported SIMD lane count.
- * @param[in,out] stats Execution counters for the alignment batch.
- */
-[[noreturn]] inline void abort_forbidden_scalar_biological_fallback(
-        block_aligner_execution_stats& stats) {
-    stats.add(stats.forbidden_scalar_biological_fallbacks);
-    bioseq_log<logging_level::error>(
-        "Block Aligner attempted forbidden scalar biological fallback");
-    std::abort();
-}
-
 // BlockAligner for the selected CPU instruction set.
 
 /** BlockAligner entry points compiled for one CPU instruction set. */
@@ -197,8 +187,7 @@ public:
         plan.ksw2_full_score_bytes = sizeof(hn::TFromD<ksw2_full_tag>);
 #endif
         plan.is_contract_supported = scoring_matrix.is_block_layout_valid()
-            && validate_block_aligner_contract(parameters, lane_count)
-                == block_aligner_contract_error::none;
+            && validate_block_aligner_contract(parameters, lane_count).has_value();
         plan.is_generated_matrix_supported =
             has_generated_diagonal_score_layout<p_alphabet, p_alphabet_dimension>(
                 scoring_matrix, plan.match_score, plan.mismatch_score);
@@ -208,7 +197,7 @@ public:
     /**
      * Try to prove that this gap needs no insertions or deletions.
      *
-     * Read resident packed DNA4 directly. The result says whether the check could
+     * Read resident packed alphabet directly. The result says whether the check could
      * run, ran without proving the diagonal best, or proved it and supplies the
      * score and edit count. The caller can use dynamic programming when it fails.
      *
@@ -245,14 +234,14 @@ public:
      *
      * The result owns its CIGAR, and parameters select trace and edit-count output
      * while the optional counters record execution work and scratch  allocation counts.
-     * Invalid coordinates, scoring layouts and BlockAligner settings abort execution.
+     * Invalid coordinates, scoring layouts and BlockAligner settings return typed contract errors.
      */
     template<
         bool p_is_reversed,
         bool p_is_diagonal_certificate_enabled = true,
         sequence_alphabet p_alphabet,
         size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u>
-    [[nodiscard]] static ksw_alignment_result align(
+    [[nodiscard]] static std::expected<ksw_alignment_result, alignment_contract_error> align(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
         size_t query_start,
@@ -273,12 +262,6 @@ public:
 
         const block_aligner_simd_tag simd_tag;
         const size_t lane_count = hn::Lanes(simd_tag);
-        if (execution_stats != nullptr
-            && !is_block_aligner_lane_shape_supported(lane_count)) {
-            // This BlockAligner requires SIMD. Stop before allocating or aligning.
-            abort_forbidden_scalar_biological_fallback(
-                *execution_stats);
-        }
         const auto contract_error = validate_block_aligner_contract(parameters, lane_count);
         const bool is_scoring_matrix_valid = scoring_matrix.is_block_layout_valid();
         const bool are_coordinates_ordered = query_end >= query_start
@@ -300,21 +283,22 @@ public:
                 || (query_length <= max_packed_cigar_run
                     && target_length <= max_packed_cigar_run));
         const auto effective_contract_error = !are_coordinates_valid
-            ? block_aligner_contract_error::coordinates
+            ? alignment_contract_error::coordinates
             : !is_scoring_matrix_valid
-                ? block_aligner_contract_error::scoring_matrix
-                : contract_error;
-        if (effective_contract_error != block_aligner_contract_error::none) {
+                ? alignment_contract_error::scoring_matrix
+                : contract_error ? alignment_contract_error::none : contract_error.error();
+        if (effective_contract_error != alignment_contract_error::none) {
             if (execution_stats != nullptr) {
                 execution_stats->add(
                     execution_stats->unsupported_contract_rejections);
             }
-            bioseq_log<logging_level::error>(
-                "Block Aligner rejected contract (error={}, are_coordinates_valid={})",
-                static_cast<unsigned>(effective_contract_error),
-                are_coordinates_valid);
-            std::abort();
+            return std::unexpected(effective_contract_error);
         }
+        const auto numeric_contract = validate_alignment_numeric_contract(
+            scoring_matrix.summary(), query_length, target_length,
+            parameters.gap_open, parameters.gap_extend, 0, parameters.x_drop_threshold,
+            -1, -1, false);
+        if (!numeric_contract) return std::unexpected(numeric_contract.error());
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         if (query_length > (std::numeric_limits<size_t>::max)() - target_length) {
             abort_block_aligner_invariant("Block result CIGAR bound overflow");
@@ -337,9 +321,9 @@ public:
                 result.max = 0;
             } else {
                 const size_t gap_len = std::max(query_length, target_length);
-                result.score = gap_len == 0 ? 0 : -(
-                    static_cast<int32_t>(parameters.gap_open)
-                    + static_cast<int32_t>(parameters.gap_extend) * gap_len);
+                result.score = gap_len == 0 ? 0 : -static_cast<int32_t>(
+                    std::int64_t{parameters.gap_open}
+                    + std::int64_t{parameters.gap_extend} * static_cast<std::int64_t>(gap_len));
                 result.max = result.score;
                 result.max_q = static_cast<int32_t>(query_length) - 1;
                 result.max_t = static_cast<int32_t>(target_length) - 1;
@@ -416,15 +400,15 @@ public:
         }
         auto align_scope = context::current().push<context::arena::alignment>();
 
-        const size_t minimum_block_size = std::max(parameters.minimum_block_size, lane_count);
-        const size_t maximum_block_size = std::max(parameters.maximum_block_size, lane_count);
+        size_t minimum_block_size = std::max(parameters.minimum_block_size, lane_count);
+        size_t maximum_block_size = std::max(parameters.maximum_block_size, lane_count);
         const auto storage_plan = require_block_storage_plan(
             query_length, target_length, maximum_block_size, parameters.is_trace_enabled);
 
         // The block recurrence uses negative costs for opening and extending gaps.
-        const int8_t negative_gap_open = static_cast<int8_t>(
+        const int16_t negative_gap_open = static_cast<int16_t>(
             -(static_cast<int>(parameters.gap_open) + parameters.gap_extend));
-        const int8_t negative_gap_extension = static_cast<int8_t>(-parameters.gap_extend);
+        const int16_t negative_gap_extension = static_cast<int16_t>(-parameters.gap_extend);
 
         block_padded_bytes query_padded, target_padded;
         if (construction_stats != nullptr) {
@@ -432,10 +416,12 @@ public:
         }
         if (parameters.input_order == block_input_order::reversed) {
             // Decode both inputs in reverse order directly into the DP buffers.
-            query_padded.template encode_region<p_is_reversed, true, p_alphabet_dimension>(
+            const auto query_copy = query_padded.template encode_region<p_is_reversed, true, p_alphabet_dimension>(
                 query_seq, query_start, query_end, maximum_block_size);
-            target_padded.template encode_region<false, true, p_alphabet_dimension>(
+            if (!query_copy) return std::unexpected(query_copy.error());
+            const auto target_copy = target_padded.template encode_region<false, true, p_alphabet_dimension>(
                 target_seq, target_start, target_end, maximum_block_size);
+            if (!target_copy) return std::unexpected(target_copy.error());
             if (execution_stats != nullptr) {
                 execution_stats->add(
                     execution_stats->reversed_compact_symbols, query_length);
@@ -444,11 +430,19 @@ public:
             }
         } else {
             // Encode the sub-region directly into its padded DP buffer.
-            query_padded.template encode_region<p_is_reversed, false, p_alphabet_dimension>(
+            const auto query_copy = query_padded.template encode_region<p_is_reversed, false, p_alphabet_dimension>(
                 query_seq, query_start, query_end, maximum_block_size);
-            target_padded.template encode_region<false, false, p_alphabet_dimension>(
+            if (!query_copy) return std::unexpected(query_copy.error());
+            const auto target_copy = target_padded.template encode_region<false, false, p_alphabet_dimension>(
                 target_seq, target_start, target_end, maximum_block_size);
+            if (!target_copy) return std::unexpected(target_copy.error());
         }
+
+        if (!count_equal_rank_chunk(query_padded.data_at(1), query_padded.data_at(1), query_length,
+                sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks
+            || !count_equal_rank_chunk(target_padded.data_at(1), target_padded.data_at(1), target_length,
+                sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks)
+            return std::unexpected(alignment_contract_error::invalid_matrix_layout);
 
         const bool is_trace_enabled = parameters.is_trace_enabled;
         if (construction_stats != nullptr) {
@@ -491,7 +485,7 @@ public:
                 ? parameters.x_drop_threshold
                 : 0;
             if (execution_stats != nullptr) {
-                align_block_core<
+                return align_block_core<
                     p_is_trace_enabled,
                     p_is_x_drop_enabled,
                     k_should_collect_stats,
@@ -501,7 +495,7 @@ public:
                     query_padded, target_padded, minimum_block_size, maximum_block_size,
                     effective_x_drop_threshold, core_stats);
             } else {
-                align_block_core<
+                return align_block_core<
                     p_is_trace_enabled,
                     p_is_x_drop_enabled,
                     !k_should_collect_stats,
@@ -513,14 +507,19 @@ public:
             }
         };
 
-        if (is_trace_enabled && is_x_drop_enabled) {
-            run_core(std::true_type{}, std::true_type{});
-        } else if (is_trace_enabled) {
-            run_core(std::true_type{}, std::false_type{});
-        } else if (is_x_drop_enabled) {
-            run_core(std::false_type{}, std::true_type{});
-        } else {
-            run_core(std::false_type{}, std::false_type{});
+        for (;;) {
+            const auto core_result = is_trace_enabled && is_x_drop_enabled
+                ? run_core(std::true_type{}, std::true_type{})
+                : is_trace_enabled ? run_core(std::true_type{}, std::false_type{})
+                : is_x_drop_enabled ? run_core(std::false_type{}, std::true_type{})
+                : run_core(std::false_type{}, std::false_type{});
+            if (core_result) break;
+            if (core_result.error() != alignment_contract_error::score_range
+                || maximum_block_size <= lane_count)
+                return std::unexpected(core_result.error());
+            maximum_block_size /= 2;
+            minimum_block_size = std::min(minimum_block_size, maximum_block_size);
+            scratch.clear(simd_tag, query_length, target_length, maximum_block_size, is_trace_enabled);
         }
 
         if (is_trace_enabled) {
@@ -588,7 +587,7 @@ template<sequence_alphabet p_alphabet>
 /**
  * Check whether an ungapped alignment is best for the requested gap.
  *
- * Select the query orientation, then try the packed DNA4 check with the prepared
+ * Select the query orientation, then try the packed alphabet check with the prepared
  * plan. Both intervals are half-open. The result distinguishes an unavailable
  * check, an inconclusive check and a proven alignment with its score and edit count
  */
@@ -603,13 +602,14 @@ template<sequence_alphabet p_alphabet>
     size_t target_end,
     const block_global_gap_certificate_plan& plan) noexcept
 {
-    return is_reversed
-        ? highway_block_aligner::try_packed_global_gap<true>(
-            query_sequence, target_sequence, query_start, query_end,
-            target_start, target_end, plan)
-        : highway_block_aligner::try_packed_global_gap<false>(
+    if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
+        if (is_reversed) return highway_block_aligner::try_packed_global_gap<true>(
             query_sequence, target_sequence, query_start, query_end,
             target_start, target_end, plan);
+    } else if (is_reversed) { return {}; }
+    return highway_block_aligner::try_packed_global_gap<false>(
+        query_sequence, target_sequence, query_start, query_end,
+        target_start, target_end, plan);
 }
 
 /**
@@ -621,7 +621,7 @@ template<sequence_alphabet p_alphabet>
  * Optional counters record execution work and scratch allocation.
  */
 template<sequence_alphabet p_alphabet>
-[[nodiscard]] ksw_alignment_result align_block(
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error> align_block(
     bool is_reversed,
     bool is_diagonal_certificate_enabled,
     bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
@@ -635,6 +635,7 @@ template<sequence_alphabet p_alphabet>
     block_aligner_execution_stats* execution_stats,
     block_aligner_construction_stats* construction_stats)
 {
+    if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
     if (is_reversed) {
         return is_diagonal_certificate_enabled
             ? highway_block_aligner::align<true, true>(
@@ -645,6 +646,9 @@ template<sequence_alphabet p_alphabet>
                 query_sequence, target_sequence, query_start, query_end,
                 target_start, target_end, scoring_matrix, parameters,
                 execution_stats, construction_stats);
+    }
+    } else if (is_reversed) {
+        return std::unexpected(alignment_contract_error::orientation);
     }
     return is_diagonal_certificate_enabled
         ? highway_block_aligner::align<false, true>(

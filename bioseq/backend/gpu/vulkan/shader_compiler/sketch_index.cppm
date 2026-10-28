@@ -35,6 +35,11 @@ layout(std430, set = 0, binding = 0) readonly buffer sequence_words_buffer { uin
 layout(std430, set = 0, binding = 1) readonly buffer rank_lookup_buffer {
     uint rank_to_code[256];
     uint rank_to_rc_code[256];
+    uint forward_seeds[256];
+    uint rank_count;
+    uint alphabet_code;
+    uint seed_policy_id;
+    uint canonical_reverse_complement;
 };
 layout(std430, set = 0, binding = 2) readonly buffer tiles_buffer { sketch_tile tiles[]; };
 layout(std430, set = 0, binding = 3) buffer tile_counts_buffer { uint tile_counts[]; };
@@ -108,14 +113,11 @@ uint64_t minimap_scramble(uint64_t key, uint64_t mask) {
     key = (key + (key << 31)) & mask;
     return key;
 }
-uint code_for_rank(uint rank) {
-    if (pc.alphabet_kind == 0u) return rank;
-    return rank_to_code[rank];
+uint rotate_left(uint value, uint shift) {
+    shift &= 31u;
+    return (value << shift) | (value >> ((32u - shift) & 31u));
 }
-uint rc_code_for_rank(uint rank) {
-    if (pc.alphabet_kind == 0u) return rank ^ 3u;
-    return rank_to_rc_code[rank];
-}
+uint rotate_right(uint value, uint shift) { return rotate_left(value, 32u - (shift & 31u)); }
 
 uint64_t hash_field_mask() {
     return pc.hash_bits >= 64u ? ~uint64_t(0)
@@ -125,11 +127,27 @@ uint64_t hash_field_mask() {
 // sketch element mirrors the scalar minimizer state machine element.
 struct sketch { uint64_t hash; uint pos; uint strand; uint is_max; };
 sketch max_sketch() { return sketch(hash_field_mask(), 0u, 0u, 1u); }
-bool sketch_leq(sketch a, sketch b) { return a.hash <= b.hash; }
-bool sketch_geq(sketch a, sketch b) { return a.hash >= b.hash; }
+bool sketch_leq(sketch a, sketch b) {
+    return a.is_max != b.is_max ? a.is_max < b.is_max : a.hash <= b.hash;
+}
+bool sketch_geq(sketch a, sketch b) { return sketch_leq(b, a); }
 bool sketch_match_diff(sketch a, sketch b) {
     return a.is_max == 0u && b.is_max == 0u && a.hash == b.hash
         && (a.pos != b.pos || a.strand != b.strand);
+}
+
+struct minimum_pair { sketch left; sketch right; };
+minimum_pair combine_minima(minimum_pair first, minimum_pair second) {
+    if (first.left.is_max != 0u) return second;
+    if (second.left.is_max != 0u) return first;
+    if (second.left.hash < first.left.hash) return second;
+    if (first.left.hash < second.left.hash) return first;
+    return minimum_pair(first.left.pos <= second.left.pos ? first.left : second.left,
+                        first.right.pos >= second.right.pos ? first.right : second.right);
+}
+bool same_selection(sketch first, sketch second) {
+    return first.is_max == 0u && second.is_max == 0u && first.hash == second.hash
+        && first.pos == second.pos && first.strand == second.strand;
 }
 
 bool query_gate_accepts(uint64_t hash) {
@@ -183,7 +201,7 @@ void write_minimizer(uint dst, sketch s) {
     } else {
         uint base = gmin * pc.words32_per_minimizer;
         uint64_t low = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
-        uint64_t high = (s.hash << 8) | uint64_t(pc.span_value & 0xffu);
+        uint64_t high = s.hash;
         out_words[base + 0u] = uint(low);
         out_words[base + 1u] = uint(low >> 32);
         out_words[base + 2u] = uint(high);
@@ -276,113 +294,76 @@ void process_tile(uint tile_id) {
         }
     }
 
-    // Rolling canonical-kmer hash constants (constant per tile).
-    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
-    uint roll_bits = pc.kmer_size * step_bits;
-    uint scramble_bits = pc.kmer_size * 2u;
-    bool hash_ok = (roll_bits <= 64u) && (scramble_bits <= 64u);
-    uint64_t roll_mask = (roll_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
-    uint64_t scramble_mask = (scramble_bits >= 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
-    uint shift_rc = step_bits * (pc.kmer_size - 1u);
     uint64_t hmask = hash_field_mask();
+    uint forward = 0u;
+    uint reverse = 0u;
 
-    uint64_t forward = uint64_t(0);
-    uint64_t reverse = uint64_t(0);
-    uint valid_rc = 0u;   // consecutive bases whose rc code < 4 (palindrome-safety vs candidate_at)
-
-    sketch ring[compile_time_maximum_span];
-    uint buf_pos = 0u;
+    minimum_pair suffix_ring[compile_time_maximum_span];
+    minimum_pair prefix_minimum = minimum_pair(max_sketch(), max_sketch());
+    for (uint slot = 0u; slot < pc.window_size; ++slot)
+        suffix_ring[slot] = minimum_pair(max_sketch(), max_sketch());
+    uint next_window_slot = 0u;
     uint valid_since_reset = 0u;
-    bool init_mode = (t.replay_lo == 0u);
-    sketch current_min = max_sketch();
-    uint current_min_pos = 0u;
+    sketch last_selected = max_sketch();
 
     for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
-        bool is_init = init_mode;
-
-        // --- rolling candidate ending at seq_pos (bit-exact with candidate_at) ---
         uint rank_here = read_rank_at_bp(seq_pos, pc.bits_per_char, pc.letters_per_unit,
                                          pc.unit_bits, g_seq_word_offset, pc.char_mask);
-        uint code = code_for_rank(rank_here);
-        uint rc = rc_code_for_rank(rank_here);
-        bool base_valid = code < 4u;          // matches candidate_at base_valid (forward code only)
-        if (code < 4u) {
-            forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
-        } else {
-            forward = uint64_t(0);
-        }
-        if (rc < 4u) {
-            reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
-            valid_rc = valid_rc + 1u;
-        } else {
-            reverse = uint64_t(0);
-            valid_rc = 0u;
-        }
-        sketch cand = max_sketch();
-
+        bool base_valid = rank_here < rank_count;
         sketch pushed = max_sketch();
         if (!base_valid) {
+            forward = 0u;
+            reverse = 0u;
             valid_since_reset = 0u;
         } else {
-            valid_since_reset = valid_since_reset + 1u;
-            if (hash_ok && valid_since_reset >= pc.kmer_size && valid_rc >= pc.kmer_size
-                && forward != reverse) {
-                uint64_t canonical = forward < reverse ? forward : reverse;
-                uint64_t h = minimap_scramble(canonical, scramble_mask) & hmask;
-                if (h != hmask) cand = sketch(h, seq_pos, forward < reverse ? 0u : 1u, 0u);
-            }
-            if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
-        }
-        uint prev_pos = buf_pos;
-        ring[buf_pos] = pushed;
-        buf_pos = (buf_pos + 1u) % pc.window_size;
-
-        if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
-            && current_min.is_max == 0u) {
-            for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
-            }
-            for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
-            }
-        }
-
-        if (sketch_leq(pushed, current_min)) {
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size || !is_init)
-                && current_min.is_max == 0u) {
-                emit_one(t, current_min, seq_pos);
-            }
-            current_min_pos = prev_pos;
-            current_min = pushed;
-        } else if (prev_pos == current_min_pos) {
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
-                && current_min.is_max == 0u) {
-                emit_one(t, current_min, seq_pos);
-            }
-            current_min = max_sketch();
-            for (uint j = buf_pos; j < pc.window_size; ++j) {
-                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
-            }
-            for (uint j = 0u; j < buf_pos; ++j) {
-                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
-            }
-            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
-                && current_min.is_max == 0u) {
-                for (uint j = buf_pos; j < pc.window_size; ++j) {
-                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
+            forward = rotate_left(forward, 7u) ^ forward_seeds[rank_here];
+            if (valid_since_reset >= pc.kmer_size) {
+                uint evicted = read_rank_at_bp(seq_pos - pc.kmer_size,
+                    pc.bits_per_char, pc.letters_per_unit, pc.unit_bits,
+                    g_seq_word_offset, pc.char_mask);
+                forward ^= rotate_left(forward_seeds[evicted], 7u * pc.kmer_size);
+                if (canonical_reverse_complement != 0u) {
+                    reverse = rotate_right(reverse, 7u)
+                        ^ rotate_right(forward_seeds[rank_to_rc_code[evicted]], 7u)
+                        ^ rotate_left(forward_seeds[rank_to_rc_code[rank_here]],
+                                      7u * (pc.kmer_size - 1u));
                 }
-                for (uint j = 0u; j < buf_pos; ++j) {
-                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
-                }
+            } else if (canonical_reverse_complement != 0u) {
+                reverse ^= rotate_left(forward_seeds[rank_to_rc_code[rank_here]],
+                                       7u * valid_since_reset);
+            }
+            valid_since_reset += 1u;
+            if (valid_since_reset >= pc.kmer_size) {
+                uint native_hash = canonical_reverse_complement != 0u
+                    ? forward + reverse : forward;
+                uint strand = canonical_reverse_complement != 0u && reverse < forward ? 1u : 0u;
+                pushed = sketch(uint64_t(native_hash) & hmask, seq_pos, strand, 0u);
             }
         }
-
-        if (init_mode && valid_since_reset >= pc.window_size + pc.kmer_size) init_mode = false;
-    }
-
-    // Final emit belongs to the sequence end; only the owning final tile does it.
-    if (loop_hi >= t.bp_count && current_min.is_max == 0u) {
-        emit_one(t, current_min, t.bp_count > 0u ? t.bp_count - 1u : 0u);
+        if (valid_since_reset < pc.kmer_size) continue;
+        minimum_pair entering = minimum_pair(pushed, pushed);
+        uint written_slot = next_window_slot;
+        next_window_slot = (next_window_slot + 1u) % pc.window_size;
+        suffix_ring[written_slot] = entering;
+        prefix_minimum = combine_minima(prefix_minimum, entering);
+        if (next_window_slot == 0u) {
+            minimum_pair suffix = suffix_ring[pc.window_size - 1u];
+            for (uint slot = pc.window_size - 1u; slot > 0u; --slot) {
+                suffix = combine_minima(suffix_ring[slot - 1u], suffix);
+                suffix_ring[slot - 1u] = suffix;
+            }
+            prefix_minimum = entering;
+        }
+        if (valid_since_reset < pc.kmer_size + pc.window_size - 1u) continue;
+        minimum_pair selected = combine_minima(prefix_minimum, suffix_ring[next_window_slot]);
+        if (!same_selection(selected.left, last_selected)) {
+            emit_one(t, selected.left, seq_pos);
+            last_selected = selected.left;
+        }
+        if (selected.right.pos != selected.left.pos && !same_selection(selected.right, last_selected)) {
+            emit_one(t, selected.right, seq_pos);
+            last_selected = selected.right;
+        }
     }
 
     if (pc.emit_mode == 0u) {

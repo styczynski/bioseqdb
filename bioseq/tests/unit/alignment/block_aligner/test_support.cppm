@@ -138,7 +138,7 @@ xdrop_params(block_alignment_stage stage, block_input_order input_order, bool tr
                                                                   scoring,
                                                                   params,
                                                                   &run.stats,
-                                                                  &run.construction);
+                                                                  &run.construction).value();
     return run;
 }
 
@@ -186,7 +186,7 @@ template <bool p_strand_reversed, bool p_enable_diagonal_certificate, class p_se
                                                                    scoring,
                                                                    params,
                                                                    &run.stats,
-                                                                   &run.construction);
+                                                                   &run.construction).value();
     return run;
 }
 
@@ -275,7 +275,7 @@ void check_align_result_identical(const ksw_alignment_result& optimized,
                                                                   scoring,
                                                                   params,
                                                                   &run.stats,
-                                                                  &run.construction);
+                                                                  &run.construction).value();
     return run;
 }
 
@@ -369,9 +369,9 @@ void check_scoring_matrix_facade_parity(std::string_view alphabet_name) {
 
     for (const auto& generation : scoring_matrix_generation_cases) {
         const auto canonical =
-            canonical_matrix::generate(generation.match, generation.mismatch, generation.ambiguity);
+            canonical_matrix::generate(generation.match, generation.mismatch, generation.ambiguity).value();
         const auto adapted =
-            adapted_matrix::generate(generation.match, generation.mismatch, generation.ambiguity);
+            adapted_matrix::generate(generation.match, generation.mismatch, generation.ambiguity).value();
 
         INFO("alphabet=" << alphabet_name << " score-case=" << generation.description << " scores=("
                          << static_cast<int>(generation.match) << ','

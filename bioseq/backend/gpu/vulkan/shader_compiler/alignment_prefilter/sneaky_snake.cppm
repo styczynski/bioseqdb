@@ -39,18 +39,18 @@ uint matching_run(
         submaze_end - position,
         job.query_length - query_cursor);
     uint run = 0u;
-    uint target_start = job.target_offset + position;
-    uint query_start = job.query_offset + query_cursor;
+    uint target_start = job.target_start + position;
+    uint query_start = job.query_start + query_cursor;
     while (run < run_limit && ((target_start + run) & 3u) != 0u) {
-        if (target_rank(target_start + run)
-            != query_rank(query_start + run)) {
+        if (target_rank(job, target_start + run)
+            != query_rank(job, query_start + run)) {
             return run;
         }
         ++run;
     }
     while (run_limit - run >= 4u) {
-        uint query_word = query_rank_quad(query_start + run);
-        uint target_word = target_rank_words[(target_start + run) >> 2u];
+        uint query_word = query_rank_quad(job, query_start + run);
+        uint target_word = target_rank_quad(job, target_start + run);
         uint different = query_word ^ target_word;
         if (different != 0u) {
             return run + (uint(findLSB(different)) >> 3u);
@@ -58,8 +58,8 @@ uint matching_run(
         run += 4u;
     }
     while (run < run_limit) {
-        if (target_rank(target_start + run)
-            != query_rank(query_start + run)) {
+        if (target_rank(job, target_start + run)
+            != query_rank(job, query_start + run)) {
             break;
         }
         ++run;

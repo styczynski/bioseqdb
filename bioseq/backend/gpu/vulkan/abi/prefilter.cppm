@@ -30,17 +30,20 @@ inline constexpr std::uint32_t k_gpu_gatekeeper_max_edits = 8u;
 struct gpu_prefilter_push {
     std::uint32_t job_count = 0; ///< Number of jobs and matching result slots.
     std::uint32_t mode = 0;      ///< SneakySnake lanes per job (1 or 8). GateKeeper uses 0.
-    std::uint32_t query_rank_count = 0;  ///< Query symbol count  used to check job ranges.
-    std::uint32_t target_rank_count = 0; ///< Target symbol count used to check job ranges.
+    std::uint32_t query_record_count = 0;  ///< Query symbol count  used to check job ranges.
+    std::uint32_t target_record_count = 0; ///< Target symbol count used to check job ranges.
 };
 // Keep the C++ job layout equal to the shader job layout.
 static_assert(std::is_standard_layout_v<bioseq::prefilter::prefilter_job>);
-static_assert(sizeof(bioseq::prefilter::prefilter_job) == 20);
-static_assert(offsetof(bioseq::prefilter::prefilter_job, query_offset) == 0);
-static_assert(offsetof(bioseq::prefilter::prefilter_job, target_offset) == 4);
-static_assert(offsetof(bioseq::prefilter::prefilter_job, query_length) == 8);
-static_assert(offsetof(bioseq::prefilter::prefilter_job, target_length) == 12);
-static_assert(offsetof(bioseq::prefilter::prefilter_job, max_edits) == 16);
+static_assert(sizeof(bioseq::prefilter::prefilter_job) == 32);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, query_record_index) == 0);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, target_record_index) == 4);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, query_start) == 8);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, target_start) == 12);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, query_length) == 16);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, target_length) == 20);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, max_edits) == 24);
+static_assert(offsetof(bioseq::prefilter::prefilter_job, orientation) == 28);
 // Keep the C++ result layout equal to the shader result layout.
 static_assert(std::is_standard_layout_v<bioseq::prefilter::prefilter_result>);
 static_assert(sizeof(bioseq::prefilter::prefilter_result) == 16);
@@ -53,7 +56,7 @@ static_assert(std::is_standard_layout_v<gpu_prefilter_push>);
 static_assert(sizeof(gpu_prefilter_push) == 16);
 static_assert(offsetof(gpu_prefilter_push, job_count) == 0);
 static_assert(offsetof(gpu_prefilter_push, mode) == 4);
-static_assert(offsetof(gpu_prefilter_push, query_rank_count) == 8);
-static_assert(offsetof(gpu_prefilter_push, target_rank_count) == 12);
+static_assert(offsetof(gpu_prefilter_push, query_record_count) == 8);
+static_assert(offsetof(gpu_prefilter_push, target_record_count) == 12);
 
 } // namespace bioseq::gpu::vulkan

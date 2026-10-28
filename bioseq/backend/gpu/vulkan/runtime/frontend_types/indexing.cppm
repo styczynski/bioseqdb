@@ -338,6 +338,9 @@ choose_sorted_values(const sorted_pair_device_views& views) noexcept {
 /// Query minimizers can already be on the GPU or be uploaded from host bytes.
 /// The target lookup table and positions must be GPU buffers.
 struct gpu_seed_inputs {
+    gpu_native_sequence_upload native_query{};
+    gpu_native_sequence_upload native_target{};
+    const vulkan_rank_lut* native_rank_policy = nullptr;
     std::span<const std::byte> host_minimizer_bytes{}; ///< Host minimizer bytes uploaded once when resident words are absent.
     const buffer* device_minimizer_words = nullptr;    ///< Resident minimizer device buffer, when already on GPU.
     const buffer* slots = nullptr;                     ///< Target lookup table on the GPU.
@@ -353,6 +356,20 @@ struct gpu_seed_inputs {
     std::uint32_t pos_bits = 0;                        ///< Number of bits used for a minimizer position.
     std::uint32_t bucket_count = 0;                    ///< Dense bucket count when slots are hash-sorted, else zero.
     std::uint64_t target_position_offset = 0;            ///< Base offset added to decoded target positions.
+};
+
+/** Admitted compacted native-verified anchors retained through their consumer. */
+struct gpu_verified_seed_buffer {
+    bioseq::parallelism::memory_permit permit{};
+    buffer anchors{};
+    std::uint64_t candidate_count{};
+    std::uint64_t verified_count{};
+    std::uint64_t emitted_count{};
+    std::uint64_t coverage_interval_count{};
+    std::uint64_t vulkan_allocation_bytes{};
+    std::uint64_t coverage_submit_wait_identity{};
+    std::uint64_t verify_count_submit_wait_identity{};
+    std::uint64_t verify_emit_submit_wait_identity{};
 };
 
 } // namespace bioseq::gpu::vulkan

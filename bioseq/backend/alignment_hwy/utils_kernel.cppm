@@ -24,6 +24,37 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
+ * Score independently varying target/query rank pairs in the current DP vector.
+ * Each target row uses the same segmented Highway byte tables as Block scoring;
+ * ranks beyond the first sixteen select subsequent tables without truncation.
+ */
+template <sequence_alphabet p_alphabet, class D>
+HWY_INLINE hn::Vec<D> get_pair_scores(
+    const scoring_matrix<p_alphabet>& matrix, D score_tag,
+    hn::Vec<hn::RebindToUnsigned<D>> targets,
+    hn::Vec<hn::RebindToUnsigned<D>> queries) {
+    static_assert(std::is_same_v<hn::TFromD<D>, std::int8_t>);
+    const hn::RebindToUnsigned<D> rank_tag;
+    const auto low_indices = hn::And(queries, hn::Set(rank_tag, std::uint8_t{15}));
+    const auto table_indices = hn::ShiftRight<4>(queries);
+    auto selected = hn::Set(rank_tag, std::uint8_t{128});
+    for (std::size_t row = 0; row < scoring_matrix<p_alphabet>::k_simd_rows; ++row) {
+        const auto row_mask = hn::Eq(targets, hn::Set(rank_tag, static_cast<std::uint8_t>(row)));
+        if (hn::AllFalse(rank_tag, row_mask)) continue;
+        const auto* row_pointer = reinterpret_cast<const std::uint8_t*>(matrix.simd_row_pointer(row));
+        auto row_scores = hn::Set(rank_tag, std::uint8_t{128});
+        for (std::size_t table = 0; table < scoring_matrix<p_alphabet>::k_simd_lookup_count; ++table) {
+            const auto lookup = hn::LoadDup128(rank_tag, row_pointer + table * 16);
+            const auto scores = hn::TableLookupBytes(lookup, low_indices);
+            row_scores = hn::IfThenElse(hn::Eq(table_indices,
+                hn::Set(rank_tag, static_cast<std::uint8_t>(table))), scores, row_scores);
+        }
+        selected = hn::IfThenElse(row_mask, row_scores, selected);
+    }
+    return hn::BitCast(score_tag, selected);
+}
+
+/**
  * @brief Loads one score row into SIMD byte-lookup tables.
  *
  * The tables can be reused when aligning several query vectors against
@@ -38,7 +69,7 @@ template <sequence_alphabet p_alphabet, class p_simd_tag>
 HWY_INLINE auto load_score_lookup_tables(
     const scoring_matrix<p_alphabet>& matrix,
     p_simd_tag simd_tag,
-    std::uint8_t rank) {
+    std::uint8_t rank, bool transposed = false) {
     static_assert(
         std::is_same_v<hn::TFromD<p_simd_tag>, std::int16_t>,
         "Score lookup requires an int16 SIMD tag");
@@ -47,13 +78,13 @@ HWY_INLINE auto load_score_lookup_tables(
     using lookup_vector = decltype(hn::LoadDup128(
         doubled_byte_tag,
         reinterpret_cast<const std::uint8_t*>(
-            matrix.simd_row_pointer(rank))));
+            matrix.simd_row_pointer(rank, transposed))));
     std::array<
         lookup_vector,
         scoring_matrix<p_alphabet>::k_simd_lookup_count>
         lookup_tables{};
     const auto* row = reinterpret_cast<const std::uint8_t*>(
-        matrix.simd_row_pointer(rank));
+        matrix.simd_row_pointer(rank, transposed));
     for (std::size_t lookup_index = 0;
          lookup_index
             < scoring_matrix<p_alphabet>::k_simd_lookup_count;

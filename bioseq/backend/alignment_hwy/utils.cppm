@@ -4,7 +4,10 @@
  */
 module;
 
+#include <algorithm>
 #include <array>
+#include <expected>
+#include <span>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -14,213 +17,237 @@ export module bioseq.alignment.utils;
 
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.simd.utils;
 
 export namespace bioseq::simd {
 
+/** A typed rejection shared by prepared scoring and CPU/GPU alignment adapters. */
+enum class alignment_contract_error : std::uint8_t {
+    none, gap_penalty, block_geometry, x_drop_threshold, stage_mode,
+    lane_shape, coordinates, scoring_matrix, trace_accounting,
+    score_range, score_accumulation, invalid_matrix_layout, orientation,
+    source_read_failed, device_capability, memory_admission,
+};
+
+/** Whether every biological diagonal/off-diagonal and synthetic score is uniform. */
+enum class substitution_kind : std::uint8_t { uniform = 0, dense = 1 };
+
+/** Matrix extrema and the uniform-scoring proof computed once during preparation. */
+struct substitution_summary final {
+    std::int32_t minimum = 0;
+    std::int32_t maximum = 0;
+    std::int32_t equal_score = 0;
+    std::int32_t unequal_score = 0;
+    std::int32_t unknown_score = 0;
+    bool uniform_diagonal = false;
+    bool uniform_off_diagonal = false;
+    bool uniform_unknown = false;
+};
+
 /**
- * @brief Stores substitution scores and padded copies for SIMD lookup.
- *
- * @tparam p_alphabet Sequence  alphabet.
- * @tparam p_alphabet_dimension Number of ranks, including the wildcard.
+ * Check accumulation and optional int8 difference-encoding bounds before allocation.
+ * Gap pairs are positive extension/nonnegative opening costs; omitted long costs use
+ * the single pair. All arithmetic is widened before multiplication or normalization.
  */
+[[nodiscard]] inline std::expected<void, alignment_contract_error>
+validate_alignment_numeric_contract(
+    const substitution_summary& scores,
+    std::size_t query_length, std::size_t target_length,
+    std::int32_t gap_open, std::int32_t gap_extend,
+    std::int32_t end_bonus = 0, std::int32_t z_drop = -1,
+    std::int32_t gap_open_long = -1, std::int32_t gap_extend_long = -1,
+    bool require_narrow_differences = true) noexcept {
+    if (gap_open < 0 || gap_extend <= 0
+        || (gap_open_long < 0 && (gap_open_long != -1 || gap_extend_long != -1))
+        || (gap_open_long >= 0 && gap_extend_long <= 0)) {
+        return std::unexpected(alignment_contract_error::gap_penalty);
+    }
+    if (gap_open_long >= 0) {
+        if (gap_open <= gap_open_long && gap_extend <= gap_extend_long) {
+            gap_open_long = gap_open;
+            gap_extend_long = gap_extend;
+        } else if (gap_open_long <= gap_open && gap_extend_long <= gap_extend) {
+            gap_open = gap_open_long;
+            gap_extend = gap_extend_long;
+        }
+    }
+    const std::int64_t long_open = gap_open_long < 0 ? gap_open : gap_open_long;
+    const std::int64_t long_extend = gap_open_long < 0 ? gap_extend : gap_extend_long;
+    const std::int64_t short_cost = std::int64_t{gap_open} + gap_extend;
+    const std::int64_t long_cost = long_open + long_extend;
+    const std::int64_t maximum_cost = std::max(short_cost, long_cost);
+    const std::int64_t minimum_cost = std::min(short_cost, long_cost);
+    const std::int64_t magnitude = std::max(
+        -std::int64_t{scores.minimum}, std::int64_t{scores.maximum});
+    if (scores.minimum < -127 || scores.maximum > 127
+        || scores.minimum > scores.maximum || scores.maximum < 0
+        || (require_narrow_differences
+            && (scores.minimum < -2 * minimum_cost
+                || 4 * maximum_cost + 2 * magnitude > 120))) {
+        return std::unexpected(alignment_contract_error::score_range);
+    }
+    constexpr std::uint64_t score_limit = std::uint64_t{1} << 29;
+    const std::uint64_t per_step = static_cast<std::uint64_t>(magnitude
+        + std::max(std::int64_t{gap_open}, long_open)
+        + std::max(std::int64_t{gap_extend}, long_extend));
+    const std::int64_t signed_bonus = end_bonus;
+    const std::uint64_t extras = static_cast<std::uint64_t>(
+        signed_bonus < 0 ? -signed_bonus : signed_bonus)
+        + static_cast<std::uint64_t>(std::max(z_drop, 0));
+    if (extras >= score_limit
+        || query_length >= score_limit || target_length >= score_limit
+        || query_length > score_limit - target_length
+        || (per_step != 0 && query_length + target_length
+            > (score_limit - 1 - extras) / per_step)) {
+        return std::unexpected(alignment_contract_error::score_accumulation);
+    }
+    return {};
+}
+
+/** Immutable substitution scores with synchronized byte lookup and wide gather tables. */
 template <sequence_alphabet p_alphabet, std::size_t p_alphabet_dimension>
 struct scoring_matrix_storage {
     using alphabet_type = p_alphabet;
-
     static constexpr std::size_t k_alphabet_dimension = p_alphabet_dimension;
-    static_assert(
-        p_alphabet_dimension > 1,
-        "Scoring matrices require at least two ranks");
-
-    static constexpr std::size_t k_entry_count =
-        p_alphabet_dimension * p_alphabet_dimension;
-    static constexpr int k_dimension =
-        static_cast<int>(p_alphabet_dimension);
-
-    /** @brief Substitution scores indexed by row and column rank. */
-    std::array<std::int8_t, k_entry_count> entries{};
-
+    static_assert(p_alphabet_dimension > 1);
+    static constexpr std::size_t k_entry_count = p_alphabet_dimension * p_alphabet_dimension;
+    static constexpr int k_dimension = static_cast<int>(p_alphabet_dimension);
     static constexpr std::size_t k_simd_rows = p_alphabet_dimension + 1;
-    static constexpr std::size_t k_simd_lookup_count =
-        (p_alphabet_dimension + 1 + 15) / 16;
+    // Highway byte tables select one of sixteen entries per 128-bit lookup block.
+    static constexpr std::size_t k_simd_lookup_count = (k_simd_rows + 15) / 16;
     static constexpr std::size_t k_simd_columns = k_simd_lookup_count * 16;
-    static constexpr std::uint8_t k_null_byte =
-        static_cast<std::uint8_t>(p_alphabet_dimension);
+    static constexpr std::uint8_t k_null_byte = static_cast<std::uint8_t>(p_alphabet_dimension);
+    static_assert(p_alphabet_dimension < std::numeric_limits<std::uint8_t>::max());
 
-    static_assert(
-        p_alphabet_dimension
-            < std::numeric_limits<std::uint8_t>::max(),
-        "Scoring rank and null sentinel must fit in uint8_t");
+private:
+    std::array<std::int8_t, k_entry_count> entries_{};
+    alignas(64) std::array<std::int8_t, k_simd_rows * k_simd_columns> simd_scores_{};
+    alignas(64) std::array<std::int32_t, k_simd_rows * k_simd_rows> gather_scores_{};
+    alignas(64) std::array<std::int8_t, k_simd_rows * k_simd_columns> transposed_scores_{};
+    substitution_summary summary_{};
+    substitution_kind kind_ = substitution_kind::dense;
+    bool prepared_ = false;
 
-    /** @brief Score rows padded for byte-table SIMD lookup. */
-    alignas(64) std::array<
-        std::int8_t,
-        k_simd_rows * k_simd_columns> simd_scores{};
-    static_assert(
-        sizeof(decltype(simd_scores))
-            == k_simd_rows * k_simd_columns * sizeof(std::int8_t),
-        "SIMD scoring storage must not add element overhead");
-
-    /**
-     * @brief Reads the score for a pair of ranks.
-     * @pre Ranks must be nonnegative and below dimension. No bounds check is performed.
-     */
-    [[nodiscard]] constexpr std::int8_t at(
-        int row,
-        int column) const noexcept {
-        return entries[
-            static_cast<std::size_t>(row) * p_alphabet_dimension + column];
+public:
+    /** Read the target-row/query-column substitution score. */
+    [[nodiscard]] constexpr std::int8_t at(std::size_t row, std::size_t column) const noexcept {
+        return entries_[row * p_alphabet_dimension + column];
     }
-
-    /**
-     * @brief Returns a mutable score for a pair of ranks.
-     * @pre Ranks must be nonnegative and below dimension. Update simd_scores separately when needed.
-     */
-    [[nodiscard]] constexpr std::int8_t& at(
-        int row,
-        int column) noexcept {
-        return entries[
-            static_cast<std::size_t>(row) * p_alphabet_dimension + column];
+    /** Read the complete logical table, including the synthetic unknown rank. */
+    [[nodiscard]] constexpr std::span<const std::int8_t> score_entries() const noexcept {
+        return entries_;
     }
-
-    /**
-     * @brief Returns the first diagonal score, used as the match score.
-     */
-    [[nodiscard]] constexpr std::int8_t match_score() const noexcept {
-        return entries[0];
+    /** Return the immutable proof and extrema computed by the checked factory. */
+    [[nodiscard]] constexpr const substitution_summary& summary() const noexcept { return summary_; }
+    /** Select the uniform compare path only when the entire matrix supports it. */
+    [[nodiscard]] constexpr substitution_kind kind() const noexcept { return kind_; }
+    /** Return the uniform diagonal representative; dense callers use maximum instead. */
+    [[nodiscard]] constexpr std::int8_t match_score() const noexcept { return entries_[0]; }
+    /** Return the uniform off-diagonal representative. */
+    [[nodiscard]] constexpr std::int8_t mismatch_score() const noexcept { return entries_[1]; }
+    /** Return the synthetic unknown representative, including a deliberate zero. */
+    [[nodiscard]] constexpr std::int8_t wildcard_score() const noexcept { return entries_.back(); }
+    /** Access one padded row for Highway byte-table lookup. */
+    [[nodiscard]] const std::int8_t* simd_row_pointer(std::size_t row, bool transposed = false) const noexcept {
+        return (transposed ? transposed_scores_.data() : simd_scores_.data()) + row * k_simd_columns;
     }
-
-    /**
-     * @brief Returns the first off-diagonal score, used as the mismatch score.
-     */
-    [[nodiscard]] constexpr std::int8_t mismatch_score() const noexcept {
-        return entries[1];
-    }
-
-    /**
-     * @brief Returns the score for aligning two wildcard ranks.
-     */
-    [[nodiscard]] constexpr std::int8_t wildcard_score() const noexcept {
-        return entries[k_entry_count - 1];
-    }
-
-    /**
-     * @brief Returns a padded SIMD lookup row.
-     * @param[in] row Rank to look up, including the extra sentinel rank.
-     * @return Pointer into this matrix's aligned score storage.
-     */
-    [[nodiscard]] const std::int8_t* simd_row_pointer(
-        std::size_t row) const noexcept {
-        return simd_scores.data() + row * k_simd_columns;
-    }
-
-    /**
-     * @brief Checks that SIMD scores match entries and all  padding is INT8_MIN.
-     */
-    // Each Highway translation unit has a different ISA. Keep this small
-    // imported template predicate in its caller so the linker cannot coalesce
-    // an AVX-512 definition into an AVX2 call site with the same weak symbol.
-    [[nodiscard, gnu::always_inline]] bool is_block_layout_valid() const noexcept {
-        for (std::size_t row = 0; row < p_alphabet_dimension; ++row) {
-            for (std::size_t column = 0;
-                 column < p_alphabet_dimension;
-                 ++column) {
-                if (simd_scores[row * k_simd_columns + column]
-                    != entries[row * p_alphabet_dimension + column]) {
-                    return false;
-                }
-            }
-            for (std::size_t column = p_alphabet_dimension;
-                 column < k_simd_columns;
-                 ++column) {
-                if (simd_scores[row * k_simd_columns + column]
-                    != std::numeric_limits<std::int8_t>::min()) {
-                    return false;
-                }
-            }
-        }
-        for (std::size_t column = 0; column < k_simd_columns; ++column) {
-            if (simd_scores[p_alphabet_dimension * k_simd_columns + column]
-                != std::numeric_limits<std::int8_t>::min()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * @brief Hashes the matrix dimension and scores to identify a scoring setup.
-     *
-     * Block Aligner uses this value when checking a preprred execution plan.
-     */
+    /** Access the target-major table, including the inaccessible padding row/column. */
+    [[nodiscard]] const std::int32_t* gather_scores() const noexcept { return gather_scores_.data(); }
+    /** Factories are the only writers; successful preparation proves both layouts. */
+    [[nodiscard, gnu::always_inline]] bool is_block_layout_valid() const noexcept { return prepared_; }
+    /** Hash alphabet rank characters and scores for prepared execution-plan identity. */
     [[nodiscard]] std::uint64_t block_semantic_identity() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
-        const auto mix = [&hash](std::uint64_t value) noexcept {
-            hash ^= value;
-            hash *= 1099511628211ULL;
-        };
+        const auto mix = [&hash](std::uint64_t value) noexcept { hash ^= value; hash *= 1099511628211ULL; };
         mix(p_alphabet_dimension);
-        for (const std::int8_t score : entries) {
-            mix(static_cast<std::uint8_t>(score));
+        if constexpr (alphabet_in_supported_set<supported_biological_alphabets, p_alphabet>)
+            mix(supported_biological_alphabets::template index_of<p_alphabet>());
+        for (std::size_t rank = 0; rank < seqan3::alphabet_size<p_alphabet>; ++rank) {
+            mix(static_cast<std::uint8_t>(seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}))));
         }
+        for (const std::int8_t score : entries_) mix(static_cast<std::uint8_t>(score));
         return hash;
     }
-
-    /**
-     * @brief Builds scalar and SIMD substitution, tables from match and penalty values.
-     *
-     * Stores the match magnitude as a reward and mismatch and wildcard values
-     * as nonpositive penalties. Any pair containing the final wildcard rank
-     * receives the wildcard penalty SIMD padding is INT8_MIN.
-     *
-     * @param[in] match Match score in either sign convention. Its magnitude must fit in int8_t.
-     * @param[in] mismatch_penalty Mismatch penalty in either  sign convention.
-     * @param[in] ambiguity_penalty Wildcard penalty in either sign convention.
-     * @return Matrix with matching scalar and SIMD score tables.
-     */
-    [[nodiscard]] static scoring_matrix_storage generate(
-        std::int8_t match,
-        std::int8_t mismatch_penalty,
-        std::int8_t ambiguity_penalty) {
+    /** Validate dense int32 input once, then construct every read-only kernel layout. */
+    [[nodiscard]] static std::expected<scoring_matrix_storage, alignment_contract_error>
+    from_entries(const std::array<std::int32_t, k_entry_count>& values) {
         scoring_matrix_storage matrix{};
-        constexpr int k_base_count = k_dimension - 1;
-
-        const std::int8_t positive_match = match > 0
-            ? match
-            : static_cast<std::int8_t>(-match);
-        const std::int8_t negative_mismatch = mismatch_penalty > 0
-            ? static_cast<std::int8_t>(-mismatch_penalty)
-            : mismatch_penalty;
-        const std::int8_t negative_ambiguity = ambiguity_penalty > 0
-            ? static_cast<std::int8_t>(-ambiguity_penalty)
-            : ambiguity_penalty;
-
-        for (int row = 0; row < k_base_count; ++row) {
-            for (int column = 0; column < k_base_count; ++column) {
-                matrix.at(row, column) = row == column
-                    ? positive_match
-                    : negative_mismatch;
-            }
-            matrix.at(row, k_base_count) = negative_ambiguity;
-        }
-        for (int column = 0; column <= k_base_count; ++column) {
-            matrix.at(k_base_count, column) = negative_ambiguity;
-        }
-
-        for (auto& score : matrix.simd_scores) {
-            score = std::numeric_limits<std::int8_t>::min();
-        }
-        for (int row = 0; row < k_dimension; ++row) {
-            for (int column = 0; column < k_dimension; ++column) {
-                matrix.simd_scores[
-                    static_cast<std::size_t>(row) * k_simd_columns + column]
-                    = matrix.at(row, column);
+        matrix.summary_.minimum = 127;
+        matrix.summary_.maximum = -127;
+        matrix.summary_.equal_score = values.front();
+        matrix.summary_.unequal_score = values[1];
+        matrix.summary_.unknown_score = values.back();
+        matrix.summary_.uniform_diagonal = true;
+        matrix.summary_.uniform_off_diagonal = true;
+        matrix.summary_.uniform_unknown = true;
+        matrix.simd_scores_.fill(std::numeric_limits<std::int8_t>::min());
+        matrix.transposed_scores_.fill(std::numeric_limits<std::int8_t>::min());
+        matrix.gather_scores_.fill(std::numeric_limits<std::int8_t>::min());
+        constexpr std::size_t biological_ranks = p_alphabet_dimension - 1;
+        for (std::size_t row = 0; row < p_alphabet_dimension; ++row) {
+            for (std::size_t column = 0; column < p_alphabet_dimension; ++column) {
+                const auto value = values[row * p_alphabet_dimension + column];
+                if (value < -127 || value > 127) return std::unexpected(alignment_contract_error::score_range);
+                matrix.entries_[row * p_alphabet_dimension + column] = static_cast<std::int8_t>(value);
+                matrix.simd_scores_[row * k_simd_columns + column] = static_cast<std::int8_t>(value);
+                matrix.gather_scores_[row * k_simd_rows + column] = value;
+                matrix.transposed_scores_[column * k_simd_columns + row] = static_cast<std::int8_t>(value);
+                matrix.summary_.minimum = std::min(matrix.summary_.minimum, value);
+                matrix.summary_.maximum = std::max(matrix.summary_.maximum, value);
+                if (row == biological_ranks || column == biological_ranks)
+                    matrix.summary_.uniform_unknown &= value == matrix.summary_.unknown_score;
+                else if (row == column) matrix.summary_.uniform_diagonal &= value == matrix.summary_.equal_score;
+                else matrix.summary_.uniform_off_diagonal &= value == matrix.summary_.unequal_score;
             }
         }
-
+        matrix.kind_ = matrix.summary_.uniform_diagonal && matrix.summary_.uniform_off_diagonal
+            && matrix.summary_.uniform_unknown ? substitution_kind::uniform : substitution_kind::dense;
+        matrix.prepared_ = true;
         return matrix;
     }
+    /** Validate magnitudes before sign normalization and prepare uniform scoring. */
+    [[nodiscard]] static std::expected<scoring_matrix_storage, alignment_contract_error>
+    generate(std::int32_t match, std::int32_t mismatch_penalty, std::int32_t ambiguity_penalty) {
+        if (match < -127 || match > 127 || mismatch_penalty < -127 || mismatch_penalty > 127
+            || ambiguity_penalty < -127 || ambiguity_penalty > 127)
+            return std::unexpected(alignment_contract_error::score_range);
+        const auto reward = match < 0 ? -match : match;
+        const auto mismatch = mismatch_penalty > 0 ? -mismatch_penalty : mismatch_penalty;
+        const auto unknown = ambiguity_penalty > 0 ? -ambiguity_penalty : ambiguity_penalty;
+        std::array<std::int32_t, k_entry_count> values{};
+        constexpr std::size_t biological_ranks = p_alphabet_dimension - 1;
+        for (std::size_t row = 0; row < p_alphabet_dimension; ++row)
+            for (std::size_t column = 0; column < p_alphabet_dimension; ++column)
+                values[row * p_alphabet_dimension + column] = row == biological_ranks || column == biological_ranks
+                    ? unknown : row == column ? reward : mismatch;
+        return from_entries(values);
+    }
 };
+
+/**
+ * Fill only the selected DP interval through checked borrowed rank windows.
+ * Biological orientation and DP traversal reversal are independent compile-time choices.
+ */
+template<bool QueryReversed, bool WriteReversed, class Sequence>
+[[nodiscard, gnu::always_inline]] inline std::expected<void, alignment_contract_error> copy_checked_alignment_ranks(
+    const Sequence& sequence, std::span<std::uint8_t> destination,
+    std::size_t begin, std::size_t end) {
+    if (end < begin || end > sequence.bp_size() || destination.size() != end - begin)
+        return std::unexpected(alignment_contract_error::coordinates);
+    const auto source = sequence.template borrow_rank_source<QueryReversed>();
+    constexpr std::size_t chunk_capacity = sequence_rank_io_chunk_capacity;
+    std::array<std::uint8_t, chunk_capacity> scratch{};
+    for (std::size_t consumed = 0; consumed < destination.size();) {
+        const auto count = std::min(chunk_capacity, destination.size() - consumed);
+        const auto ranks = source.read_checked(begin + consumed, count, scratch);
+        if (!ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+        if constexpr (WriteReversed)
+            std::reverse_copy(ranks->begin(), ranks->end(), destination.end() - consumed - count);
+        else std::copy(ranks->begin(), ranks->end(), destination.begin() + consumed);
+        consumed += count;
+    }
+    return {};
+}
 
 /**
  * @brief Selects score storage from an alphabet or compact-sequence source.
@@ -241,5 +268,102 @@ static_assert(std::is_same_v<
     scoring_matrix<sequence_custom_alphabet<seq::dna4, std::uint64_t>>>);
 static_assert(scoring_matrix<seq::dna4>::k_alphabet_dimension == 5u);
 static_assert(scoring_matrix<seq::dna5>::k_alphabet_dimension == 6u);
+
+/** Score and exact edit count for one non-overlapping implicit seed interval. */
+struct implicit_seed_alignment_summary {
+    std::int32_t score{};
+    std::uint64_t edit_distance{};
+};
+
+/**
+ * Replay a verified seed using bounded native-rank reads and the selected SIMD
+ * equality kernel. Intervals use the selected query orientation and forward
+ * target coordinates. The caller's counter validates ranks and reports equality;
+ * a mismatch is a violated seed-verification contract, never an implicit match.
+ * Dense matrices sum the actual diagonal; unequal tails use the cheaper affine
+ * gap pair. No whole-sequence rank copy or source-owned pointer survives a read.
+ */
+template<bool p_query_reversed, class Query, class Target,
+         sequence_alphabet Alphabet, std::size_t Dimension, class Counter>
+    requires requires(const Query& query, const Target& target) {
+        query.template borrow_rank_source<p_query_reversed>();
+        target.template borrow_rank_source<false>();
+    }
+[[nodiscard]] inline std::expected<implicit_seed_alignment_summary,
+                                  alignment_contract_error>
+replay_implicit_seed_alignment(
+    const Query& query, const Target& target,
+    std::size_t query_start, std::size_t query_end,
+    std::size_t target_start, std::size_t target_end,
+    const scoring_matrix_storage<Alphabet, Dimension>& matrix,
+    std::int32_t gap_open, std::int32_t gap_extend,
+    std::int32_t gap_open_long, std::int32_t gap_extend_long,
+    Counter counter) {
+    static_assert(std::is_same_v<typename Query::traits::alphabet_type, Alphabet>);
+    static_assert(std::is_same_v<typename Target::traits::alphabet_type, Alphabet>);
+    if (query_start > query_end || query_end > query.bp_size()
+        || target_start > target_end || target_end > target.bp_size()) {
+        return std::unexpected(alignment_contract_error::coordinates);
+    }
+    if (!matrix.is_block_layout_valid()) {
+        return std::unexpected(alignment_contract_error::invalid_matrix_layout);
+    }
+    const std::size_t query_length = query_end - query_start;
+    const std::size_t target_length = target_end - target_start;
+    const auto numeric = validate_alignment_numeric_contract(matrix.summary(),
+        query_length, target_length, gap_open, gap_extend, 0, -1,
+        gap_open_long, gap_extend_long, false);
+    if (!numeric) return std::unexpected(numeric.error());
+
+    const auto query_source = query.template borrow_rank_source<p_query_reversed>();
+    const auto target_source = target.template borrow_rank_source<false>();
+    constexpr std::size_t chunk_capacity = sequence_rank_io_chunk_capacity;
+    std::array<std::uint8_t, chunk_capacity> query_chunk;
+    std::array<std::uint8_t, chunk_capacity> target_chunk;
+    const std::size_t common_length = std::min(query_length, target_length);
+    std::int64_t score = 0;
+    for (std::size_t consumed = 0; consumed < common_length;) {
+        const std::size_t count = std::min(chunk_capacity, common_length - consumed);
+        const auto query_ranks = query_source.read_checked(
+            query_start + consumed, count, query_chunk);
+        if (!query_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+        // A second read may evict the first source's two-slot cache, including
+        // when both operands alias one source. Retain only this bounded chunk.
+        if (query_ranks->data() != query_chunk.data()) {
+            std::copy(query_ranks->begin(), query_ranks->end(), query_chunk.begin());
+        }
+        const auto target_ranks = target_source.read_checked(
+            target_start + consumed, count, target_chunk);
+        if (!target_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+        const auto compared = counter(query_chunk.data(), target_ranks->data(), count);
+        if (!compared.valid_ranks || compared.equal_symbols != count) {
+            return std::unexpected(alignment_contract_error::trace_accounting);
+        }
+        if (matrix.summary().uniform_diagonal) {
+            score += static_cast<std::int64_t>(count) * matrix.summary().equal_score;
+        } else {
+            // Verified seed spans normally contain only runtime k ranks; this
+            // cold dense-table replay uses the same prepared matrix authority.
+            for (std::size_t index = 0; index < count; ++index) {
+                score += matrix.at((*target_ranks)[index], query_chunk[index]);
+            }
+        }
+        consumed += count;
+    }
+    const std::size_t tail = std::max(query_length, target_length) - common_length;
+    if (tail != 0u) {
+        const std::int64_t first_cost = gap_open
+            + static_cast<std::int64_t>(tail) * gap_extend;
+        const std::int64_t second_cost = gap_open_long < 0 ? first_cost
+            : gap_open_long + static_cast<std::int64_t>(tail) * gap_extend_long;
+        score -= std::min(first_cost, second_cost);
+    }
+    if (score < std::numeric_limits<std::int32_t>::min()
+        || score > std::numeric_limits<std::int32_t>::max()) {
+        return std::unexpected(alignment_contract_error::score_accumulation);
+    }
+    return implicit_seed_alignment_summary{
+        .score = static_cast<std::int32_t>(score), .edit_distance = tail};
+}
 
 }  // namespace bioseq::simd

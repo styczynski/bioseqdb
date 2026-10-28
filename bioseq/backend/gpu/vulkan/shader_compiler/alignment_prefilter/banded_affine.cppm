@@ -10,14 +10,14 @@ export namespace bioseq::gpu::vulkan {
 
 /// @brief Finds the best local alignment score and endpoints within a diagonal band.
 /// One GPU thread solves each job using dynamic programming. Workgroups take
-/// further jobs when the batch exceeds the dispatch size. Inputs use one integer
-/// rank per symboi, so the same shader supports different alphabets.
+/// further jobs when the batch exceeds the dispatch size. Inputs use native packed ranks and the same recurrence for every alphabet.
 inline constexpr std::string_view k_alignment_extension_banded_affine_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 const int k_negative_infinity = -1073741824;
 const uint k_status_ok = 0u;
 const uint k_status_unsupported_geometry = 1u;
+const uint k_status_score_range = 3u;
 
 struct alignment_extension_job {
     uint query_offset;
@@ -56,12 +56,19 @@ layout(push_constant) uniform push_constants {
     uint reserved0;
 } pc;
 
+uint packed_sequence_byte(uint64_t byte_index, bool query) {
+    uint word = query ? query_symbols[uint(byte_index >> 2u)] : target_symbols[uint(byte_index >> 2u)];
+    return (word >> ((uint(byte_index) & 3u) * 8u)) & 255u;
+}
+
 int bioseq_max3(int a, int b, int c) {
     return max(max(a, b), c);
 }
 
 int substitution_score(uint query_symbol, uint target_symbol) {
-    return query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty;
+    return substitution.model == 0u
+        ? (query_symbol == target_symbol ? pc.match_score : -pc.mismatch_penalty)
+        : substitution.values[target_symbol * substitution.row_stride + query_symbol];
 }
 
 void reject_job(uint job_index) {
@@ -76,8 +83,18 @@ void solve_job(uint job_index) {
     if (job.query_len > pc.max_query_len || job.target_len > pc.max_target_len
         || job.band_width > pc.max_band_width || job.flags != 0u
         || job.reserved0 != 0u || job.reserved1 != 0u
-        || pc.flags != 0u || pc.reserved0 != 0u || pc.alphabet_size == 0u) {
+        || pc.flags != 0u || pc.reserved0 != 0u || pc.alphabet_size == 0u
+        || substitution.rank_count != pc.alphabet_size
+        || sequence_descriptors[0].alphabet_code != substitution.alphabet_code
+        || sequence_descriptors[1].alphabet_code != substitution.alphabet_code) {
         reject_job(job_index);
+        return;
+    }
+
+    if (!alignment_numeric_contract(job.query_len, job.target_len, pc.match_score, pc.mismatch_penalty,
+        pc.gap_open_penalty, pc.gap_extend_penalty, pc.gap_open_penalty, pc.gap_extend_penalty, 0, -1)) {
+        reject_job(job_index);
+        results[job_index].status = k_status_score_range;
         return;
     }
 
@@ -106,7 +123,7 @@ void solve_job(uint job_index) {
         curr_m[0] = 0;
         curr_i[0] = k_negative_infinity;
         curr_d[0] = k_negative_infinity;
-        uint query_symbol = query_symbols[job.query_offset + i - 1u];
+        uint query_symbol = native_packed_rank(sequence_descriptors[0], job.query_offset + i - 1u, true);
         if (query_symbol >= pc.alphabet_size) {
             reject_job(job_index);
             return;
@@ -120,7 +137,7 @@ void solve_job(uint job_index) {
                 continue;
             }
 
-            uint target_symbol = target_symbols[job.target_offset + j - 1u];
+            uint target_symbol = native_packed_rank(sequence_descriptors[1], job.target_offset + j - 1u, false);
             if (target_symbol >= pc.alphabet_size) {
                 reject_job(job_index);
                 return;

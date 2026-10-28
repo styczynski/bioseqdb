@@ -169,6 +169,8 @@ struct backend_regions {
 /** Chooses the seed positions and sequence differences used in a tesa. */
 enum class fixture_kind {
     single_seed_collision,
+    single_seed_exact,
+    single_seed_flank_mismatch,
     multi_seed_mismatch,
     off_diagonal_gap,
     out_of_band_gap,
@@ -195,12 +197,17 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
                                   ? "ACGTAAAAAAAAA"
                                   : std::string(target_length, 'A');
     std::vector<::bioseq::chaining::anchor> anchors;
-    if (kind == fixture_kind::single_seed_collision) {
+    if (kind == fixture_kind::single_seed_collision || kind == fixture_kind::single_seed_exact
+        || kind == fixture_kind::single_seed_flank_mismatch) {
         anchors.push_back(make_anchor(31, reverse));
-        // The seed covers [24, 32), but two bases differ. Edit counting must
-        // compare the bases even when the anchor says their hashes match.
-        target_text[26] = 'C';
-        target_text[29] = 'C';
+        if (kind == fixture_kind::single_seed_collision) {
+            // A bypassed hash collision must fail defensive implicit-seed replay.
+            target_text[26] = 'C';
+            target_text[29] = 'C';
+        } else if (kind == fixture_kind::single_seed_flank_mismatch) {
+            target_text[20] = 'C';
+            target_text[36] = 'C';
+        }
     } else if (kind == fixture_kind::multi_seed_mismatch) {
         anchors.push_back(make_anchor(31, reverse));
         anchors.push_back(make_anchor(63, reverse));
@@ -224,7 +231,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
     auto lazy_target = bioseq::storage::make_resident_lazy_sequence(target_range);
     const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_query);
     const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_target);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     minimap2_parameters parameters = exact_alignment_params();
     parameters.max_gap = max_gap;
     parameters.do_cigar = do_cigar;
@@ -244,7 +251,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         .batched = make_region(anchor_span, query_text.size()),
     };
 
-    align_regions<base_alignment_algorithm::ksw2>(
+    const auto ksw2_result = align_regions<base_alignment_algorithm::ksw2>(
         std::span<alignment_region>{&fixture_regions.ksw2, 1},
         anchor_span,
         query_view,
@@ -252,7 +259,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         scoring,
         fixed_alignment_kernels(),
         parameters);
-    align_regions<base_alignment_algorithm::block_aligner>(
+    const auto block_result = align_regions<base_alignment_algorithm::block_aligner>(
         std::span<alignment_region>{&fixture_regions.block, 1},
         anchor_span,
         query_view,
@@ -260,7 +267,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         scoring,
         fixed_alignment_kernels(),
         parameters);
-    fixed_alignment_kernels().align_ksw2_batched(
+    const auto batched_result = fixed_alignment_kernels().align_ksw2_batched(
         std::span<alignment_region>{&fixture_regions.batched, 1},
         anchor_span,
         query_view,
@@ -268,6 +275,12 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         scoring,
         parameters,
         nullptr);
+    for (const auto& result : {ksw2_result, block_result, batched_result}) {
+        if (kind == fixture_kind::single_seed_collision) {
+            REQUIRE_FALSE(result);
+            CHECK(result.error() == alignment_contract_error::trace_accounting);
+        } else REQUIRE(result);
+    }
     return fixture_regions;
 }
 
@@ -313,26 +326,20 @@ TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
     CHECK(*existing_cigar_text == "8M2D");
 }
 
-TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
+TEST_CASE("Single-seed replay rejects a colliding hash and clears all backend outputs",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context test_context;
     context::installed_context_scope installed_context(test_context);
-
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(reverse, fixture_kind::single_seed_collision);
-        check_exact_region(regions.ksw2, 2, 8, 8);
-        check_exact_region(regions.block, 2, 8, 8);
-        check_exact_region(regions.batched, 2, 8, 8);
-        const auto ksw2_cigar_text = bioseq::format_cigar(regions.ksw2.cigar);
-        REQUIRE(ksw2_cigar_text.has_value());
-        CHECK(*ksw2_cigar_text == "8M");
-        const auto block_cigar_text = bioseq::format_cigar(regions.block.cigar);
-        REQUIRE(block_cigar_text.has_value());
-        CHECK(*block_cigar_text == "8M");
-        const auto batched_cigar_text = bioseq::format_cigar(regions.batched.cigar);
-        REQUIRE(batched_cigar_text.has_value());
-        CHECK(*batched_cigar_text == "8M");
+        const auto regions = run_fixture(reverse, fixture_kind::single_seed_collision);
+        for (const auto* region : {&regions.ksw2, &regions.block, &regions.batched}) {
+            CHECK_FALSE(region->has_alignment);
+            CHECK(region->dp_score == 0);
+            CHECK(region->dp_max_score == 0);
+            CHECK(region->edit_distance == 0u);
+            CHECK(region->cigar.empty());
+        }
     }
 }
 
@@ -358,7 +365,7 @@ TEST_CASE("Exact edit accounting forces traceback when CIGAR was not requested",
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
         const backend_regions regions =
-            run_fixture(reverse, fixture_kind::single_seed_collision, 16, false);
+            run_fixture(reverse, fixture_kind::single_seed_flank_mismatch, 16, false);
         CHECK(regions.ksw2.edit_distance == 2);
         CHECK(regions.block.edit_distance == 2);
         CHECK(regions.batched.edit_distance == 2);
@@ -458,7 +465,7 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
     context::installed_context_scope installed_context(test_context);
 
     for (const bool reverse : {false, true}) {
-        for (const fixture_kind kind : {fixture_kind::single_seed_collision,
+        for (const fixture_kind kind : {fixture_kind::single_seed_exact,
                                         fixture_kind::multi_seed_mismatch,
                                         fixture_kind::off_diagonal_gap}) {
             CAPTURE(reverse, kind);
@@ -502,7 +509,7 @@ TEST_CASE("alignment storage plan preserves extension geometry and separates CIG
     region.anchor_start = 0;
     region.seed_count = 2;
     const auto plan = derive_alignment_region_storage_plan(
-        region, anchors, 1000u, 2000u, params);
+        region, anchors, 1000u, 2000u, params, params.match_score).value();
     REQUIRE(plan.has_work);
     CHECK(plan.anchor_begin == 0);
     CHECK(plan.seed_query_start == 100);
@@ -526,7 +533,7 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     minimap2_parameters params{};
     alignment_region empty{};
     const auto empty_plan = derive_alignment_region_storage_plan(
-        empty, {}, 0u, 0u, params);
+        empty, {}, 0u, 0u, params, params.match_score).value();
     CHECK_FALSE(empty_plan.has_work);
     CHECK(empty_plan.final_cigar_capacity_bytes == 0u);
     CHECK(empty_plan.initial_cigar_reserve == 0u);
@@ -535,7 +542,7 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     alignment_region region{};
     region.anchor_start = 0;
     region.seed_count = 1;
-    const auto plan = derive_alignment_region_storage_plan(region, anchors, 8u, 8u, params);
+    const auto plan = derive_alignment_region_storage_plan(region, anchors, 8u, 8u, params, params.match_score).value();
     CHECK(plan.seed_query_start == 0);
     CHECK(plan.outer_query_extent == 8u);
     CHECK(plan.outer_reference_extent == 8u);
@@ -546,18 +553,18 @@ TEST_CASE("alignment storage plan handles empty jobs and checked ownership witho
     CHECK(plan.final_cigar_capacity_bytes == 32u * sizeof(bioseq::cigar_run));
 
     region.anchor_start = -1;
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params), std::invalid_argument);
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
     region.anchor_start = 0;
     region.seed_count = 2;
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params), std::invalid_argument);
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
     region.seed_count = 1;
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, 7u, 8u, params), std::invalid_argument);
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, 7u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
     params.gap_ext1 = 0;
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, 8u, 8u, params), std::invalid_argument);
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, 8u, 8u, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
 }
 
 TEST_CASE("alignment storage plan rejects signed and CIGAR byte overflow before allocation",
@@ -572,10 +579,10 @@ TEST_CASE("alignment storage plan rejects signed and CIGAR byte overflow before 
     alignment_region region{};
     region.anchor_start = 0;
     region.seed_count = 2;
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, signed_limit + 1u, signed_limit, params), std::length_error);
-    CHECK_THROWS_AS(derive_alignment_region_storage_plan(
-        region, anchors, signed_limit, signed_limit, params), std::length_error);
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, signed_limit + 1u, signed_limit, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
+    CHECK(derive_alignment_region_storage_plan(
+        region, anchors, signed_limit, signed_limit, params, params.match_score) == std::unexpected(alignment_contract_error::coordinates));
 }
 
 TEST_CASE("Block storage plan matches existing constructor element requests",
@@ -621,9 +628,9 @@ TEST_CASE("KSW2 storage plan matches single and dual affine constructor requests
     REQUIRE(single.has_value());
     CHECK(single->target_vector_count == 13u);
     CHECK(single->query_vector_count == 7u);
-    CHECK(single->state_array_count == 5u);
+    CHECK(single->state_array_count == 4u);
     CHECK(single->state_array_bytes == 208u);
-    CHECK(single->state_bytes == 1376u);
+    CHECK(single->state_bytes == 1168u);
     CHECK(single->exact_score_elements == 208u);
     CHECK(single->exact_score_bytes == 832u);
     CHECK(single->anti_diagonal_count == 299u);
@@ -634,18 +641,18 @@ TEST_CASE("KSW2 storage plan matches single and dual affine constructor requests
     CHECK(single->packed_cigar_step_bound == 300u);
     CHECK(single->packed_cigar_capacity_bound == 300u);
     CHECK(single->packed_cigar_bytes == 1200u);
-    CHECK(single->logical_alignment_bytes == 18968u);
+    CHECK(single->logical_alignment_bytes == 18760u);
 
     const auto dual = derive_ksw2_storage_plan(100u, 200u, 16u, true, 31, true, 4u, true);
     REQUIRE(dual.has_value());
-    CHECK(dual->state_array_count == 7u);
-    CHECK(dual->state_bytes == 1792u);
-    CHECK(dual->logical_alignment_bytes == 19384u);
+    CHECK(dual->state_array_count == 6u);
+    CHECK(dual->state_bytes == 1584u);
+    CHECK(dual->logical_alignment_bytes == 19176u);
 
     const auto score_only = derive_ksw2_storage_plan(100u, 200u, 16u, false, -1, false, 4u, false);
     REQUIRE(score_only.has_value());
     CHECK(score_only->band_vector_capacity == 8u);
-    CHECK(score_only->logical_alignment_bytes == 1376u);
+    CHECK(score_only->logical_alignment_bytes == 1168u);
     CHECK(score_only->exact_score_elements == 0u);
     CHECK(score_only->backtrack_bytes == 0u);
     CHECK(score_only->band_bound_elements == 0u);
@@ -708,8 +715,8 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
     region.anchor_start = 0;
     region.seed_count = 2;
     const auto region_plan = derive_alignment_region_storage_plan(
-        region, anchors, 1000u, 2000u, params);
-    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1);
+        region, anchors, 1000u, 2000u, params, params.match_score).value();
+    const auto scoring = scoring_matrix<dna4_u64>::generate(2, 4, 1).value();
     const auto geometry = fixed_alignment_kernels().prepare_block_global_gap_certificate(
         scoring,
         project_block_aligner_params(params, block_alignment_stage::gap_extension));
@@ -793,7 +800,7 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
         concurrent_region.seed_count = 16;
     }
     const auto concurrent_region_plan = derive_alignment_region_storage_plan(
-        concurrent_regions.front(), concurrency_anchors, 1000u, 2000u, params);
+        concurrent_regions.front(), concurrency_anchors, 1000u, 2000u, params, params.match_score).value();
     const auto concurrent_selected =
         derive_selected_alignment_region_storage_plan<base_alignment_algorithm::ksw2>(
             concurrent_regions.front(),
@@ -819,7 +826,7 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
               true,
               concurrent_regions.size(),
               concurrent_selected->temporary_workspace_bytes * 2u,
-              workspace_scratch) == 2u);
+              workspace_scratch, scoring.summary().maximum) == 2u);
     CHECK(admitted_alignment_worker_concurrency<base_alignment_algorithm::ksw2>(
               concurrent_regions,
               concurrency_anchors,
@@ -832,7 +839,7 @@ TEST_CASE("alignment storage plans cover concurrent selected-algorithm workers",
               true,
               concurrent_regions.size(),
               concurrent_selected->temporary_workspace_bytes - 1u,
-              workspace_scratch) == 0u);
+              workspace_scratch, scoring.summary().maximum) == 0u);
 }
 #endif
 

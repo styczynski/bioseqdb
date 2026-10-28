@@ -26,6 +26,8 @@ import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.common.checked_arithmetic;
 import bioseq.highway.sources.alignment_utils;
+import bioseq.highway.sources.simd_utils;
+import bioseq.simd.utils;
 import bioseq.highway.sources.ksw2_primitives;
 import bioseq.common.context;
 import bioseq.storage.scanner;
@@ -51,7 +53,7 @@ namespace hn = hwy::HWY_NAMESPACE;
  * end extension, where end_bonus favors reaching the query end.
  *
  * Return the score, endpoints, stopping state and optional owning CIGAR.
- * Throw std::length_error when coordinates or buffer sizes cannot be represented.
+ * Return a typed contract error before allocating when numeric bounds are invalid.
  */
 template<
     ksw_aligner_mode p_mode,
@@ -60,7 +62,7 @@ template<
     size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u,
     class p_partial_score_type = ksw2_partial_score_type,
     class p_full_score_type = ksw2_full_score_type>
-[[nodiscard]] ksw_alignment_result align_ksw2_core(
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error> align_ksw2_core(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     size_t query_start,
@@ -68,10 +70,10 @@ template<
     size_t target_start,
     size_t target_end,
     const scoring_matrix<p_alphabet>& scoring_matrix,
-    int8_t gap_open,
-    int8_t gap_extend,
-    int8_t gap_open_long,
-    int8_t gap_extend_long,
+    int32_t gap_open,
+    int32_t gap_extend,
+    int32_t gap_open_long,
+    int32_t gap_extend_long,
     int configured_band_width,
     int z_drop,
     int end_bonus,
@@ -98,15 +100,41 @@ template<
         return result;
     }
 
+    if (query_end < query_start || target_end < target_start
+        || query_end > query_seq.bp_size() || target_end > target_seq.bp_size())
+        return std::unexpected(alignment_contract_error::coordinates);
+    if (!scoring_matrix.is_block_layout_valid())
+        return std::unexpected(alignment_contract_error::invalid_matrix_layout);
     const size_t query_length  = query_end - query_start;
     const size_t target_length = target_end - target_start;
-    if (query_length == 0 || target_length == 0) return result;
+    const auto numeric_contract = validate_alignment_numeric_contract(
+        scoring_matrix.summary(), query_length, target_length,
+        gap_open, gap_extend, end_bonus, z_drop, gap_open_long, gap_extend_long);
+    if (!numeric_contract) return std::unexpected(numeric_contract.error());
+    if (query_length == 0 || target_length == 0) {
+        const auto gap_length = std::max(query_length, target_length);
+        const auto short_penalty = std::int64_t{gap_open} + static_cast<std::int64_t>(gap_length) * gap_extend;
+        const auto long_penalty = std::int64_t{gap_open_long} + static_cast<std::int64_t>(gap_length) * gap_extend_long;
+        result.score = gap_length == 0 ? 0 : -static_cast<std::int32_t>(std::min(short_penalty, long_penalty));
+        result.max = result.score;
+        result.max_q = static_cast<std::int32_t>(query_length) - 1;
+        result.max_t = static_cast<std::int32_t>(target_length) - 1;
+        result.mqe = result.mte = result.score;
+        result.mqe_t = result.max_t;
+        result.mte_q = result.max_q;
+        result.has_reached_end = true;
+        if (!flags.score_only && gap_length != 0
+            && !bioseq::push_native_cigar(result.cigar,
+                bioseq::cigar_symbol{}.assign_char(query_length == 0 ? 'D' : 'I'), gap_length))
+            return std::unexpected(alignment_contract_error::coordinates);
+        return result;
+    }
     constexpr auto coordinate_limit =
         static_cast<size_t>((std::numeric_limits<int>::max)());
     const auto sequence_steps = bioseq::common::checked_add(query_length, target_length);
     if (!sequence_steps || query_length > coordinate_limit || target_length > coordinate_limit ||
         *sequence_steps - 1u > coordinate_limit) {
-        throw std::length_error{"KSW2 storage exceeds the signed anti-diagonal domain"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
 
     const int query_length_i32 = static_cast<int>(query_length);
@@ -118,7 +146,8 @@ template<
 
     // Reuse scoring constants across all SIMD updates.
     const auto zero_scores          = hn::Zero(simd_tag);
-    const auto match_scores   = hn::Set(simd_tag, scoring_matrix.match_score());
+    const auto match_scores = hn::Set(simd_tag, scoring_matrix.match_score());
+    const auto maximum_scores = hn::Set(simd_tag, static_cast<p_partial_score_type>(scoring_matrix.summary().maximum));
     const auto mismatch_scores = hn::Set(simd_tag, scoring_matrix.mismatch_score());
     const auto wildcard_ranks = hn::Set(simd_tag, static_cast<p_partial_score_type>(p_alphabet_dimension - 1));
 
@@ -126,7 +155,7 @@ template<
         static_cast<p_partial_score_type>((gap_open + gap_extend) * 2));
     const auto gap_open_scores = hn::Set(simd_tag, gap_open);
     const auto maximum_plausible_scores = hn::Set(simd_tag,
-        static_cast<p_partial_score_type>(scoring_matrix.match_score() + (gap_open + gap_extend) * 2));
+        static_cast<p_partial_score_type>(scoring_matrix.summary().maximum + (gap_open + gap_extend) * 2));
 
     const auto short_gap_open_scores = hn::Set(simd_tag, gap_open);
     const auto long_gap_open_scores  = hn::Set(simd_tag, gap_open_long);
@@ -138,15 +167,6 @@ template<
     const int8_t wildcard_score = scoring_matrix.wildcard_score();
     auto wildcard_scores = hn::Set(
         simd_tag, static_cast<p_partial_score_type>(wildcard_score));
-    if (wildcard_score == 0) {
-        if constexpr (k_is_dual_affine) {
-            wildcard_scores = hn::Set(
-                simd_tag, static_cast<p_partial_score_type>(-gap_extend_long));
-        } else {
-            wildcard_scores = hn::Set(
-                simd_tag, static_cast<p_partial_score_type>(-gap_extend));
-        }
-    }
 
     // Backtrack direction constants
     const auto short_horizontal_gap_direction = hn::Set(simd_tag, static_cast<p_partial_score_type>(1));
@@ -160,25 +180,18 @@ template<
 
     // A negative bandwidth allows every matrix cell.
     const int band_width = configured_band_width < 0
-        ? std::max(target_length_i32, query_length_i32) : configured_band_width;
+        ? std::max(target_length_i32, query_length_i32)
+        : std::min(configured_band_width, std::max(target_length_i32, query_length_i32));
     const int left_band  = band_width;
     const int right_band = band_width;
 
-    // Reject scores outside, the range supported by difference encoding.
-    int minimum_matrix_score = scoring_matrix.mismatch_score();
-    for (size_t score_index = 1; score_index < scoring_matrix.entries.size(); ++score_index) {
-        if (scoring_matrix.entries[score_index] < minimum_matrix_score)
-            minimum_matrix_score = scoring_matrix.entries[score_index];
-    }
-    if (-minimum_matrix_score > 2 * (gap_open + gap_extend)) return result;
-
     // Find the gap length where the long-gap penalty becomes cheaper.
-    [[maybe_unused]] int long_gap_threshold = 0;
-    [[maybe_unused]] int long_gap_difference = 0;
+    [[maybe_unused]] int64_t long_gap_threshold = 0;
+    [[maybe_unused]] int64_t long_gap_difference = 0;
     if constexpr (k_is_dual_affine) {
         if (gap_extend != gap_extend_long) {
-            long_gap_threshold = (gap_open_long - gap_open)
-                / (gap_extend - gap_extend_long) - 1;
+            long_gap_threshold = (int64_t{gap_open_long} - gap_open)
+                / (int64_t{gap_extend} - gap_extend_long) - 1;
             if (gap_open_long + gap_extend_long + long_gap_threshold * gap_extend_long
                 > gap_open + gap_extend + long_gap_threshold * gap_extend)
             {
@@ -187,6 +200,11 @@ template<
         }
         long_gap_difference = long_gap_threshold * (gap_extend - gap_extend_long)
                         - (gap_open_long - gap_open) - gap_extend_long;
+        const std::int64_t maximum_cost = std::max(std::int64_t{gap_open} + gap_extend,
+            std::int64_t{gap_open_long} + gap_extend_long);
+        if (long_gap_difference < -maximum_cost
+            || long_gap_difference > maximum_cost + scoring_matrix.summary().maximum)
+            return std::unexpected(alignment_contract_error::score_range);
     }
 
     // Check buffer sizes before allocating the DP stte.
@@ -195,7 +213,7 @@ template<
         configured_band_width, !should_use_approximate_maximum,
         sizeof(p_full_score_type), should_compute_cigar);
     if (!storage_plan) {
-        throw std::length_error{"KSW2 storage geometry is not representable"};
+        return std::unexpected(alignment_contract_error::coordinates);
     }
     // Allocate the DP state in the alignment arena
     ksw_state_for<p_mode> state(*storage_plan);
@@ -238,26 +256,36 @@ template<
     std::span<uint8_t> target_destination(state.target_bytes, target_length);
     if (flags.reverse_cigar) {
         // Keep the oriented query in its current order for a left extension.
-        query_seq.template copy_ranks<p_is_reversed, false>(
-            query_destination, query_start, query_end);
+        const auto query_copy = copy_checked_alignment_ranks<p_is_reversed, false>(
+            query_seq, query_destination, query_start, query_end);
+        if (!query_copy) return std::unexpected(query_copy.error());
         // Read the target backwards for the  left extension.
-        target_seq.template copy_ranks<false, true>(
-            target_destination, target_start, target_end);
+        const auto target_copy = copy_checked_alignment_ranks<false, true>(
+            target_seq, target_destination, target_start, target_end);
+        if (!target_copy) return std::unexpected(target_copy.error());
     } else {
         // Reverse the oriented query for the anti-diagonal calculation.
         // On the reverse strand, the two reversals leave complemented bases.
-        query_seq.template copy_ranks<p_is_reversed, true>(
-            query_destination, query_start, query_end);
-        target_seq.template copy_ranks<false, false>(
-            target_destination, target_start, target_end);
+        const auto query_copy = copy_checked_alignment_ranks<p_is_reversed, true>(
+            query_seq, query_destination, query_start, query_end);
+        if (!query_copy) return std::unexpected(query_copy.error());
+        const auto target_copy = copy_checked_alignment_ranks<false, false>(
+            target_seq, target_destination, target_start, target_end);
+        if (!target_copy) return std::unexpected(target_copy.error());
     }
+
+    if (!count_equal_rank_chunk(state.query_reversed, state.query_reversed, query_length,
+            sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks
+        || !count_equal_rank_chunk(state.target_bytes, state.target_bytes, target_length,
+            sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks)
+        return std::unexpected(alignment_contract_error::invalid_matrix_layout);
 
     // Track one promising position when approximate maxima are requested.
     p_full_score_type approx_score = 0;
     int approximate_score_target_position = 0;
 
     // Compare ranks inside the SIMD loop for the standard scoring matrix.
-    const bool should_use_fused_score = !flags.generic_score;
+    const bool should_use_fused_score = scoring_matrix.kind() == substitution_kind::uniform;
 
     // Advance tmrough the scoring matrix one anti-diagonal at a time.
     const int byte_lane_count_i32 = static_cast<int>(byte_lane_count);
@@ -352,15 +380,6 @@ template<
             }
         }
 
-        // Precompute symbol-pair scores for a custom, scoring  matrix.
-        // Standard match, mismatch and wildcard scores are computed in the SIMD loop.
-        if (flags.generic_score) {
-            for (int target_position = unaligned_band_start; target_position <= unaligned_band_end; ++target_position) {
-                state.diag_score_base[target_position] = scoring_matrix.at(
-                    state.target_bytes[target_position], query_reversed_aligned[target_position]);
-            }
-        }
-
         // Put boundary values in the first vector lane.
         auto horizontal_gap_carry  = set_lane_zero(simd_tag, horizontal_gap_boundary_carry);
         auto horizontal_difference_carry  = set_lane_zero(simd_tag, horizontal_difference_boundary_carry);
@@ -379,14 +398,14 @@ template<
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks)
+                        wildcard_ranks, scoring_matrix)
                     : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks);
+                        wildcard_ranks, scoring_matrix);
                 reduce_ksw_dp_maximum<p_mode>(simd_tag, cell, maximum_plausible_scores,
-                    match_scores);
+                    maximum_scores);
                 store_ksw_dp_cell<p_mode>(simd_tag, state_offset, cell, state,
                     gap_open_scores, short_gap_open_scores, long_gap_open_scores,
                     short_gap_costs, long_gap_costs, zero_scores);
@@ -402,12 +421,12 @@ template<
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks)
+                        wildcard_ranks, scoring_matrix)
                     : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks);
+                        wildcard_ranks, scoring_matrix);
 
                 // Keep the earlier direction when scores tie.
                 auto backtrack_directions = hn::IfThenElseZero(
@@ -429,7 +448,7 @@ template<
                     backtrack_directions = hn::IfThenElse(
                         hn::Gt(cell.long_vertical_gap_candidates, cell.selected_scores), long_vertical_gap_direction, backtrack_directions);
                     cell.selected_scores = hn::Max(cell.selected_scores, cell.long_vertical_gap_candidates);
-                    cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
+                    cell.selected_scores = hn::Min(cell.selected_scores, maximum_scores);
                 }
 
                 // Save score differences and gap state for the next anti-diagonal.
@@ -499,12 +518,12 @@ template<
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks)
+                        wildcard_ranks, scoring_matrix)
                     : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
                         query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
                         double_gap_costs, match_scores,
                         mismatch_scores, wildcard_scores,
-                        wildcard_ranks);
+                        wildcard_ranks, scoring_matrix);
 
                 // Prefer the later gap direction when scores tie.
                 auto backtrack_directions = hn::IfThenZeroElse(
@@ -526,7 +545,7 @@ template<
                     backtrack_directions = hn::IfThenElse(
                         hn::Gt(cell.selected_scores, cell.long_vertical_gap_candidates), backtrack_directions, long_vertical_gap_direction);
                     cell.selected_scores = hn::Max(cell.selected_scores, cell.long_vertical_gap_candidates);
-                    cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
+                    cell.selected_scores = hn::Min(cell.selected_scores, maximum_scores);
                 }
 
                 hn::Store(hn::Sub(cell.selected_scores, cell.shifted_left_differences), simd_tag,
@@ -885,7 +904,7 @@ public:
     template<
         bool p_is_reversed,
         sequence_alphabet p_alphabet>
-    [[nodiscard]] static ksw_alignment_result align_single_affine(
+    [[nodiscard]] static std::expected<ksw_alignment_result, alignment_contract_error> align_single_affine(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
         size_t query_start,
@@ -916,7 +935,7 @@ public:
     template<
         bool p_is_reversed,
         sequence_alphabet p_alphabet>
-    [[nodiscard]] static ksw_alignment_result align_dual_affine(
+    [[nodiscard]] static std::expected<ksw_alignment_result, alignment_contract_error> align_dual_affine(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
         size_t query_start,
@@ -926,15 +945,25 @@ public:
         const scoring_matrix<p_alphabet>& scoring_matrix,
         ksw_dual_affine_parameters parameters)
     {
-        if (parameters.gap_open_long + parameters.gap_extend_long
-            < parameters.gap_open_short + parameters.gap_extend_short)
-        {
-            std::swap(
-                parameters.gap_open_short,
-                parameters.gap_open_long);
-            std::swap(
-                parameters.gap_extend_short,
-                parameters.gap_extend_long);
+        if (parameters.gap_open_short < 0 || parameters.gap_open_long < 0
+            || parameters.gap_extend_short <= 0 || parameters.gap_extend_long <= 0)
+            return std::unexpected(alignment_contract_error::gap_penalty);
+        const bool short_dominates = parameters.gap_open_short <= parameters.gap_open_long
+            && parameters.gap_extend_short <= parameters.gap_extend_long;
+        const bool long_dominates = parameters.gap_open_long <= parameters.gap_open_short
+            && parameters.gap_extend_long <= parameters.gap_extend_short;
+        if (short_dominates || long_dominates) {
+            const ksw_single_affine_parameters single{
+                .gap_open = short_dominates ? parameters.gap_open_short : parameters.gap_open_long,
+                .gap_extend = short_dominates ? parameters.gap_extend_short : parameters.gap_extend_long,
+                .band_width = parameters.band_width, .z_drop = parameters.z_drop,
+                .end_bonus = parameters.end_bonus, .flags = parameters.flags};
+            return align_single_affine<p_is_reversed>(query_sequence, target_sequence,
+                query_start, query_end, target_start, target_end, scoring_matrix, single);
+        }
+        if (parameters.gap_open_short > parameters.gap_open_long) {
+            std::swap(parameters.gap_open_short, parameters.gap_open_long);
+            std::swap(parameters.gap_extend_short, parameters.gap_extend_long);
         }
         return align_ksw2_core<ksw_aligner_mode::dual_affine, p_is_reversed>(
             query_sequence, target_sequence,
@@ -955,7 +984,7 @@ public:
  * score, endpoints, stopping state and optional CIGAR.
  */
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] ksw_alignment_result align_ksw2_single_affine(
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error> align_ksw2_single_affine(
     bool is_reversed,
     bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
@@ -966,13 +995,16 @@ template <sequence_alphabet p_alphabet>
     const scoring_matrix<p_alphabet>& scoring_matrix,
     const ksw_single_affine_parameters& parameters)
 {
-    return is_reversed
-        ? highway_ksw2_aligner::align_single_affine<true>(
-            query_sequence, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, parameters)
-        : highway_ksw2_aligner::align_single_affine<false>(
+    if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
+        if (is_reversed) return highway_ksw2_aligner::align_single_affine<true>(
             query_sequence, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, parameters);
+    } else if (is_reversed) {
+        return std::unexpected(alignment_contract_error::orientation);
+    }
+    return highway_ksw2_aligner::align_single_affine<false>(
+        query_sequence, target_sequence, query_start, query_end,
+        target_start, target_end, scoring_matrix, parameters);
 }
 
 /**
@@ -983,7 +1015,7 @@ template <sequence_alphabet p_alphabet>
  * the score, endpoints, stopping state and optional CIGAR.
  */
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] ksw_alignment_result align_ksw2_dual_affine(
+[[nodiscard]] std::expected<ksw_alignment_result, alignment_contract_error> align_ksw2_dual_affine(
     bool is_reversed,
     bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
@@ -994,13 +1026,16 @@ template <sequence_alphabet p_alphabet>
     const scoring_matrix<p_alphabet>& scoring_matrix,
     ksw_dual_affine_parameters parameters)
 {
-    return is_reversed
-        ? highway_ksw2_aligner::align_dual_affine<true>(
-            query_sequence, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, parameters)
-        : highway_ksw2_aligner::align_dual_affine<false>(
+    if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
+        if (is_reversed) return highway_ksw2_aligner::align_dual_affine<true>(
             query_sequence, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, parameters);
+    } else if (is_reversed) {
+        return std::unexpected(alignment_contract_error::orientation);
+    }
+    return highway_ksw2_aligner::align_dual_affine<false>(
+        query_sequence, target_sequence, query_start, query_end,
+        target_start, target_end, scoring_matrix, parameters);
 }
 
 }  // namespace target

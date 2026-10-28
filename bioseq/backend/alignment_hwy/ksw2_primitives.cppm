@@ -23,6 +23,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
+import bioseq.highway.sources.alignment_utils;
 import bioseq.common.context;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -170,16 +171,11 @@ public:
     ksw2_partial_score_type* diff_left_base = nullptr;  ///< Horizontal score-difference rows.
     ksw2_partial_score_type* gap_e_offset_base = nullptr;  ///< Horizontal gap offsets.
     ksw2_partial_score_type* gap_f_offset_base = nullptr;  ///< Vertical gap offsets.
-    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Precomputed symbol-pair scores for, custom scoring matrices.
     uint8_t* target_bytes       = nullptr;  ///< Encoded target ranks.
     uint8_t* query_reversed     = nullptr;  ///< Encoded query ranks in DP order.
 
     /** Construct an empty state handle. */
     ksw_dp_state() = default;
-
-    /** Allocate the single-affine buffers described by plan. */
-    explicit ksw_dp_state(const ksw2_storage_plan& plan)
-        : ksw_dp_state(plan, /*zero_state_arrays=*/true) {}
 
     /** Return the number of vector slots in one target row. */
     [[nodiscard]] int target_vector_count() const noexcept { return target_vec_count_; }
@@ -200,13 +196,8 @@ public:
         std::memset(base, value, array_byte_count());
     }
 
-protected:
-    // Allocate all buffers in the aligkment arena. Single-affine state starts
-    // at zero. The dual-affine caller supplies its own gap values, so it skips
-    // that zero-fill. Always  clear the diagonal-score array because custom
-    // scoring can read its padding before writing it. Sequence encoding fills
-    // the query and target buffers separately.
-    ksw_dp_state(const ksw2_storage_plan& plan, bool zero_state_arrays)
+    /** Allocate and initialize all state and rank-tail lanes from the admitted plan. */
+    explicit ksw_dp_state(const ksw2_storage_plan& plan)
         : target_vec_count_(static_cast<int>(plan.target_vector_count))
         , query_vec_count_(static_cast<int>(plan.query_vector_count))
         , vec_bytes_(plan.vector_bytes)
@@ -215,32 +206,21 @@ protected:
         const size_t state_array_byte_count = plan.state_array_bytes;
         storage_ = context::current().alloc_align_array<ksw2_partial_score_type, 64>(
             plan.state_bytes);
-        const size_t initialized_state_bytes = static_cast<size_t>(state_array_count) * state_array_byte_count;
-        if (zero_state_arrays) {
-            std::memset(storage_.data(), 0, initialized_state_bytes);
-        } else {
-            // Clear the diagonal-score array, including padding.
-            // The caller initializes the other arrays.
-            std::memset(storage_.data() + static_cast<size_t>(state_array_count - 1) * state_array_byte_count,
-                        0, state_array_byte_count);
-        }
-        // Clear the extra byte that a boundary read through diag_score_base can use.
-        if (storage_.size() > initialized_state_bytes) {
-            storage_[initialized_state_bytes] = 0;
-        }
-
+        // Initialize rank tails and every state/halo lane before any vector load.
+        // The dual caller overwrites its active gap arrays immediately afterwards.
+        std::memset(storage_.data(), 0, storage_.size_bytes());
         ksw2_partial_score_type* storage_base = storage_.data();
         diff_up_base      = storage_base;
         diff_left_base    = diff_up_base      + state_array_byte_count;
         gap_e_offset_base = diff_left_base    + state_array_byte_count;
         gap_f_offset_base = gap_e_offset_base + state_array_byte_count;
-        diag_score_base   = storage_base + static_cast<size_t>(state_array_count - 1) * state_array_byte_count;
         target_bytes      = reinterpret_cast<uint8_t*>(
             storage_base + static_cast<size_t>(state_array_count) * state_array_byte_count);
         query_reversed    = reinterpret_cast<uint8_t*>(
             storage_base + static_cast<size_t>(state_array_count + 1) * state_array_byte_count);
     }
 
+protected:
     [[nodiscard]] ksw2_partial_score_type* array_pointer(int index) noexcept {
         return storage_.data()
             + static_cast<size_t>(index) * target_vec_count_ * vec_bytes_;
@@ -263,9 +243,7 @@ public:
 
     /** Allocate the dual-affine buffers described by plan. */
     explicit ksw_dual_affine_dp_state(const ksw2_storage_plan& plan)
-        // The core initializes both gap models after allocation Skip clearing
-        // those arrays here, while  the parent still clears the diagonal-score array.
-        : ksw_dp_state(plan, /*zero_state_arrays=*/false)
+        : ksw_dp_state(plan)
     {
         gap_e2_offset_base = array_pointer(4);
         gap_f2_offset_base = array_pointer(5);
@@ -454,14 +432,15 @@ struct ksw_dp_cell {
 };
 
 // Build scores directly from sequence ranks for standard scoring.
-// Custom scoring reads precomputed values from diag_score_base.
+// Dense scoring performs the pair lookup directly in the current vector.
 
 /** Load neighboring DP state and compute candidate scores for each SIMD lane. */
 template <
     ksw_aligner_mode p_mode,
     bool p_is_fused_score,
     class p_simd_tag,
-    class p_state_type>
+    class p_state_type,
+    sequence_alphabet p_alphabet>
 [[always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
     p_simd_tag simd_tag, int state_offset,
     p_state_type& HWY_RESTRICT state,
@@ -472,7 +451,8 @@ template <
     hn::Vec<p_simd_tag> match_scores,
     hn::Vec<p_simd_tag> mismatch_scores,
     hn::Vec<p_simd_tag> wildcard_scores,
-    hn::Vec<p_simd_tag> wildcard_ranks) noexcept
+    hn::Vec<p_simd_tag> wildcard_ranks,
+    const scoring_matrix<p_alphabet>& matrix) noexcept
 {
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
@@ -494,7 +474,10 @@ template <
         cell.selected_scores = hn::IfThenElse(
             hn::MaskFromVec(wildcard_lanes), wildcard_scores, cell.selected_scores);
     } else {
-        cell.selected_scores = hn::Load(simd_tag, state.diag_score_base + state_offset);
+        const hn::RebindToUnsigned<p_simd_tag> rank_tag;
+        cell.selected_scores = get_pair_scores(matrix, simd_tag,
+            hn::LoadU(rank_tag, state.target_bytes + state_offset),
+            hn::LoadU(rank_tag, query_reversed_aligned + state_offset));
     }
 
     if constexpr (!k_is_dual_affine) {
