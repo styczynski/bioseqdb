@@ -13,6 +13,7 @@ module;
 #include <map>
 #include <simdjson.h>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -79,16 +80,17 @@ static_assert(
 // Reader workloads report rpcord counts and decoded sequence lengths.
 
 /// Run the Bioseq reader with the exact backend and concurrency options supplied.
-template <bool p_is_fasta>
+template <sequence_alphabet p_alphabet, bool p_is_fasta>
 [[nodiscard]] io_measurement run_bioseq_io_with_options(const std::string& path,
                                                         const reader_options& options) {
-    using alphabet_config = benchmark_alphabet;
+    using alphabet_config = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
     constexpr auto file_type =
         p_is_fasta ? sequence_file_format::fasta : sequence_file_format::fastq;
 
     std::atomic<std::size_t> record_count_atomic{0};
     std::atomic<std::size_t> body_bytes_atomic{0};
+    std::atomic<bool> read_failed{false};
 
     // Accumulate record and decoded-body totals from one delivered batch.
     auto handler_fn = [&record_count_atomic, &body_bytes_atomic](batch_t&& batch) {
@@ -103,15 +105,16 @@ template <bool p_is_fasta>
         body_bytes_atomic.fetch_add(local_body_bytes, std::memory_order_relaxed);
     };
     // Report a failed benchmark read with its corpus path.
-    auto failure_fn = [&path](std::string&& msg) {
+    auto failure_fn = [&path, &read_failed](std::string&& msg) {
+        read_failed.store(true, std::memory_order_relaxed);
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] read failed on '{}': {}", path, msg);
     };
-    auto outcome = read_sequences_file<seq::dna4, file_type>(path, handler_fn, failure_fn, options);
-    if (!outcome.has_value()) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] read_sequences_file error: {}",
-                                         outcome.error());
-    }
+    auto outcome = read_sequences_file<p_alphabet, file_type>(path, handler_fn, failure_fn, options);
+    if (!outcome.has_value())
+        throw std::runtime_error("benchmark reader failed on '" + path + "': " + outcome.error());
+    if (read_failed.load(std::memory_order_relaxed))
+        throw std::runtime_error("benchmark reader reported an input failure on '" + path + "'");
     io_measurement out;
     out.observed_record_count = record_count_atomic.load(std::memory_order_relaxed);
     out.observed_body_bytes = body_bytes_atomic.load(std::memory_order_relaxed);
@@ -135,9 +138,7 @@ template <bool p_is_fasta>
     io_measurement out;
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] naive ifstream open failed: '{}'",
-                                         path);
-        return out;
+        throw std::runtime_error("benchmark baseline cannot open '" + path + "'");
     }
     std::string line;
     bool in_record = false;
@@ -157,6 +158,8 @@ template <bool p_is_fasta>
             out.observed_body_bytes += body_size;
         }
     }
+    if (!in.eof() || in.bad())
+        throw std::runtime_error("benchmark baseline read failed on '" + path + "'");
     if (in_record)
         out.observed_record_count += 1;
     return out;
@@ -167,9 +170,7 @@ template <bool p_is_fasta>
     io_measurement out;
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] naive ifstream open failed: '{}'",
-                                         path);
-        return out;
+        throw std::runtime_error("benchmark baseline cannot open '" + path + "'");
     }
     std::string line;
     /// Expected line role in the four-line FASTQ baseline parser.
@@ -199,47 +200,50 @@ template <bool p_is_fasta>
             break;
         }
     }
+    if (!in.eof() || in.bad() || step != fastq_step::header)
+        throw std::runtime_error("benchmark FASTQ baseline read failed on '" + path + "'");
     return out;
 }
 
-/// Select a reader and its options from the configured algorithm name.
+/// Select existing reader options after dispatching the destination alphabet once.
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] io_measurement dispatch_reader(std::string_view algo, const reader_input& input) {
     reader_options options{};
     if (algo == "bioseq_io_sync_fasta") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = false;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<true>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, true>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_mmap_fasta") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = true;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<true>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, true>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_async4_fasta") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = false;
         options.concurrency.worker_count = 4;
-        return run_bioseq_io_with_options<true>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, true>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_sync_fastq") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = false;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<false>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, false>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_mmap_fastq") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = true;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<false>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, false>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_async4_fastq") {
         options.io.gzip_auto_detect = false;
         options.io.prefer_mmap = false;
         options.concurrency.worker_count = 4;
-        return run_bioseq_io_with_options<false>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, false>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_pgzip_fastq") {
         options.io.gzip_auto_detect = true;
@@ -247,26 +251,16 @@ template <bool p_is_fasta>
         options.io.parallel_gzip_enabled = true;
         options.io.parallel_gzip_thread_count = 0;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<false>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, false>(input.corpus_path, options);
     }
     if (algo == "bioseq_io_zlib_fastq") {
         options.io.gzip_auto_detect = true;
         options.io.prefer_mmap = true;
         options.io.parallel_gzip_enabled = false;
         options.concurrency.worker_count = 0;
-        return run_bioseq_io_with_options<false>(input.corpus_path, options);
+        return run_bioseq_io_with_options<p_alphabet, false>(input.corpus_path, options);
     }
-    if (algo == "kseqpp_fasta" || algo == "kseqpp_fastq") {
-        return run_kseqpp(input.corpus_path);
-    }
-    if (algo == "naive_ifstream_fasta") {
-        return run_naive_ifstream_fasta(input.corpus_path);
-    }
-    if (algo == "naive_ifstream_fastq") {
-        return run_naive_ifstream_fastq(input.corpus_path);
-    }
-    bioseq_log<logging_level::error>("[bioseq.io.benchmark] unknown reader algorithm '{}'", algo);
-    return {};
+    throw std::invalid_argument("unknown reader benchmark algorithm: " + std::string{algo});
 }
 
 // Reader benchmark setup, execution, and cleanup.
@@ -276,13 +270,17 @@ template <bool p_is_fasta>
                                               std::string_view test_case_name,
                                               simdjson::dom::element data,
                                               const run_constraints& /*constraints*/) {
-    const corpus_descriptor descriptor = prepare_corpus(data_dir, test_case_name, data);
     reader_input input;
+    input.corpus_alphabet = read_string_field(data, "alphabet", "dna4");
+    if (!supported_biological_alphabets::try_index_of_name(input.corpus_alphabet.c_str()))
+        throw std::invalid_argument("unknown reader corpus alphabet: " + input.corpus_alphabet);
+    const corpus_descriptor descriptor = prepare_corpus(data_dir, test_case_name, data);
     if (!descriptor.valid)
-        return input;
+        throw std::runtime_error("reader corpus preparation failed: " + std::string{test_case_name});
     input.corpus_path = descriptor.path;
     input.bytes_on_disk = descriptor.bytes_on_disk;
     input.expected_record_count = descriptor.record_count;
+    input.expected_body_bytes = descriptor.body_bytes;
     input.is_fastq = descriptor.is_fastq;
     input.is_compressed = descriptor.is_compressed;
     input.is_synthetic = descriptor.is_synthetic;
@@ -301,10 +299,36 @@ template <bool p_is_fasta>
 
 /// Run one configured reader workload when corpus preparation succeeded.
 [[nodiscard]] io_measurement
-run_reader(std::string_view algo, const parameter_map& /*params*/, const reader_input& input) {
+run_reader(std::string_view algo, const parameter_map& params, const reader_input& input) {
     if (input.corpus_path.empty())
-        return {};
-    return dispatch_reader(algo, input);
+        throw std::runtime_error("reader benchmark has no prepared corpus");
+    std::string alphabet_name = input.corpus_alphabet;
+    if (const auto parameter = params.find("alphabet"); parameter != params.end()) {
+        if (!parameter->second.is_string())
+            throw std::invalid_argument("reader alphabet parameter must be a string");
+        if (parameter->second.as_string() != "corpus")
+            alphabet_name = std::string{parameter->second.as_string()};
+    }
+    const auto alphabet_code =
+        supported_biological_alphabets::try_index_of_name(alphabet_name.c_str());
+    if (!alphabet_code)
+        throw std::invalid_argument("unknown reader benchmark alphabet: " + alphabet_name);
+    // Baselines count lexical residues once, independently of destination ranks.
+    if (algo == "kseqpp_fasta" || algo == "kseqpp_fastq") {
+        return run_kseqpp(input.corpus_path);
+    }
+    if (algo == "naive_ifstream_fasta") {
+        return run_naive_ifstream_fasta(input.corpus_path);
+    }
+    if (algo == "naive_ifstream_fastq") {
+        return run_naive_ifstream_fastq(input.corpus_path);
+    }
+    io_measurement output;
+    supported_biological_alphabets::dispatch_alphabet_by_code(
+        *alphabet_code, [algo, &input, &output]<class p_alphabet>() {
+            output = dispatch_reader<p_alphabet>(algo, input);
+        });
+    return output;
 }
 
 /// Report file size, decoded sequence length, and record counts.
@@ -312,6 +336,11 @@ run_reader(std::string_view algo, const parameter_map& /*params*/, const reader_
                                                             const parameter_map& /*params*/,
                                                             const reader_input& input,
                                                             const io_measurement& output) {
+    if (input.is_synthetic &&
+        (output.observed_record_count != input.expected_record_count ||
+         output.observed_body_bytes != input.expected_body_bytes)) {
+        throw std::runtime_error("reader result differs from generated record/residue totals");
+    }
     std::map<std::string, double> metrics;
     metrics.emplace("bytes_on_disk", static_cast<double>(input.bytes_on_disk));
     metrics.emplace("decompressed_bytes", static_cast<double>(input.decompressed_bytes));

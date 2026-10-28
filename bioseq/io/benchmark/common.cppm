@@ -16,6 +16,7 @@ module;
 #include <memory>
 #include <random>
 #include <simdjson.h>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -25,6 +26,7 @@ module;
 module bioseq.io.benchmark:common;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
@@ -62,6 +64,8 @@ struct reader_input {
     std::size_t bytes_on_disk = 0;
     std::size_t decompressed_bytes = 0;
     std::size_t expected_record_count = 0;
+    std::size_t expected_body_bytes = 0; ///< Exact for generated corpora.
+    std::string corpus_alphabet = "dna4";
     bool is_fastq = false;
     bool is_compressed = false;
     bool is_synthetic = false;
@@ -256,26 +260,47 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     return full_path.string();
 }
 
-/// Write generated DNA records as FASTA or FASTQ. Return the number of bytes
-/// submitted to the output stream, or zero if the file cannot be opened.
-[[nodiscard]] std::size_t emit_synthetic_corpus(const std::string& output_path,
+/// File details from prepare_corpus. The synthetic flag tells cleanup whether
+/// this benchmark created the file.
+struct corpus_descriptor {
+    std::string path;
+    std::size_t bytes_on_disk = 0;
+    std::size_t record_count = 0; ///< 0 for real-data (unknown until parse)
+    std::size_t body_bytes = 0; ///< Exact generated residue count, before alphabet reduction.
+    bool is_fastq = false;
+    bool is_compressed = false;
+    bool is_synthetic = false;
+    bool valid = false;
+};
+
+/// Write FASTA or FASTQ using canonical characters from the declared alphabet.
+/// Record exact logical and file lengths for validation outside the timed reader.
+[[nodiscard]] corpus_descriptor emit_synthetic_corpus(const std::string& output_path,
                                                 bool is_fastq,
                                                 std::size_t record_count,
                                                 std::size_t mean_record_logical_length,
                                                 std::uint64_t seed,
+                                                std::string_view alphabet_characters,
                                                 std::string_view header_shape = "plain") {
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
         bioseq_log<logging_level::error>("[bioseq.io.benchmark] failed to open '{}' for writing",
                                          output_path);
-        return 0;
+        return {};
     }
+    corpus_descriptor descriptor{
+        .path = output_path,
+        .record_count = record_count,
+        .is_fastq = is_fastq,
+        .is_synthetic = true,
+    };
     std::mt19937_64 rng(seed);
-    std::uniform_int_distribution<int> base_dist(0, 3);
+    // Keep the distribution type, seed and DNA4 rank order unchanged.
+    std::uniform_int_distribution<int> base_dist(
+        0, static_cast<int>(alphabet_characters.size()) - 1);
     std::normal_distribution<double> length_dist(static_cast<double>(mean_record_logical_length),
                                                  static_cast<double>(mean_record_logical_length) *
                                                      0.1);
-    constexpr std::array<char, 4> bases{'A', 'C', 'G', 'T'};
     constexpr std::size_t fasta_wrap = 80;
 
     std::string buffer;
@@ -293,6 +318,10 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
         const double sample = length_dist(rng);
         const std::size_t record_length = static_cast<std::size_t>(std::max(8.0, sample));
+        const auto body_bytes = bioseq::common::checked_add(descriptor.body_bytes, record_length);
+        if (!body_bytes)
+            throw std::overflow_error("synthetic corpus residue count overflow");
+        descriptor.body_bytes = *body_bytes;
         // UniProt-shaped FASTA headers exercise positional fields and metadata tags.
         // Plain headers and FASTQ records use  the sequence number.
         if (header_shape == "uniprot_metadata" && !is_fastq) {
@@ -311,7 +340,7 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
 
         if (is_fastq) {
             for (std::size_t letter_index = 0; letter_index < record_length; ++letter_index) {
-                buffer.push_back(bases[base_dist(rng)]);
+                buffer.push_back(alphabet_characters[base_dist(rng)]);
             }
             buffer.push_back('\n');
             buffer.push_back('+');
@@ -325,7 +354,7 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
             while (emitted_letters < record_length) {
                 const std::size_t this_line = std::min(fasta_wrap, record_length - emitted_letters);
                 for (std::size_t letter_index = 0; letter_index < this_line; ++letter_index) {
-                    buffer.push_back(bases[base_dist(rng)]);
+                    buffer.push_back(alphabet_characters[base_dist(rng)]);
                 }
                 buffer.push_back('\n');
                 emitted_letters += this_line;
@@ -337,20 +366,14 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     flush_buffer();
     out.flush();
     out.close();
-    return bytes_written;
+    if (!out)
+        return {};
+    descriptor.bytes_on_disk = bytes_written;
+    descriptor.valid = true;
+    return descriptor;
 }
 
-/// File details from prepare_corpus. The synthetic flag tells cleanup whether
-/// this benchmark created the file.
-struct corpus_descriptor {
-    std::string path;
-    std::size_t bytes_on_disk = 0;
-    std::size_t record_count = 0; ///< 0 for real-data (unknown until parse)
-    bool is_fastq = false;
-    bool is_compressed = false;
-    bool is_synthetic = false;
-    bool valid = false;
-};
+
 
 /// Resolve a corpus's on-disk path. For real-data cells, look up the
 /// path under `data_dir`. Synthetic corpora are generated at a temporary path.
@@ -403,26 +426,40 @@ struct corpus_descriptor {
         static_cast<std::size_t>(read_int_field(data, "mean_record_length_bp", 200));
     const std::uint64_t seed = static_cast<std::uint64_t>(read_int_field(data, "seed", 42));
     const std::string header_shape = read_string_field(data, "header_shape", "plain");
+    const std::string alphabet_name = read_string_field(data, "alphabet", "dna4");
+    const auto alphabet_code =
+        supported_biological_alphabets::try_index_of_name(alphabet_name.c_str());
+    if (!alphabet_code)
+        throw std::invalid_argument("unknown synthetic corpus alphabet: " + alphabet_name);
+    std::string alphabet_characters;
+    supported_biological_alphabets::dispatch_alphabet_by_code(
+        *alphabet_code, [&alphabet_characters]<class p_alphabet>() {
+            alphabet_characters.reserve(seqan3::alphabet_size<p_alphabet>);
+            for (std::size_t rank = 0; rank < seqan3::alphabet_size<p_alphabet>; ++rank) {
+                p_alphabet symbol{};
+                seqan3::assign_rank_to(static_cast<seqan3::alphabet_rank_t<p_alphabet>>(rank), symbol);
+                alphabet_characters.push_back(seqan3::to_char(symbol));
+            }
+        });
 
     const std::string path_tag = std::string{format_name} + "_" + std::string{test_case_name};
     descriptor.path = allocate_temp_path(path_tag);
-    const std::size_t bytes = emit_synthetic_corpus(descriptor.path,
-                                                    descriptor.is_fastq,
-                                                    record_count,
-                                                    mean_record_logical_length,
-                                                    seed,
-                                                    header_shape);
-    if (bytes == 0) {
+    const auto generated = emit_synthetic_corpus(descriptor.path,
+                                                 descriptor.is_fastq,
+                                                 record_count,
+                                                 mean_record_logical_length,
+                                                 seed,
+                                                 alphabet_characters,
+                                                 header_shape);
+    if (!generated.valid) {
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] synthetic corpus generation failed for '{}'", test_case_name);
+        std::error_code cleanup_error;
+        filesystem::remove(descriptor.path, cleanup_error);
         descriptor.path.clear();
         return descriptor;
     }
-    descriptor.bytes_on_disk = bytes;
-    descriptor.record_count = record_count;
-    descriptor.is_synthetic = true;
-    descriptor.valid = true;
-    return descriptor;
+    return generated;
 }
 
 /// Estimate corpus memory from the configured record count and mean length,

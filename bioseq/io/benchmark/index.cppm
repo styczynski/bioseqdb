@@ -116,6 +116,15 @@ int run(int argc, char** argv) {
             reader_evaluator{evaluate_reader},
             reader_cleanup{cleanup_reader}),
         create_benchmark<reader_input, io_measurement>(
+            "IO readers — native protein alphabets",
+            "bench_io_readers_protein",
+            config_path,
+            resource_estimator{estimate_reader_resources},
+            reader_builder{build_reader_input},
+            reader_runner{run_reader},
+            reader_evaluator{evaluate_reader},
+            reader_cleanup{cleanup_reader}),
+        create_benchmark<reader_input, io_measurement>(
             "IO readers — FASTQ (plain / async / mmap)",
             "bench_io_readers_fastq",
             config_path,

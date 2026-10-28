@@ -1,8 +1,8 @@
 {
   "params": {
-    "bioseq_io_sync_fasta":        {"_": {"type": "integer", "default": 0}},
-    "bioseq_io_mmap_fasta":        {"_": {"type": "integer", "default": 0}},
-    "bioseq_io_async4_fasta":      {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_sync_fasta":        {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
+    "bioseq_io_mmap_fasta":        {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
+    "bioseq_io_async4_fasta":      {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
     "bioseq_io_sync_fastq":        {"_": {"type": "integer", "default": 0}},
     "bioseq_io_mmap_fastq":        {"_": {"type": "integer", "default": 0}},
     "bioseq_io_async4_fastq":      {"_": {"type": "integer", "default": 0}},
@@ -47,8 +47,10 @@
     "FASTQ_VERY_LONG": { "data": { "format": "fastq", "kind": "synthetic", "record_count": 15,    "mean_record_length_bp": 1000000,"seed": 8 }, "description": "~16 MiB FASTQ of ~1 Mbp records" },
 
     "FASTA_REAL_HUMAN_GENOME":    { "data": { "format": "fasta", "kind": "real", "real_data_path": "homo_sapiens_GRCh38_dna4.fasta" },                  "description": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)" },
-    "FASTQ_REAL_HUMAN_FASTQ_6GB": { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq" }, "description": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful." },
-    "FASTQ_REAL_HUMAN_FASTQ_GZ":  { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true }, "description": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note." },
+    "FASTQ_REAL_HUMAN_FASTQ_6GB": {"data": {"format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq", "alphabet": "dna5"}, "description": "Strict DNA5 reader corpus preserving N. Historical DNA4-drop-N measurements are not comparable to this corrected native DNA5 input. Uncompressed input."},
+    "FASTQ_REAL_HUMAN_FASTQ_GZ":  {"data": {"format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true, "alphabet": "dna5"}, "description": "Strict DNA5 reader corpus preserving N. Historical DNA4-drop-N measurements are not comparable to this corrected native DNA5 input. Gzip compressed input."},
+
+    "FASTA_PROTEIN": {"data": {"format": "fasta", "kind": "synthetic", "alphabet": "aa27", "record_count": 20000, "mean_record_length_bp": 400, "seed": 1401}, "description": "One full-AA27 lexical corpus, reduced natively into each of the four protein alphabets; residue counts remain unchanged"},
 
     "FASTA_IDENTIFIER_UNIPROT_SHORT": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200, "seed": 101, "header_shape": "uniprot_metadata" }, "description": "~9 MiB FASTA of ~200 bp records with UniProt-like metadata headers" },
 
@@ -392,6 +394,163 @@
     }
   },
 
+  "bench_io_readers_protein": {
+    "tags": [
+      "io",
+      "reader",
+      "protein"
+    ],
+    "description": "One AA27 lexical FASTA corpus: native AA10Li, AA10Murphy, AA20 and AA27 packing through existing sync, mmap and async readers, compared with one alphabet-independent line-reader baseline. Generated record and residue totals are checked for every result. No source nucleotide translation or extra decode pass.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 1401
+    },
+    "matrix": {
+      "for": {
+        "FASTA_PROTEIN": 3
+      },
+      "over": {
+        "bioseq_io_sync_fasta": {
+          "alphabet": [
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27"
+          ]
+        },
+        "bioseq_io_mmap_fasta": {
+          "alphabet": [
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27"
+          ]
+        },
+        "bioseq_io_async4_fasta": {
+          "alphabet": [
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27"
+          ]
+        },
+        "naive_ifstream_fasta": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {},
+        "record_count": {
+          "type": "evaluation",
+          "rules": [
+            [
+              "bioseq_io_sync_fasta_protein_records_match_naive",
+              {
+                "key": "bioseq_io_sync_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ],
+            [
+              "bioseq_io_mmap_fasta_protein_records_match_naive",
+              {
+                "key": "bioseq_io_mmap_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ],
+            [
+              "bioseq_io_async4_fasta_protein_records_match_naive",
+              {
+                "key": "bioseq_io_async4_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ]
+          ]
+        },
+        "observed_body_bytes": {
+          "type": "evaluation",
+          "rules": [
+            [
+              "bioseq_io_sync_fasta_protein_residues_match_naive",
+              {
+                "key": "bioseq_io_sync_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ],
+            [
+              "bioseq_io_mmap_fasta_protein_residues_match_naive",
+              {
+                "key": "bioseq_io_mmap_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ],
+            [
+              "bioseq_io_async4_fasta_protein_residues_match_naive",
+              {
+                "key": "bioseq_io_async4_fasta"
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "p50"
+              },
+              {
+                "key": "naive_ifstream_fasta"
+              }
+            ]
+          ]
+        },
+        "records_nonzero": {
+          "type": "evaluation"
+        },
+        "bytes_on_disk": {
+          "type": "evaluation"
+        },
+        "decompressed_bytes": {
+          "type": "evaluation"
+        }
+      }
+    }
+  },
+
   "bench_io_readers_fasta": {
     "tags": ["io", "reader", "fasta"],
     "description": "FASTA reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTA corpora.",
@@ -672,7 +831,7 @@
 
   "bench_io_writers_fastq": {
     "tags": ["io", "writer", "fastq"],
-    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The dna5 SRR file is intentionally NOT included here: the bench's dna4 reader drops 'N's during slurp, so any roundtrip through dna4 is destructive on dna5 input. The reader matrix above keeps the 6 GiB dna5 cell to exercise mmap-parallel + parallel-gzip throughput; the writer matrix sticks to dna4-only corpora for byte-faithful roundtrip.",
+    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The writer matrix uses only DNA4 corpora. The separate real-data reader matrix explicitly selects DNA5 to preserve N and exercise mmap-parallel and parallel-gzip throughput.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {

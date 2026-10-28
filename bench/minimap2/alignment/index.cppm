@@ -28,6 +28,7 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <concepts>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -39,7 +40,10 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <tuple>
+#include <variant>
 #include <vector>
 
 export module bioseq.bench.minimap2.alignment;
@@ -124,13 +128,17 @@ struct prefilter_pipeline_match_count_parity_state {
 };
 
 /** @brief Generated sequence pairs and untimed representations for a run. */
-struct aligner_input {
+template<sequence_alphabet Alphabet, std::unsigned_integral Storage = std::uint32_t>
+struct aligner_input_for {
+    using alphabet_type = Alphabet;
+    using storage_unit = Storage;
+    using generator_type = gen::alphabet_sequence_generator<Alphabet, Storage>;
     /// Generated pairs are read-only after `on_input` returns, but
     /// `tool_minimap2` / `minimap_port` take non-const `compact_sequence_range&`
     /// refs even though they don't mutate. `mutable` lets concurrent
     /// `on_run` calls access them through their declared signatures
     /// without forcing a `const_cast` at every call site.
-    mutable std::vector<typename bench_generator_t::query_target_pair> pairs;
+    mutable std::vector<typename generator_type::query_target_pair> pairs;
     /// Pre-decoded ACGT strings in lock-step with `pairs`. Populated
     /// once in `build_input` so the per-iteration timing window of
     /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
@@ -142,6 +150,8 @@ struct aligner_input {
     /// REPR_STORAGE_* test cases to force a specific minimizer representation
     /// storage instantiation (K=7 → 32-bit, K=27 → 128-bit).
     std::int32_t kmer_size_override = 0;
+    /// Native planted inputs require one primary covering the exact query and target interval.
+    bool require_exact_primary_position = false;
     /// Shared because the framework may move/copy an input while every timed
     /// execution tuple for one batch must contribute to the same zero-work
     /// parity ledger. The evaluator is the only writer.
@@ -150,12 +160,27 @@ struct aligner_input {
             std::make_shared<prefilter_pipeline_match_count_parity_state>();
 };
 
+/// Preserve the existing DNA fixture and callback type without a second implementation.
+using aligner_input = aligner_input_for<seq::dna4>;
+
+/// Native uint64 storage uses one runtime alphabet axis; existing DNA baselines retain uint32.
+/// Query and target ownership stay together in the selected alternative.
+using native_aligner_input = decltype([]<class... Entries>(std::tuple<Entries...>) {
+    return std::variant<aligner_input_for<typename Entries::alphabet_type, std::uint64_t>...>{};
+}(supported_biological_alphabets::alphabet_entries_tuple{}));
+
 /** @brief Correctness, routing, and backend execution stats for a run. */
 struct aligner_output {
     std::size_t total_results          = 0;
     std::size_t correct_pairs          = 0;
     std::size_t total_pairs            = 0;
     std::vector<std::uint8_t> correct_pair_flags;
+    /// Observed coordinates for the single planted native-alphabet query, recorded only for that group.
+    decltype(match_result::query_start) native_query_start = 0u;
+    decltype(match_result::query_end) native_query_end = 0u;
+    decltype(match_result::target_start) native_target_start = 0u;
+    decltype(match_result::target_end) native_target_end = 0u;
+    bool native_primary_position_exact = false;
     double      sum_abs_position_offset = 0.0;
     bool        vulkan_hardware_unavailable = false;
     /// The Vulkan-labelled rows are deliberately mixed CPU/GPU pipelines and
@@ -482,10 +507,11 @@ static_assert([] {
 /// dna4/u32 storage and also keeps pre-decoded ACGT strings for the minimap2
 /// reference path. Generation shares the compact target across pairs and
 /// fills packed storage directly, so it carries no per-pair reference copy.
-[[nodiscard]] run_constraints estimate_aligner_resources(
+template<sequence_alphabet Alphabet, std::unsigned_integral Storage = std::uint32_t>
+[[nodiscard]] run_constraints estimate_aligner_resources_for(
     std::string_view /*data_dir*/,
     std::string_view /*test_case_name*/,
-    simdjson::dom::element data) noexcept
+    simdjson::dom::element data, bool prepare_reference_text = true) noexcept
 {
     const auto fragment_count = static_cast<std::size_t>(
         read_int_field(data, "fragment_count", 100));
@@ -495,7 +521,7 @@ static_assert([] {
         read_int_field(data, "reference_length", 10000));
 
     using range_t = compact_sequence_range<
-        sequence_custom_alphabet<seq::dna4, std::uint32_t>>;
+        sequence_custom_alphabet<Alphabet, Storage>>;
     using traits = typename range_t::traits;
     const auto packed_bytes_for = [] (std::size_t bp) noexcept -> std::size_t {
         return ((bp + traits::letters_per_unit - 1) / traits::letters_per_unit)
@@ -504,7 +530,8 @@ static_assert([] {
 
     const std::size_t target_packed = packed_bytes_for(reference_length);
     const std::size_t query_packed  = packed_bytes_for(fragment_length_mean);
-    const std::size_t acgt_bytes_per_pair = reference_length + fragment_length_mean;
+    const std::size_t acgt_bytes_per_pair = prepare_reference_text
+        ? reference_length + fragment_length_mean : 0u;
     const std::size_t cached_per_pair =
         target_packed + query_packed + acgt_bytes_per_pair;
     const std::size_t cached_input_bytes = fragment_count * cached_per_pair;
@@ -535,15 +562,23 @@ static_assert([] {
     };
 }
 
+/// Keep DNA baseline memory admission unchanged.
+[[nodiscard]] run_constraints estimate_aligner_resources(
+    std::string_view data_dir, std::string_view test_case_name,
+    simdjson::dom::element data) noexcept {
+    return estimate_aligner_resources_for<seq::dna4>(data_dir, test_case_name, data);
+}
+
 /// Materialise a `(query, target)` batch from the `data` JSON blob.
 /// Lives in `on_input`; runs once per `(benchmark, test_case, group)`
 /// batch. The generator dimensions come from the JSON blob; the framework-
 /// resolved tuples in `constraints` seed the zero-work off/Vulkan parity
 /// ledger with the rows and thresholds that are actually scheduled.
-[[nodiscard]] aligner_input build_input(std::string_view /*data_dir*/,
+template<sequence_alphabet Alphabet, std::unsigned_integral Storage = std::uint32_t>
+[[nodiscard]] aligner_input_for<Alphabet, Storage> build_aligner_input(std::string_view /*data_dir*/,
                                         std::string_view test_case_name,
                                         simdjson::dom::element data,
-                                        const run_constraints& constraints) {
+                                        const run_constraints& constraints, bool prepare_reference_text = true) {
     gen::generator_params params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
@@ -571,8 +606,9 @@ static_assert([] {
     params.seed = static_cast<std::uint64_t>(
         read_int_field(data, "seed", static_cast<std::int64_t>(params.seed)));
 
-    aligner_input input;
-    input.pairs = bench_generator_t(params).generate_sequences_pairs(params.fragment_count);
+    aligner_input_for<Alphabet, Storage> input;
+    input.pairs = gen::alphabet_sequence_generator<Alphabet, Storage>(params)
+        .generate_sequences_pairs(params.fragment_count);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
 
@@ -601,18 +637,72 @@ static_assert([] {
     // target that's an extra ~500 MB beyond the existing packed
     // representation. Acceptable: the cached input is held only for
     // the duration of the benchmark.
-    input.queries_acgt.reserve(input.pairs.size());
-    input.targets_acgt.reserve(input.pairs.size());
-    for (auto& pair : input.pairs) {
-        input.queries_acgt.push_back(
-            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.query));
-        input.targets_acgt.push_back(
-            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(*pair.target));
+    if (prepare_reference_text) {
+        input.queries_acgt.reserve(input.pairs.size());
+        input.targets_acgt.reserve(input.pairs.size());
+        for (auto& pair : input.pairs) {
+            input.queries_acgt.push_back(
+                bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.query));
+            input.targets_acgt.push_back(
+                bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(*pair.target));
+        }
+
     }
 
     bioseq_log<logging_level::debug>("[bioseq_benchmark] build_input '{}' produced {} pairs (k_override={})",
              test_case_name, input.pairs.size(), input.kmer_size_override);
     return input;
+}
+
+/// Keep all existing DNA dataset preparation and reference strings unchanged.
+[[nodiscard]] aligner_input build_input(
+    std::string_view data_dir, std::string_view test_case_name,
+    simdjson::dom::element data, const run_constraints& constraints) {
+    return build_aligner_input<seq::dna4>(data_dir, test_case_name, data, constraints);
+}
+
+/// Resolve a benchmark alphabet through the production registry before allocating input.
+[[nodiscard]] supported_biological_alphabets::alphabet_code_t native_benchmark_alphabet_code(
+    simdjson::dom::element data) {
+    std::string_view name;
+    if (data["alphabet"].get(name) != simdjson::SUCCESS)
+        throw std::invalid_argument("native benchmark requires an alphabet name");
+    const std::string terminated{name};
+    const auto code = supported_biological_alphabets::try_index_of_name(terminated.c_str());
+    if (!code) throw std::invalid_argument("native benchmark alphabet is not registered");
+    return *code;
+}
+
+/// Estimate native packed storage through the same admission helper without reference-text copies.
+[[nodiscard]] run_constraints estimate_native_aligner_resources(
+    std::string_view data_dir, std::string_view test_case_name,
+    simdjson::dom::element data) {
+    run_constraints resources{};
+    supported_biological_alphabets::dispatch_alphabet_by_code(native_benchmark_alphabet_code(data),
+        [&resources, data_dir, test_case_name, data]<class Alphabet>() {
+            resources = estimate_aligner_resources_for<Alphabet, std::uint64_t>(data_dir, test_case_name, data, false);
+        });
+    return resources;
+}
+
+/// Generate one zero-error, forward planted query directly in the selected native alphabet.
+[[nodiscard]] native_aligner_input build_native_aligner_input(
+    std::string_view data_dir, std::string_view test_case_name,
+    simdjson::dom::element data, const run_constraints& constraints) {
+    if (read_int_field(data, "fragment_count", 0) != 1
+        || read_double_field(data, "substitution_rate", -1.0) != 0.0
+        || read_double_field(data, "insertion_rate", -1.0) != 0.0
+        || read_double_field(data, "deletion_rate", -1.0) != 0.0
+        || read_double_field(data, "reverse_complement_rate", -1.0) != 0.0)
+        throw std::invalid_argument("native benchmark requires one exact forward planted query");
+    std::optional<native_aligner_input> input;
+    supported_biological_alphabets::dispatch_alphabet_by_code(native_benchmark_alphabet_code(data),
+        [&input, data_dir, test_case_name, data, &constraints]<class Alphabet>() {
+            auto typed = build_aligner_input<Alphabet, std::uint64_t>(data_dir, test_case_name, data, constraints, false);
+            typed.require_exact_primary_position = true;
+            input.emplace(std::in_place_type<aligner_input_for<Alphabet, std::uint64_t>>, std::move(typed));
+        });
+    return std::move(*input);
 }
 
 /// Encode a fixed ACGT fixture outside every timed callback.
@@ -870,8 +960,8 @@ void bind_fixed_benchmark_highway_target(minimap2_parameters& params) {
         .planned_target = binding.target,
     };
     params.highway_executed_target = binding.target;
-    // Frozen scheduler-registry code: DNA4 is alignment alphabet entry zero.
-    params.alphabet_code = 0u;
+    // Existing DNA fixtures retain their registry-owned identity. Native runners bind their actual type.
+    params.alphabet_code = supported_biological_alphabets::index_of<seq::dna4>();
 }
 
 [[nodiscard]] algorithm_dispatch dispatch_algorithm(std::string_view algo,
@@ -2678,15 +2768,19 @@ static_assert([] {
 /// Hand the (query, target) pair off to either the C reference or the
 /// bioseq port, then aggregate the per-pair primary-correctness flags
 /// into the aligner_output.
+template<sequence_alphabet Alphabet, std::unsigned_integral Storage = std::uint32_t>
 [[nodiscard]] aligner_output run_aligner_impl(
                                           std::string_view algo,
                                           const parameter_map& params,
-                                          const aligner_input& input,
+                                          const aligner_input_for<Alphabet, Storage>& input,
                                           bool strict_xxl_gate,
                                           bool capture_full_route_stats) {
     const std::uint32_t edit_threshold = read_max_edits_param(params);
-    const algorithm_dispatch dispatch = dispatch_algorithm(
+    algorithm_dispatch dispatch = dispatch_algorithm(
         algo, input.kmer_size_override, edit_threshold);
+    dispatch.params.alphabet_code = supported_biological_alphabets::template index_of<Alphabet>();
+    if (input.require_exact_primary_position && dispatch.is_minimap2_reference)
+        throw std::invalid_argument("native benchmark cannot use a nucleotide reference backend");
 
     aligner_output output;
     output.total_pairs = input.pairs.size();
@@ -2768,11 +2862,11 @@ static_assert([] {
             bioseq_log<logging_level::error>("[bioseq_benchmark] selected Vulkan aligner failed (algo='{}', pair_index={}, "
                  "query_len={}, target_len={}, k={}): {}",
                  algo, pair_index,
-                 input.queries_acgt[pair_index].size(),
-                 input.targets_acgt[pair_index].size(),
+                 pair.query.bp_size(),
+                 pair.target->bp_size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.enforce_edit_threshold
+            if (input.require_exact_primary_position || dispatch.enforce_edit_threshold
                 || dispatch.explicit_vulkan
                 || dispatch.explicit_prefilter_vulkan
                 || strict_xxl_gate) {
@@ -2784,11 +2878,11 @@ static_assert([] {
             bioseq_log<logging_level::error>("[bioseq_benchmark] aligner threw exception (algo='{}', pair_index={}, "
                  "query_len={}, target_len={}, k={}): {}",
                  algo, pair_index,
-                 input.queries_acgt[pair_index].size(),
-                 input.targets_acgt[pair_index].size(),
+                 pair.query.bp_size(),
+                 pair.target->bp_size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.enforce_edit_threshold
+            if (input.require_exact_primary_position || dispatch.enforce_edit_threshold
                 || dispatch.explicit_prefilter_vulkan
                 || strict_xxl_gate) throw;
             every_pair_route_validated = false;
@@ -2796,12 +2890,15 @@ static_assert([] {
         } catch (...) {
             bioseq_log<logging_level::error>("[bioseq_benchmark] aligner threw non-std exception (algo='{}', pair_index={})",
                  algo, pair_index);
-            if (dispatch.enforce_edit_threshold
+            if (input.require_exact_primary_position || dispatch.enforce_edit_threshold
                 || dispatch.explicit_prefilter_vulkan
                 || strict_xxl_gate) throw;
             every_pair_route_validated = false;
             continue;
         }
+        if (results.failure)
+            throw std::runtime_error(fmt::format("alignment benchmark returned contract error {}",
+                static_cast<unsigned>(*results.failure)));
         const bool pair_route_validated = require_selected_route_execution(
             algo, dispatch, results, strict_xxl_gate);
         if (!pair_route_validated) {
@@ -2872,6 +2969,17 @@ static_assert([] {
             output.total_results += 1;
             if (!match.is_primary || found_primary) continue;
             found_primary = true;
+            if (input.require_exact_primary_position) {
+                output.native_query_start = match.query_start;
+                output.native_query_end = match.query_end;
+                output.native_target_start = match.target_start;
+                output.native_target_end = match.target_end;
+                output.native_primary_position_exact = match.query_start == 0
+                    && static_cast<std::size_t>(match.query_end) == pair.query.bp_size()
+                    && static_cast<std::size_t>(match.target_start) == pair.truth_target_start
+                    && static_cast<std::size_t>(match.target_end) == pair.truth_target_end
+                    && match.is_reverse == pair.is_reverse;
+            }
             const std::int32_t offset =
                 match.target_start - static_cast<std::int32_t>(pair.truth_target_start);
             const std::int32_t abs_offset = std::abs(offset);
@@ -2969,6 +3077,13 @@ static_assert([] {
             algo, output.total_pairs, output.total_results,
             output.correct_pairs));
     }
+    if (input.require_exact_primary_position
+        && (output.total_pairs != 1u || output.total_results != 1u
+            || !output.native_primary_position_exact || !every_pair_route_validated))
+        throw std::runtime_error(fmt::format(
+            "native alignment failed exact placement: algorithm={} observed query=[{},{}) target=[{},{})",
+            algo, output.native_query_start, output.native_query_end,
+            output.native_target_start, output.native_target_end));
     return output;
 }
 
@@ -3403,20 +3518,20 @@ struct prefilter_pipeline_match_count_parity_stats {
 record_prefilter_pipeline_match_count_parity(
     std::string_view algorithm,
     const parameter_map& params,
-    const aligner_input& input,
+    const std::shared_ptr<prefilter_pipeline_match_count_parity_state>& parity,
     const aligner_output& output)
 {
     const bool is_prefilter_off = algorithm == "bioseq_prefilter_off";
     const bool is_prefilter_vulkan =
         algorithm == "bioseq_prefilter_vulkan";
     if (!is_prefilter_off && !is_prefilter_vulkan) return {};
-    if (!input.prefilter_pipeline_match_count_parity) {
+    if (!parity) {
         throw std::logic_error(
             "prefilter pipeline parity state is unexpectedly absent");
     }
 
     const std::uint32_t threshold = read_max_edits_param(params);
-    auto& shared = *input.prefilter_pipeline_match_count_parity;
+    auto& shared = *parity;
     std::scoped_lock lock{shared.mutex};
     auto& state = shared.by_threshold[threshold];
     const auto record_stable_count =
@@ -3519,12 +3634,12 @@ record_prefilter_pipeline_match_count_parity(
 [[nodiscard]] std::map<std::string, double> evaluate_aligner(
     std::string_view algorithm,
     const parameter_map& params,
-    const aligner_input& input,
+    const std::shared_ptr<prefilter_pipeline_match_count_parity_state>& parity,
     const aligner_output& output)
 {
     const auto prefilter_match_count_parity =
         record_prefilter_pipeline_match_count_parity(
-            algorithm, params, input, output);
+            algorithm, params, parity, output);
     std::map<std::string, double> metrics;
     metrics.emplace("pipeline_backend_available",
         output.vulkan_hardware_unavailable ? 0.0 : 1.0);
@@ -4179,6 +4294,37 @@ record_prefilter_pipeline_match_count_parity(
     return metrics;
 }
 
+/// Run one native alphabet through the existing scalar-ABI production pipeline.
+[[nodiscard]] aligner_output run_native_aligner(
+    std::string_view algorithm, const parameter_map& params, const native_aligner_input& input) {
+    return std::visit([algorithm, &params](const auto& typed) {
+        return run_aligner_impl(algorithm, params, typed, false, true);
+    }, input);
+}
+
+/// Report actual and expected coordinates so every native result has inspectable placement evidence.
+[[nodiscard]] std::map<std::string, double> evaluate_native_aligner(
+    std::string_view algorithm, const parameter_map& params,
+    const native_aligner_input& input, const aligner_output& output) {
+    return std::visit([algorithm, &params, &output](const auto& typed) {
+        using alphabet_type = typename std::remove_cvref_t<decltype(typed)>::alphabet_type;
+        auto metrics = evaluate_aligner(algorithm, params, typed.prefilter_pipeline_match_count_parity, output);
+        const auto& pair = typed.pairs.front();
+        using storage_unit = typename std::remove_cvref_t<decltype(typed)>::storage_unit;
+        metrics.emplace("native_input_storage_bits", std::numeric_limits<storage_unit>::digits);
+        metrics.emplace("native_alphabet_code", supported_biological_alphabets::template index_of<alphabet_type>());
+        metrics.emplace("native_primary_position_exact", output.native_primary_position_exact ? 1.0 : 0.0);
+        metrics.emplace("native_observed_query_start", output.native_query_start);
+        metrics.emplace("native_observed_query_end", output.native_query_end);
+        metrics.emplace("native_observed_target_start", output.native_target_start);
+        metrics.emplace("native_observed_target_end", output.native_target_end);
+        metrics.emplace("native_expected_query_end", static_cast<double>(pair.query.bp_size()));
+        metrics.emplace("native_expected_target_start", static_cast<double>(pair.truth_target_start));
+        metrics.emplace("native_expected_target_end", static_cast<double>(pair.truth_target_end));
+        return metrics;
+    }, input);
+}
+
 /// Evaluate primary correctness against an independent exact-threshold truth
 /// set. This work is outside the timed callback. In particular, a generated
 /// dataset may contain input pairs but no pair whose ground-truth interval has
@@ -4190,7 +4336,7 @@ record_prefilter_pipeline_match_count_parity(
     const aligner_input& input,
     const aligner_output& output)
 {
-    auto metrics = evaluate_aligner(algorithm, params, input, output);
+    auto metrics = evaluate_aligner(algorithm, params, input.prefilter_pipeline_match_count_parity, output);
     if (output.vulkan_hardware_unavailable) {
         return metrics;
     }
@@ -4976,7 +5122,12 @@ int run(int argc, char** argv) {
             run_aligner_strict_xxl_paired};
     auto eval = std::function<std::map<std::string, double>(
         std::string_view, const parameter_map&,
-        const aligner_input&, const aligner_output&)>{evaluate_aligner};
+        const aligner_input&, const aligner_output&)> {
+            [](std::string_view algorithm, const parameter_map& params,
+               const aligner_input& input, const aligner_output& output) {
+                return evaluate_aligner(algorithm, params,
+                    input.prefilter_pipeline_match_count_parity, output);
+            }};
     auto eval_prefilter_pipeline =
         std::function<std::map<std::string, double>(
             std::string_view, const parameter_map&,
@@ -4986,6 +5137,16 @@ int run(int argc, char** argv) {
         std::string_view, const parameter_map&,
         const aligner_input&, const aligner_output&)>{
             serialize_xxl_paired_sample};
+    auto native_estimate = std::function<run_constraints(
+        std::string_view, std::string_view, simdjson::dom::element)>{estimate_native_aligner_resources};
+    auto native_build = std::function<native_aligner_input(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const run_constraints&)>{build_native_aligner_input};
+    auto native_run = std::function<aligner_output(
+        std::string_view, const parameter_map&, const native_aligner_input&)>{run_native_aligner};
+    auto native_eval = std::function<std::map<std::string, double>(
+        std::string_view, const parameter_map&, const native_aligner_input&,
+        const aligner_output&)>{evaluate_native_aligner};
     auto estimate_endpoint = std::function<run_constraints(
         std::string_view, std::string_view, simdjson::dom::element)>{
             estimate_endpoint_qualification_resources};
@@ -5017,6 +5178,10 @@ int run(int argc, char** argv) {
             "SneakySnake full-pipeline regional impact",
             "bench_prefilter_pipeline",
             config_path, estimate, build, run, eval_prefilter_pipeline),
+        create_benchmark<native_aligner_input, aligner_output>(
+            "Native biological alphabet planted alignments",
+            "bench_aligners_native_alphabets", config_path,
+            native_estimate, native_build, native_run, native_eval),
         create_benchmark<aligner_input, aligner_output>(
             "Aligner full grid (length × error × algorithm)",
             "bench_aligners_grid", config_path, estimate, build, run, eval),

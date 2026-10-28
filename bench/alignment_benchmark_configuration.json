@@ -50,6 +50,115 @@
   },
 
   "test_cases": {
+    "NATIVE_DNA4_EXACT": {
+      "data": {
+        "alphabet": "dna4",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native dna4: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
+    "NATIVE_DNA5_EXACT": {
+      "data": {
+        "alphabet": "dna5",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native dna5: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
+    "NATIVE_AA10LI_EXACT": {
+      "data": {
+        "alphabet": "aa10li",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native aa10li: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
+    "NATIVE_AA10MURPHY_EXACT": {
+      "data": {
+        "alphabet": "aa10murphy",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native aa10murphy: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
+    "NATIVE_AA20_EXACT": {
+      "data": {
+        "alphabet": "aa20",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native aa20: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
+    "NATIVE_AA27_EXACT": {
+      "data": {
+        "alphabet": "aa27",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native aa27: one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    }
+,
     "SNEAKYSNAKE_ERR_E2_100BP": {
       "concurrency": 1,
       "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
@@ -2544,6 +2653,104 @@
           "type": "region",
           "region": "sort_run",
           "rules": []
+        }
+      }
+    }
+  },
+
+  "bench_aligners_native_alphabets": {
+    "tags": [
+      "aligner",
+      "native-alphabet",
+      "protein",
+      "cpu"
+    ],
+    "description": "Native uint64 packed input with the existing native32 hash minimizer, checked native seed verification, SIMD chaining and KSW2/Block runners over every registered biological alphabet. Exact planted inputs require one primary with observed query and target endpoints equal to generated truth; external nucleotide aligners are excluded. DNA performance baselines remain in their unchanged groups.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 370371
+    },
+    "matrix": {
+      "for": {
+        "NATIVE_DNA4_EXACT": 5,
+        "NATIVE_DNA5_EXACT": 5,
+        "NATIVE_AA10LI_EXACT": 5,
+        "NATIVE_AA10MURPHY_EXACT": 5,
+        "NATIVE_AA20_EXACT": 5,
+        "NATIVE_AA27_EXACT": 5
+      },
+      "over": {
+        "bioseq_ksw2_simd_dp_bounded_nthash": {},
+        "bioseq_block_simd_dp_bounded_nthash": {}
+      },
+      "by_regions": true,
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "bioseq_ksw2_simd_dp_bounded_nthash",
+          "bioseq_block_simd_dp_bounded_nthash"
+        ],
+        "exact_test_case_iterations": {
+          "NATIVE_DNA4_EXACT": 5,
+          "NATIVE_DNA5_EXACT": 5,
+          "NATIVE_AA10LI_EXACT": 5,
+          "NATIVE_AA10MURPHY_EXACT": 5,
+          "NATIVE_AA20_EXACT": 5,
+          "NATIVE_AA27_EXACT": 5
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "metrics": {
+        "wall_clock_ns": {},
+        "region_total_ns": {
+          "type": "region"
+        },
+        "region_visits": {
+          "type": "region"
+        },
+        "match_count": {
+          "type": "evaluation"
+        },
+        "primary_correct_fraction": {
+          "type": "evaluation"
+        },
+        "mean_position_offset_bp": {
+          "type": "evaluation"
+        },
+        "native_alphabet_code": {
+          "type": "evaluation"
+        },
+        "native_input_storage_bits": {
+          "type": "evaluation"
+        },
+        "native_primary_position_exact": {
+          "type": "evaluation"
+        },
+        "native_observed_query_start": {
+          "type": "evaluation"
+        },
+        "native_observed_query_end": {
+          "type": "evaluation"
+        },
+        "native_observed_target_start": {
+          "type": "evaluation"
+        },
+        "native_observed_target_end": {
+          "type": "evaluation"
+        },
+        "native_expected_query_end": {
+          "type": "evaluation"
+        },
+        "native_expected_target_start": {
+          "type": "evaluation"
+        },
+        "native_expected_target_end": {
+          "type": "evaluation"
         }
       }
     }
