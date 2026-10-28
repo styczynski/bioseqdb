@@ -4,6 +4,10 @@
  */
 module;
 
+// Anchor the inline ASCII encoder reached through the imported SQL constructor
+// before separate sequence modules contribute Highway byte-vector declarations.
+#include <hwy/highway.h>
+
 #include <array>
 #include <algorithm>
 #include <cstddef>

@@ -4,6 +4,10 @@
  */
 module;
 
+// Anchor Highway declarations before the generic packed decoder is instantiated
+// through both sequence and PostgreSQL storage module imports.
+#include <hwy/highway.h>
+
 #include <bioseq/pg_compat.h>
 
 extern "C" {
