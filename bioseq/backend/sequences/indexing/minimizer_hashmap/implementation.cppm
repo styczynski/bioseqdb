@@ -617,10 +617,10 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
         || request.kernels->two_stack_nthash == nullptr
         || request.read_fragment == nullptr
         || request.release_fragment == nullptr
-        || request.append_records == nullptr
-        || request.append_raw == nullptr
-        || request.sequence_context == nullptr
-        || request.collector_context == nullptr) {
+        || request.sink.state == nullptr
+        || request.sink.acquire == nullptr
+        || request.sink.commit == nullptr
+        || request.sequence_context == nullptr) {
         return rejected_bridge_result(exact_simd_index_status::invalid_state);
     }
     const std::size_t storage_bits = request.storage_unit_bytes * 8u;
@@ -682,10 +682,6 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
         .consume_end_bp = std::min(
             request.hi_unit * letters_per_unit, request.total_bp),
     };
-    kernel_sink_adapter sink{
-        request.collector_context,
-        request.append_records,
-        request.append_raw};
     bioseq::minimizers::minimizer_kernel_invocation invocation{
         .sequence = {
             .storage = nullptr,
@@ -708,27 +704,23 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
         .window = request.window_size,
         .kmer = request.kmer_size,
         .emitted_position_base = request.emitted_position_base,
-        .output_layout =
-            bioseq::minimizers::k_minimizer_output_layout<
-                bioseq::minimizers::minimap_sketch_data>,
-        .output_hash_mask =
-            bioseq::minimizers::minimap_sketch_data::k_hash_field_mask,
-        .output_position_mask =
-            bioseq::minimizers::minimap_sketch_data::k_position_field_mask,
+        .output_layout = request.output_layout,
+        .output_hash_mask = request.output_hash_mask,
+        .output_position_mask = request.output_position_mask,
         .two_stack_route = bioseq::minimizers::two_stack_route::
             chronological_continuation,
-        .sink = sink.sink(),
+        .sink = request.sink,
     };
     const bioseq::minimizers::minimizer_kernel_result kernel_result =
         request.kernels->two_stack_nthash(invocation);
-    sink.validate(kernel_result);
     if (kernel_result.stats.algorithm
         != bioseq::minimizers::minimizer_kernel_algorithm::two_stack_nthash) {
         return rejected_bridge_result(exact_simd_index_status::invalid_state);
     }
     return {
-        .status = exact_status_from_kernel(kernel_result, sink.accepted),
+        .status = exact_status_from_kernel(kernel_result, true),
         .stats = bridge_exact_stats(kernel_result.stats.two_stack),
+        .emitted = kernel_result.emitted,
     };
 }
 

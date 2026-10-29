@@ -77,7 +77,7 @@ TEST_CASE("exact_simd indexing bridge is linked, exact, and instrumented",
     const auto range_view = bioseq::storage::make_lazy_sequence_view(range_owner);
     sketch_collector exact_collector;
 #if HWY_TARGET == HWY_SCALAR
-    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
                           exact_collector,
                           range_view,
                           fixed_alphabet_code<::seq::dna4>(),
@@ -90,7 +90,7 @@ TEST_CASE("exact_simd indexing bridge is linked, exact, and instrumented",
                           "bridge contract"),
                       bioseq::indexing::exact_simd_index_runtime_error);
 #else
-    const auto stats = bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    const auto stats = bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
         exact_collector,
         range_view,
         fixed_alphabet_code<::seq::dna4>(),
@@ -134,7 +134,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
     const auto no_n_view = bioseq::storage::make_lazy_sequence_view(no_n_owner);
     sketch_collector no_n_exact_collector;
     sketch_collector mismatched_alphabet_collector;
-    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
                           mismatched_alphabet_collector,
                           no_n_view,
                           fixed_alphabet_code<::seq::dna4>(),
@@ -147,7 +147,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
                           "DNA5 bridge mismatched alphabet evidence"),
                       bioseq::indexing::exact_simd_index_runtime_error);
 #if HWY_TARGET == HWY_SCALAR
-    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    REQUIRE_THROWS_AS((void)bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
                           no_n_exact_collector,
                           no_n_view,
                           fixed_alphabet_code<::seq::dna5>(),
@@ -160,7 +160,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
                           "DNA5 bridge contract"),
                       bioseq::indexing::exact_simd_index_runtime_error);
 #else
-    const auto no_n_stats = bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    const auto no_n_stats = bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
         no_n_exact_collector,
         no_n_view,
         fixed_alphabet_code<::seq::dna5>(),
@@ -190,7 +190,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
     auto with_n_owner = bioseq::storage::make_resident_lazy_sequence(with_n_range);
     const auto with_n_view = bioseq::storage::make_lazy_sequence_view(with_n_owner);
     sketch_collector with_n_collector;
-    const auto with_n_stats = bioseq::indexing::collect_exact_simd_index_range_or_throw(
+    const auto with_n_stats = bioseq::indexing::collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
         with_n_collector,
         with_n_view,
         fixed_alphabet_code<::seq::dna5>(),

@@ -340,182 +340,109 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
 
         collector.clear();
         exact_simd_index_execution_stats exact_simd_stats{};
-        if (backend == minimizer_sketch_backend::scalar && algorithm_identity != nullptr) {
+        if (backend == minimizer_sketch_backend::scalar ||
+            backend == minimizer_sketch_backend::exact_simd) {
+            const auto requested_algorithm = algorithm_identity != nullptr
+                ? algorithm_identity->requested_algorithm
+                : backend == minimizer_sketch_backend::scalar
+                    ? bioseq::simd::minimizer_algorithm::scalar
+                    : bioseq::simd::minimizer_algorithm::two_stack_nthash;
+            const std::uint8_t packed_storage_bits = algorithm_identity != nullptr
+                ? algorithm_identity->packed_storage_bits
+                : static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits);
             const auto selected_layout =
                 select_minimizer_generation_physical_layout<p_alphabet>(
-                    algorithm_identity->requested_algorithm,
-                    target_length,
-                    algorithm_identity->packed_storage_bits,
-                    kmer_size,
-                    window_size);
+                    requested_algorithm, target_length, packed_storage_bits,
+                    kmer_size, window_size);
             if (!selected_layout) {
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
             }
             const auto selected_identity =
                 make_minimizer_generation_algorithm_identity(*selected_layout);
-            if (!selected_identity || *selected_identity != *algorithm_identity) {
+            if (!selected_identity ||
+                (algorithm_identity != nullptr && *selected_identity != *algorithm_identity)) {
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
             }
-            add_route(&minimizer_sequence_generation_execution_receipt::scalar_core_runs);
+            const bool scalar = backend == minimizer_sketch_backend::scalar;
+            add_route(scalar
+                ? &minimizer_sequence_generation_execution_receipt::scalar_core_runs
+                : &minimizer_sequence_generation_execution_receipt::exact_simd_core_runs);
             try {
-                (void)bioseq::minimizers::visit_minimizer_physical_layout(
+                exact_simd_stats = bioseq::minimizers::visit_minimizer_physical_layout(
                     *selected_layout,
-                    [&sequence,
-                     range,
-                     emit_base,
-                     window_size,
-                     kmer_size,
-                     &output]<class p_minimizer>() {
+                    [&sequence, alphabet_code, range, emit_base, window_size, kmer_size,
+                     packed_storage_bits, kernels, &output, execution_receipt,
+                     effective_algorithm = selected_identity->effective_algorithm]<class p_minimizer>() {
                         struct canonical_pair_collector {
                             std::vector<detail::sorted_pair_t>* output = nullptr;
                             std::uint64_t emit_base = 0u;
                             std::uint64_t core_lo = 0u;
                             std::uint64_t core_hi = 0u;
 
-                            /** Append a scalar minimizer if its global position lies inside the core. */
+                            /** Append full-width hashes with global positions inside this core. */
                             void collect(const p_minimizer& minimizer) {
-                                const std::uint64_t position =
-                                    emit_base +
-                                    static_cast<std::uint64_t>(minimizer.last_pos());
-                                if (position < core_lo || position >= core_hi) {
-                                    return;
+                                const std::uint64_t position = emit_base + minimizer.last_pos();
+                                if (position >= core_lo && position < core_hi) {
+                                    output->emplace_back(minimizer.kmer(),
+                                        (position << 1u) | minimizer.strand());
                                 }
-                                output->emplace_back(
-                                    minimizer.kmer(),
-                                    (position << 1u) |
-                                        static_cast<std::uint64_t>(minimizer.strand()));
                             }
-                        } direct_collector{
-                            .output = &output,
-                            .emit_base = emit_base,
-                            .core_lo = range.core_lo_bp,
-                            .core_hi = range.core_hi_bp,
-                        };
-                        bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
-                            direct_collector,
-                            sequence,
-                            range.cs_u,
-                            range.ce_u,
-                            window_size,
-                            kmer_size);
+                        } direct_collector{&output, emit_base, range.core_lo_bp, range.core_hi_bp};
+                        if (effective_algorithm == bioseq::simd::minimizer_algorithm::scalar) {
+                            bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
+                                direct_collector, sequence, range.cs_u, range.ce_u,
+                                window_size, kmer_size);
+                            return exact_simd_index_execution_stats{};
+                        }
+                        if (effective_algorithm ==
+                            bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                            const auto stats = collect_reference_simd_index_range_or_throw<p_minimizer>(
+                                direct_collector, sequence, alphabet_code, range.cs_u, range.ce_u,
+                                window_size, kmer_size, packed_storage_bits, kernels,
+                                "minimizers_per_sequence build");
+                            if (execution_receipt != nullptr) {
+                                execution_receipt->reference_simd_stats.merge(stats);
+                                execution_receipt->reference_simd_stats_available = true;
+                                execution_receipt->saturated = execution_receipt->saturated ||
+                                    execution_receipt->reference_simd_stats.saturated;
+                            }
+                            return exact_simd_index_execution_stats{};
+                        }
+                        if constexpr (bioseq::minimizers::two_stack_simd_minimizer_representation<
+                                          p_minimizer>) {
+                            return collect_exact_simd_index_range_or_throw<p_minimizer>(
+                                direct_collector, sequence, alphabet_code, range.cs_u, range.ce_u,
+                                window_size, kmer_size, 0u, kernels,
+                                "minimizers_per_sequence build");
+                        } else {
+                            throw exact_simd_index_runtime_error{
+                                exact_simd_index_status::unsupported_representation,
+                                "minimizers_per_sequence build"};
+                            return exact_simd_index_execution_stats{};
+                        }
                     });
+            } catch (const exact_simd_index_runtime_error&) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             } catch (const std::invalid_argument&) {
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
             }
-            if (scalar_build_stats != nullptr) {
+            if (scalar && scalar_build_stats != nullptr) {
                 scalar_build_stats->record_scalar_collection(
                     range.ce_u - range.cs_u, range.ce_u - range.cs_u, 1u, 1u);
             }
-            return exact_simd_stats;
-        }
-        if (backend == minimizer_sketch_backend::exact_simd) {
-            add_route(&minimizer_sequence_generation_execution_receipt::exact_simd_core_runs);
-            if (algorithm_identity != nullptr &&
-                algorithm_identity->effective_algorithm ==
-                    bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
-                const auto selected_layout =
-                    select_minimizer_generation_physical_layout<p_alphabet>(
-                        algorithm_identity->requested_algorithm,
-                        target_length,
-                        algorithm_identity->packed_storage_bits,
-                        kmer_size,
-                        window_size);
-                if (!selected_layout) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::storage_contract_mismatch);
-                }
-                const auto selected_identity =
-                    make_minimizer_generation_algorithm_identity(*selected_layout);
-                if (!selected_identity || *selected_identity != *algorithm_identity) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::storage_contract_mismatch);
-                }
-                try {
-                    const auto reference_stats =
-                        bioseq::minimizers::visit_minimizer_physical_layout(
-                            *selected_layout,
-                            [&sequence,
-                             alphabet_code,
-                             range,
-                             emit_base,
-                             window_size,
-                             kmer_size,
-                             algorithm_identity,
-                             kernels,
-                             &output]<class p_minimizer>() {
-                                struct canonical_pair_collector {
-                                    std::vector<detail::sorted_pair_t>* output = nullptr;
-                                    std::uint64_t emit_base = 0u;
-                                    std::uint64_t core_lo = 0u;
-                                    std::uint64_t core_hi = 0u;
-
-                                    /// Append a reference-SIMD minimizer if its global position lies inside the core.
-                                    void collect(const p_minimizer& minimizer) {
-                                        const std::uint64_t position =
-                                            emit_base +
-                                            static_cast<std::uint64_t>(minimizer.last_pos());
-                                        if (position < core_lo || position >= core_hi) {
-                                            return;
-                                        }
-                                        output->emplace_back(
-                                            minimizer.kmer(),
-                                            (position << 1u) |
-                                                static_cast<std::uint64_t>(minimizer.strand()));
-                                    }
-                                } direct_collector{
-                                    .output = &output,
-                                    .emit_base = emit_base,
-                                    .core_lo = range.core_lo_bp,
-                                    .core_hi = range.core_hi_bp,
-                                };
-                                return collect_reference_simd_index_range_or_throw<p_minimizer>(
-                                    direct_collector,
-                                    sequence,
-                                    alphabet_code,
-                                    range.cs_u,
-                                    range.ce_u,
-                                    window_size,
-                                    kmer_size,
-                                    algorithm_identity->packed_storage_bits,
-                                    kernels,
-                                    "minimizers_per_sequence build");
-                            });
-                    if (execution_receipt != nullptr) {
-                        execution_receipt->reference_simd_stats.merge(reference_stats);
-                        execution_receipt->reference_simd_stats_available = true;
-                        execution_receipt->saturated =
-                            execution_receipt->saturated ||
-                            execution_receipt->reference_simd_stats.saturated;
-                    }
-                } catch (const exact_simd_index_runtime_error&) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::storage_contract_mismatch);
-                } catch (const std::invalid_argument&) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::storage_contract_mismatch);
-                }
-            } else {
-                exact_simd_stats =
-                    collect_exact_simd_index_range_or_throw(collector,
-                                                            sequence,
-                                                            alphabet_code,
-                                                            range.cs_u,
-                                                            range.ce_u,
-                                                            window_size,
-                                                            kmer_size,
-                                                            0u,
-                                                            kernels,
-                                                            "minimizers_per_sequence build");
-                if (execution_receipt != nullptr) {
-                    execution_receipt->exact_simd_stats.merge(exact_simd_stats);
-                    execution_receipt->exact_simd_stats_available = true;
-                    execution_receipt->saturated = execution_receipt->saturated ||
-                                                   execution_receipt->exact_simd_stats.saturated;
-                }
+            if (selected_identity->effective_algorithm ==
+                    bioseq::simd::minimizer_algorithm::two_stack_nthash &&
+                execution_receipt != nullptr) {
+                execution_receipt->exact_simd_stats.merge(exact_simd_stats);
+                execution_receipt->exact_simd_stats_available = true;
+                execution_receipt->saturated = execution_receipt->saturated ||
+                    execution_receipt->exact_simd_stats.saturated;
             }
+            return exact_simd_stats;
         } else if (backend == minimizer_sketch_backend::bounded_nthash_simd) {
             if (!allow_packed_bounded) {
                 return std::unexpected(
@@ -551,14 +478,10 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                                                 "minimizers_per_sequence build"};
             }
         } else {
-            add_route(&minimizer_sequence_generation_execution_receipt::scalar_core_runs);
-            bioseq::simd::collect_minimizers_segment_scalar<minimap_sketch_data>(
-                collector, sequence, range.cs_u, range.ce_u, window_size, kmer_size);
-            if (scalar_build_stats != nullptr) {
-                scalar_build_stats->record_scalar_collection(
-                    range.ce_u - range.cs_u, range.ce_u - range.cs_u, 1u, 1u);
-            }
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
+
         for (const minimap_sketch_data& minimizer : collector.extract_sketches_data()) {
             const std::uint64_t position =
                 emit_base + static_cast<std::uint64_t>(minimizer.last_pos());

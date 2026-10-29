@@ -1192,7 +1192,9 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 increment_route_counter_(exact_simd_core_runs_);
                 try {
                     if (algorithm_identity_.effective_algorithm ==
-                        bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                            bioseq::simd::minimizer_algorithm::simd_minimap2_reference ||
+                        algorithm_identity_.effective_algorithm ==
+                            bioseq::simd::minimizer_algorithm::two_stack_nthash) {
                         const auto selected_layout =
                             select_minimizer_generation_physical_layout<p_alphabet>(
                                 algorithm_identity_.requested_algorithm,
@@ -1210,14 +1212,28 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                             return std::unexpected(
                                 minimizer_generation_encoding_error::storage_contract_mismatch);
                         }
-                        const auto stats = bioseq::minimizers::visit_minimizer_physical_layout(
-                            *selected_layout,
+                        // The persisted fragment extent excludes its halo. Keep the
+                        // existing one-run chronological route by selecting a transient
+                        // record for the complete collection range, as scalar does.
+                        const auto execution_layout = algorithm_identity_.effective_algorithm ==
+                                bioseq::simd::minimizer_algorithm::two_stack_nthash
+                            ? select_minimizer_generation_physical_layout<p_alphabet>(
+                                algorithm_identity_.requested_algorithm, collect_hi - collect_lo,
+                                algorithm_identity_.packed_storage_bits, kmer_size_, window_size_)
+                            : selected_layout;
+                        if (!execution_layout) {
+                            return std::unexpected(
+                                minimizer_generation_encoding_error::storage_contract_mismatch);
+                        }
+                        reference_simd_index_execution_stats reference_stats{};
+                        const auto exact_stats = bioseq::minimizers::visit_minimizer_physical_layout(
+                            *execution_layout,
                             [this,
                              core_lo,
                              core_hi,
                              target_length,
                              halo,
-                             &run]<class p_minimizer>() {
+                             &run, &reference_stats]<class p_minimizer>() {
                                 const std::uint64_t local_position_capacity =
                                     static_cast<std::uint64_t>(
                                         bioseq::minimizers::
@@ -1225,11 +1241,11 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                                 if (halo > (std::numeric_limits<std::uint64_t>::max)() / 2u ||
                                     local_position_capacity <= 2u * halo) {
                                     throw std::invalid_argument(
-                                        "reference fragment owner cannot represent its halo");
+                                        "exact fragment owner cannot represent its halo");
                                 }
                                 const std::uint64_t maximum_core_bp =
                                     local_position_capacity - 2u * halo;
-                                reference_simd_index_execution_stats combined{};
+                                exact_simd_index_execution_stats combined{};
                                 std::uint64_t subcore_lo = core_lo;
                                 while (subcore_lo < core_hi) {
                                     const std::uint64_t subcore_hi =
@@ -1244,7 +1260,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                                     if (subcollect_hi < subcollect_lo ||
                                         subcollect_hi - subcollect_lo > local_position_capacity) {
                                         throw std::invalid_argument(
-                                            "reference fragment owner range exceeds its record");
+                                            "exact fragment owner range exceeds its record");
                                     }
                                     struct canonical_event_collector {
                                         std::vector<canonical_minimizer_event>* output = nullptr;
@@ -1252,7 +1268,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                                         std::uint64_t core_lo = 0u;
                                         std::uint64_t core_hi = 0u;
 
-                                        /// Keep reference-kernel minimizers within this subcore and
+                                        /// Keep selected physical minimizers within this subcore and
                                         /// convert their positions to global coordinates.
                                         void collect(const p_minimizer& minimizer) {
                                             const std::uint64_t position =
@@ -1274,43 +1290,47 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                                         .core_lo = subcore_lo,
                                         .core_hi = subcore_hi,
                                     };
-                                    combined.merge(
-                                        collect_reference_simd_index_range_or_throw<p_minimizer>(
-                                            direct_collector,
-                                            sequence_,
-                                            alphabet_code_,
-                                            static_cast<sequence_size_t>(subcollect_lo),
-                                            static_cast<sequence_size_t>(subcollect_hi),
-                                            window_size_,
-                                            kmer_size_,
-                                            algorithm_identity_.packed_storage_bits,
-                                            kernels_,
-                                            "minimizer fragment generation replay"));
+                                    if (algorithm_identity_.effective_algorithm ==
+                                        bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                                        reference_stats.merge(
+                                            collect_reference_simd_index_range_or_throw<p_minimizer>(
+                                                direct_collector, sequence_, alphabet_code_,
+                                                static_cast<sequence_size_t>(subcollect_lo),
+                                                static_cast<sequence_size_t>(subcollect_hi),
+                                                window_size_, kmer_size_,
+                                                algorithm_identity_.packed_storage_bits, kernels_,
+                                                "minimizer fragment generation replay"));
+                                    } else if constexpr (
+                                        bioseq::minimizers::two_stack_simd_minimizer_representation<
+                                            p_minimizer>) {
+                                        combined.merge(
+                                            collect_exact_simd_index_range_or_throw<p_minimizer>(
+                                                direct_collector, sequence_, alphabet_code_,
+                                                static_cast<sequence_size_t>(subcollect_lo),
+                                                static_cast<sequence_size_t>(subcollect_hi),
+                                                window_size_, kmer_size_, 0u, kernels_,
+                                                "minimizer fragment generation replay"));
+                                    } else {
+                                        throw exact_simd_index_runtime_error{
+                                            exact_simd_index_status::unsupported_representation,
+                                            "minimizer fragment generation replay"};
+                                    }
                                     subcore_lo = subcore_hi;
                                 }
                                 return combined;
                             });
-                        reference_simd_stats_.merge(stats);
-                        reference_simd_stats_present_ = true;
-                        route_stats_saturated_ =
-                            route_stats_saturated_ || reference_simd_stats_.saturated;
-                    } else if (algorithm_identity_.effective_algorithm ==
-                               bioseq::simd::minimizer_algorithm::two_stack_nthash) {
-                        const auto stats = collect_exact_simd_index_range_or_throw(
-                            collector,
-                            sequence_,
-                            alphabet_code_,
-                            static_cast<sequence_size_t>(collect_lo),
-                            static_cast<sequence_size_t>(collect_hi),
-                            window_size_,
-                            kmer_size_,
-                            0u,
-                            kernels_,
-                            "minimizer fragment generation replay");
-                        exact_simd_stats_.merge(stats);
-                        exact_simd_stats_present_ = true;
-                        route_stats_saturated_ =
-                            route_stats_saturated_ || exact_simd_stats_.saturated;
+                        if (algorithm_identity_.effective_algorithm ==
+                            bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                            reference_simd_stats_.merge(reference_stats);
+                            reference_simd_stats_present_ = true;
+                            route_stats_saturated_ =
+                                route_stats_saturated_ || reference_simd_stats_.saturated;
+                        } else {
+                            exact_simd_stats_.merge(exact_stats);
+                            exact_simd_stats_present_ = true;
+                            route_stats_saturated_ =
+                                route_stats_saturated_ || exact_simd_stats_.saturated;
+                        }
                     } else {
                         return std::unexpected(
                             minimizer_generation_encoding_error::storage_contract_mismatch);
@@ -2174,12 +2194,12 @@ template <class p_storage> struct minimizers_per_fragment_index {
           const bioseq::minimizers::minimizer_kernels* kernels,
           minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
           std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
-        constexpr std::size_t w = 10, k = 15; // Fixed minimizer parameters for this compatibility build.
+        constexpr std::size_t w = 10, k = 15; // Fixed minimizer parameters for the ordinary fragment build.
         constexpr std::size_t frag_bp = 32'768u;
         constexpr std::size_t k_context_span = w + k; // Context collected on both sides of each core.
         static_assert(
-            frag_bp < (std::size_t{1} << 28),
-            "fragment-core-local positions must fit the 28-bit minimap_sketch_data field");
+            frag_bp <= bioseq::minimizers::k_max_minimizer_sequence_length<minimap_sketch_data>,
+            "fragment-local positions must fit the canonical compact output route");
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
         if (backend == minimizer_sketch_backend::exact_simd &&
@@ -2310,6 +2330,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                     execution_stats_out](std::size_t fragment_no,
                                                          sketch_collector& collector,
                                                          std::vector<minimap_sketch_data>& core,
+                                                         std::vector<std::pair<std::uint64_t, std::uint64_t>>& wide_core,
                                                          std::vector<char>& out_blob) {
             const sequence_size_t core_lo = static_cast<sequence_size_t>(fragment_no) * frag_bp;
             const sequence_size_t core_hi =
@@ -2322,6 +2343,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
             const sequence_size_t emit_base = coll_lo;
             const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             core.clear();
+            wide_core.clear();
             if (collect_bp >= static_cast<sequence_size_t>(k_context_span)) {
                 if (backend == minimizer_sketch_backend::vulkan_segment) {
                     auto pairs =
@@ -2331,31 +2353,78 @@ template <class p_storage> struct minimizers_per_fragment_index {
                     for (const auto& pair : pairs.pairs) {
                         const sequence_size_t global_pos =
                             static_cast<sequence_size_t>(pair.second >> 1u);
-                        core.push_back(
-                            minimap_sketch_data{pair.first,
-                                                static_cast<std::uint64_t>(global_pos - core_lo),
-                                                static_cast<std::uint64_t>(pair.second & 1u)});
+                        core.emplace_back(pair.first,
+                            static_cast<std::uint64_t>(global_pos - core_lo), pair.second & 1u);
                     }
                 } else {
-                    if (backend == minimizer_sketch_backend::exact_simd) {
-                        const auto stats = collect_exact_simd_index_range_or_throw(
-                            collector,
-                            seq,
-                            alphabet_code,
-                            coll_lo,
-                            coll_hi,
-                            w,
-                            k,
-                            0u,
-                            kernels,
-                            "minimizers_per_fragment build");
+                    if (backend == minimizer_sketch_backend::exact_simd ||
+                        backend == minimizer_sketch_backend::scalar) {
+                        const auto algorithm = backend == minimizer_sketch_backend::exact_simd
+                            ? bioseq::simd::minimizer_algorithm::two_stack_nthash
+                            : bioseq::simd::minimizer_algorithm::scalar;
+                        const auto layout = select_minimizer_generation_physical_layout<p_alphabet>(
+                            algorithm, collect_bp,
+                            static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits),
+                            k, w);
+                        if (!layout) {
+                            throw exact_simd_index_runtime_error{
+                                exact_simd_index_status::unsupported_representation,
+                                "minimizers_per_fragment build"};
+                        }
+                        const auto stats = bioseq::minimizers::visit_minimizer_physical_layout(
+                            *layout,
+                            [&seq, &core, &wide_core, alphabet_code, coll_lo, coll_hi, emit_base,
+                             core_lo, core_hi, backend, kernels]<class p_minimizer>() {
+                                struct canonical_pair_collector {
+                                    std::vector<minimap_sketch_data>* narrow_output;
+                                    std::vector<std::pair<std::uint64_t, std::uint64_t>>* wide_output;
+                                    sequence_size_t emit_base;
+                                    sequence_size_t core_lo;
+                                    sequence_size_t core_hi;
+
+                                    /** Preserve the complete hash and make positions fragment-local. */
+                                    void collect(const p_minimizer& minimizer) {
+                                        const sequence_size_t position = emit_base + minimizer.last_pos();
+                                        if (position >= core_lo && position < core_hi) {
+                                            if constexpr (p_minimizer::k_hash_field_mask <=
+                                                          minimap_sketch_data::k_hash_field_mask) {
+                                                narrow_output->emplace_back(minimizer.kmer(),
+                                                    position - core_lo, minimizer.strand());
+                                            } else {
+                                                wide_output->emplace_back(minimizer.kmer(),
+                                                    ((position - core_lo) << 1u) | minimizer.strand());
+                                            }
+                                        }
+                                    }
+                                } direct_collector{&core, &wide_core, emit_base, core_lo, core_hi};
+                                if (backend == minimizer_sketch_backend::scalar) {
+                                    bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
+                                        direct_collector, seq, coll_lo, coll_hi, w, k);
+                                    return exact_simd_index_execution_stats{};
+                                }
+                                if constexpr (
+                                    bioseq::minimizers::two_stack_simd_minimizer_representation<
+                                        p_minimizer>) {
+                                    return collect_exact_simd_index_range_or_throw<p_minimizer>(
+                                        direct_collector, seq, alphabet_code, coll_lo, coll_hi,
+                                        w, k, 0u, kernels, "minimizers_per_fragment build");
+                                } else {
+                                    throw exact_simd_index_runtime_error{
+                                        exact_simd_index_status::unsupported_representation,
+                                        "minimizers_per_fragment build"};
+                                    return exact_simd_index_execution_stats{};
+                                }
+                            });
                         if (execution_stats_out != nullptr) {
-                            ++execution_stats_out->exact_simd_core_runs;
-                            execution_stats_out->exact_simd_stats.merge(stats);
-                            execution_stats_out->exact_simd_stats_present = true;
-                            execution_stats_out->saturated =
-                                execution_stats_out->saturated ||
-                                execution_stats_out->exact_simd_stats.saturated;
+                            if (backend == minimizer_sketch_backend::scalar) {
+                                ++execution_stats_out->scalar_core_runs;
+                            } else {
+                                ++execution_stats_out->exact_simd_core_runs;
+                                execution_stats_out->exact_simd_stats.merge(stats);
+                                execution_stats_out->exact_simd_stats_present = true;
+                                execution_stats_out->saturated = execution_stats_out->saturated ||
+                                    execution_stats_out->exact_simd_stats.saturated;
+                            }
                         }
                     } else if (backend == minimizer_sketch_backend::bounded_nthash_simd) {
                         const auto result = collect_packed_bounded_nthash_index_lazy(seq,
@@ -2380,12 +2449,6 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                 execution_stats_out->saturated ||
                                 execution_stats_out->packed_bounded_stats.saturated;
                         }
-                    } else if (backend == minimizer_sketch_backend::scalar) {
-                        if (execution_stats_out != nullptr) {
-                            ++execution_stats_out->scalar_core_runs;
-                        }
-                        bioseq::simd::collect_minimizers_segment_scalar<minimap_sketch_data>(
-                            collector, seq, coll_lo, coll_hi, w, k);
                     } else {
                         index_corruption_panic(
                             "minimizers_per_fragment build: unsupported sketch backend");
@@ -2396,17 +2459,21 @@ template <class p_storage> struct minimizers_per_fragment_index {
                         if (global_pos < core_lo || global_pos >= core_hi) {
                             continue;
                         }
-                        core.push_back(
-                            minimap_sketch_data{minimizer.kmer(),
-                                                static_cast<std::uint64_t>(global_pos - core_lo),
-                                                minimizer.strand()});
+                        core.emplace_back(minimizer.kmer(),
+                            static_cast<std::uint64_t>(global_pos - core_lo), minimizer.strand());
                     }
                 }
             } else if (execution_stats_out != nullptr) {
                 ++execution_stats_out->short_core_runs;
             }
             minimizer_hashmap_fragment_index frag_idx;
-            frag_idx.build(core, core_hi - core_lo); // Length of this fragment core.
+            // Retain compact sorting for every hash domain fitting the canonical
+            // record. Wider domains use the existing full-width pair encoder.
+            if (wide_core.empty()) {
+                frag_idx.build(core, core_hi - core_lo);
+            } else {
+                frag_idx.build_from_pairs(wide_core, core_hi - core_lo);
+            }
             out_blob.resize(frag_idx.serialize_binary_size());
             frag_idx.serialize_to_binary(out_blob.data());
         };
@@ -2434,8 +2501,9 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                        &write_fragment_blob](std::size_t fragment_no) {
             sketch_collector collector;
             std::vector<minimap_sketch_data> core;
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> wide_core;
             std::vector<char> blob;
-            build_fragment_blob(fragment_no, collector, core, blob);
+            build_fragment_blob(fragment_no, collector, core, wide_core, blob);
             write_fragment_blob(fragment_no, blob);
         };
 
@@ -2477,8 +2545,9 @@ template <class p_storage> struct minimizers_per_fragment_index {
                     [&build_fragment_blob, &blobs, wave_lo](std::size_t lo, std::size_t hi) {
                         sketch_collector collector;
                         std::vector<minimap_sketch_data> core;
+                        std::vector<std::pair<std::uint64_t, std::uint64_t>> wide_core;
                         for (std::size_t rel = lo; rel < hi; ++rel) {
-                            build_fragment_blob(wave_lo + rel, collector, core, blobs[rel]);
+                            build_fragment_blob(wave_lo + rel, collector, core, wide_core, blobs[rel]);
                         }
                     });
 

@@ -146,9 +146,11 @@ struct exact_simd_index_bridge_request {
     void* sequence_context = nullptr;
     exact_simd_index_read_fragment read_fragment = nullptr;
     exact_simd_index_release_fragment release_fragment = nullptr;
-    void* collector_context = nullptr;
-    exact_simd_index_append_records append_records = nullptr;
-    exact_simd_index_append_raw append_raw = nullptr;
+    bioseq::minimizers::minimizer_sink sink{};
+    bioseq::minimizers::minimizer_output_layout output_layout =
+        bioseq::minimizers::minimizer_output_layout::unsupported;
+    std::uint64_t output_hash_mask = 0u;
+    std::uint64_t output_position_mask = 0u;
     std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code;
     std::uint8_t bits_per_symbol = 0u;
     std::size_t storage_unit_bytes = 0;
@@ -299,9 +301,9 @@ struct reference_simd_index_execution_stats {
 
 namespace reference_index_detail {
 
-/// Receive the reference kernel's selected record type and pass each record
-/// to the caller's collector.
-template <class p_minimizer, class p_collector> struct reference_index_sink {
+/// Receive a selected physical record type and pass batches or records
+/// to the caller's collector without narrowing its hash or position fields.
+template <class p_minimizer, class p_collector> struct typed_index_sink {
     static constexpr std::size_t k_batch_capacity = 256u;
     static constexpr auto k_output_layout =
         bioseq::minimizers::k_minimizer_output_layout<p_minimizer>;
@@ -311,8 +313,12 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
     static_assert(std::is_trivially_copyable_v<p_minimizer>);
     static_assert(std::is_trivially_destructible_v<p_minimizer>);
 
+    /** Borrow the collector; the kernel initializes only the committed batch records. */
+    explicit typed_index_sink(p_collector& destination) noexcept
+        : collector(std::addressof(destination)) {}
+
     p_collector* collector = nullptr;
-    alignas(p_minimizer) std::array<std::byte, k_batch_capacity * sizeof(p_minimizer)> batch{};
+    alignas(p_minimizer) std::array<std::byte, k_batch_capacity * sizeof(p_minimizer)> batch;
     std::exception_ptr exception{};
     std::size_t committed = 0u;
     bool accepted = true;
@@ -322,7 +328,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
     /// alignment. Call commit() gefore borrowing again.
     [[nodiscard]] static bioseq::minimizers::minimizer_sink_batch_view
     acquire(void* opaque, std::size_t minimum) noexcept {
-        auto& self = *static_cast<reference_index_sink*>(opaque);
+        auto& self = *static_cast<typed_index_sink*>(opaque);
         if (!self.accepted || self.acquired || minimum > k_batch_capacity) {
             self.accepted = false;
             return {};
@@ -340,7 +346,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
     /// Pass initialized records to the collector and destroy them. Save collector
 /// exceptions for validate() to rethrow after the kernel returns.
     static void commit(void* opaque, std::size_t initialized) noexcept {
-        auto& self = *static_cast<reference_index_sink*>(opaque);
+        auto& self = *static_cast<typed_index_sink*>(opaque);
         if (!self.acquired || initialized > k_batch_capacity) {
             self.accepted = false;
             return;
@@ -349,8 +355,23 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
             static_cast<p_minimizer*>(static_cast<void*>(self.batch.data())));
         if (self.accepted && self.collector != nullptr) {
             try {
-                for (std::size_t index = 0u; index < initialized; ++index) {
-                    self.collector->collect(records[index]);
+                if constexpr (requires {
+                    { self.collector->append_records(
+                        std::span<const p_minimizer>{records, initialized}) }
+                        -> std::convertible_to<bool>;
+                }) {
+                    self.accepted = static_cast<bool>(self.collector->append_records(
+                        std::span<const p_minimizer>{records, initialized}));
+                } else {
+                    for (std::size_t index = 0u; index < initialized; ++index) {
+                        self.collector->collect(records[index]);
+                    }
+                    if constexpr (requires {
+                        { std::as_const(*self.collector).is_ok() }
+                            -> std::convertible_to<bool>;
+                    }) {
+                        self.accepted = static_cast<bool>(std::as_const(*self.collector).is_ok());
+                    }
                 }
             } catch (...) {
                 self.exception = std::current_exception();
@@ -377,7 +398,7 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
         bioseq::minimizers::minimizer_output_layout layout,
         const std::uint64_t* values,
         std::size_t count) noexcept {
-        auto& self = *static_cast<reference_index_sink*>(opaque);
+        auto& self = *static_cast<typed_index_sink*>(opaque);
         if (!self.accepted || self.acquired || self.collector == nullptr ||
             layout != k_output_layout || (count != 0u && values == nullptr)) {
             self.accepted = false;
@@ -388,9 +409,23 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
                           requires std::same_as<typename p_minimizer::storage_type, std::uint64_t>;
                       }) {
             try {
-                for (std::size_t index = 0u; index < count; ++index) {
-                    const p_minimizer record = p_minimizer::from_raw_storage(values[index]);
-                    self.collector->collect(record);
+                if constexpr (requires {
+                    { self.collector->append_raw_storage(values, count) }
+                        -> std::convertible_to<bool>;
+                }) {
+                    self.accepted = static_cast<bool>(
+                        self.collector->append_raw_storage(values, count));
+                } else {
+                    for (std::size_t index = 0u; index < count; ++index) {
+                        const p_minimizer record = p_minimizer::from_raw_storage(values[index]);
+                        self.collector->collect(record);
+                    }
+                    if constexpr (requires {
+                        { std::as_const(*self.collector).is_ok() }
+                            -> std::convertible_to<bool>;
+                    }) {
+                        self.accepted = static_cast<bool>(std::as_const(*self.collector).is_ok());
+                    }
                 }
             } catch (...) {
                 self.exception = std::current_exception();
@@ -421,11 +456,11 @@ template <class p_minimizer, class p_collector> struct reference_index_sink {
 
     /// Rethrow, collector failures and check that every borrowed batch was
 /// committed and the emitted record count agrees.
-    void validate(const bioseq::minimizers::minimizer_kernel_result& result) {
+    void validate(const std::uint64_t emitted) {
         if (exception != nullptr) {
             std::rethrow_exception(exception);
         }
-        if (acquired || result.emitted != committed) {
+        if (acquired || emitted != committed) {
             accepted = false;
         }
     }
@@ -535,9 +570,7 @@ collect_reference_simd_index_range_or_throw(
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range, operation};
         }
 
-        reference_index_detail::reference_index_sink<p_minimizer, p_collector> sink_adapter{
-            .collector = &collector,
-        };
+        reference_index_detail::typed_index_sink<p_minimizer, p_collector> sink_adapter{collector};
         bioseq::minimizers::minimizer_kernel_invocation invocation{
             .sequence = {
                 .storage = static_cast<const std::byte*>(descriptor.units),
@@ -560,7 +593,7 @@ collect_reference_simd_index_range_or_throw(
         };
         const bioseq::minimizers::minimizer_kernel_result result =
             kernels->minimap2_reference(invocation);
-        sink_adapter.validate(result);
+        sink_adapter.validate(result.emitted);
         const exact_simd_index_status status =
             reference_index_detail::reference_status_from_kernel(result, sink_adapter.accepted);
         const auto& stats = result.stats.reference;
@@ -592,6 +625,7 @@ collect_reference_simd_index_range_or_throw(
 struct exact_simd_index_bridge_result {
     exact_simd_index_status status = exact_simd_index_status::ok;
     exact_simd_index_execution_stats stats{};
+    std::uint64_t emitted = 0u;
 };
 
 /// Validate a callback request and  run its generated two-rtack ntHash kernel.
@@ -672,13 +706,14 @@ struct admitted_fragment_source {
 
 } // namespace exact_simd_index_detail
 
-/// Run two-stack ntHash on [lo_bp, hi_bp), borrowing packed 32-bit storage or
-/// allocating a copy. Add emitted_position_base to the reported coordinates.
+/// Run two-stack ntHash on [lo_bp, hi_bp), borrowing native packed storage or
+/// materializing only admitted input fragments. Add emitted_position_base to the reported coordinates.
 /// A rejected run throws exact_simd_index_runtime_error.
 ///
+/// @tparam p_minimizer Selected physical hash/position representation.
 /// @tparam p_collector Collector accepting batches or individual minimizer records.
 /// @tparam p_alphabet Registered biological alphabet.
-template <class p_collector, sequence_alphabet p_alphabet>
+template <class p_minimizer, class p_collector, sequence_alphabet p_alphabet>
 [[nodiscard]] inline exact_simd_index_execution_stats
 collect_exact_simd_index_range_or_throw(p_collector& collector,
                                         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
@@ -690,7 +725,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                                         std::size_t emitted_position_base,
                                         const bioseq::minimizers::minimizer_kernels* kernels,
                                         std::string_view operation) {
-    static_assert(std::same_as<typename minimap_sketch_data::storage_type, std::uint64_t>);
+    static_assert(bioseq::minimizers::two_stack_simd_minimizer_representation<p_minimizer>);
 
     if constexpr (!bioseq::minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
         throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_alphabet,
@@ -729,62 +764,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
             + (total_units % fragment_units != 0u);
         sequence_context sequence_state{sequence, lo_bp, logical_length, total_units,
             letters_per_unit, packed_width, resident, {}, operation};
-        // Prefer batch append when supported, otherwise collect each record.
-        const auto append_records =
-            +[](void* opaque, const minimap_sketch_data* records, std::size_t count) {
-                auto& collector = *static_cast<p_collector*>(opaque);
-                if constexpr (requires {
-                                  {
-                                      collector.append_records(
-                                          std::span<const minimap_sketch_data>{records, count})
-                                  } -> std::convertible_to<bool>;
-                              }) {
-                    return static_cast<bool>(collector.append_records(
-                        std::span<const minimap_sketch_data>{records, count}));
-                } else if constexpr (requires(const minimap_sketch_data& record) {
-                                         collector.collect(record);
-                                     }) {
-                    for (std::size_t index = 0u; index < count; ++index) {
-                        collector.collect(records[index]);
-                    }
-                    if constexpr (requires {
-                                      {
-                                          std::as_const(collector).is_ok()
-                                      } -> std::convertible_to<bool>;
-                                  }) {
-                        return static_cast<bool>(std::as_const(collector).is_ok());
-                    }
-                    return true;
-                } else {
-                    return false;
-                }
-            };
-        // Append packed words directly when supported, otherwise  construct
-        // minimizer records for collect().
-        const auto append_raw = +[](void* opaque, const std::uint64_t* raw, std::size_t count) {
-            auto& collector = *static_cast<p_collector*>(opaque);
-            if constexpr (requires {
-                              {
-                                  collector.append_raw_storage(raw, count)
-                              } -> std::convertible_to<bool>;
-                          }) {
-                return static_cast<bool>(collector.append_raw_storage(raw, count));
-            } else if constexpr (requires(const minimap_sketch_data& record) {
-                                     collector.collect(record);
-                                 }) {
-                for (std::size_t index = 0u; index < count; ++index) {
-                    collector.collect(minimap_sketch_data::from_raw_storage(raw[index]));
-                }
-                if constexpr (requires {
-                                  { std::as_const(collector).is_ok() } -> std::convertible_to<bool>;
-                              }) {
-                    return static_cast<bool>(std::as_const(collector).is_ok());
-                }
-                return true;
-            } else {
-                return false;
-            }
-        };
+        reference_index_detail::typed_index_sink<p_minimizer, p_collector> sink_adapter{collector};
 
         const exact_simd_index_bridge_result result =
             collect_exact_simd_index_erased(exact_simd_index_bridge_request{
@@ -792,9 +772,10 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                 .sequence_context = &sequence_state,
                 .read_fragment = &sequence_context::read_fragment,
                 .release_fragment = &sequence_context::release_fragment,
-                .collector_context = &collector,
-                .append_records = append_records,
-                .append_raw = append_raw,
+                .sink = sink_adapter.sink(),
+                .output_layout = bioseq::minimizers::k_minimizer_output_layout<p_minimizer>,
+                .output_hash_mask = static_cast<std::uint64_t>(p_minimizer::k_hash_field_mask),
+                .output_position_mask = static_cast<std::uint64_t>(p_minimizer::k_position_field_mask),
                 .alphabet_code = alphabet_code,
                 .bits_per_symbol = bits_per_symbol,
                 .storage_unit_bytes = packed_width,
@@ -809,6 +790,11 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                 .kmer_size = runtime_k,
                 .emitted_position_base = emitted_position_base,
             });
+        sink_adapter.validate(result.emitted);
+        if (!sink_adapter.accepted) {
+            throw exact_simd_index_runtime_error{
+                exact_simd_index_status::collector_overflow, operation};
+        }
         if (result.status != exact_simd_index_status::ok) {
             throw exact_simd_index_runtime_error{result.status, operation};
         }

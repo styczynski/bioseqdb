@@ -879,7 +879,7 @@ TEST_CASE("minimizer index facades preserve biological rejection precedence",
 
     sketch_collector exact_collector;
     try {
-        (void)collect_exact_simd_index_range_or_throw(exact_collector,
+        (void)collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(exact_collector,
                                                       view,
                                                       fixed_alphabet_code<::seq::dna4>(),
                                                       2u,
