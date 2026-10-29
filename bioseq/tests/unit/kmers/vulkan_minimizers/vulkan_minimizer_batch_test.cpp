@@ -217,6 +217,59 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     }
     REQUIRE(malformed_authority_rejected);
     REQUIRE(vk::runtime::instance().reusable_gpu_arena().release_idle_capacity());
+
+    // Reuse the same native N ranks with complete windows. A one-record
+    // capacity must be rejected before any output can be written or published.
+    auto bounded_params = malformed_params;
+    bounded_params.window_size = 3u;
+    auto valid_layouts = malformed_layouts;
+    valid_layouts[0].query_len = static_cast<std::uint32_t>(all_n.size());
+    REQUIRE(cpu_sketch<minimap_sketch_data>(all_n, bounded_params.window_size, kmer_size).size() > 1u);
+    const auto single_overflow = vk::runtime::instance().run_sketch_roundtrip(
+        std::span<const std::byte>{packed_sequence.data(), packed_sequence.size()},
+        rank_lut, bounded_params, 1u, {}, 0u);
+    REQUIRE(single_overflow.overflow);
+    REQUIRE_FALSE(single_overflow.minimizer_words.is_valid());
+    REQUIRE(single_overflow.arena_trimmed_before_return);
+
+    // A wide window emits nothing: count-first device output can still use
+    // capacity1, whereas one-submission host output must admit the safe bound.
+    for (const std::uint32_t bounded_window : {24u, 3u}) {
+        bounded_params.window_size = bounded_window;
+        const bool emits_minimizers = bounded_window == 3u;
+        for (const auto materialization : {
+                 vk::vulkan_sketch_host_materialization::host_and_device,
+                 vk::vulkan_sketch_host_materialization::device_only}) {
+            const auto bounded_result = vk::runtime::instance().run_sketch_tile_batch_roundtrip(
+                std::span<const std::byte>{packed_sequence.data(), packed_sequence.size()},
+                rank_lut,
+                bounded_params,
+                std::span<const vk::gpu_sketch_tile_wire>{tiles.data(), tiles.size()},
+                std::span<const vk::gpu_sketch_query_layout_wire>{
+                    valid_layouts.data(), valid_layouts.size()},
+                1u,
+                materialization);
+            const bool device_only = materialization == vk::vulkan_sketch_host_materialization::device_only;
+            const bool expects_overflow = !device_only || emits_minimizers;
+            const std::uint64_t expected_count_submissions = device_only ? 1u : 0u;
+            const std::uint64_t expected_emit_submissions = device_only && !emits_minimizers ? 1u : 0u;
+            REQUIRE(bounded_result.overflow == expects_overflow);
+            REQUIRE(bounded_result.host_minimizer_bytes.empty());
+            REQUIRE(bounded_result.minimizer_words.is_valid() == !expects_overflow);
+            REQUIRE(bounded_result.query_authority.does_cover_device_output() == !expects_overflow);
+            if (!expects_overflow) {
+                REQUIRE(bounded_result.count == 0u);
+                REQUIRE(bounded_result.minimizer_words.bytes == sizeof(std::uint32_t));
+            }
+            REQUIRE(bounded_result.dispatch_stats.count_dispatches() == expected_count_submissions);
+            REQUIRE(bounded_result.dispatch_stats.prefix_scan_sequences() == expected_count_submissions);
+            REQUIRE(bounded_result.dispatch_stats.prefix_scan_dispatches() == 3u * expected_count_submissions);
+            REQUIRE(bounded_result.dispatch_stats.emit_dispatches() == expected_emit_submissions);
+            REQUIRE(bounded_result.dispatch_stats.completed_roundtrips() ==
+                    expected_count_submissions + expected_emit_submissions);
+            REQUIRE(vk::runtime::instance().reusable_gpu_arena().release_idle_capacity());
+        }
+    }
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

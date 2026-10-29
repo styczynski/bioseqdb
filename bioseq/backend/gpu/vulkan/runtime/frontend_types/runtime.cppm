@@ -257,6 +257,9 @@ class runtime {
     /// @brief Builds ordered minimizers for one packed sequence.
     /// Returns a GPU buffer and minimizer count, or reports output  overflow.
     /// Optional query-hash bits restrict which minimizers are emitted.
+    /// Capacity must cover target_minimizer_count_upper_bound(bp_size, kmer_size)
+    /// and fit uint32 plus device descriptor limits: this route emits before
+    /// its first fence and rejects an insufficient proof as output overflow.
     runtime_sketch_result run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                const vulkan_rank_lut& rank_lut,
                                                const vulkan_sketch_params& params,
@@ -267,6 +270,10 @@ class runtime {
     /// @brief Builds ordered minimizers for a batch of query sequences.
     /// `materialization` selects a host copy or device-only output. Device-only
     /// results also carry authorization for later seed operations.
+    /// Host-and-device capacity must cover twice the owned trigger positions
+    /// across all tiles. Device-only mode counts first and accepts smaller
+    /// estimates when the checked actual output fits. Capacity is at most uint32;
+    /// all bound input/output descriptors must fit the device byte-range limit.
     runtime_sketch_batch_result
     run_sketch_tile_batch_roundtrip(std::span<const std::byte> packed_sequence,
                                     const vulkan_rank_lut& rank_lut,
@@ -316,6 +323,9 @@ class runtime {
 
     /// @brief Emits minimizer pairs and sorts by hash, then encoded position within each hash
     /// Returns the GPU buffers and a host copy of the pairs.
+    /// The conservative native count bound must fit uint32 so the append counter
+    /// cannot wrap. A smaller supplied capacity safely reports an invalid result
+    /// if exceeded; output allocations must fit the device descriptor byte limit.
     gpu_sorted_pair_result
     run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_sequence,
                                     const vulkan_rank_lut& rank_lut,

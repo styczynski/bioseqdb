@@ -2490,7 +2490,9 @@ adopt_gpu_built_index(
         || required_bucket_bytes > built.slots.bytes
         || built.slot_mask != 0u
         || built.occupied_slots > built.position_count
-        || built.position_count > built.target_len
+        // The built record does not carry k; k=1 gives the shared broad bound.
+        || built.position_count > bioseq::gpu::vulkan::target_minimizer_count_upper_bound(
+               built.target_len, 1u)
         || (built.position_count == 0u) != (built.occupied_slots == 0u)) {
         return std::unexpected{gpu_built_index_adoption_error::invalid_build};
     }

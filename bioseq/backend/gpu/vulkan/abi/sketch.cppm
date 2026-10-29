@@ -168,11 +168,14 @@ struct gpu_target_index_host_scratch_plan {
 }
 
 /**
- * @brief Bounds the number of minimizers a  target sequence can emit.
+ * @brief Bounds the number of minimizers a target sequence can emit.
  *
- * Each k-mer end osition can be emitted at most once. Filtering by the query
- * can only reduce the count. Returns zero for an invalid k-mer size or a
- * sequence shorter than one k-mer.
+ * Each complete window can emit both equal-hash endpoints. The same position
+ * can occur in successive windows, and there cannot be more complete windows
+ * than candidate k-mer end positions. Query filtering only reduces this bound.
+ * Returns zero for an invalid k-mer size or a sequence shorter than one k-mer;
+ * multiplication saturates at uint64_t maximum. Output-ABI limits are checked
+ * separately by the runtime.
  */
 [[nodiscard]] constexpr std::uint64_t
 target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_size) noexcept {
@@ -181,6 +184,47 @@ target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_si
     }
     return bioseq::common::saturating_mul(
         bp_count - static_cast<std::uint64_t>(kmer_size) + 1u, std::uint64_t{2u});
+}
+
+/**
+ * Check a completed count scan without trusting wrapped 32-bit prefixes.
+ * Counts are raw count-pass words, without emit-completion flags. The caller
+ * proves each tile's native count fits below that flag and supplies a conservative
+ * total bound. Ordinary bounds fitting uint32 need only the final count word;
+ * larger bounds require a widened sum of the existing mapped count words.
+ * @return Exact uint32-representable count, or no value on flags/bounds/wrap.
+ */
+[[nodiscard]] inline std::optional<std::uint64_t> checked_sketch_output_count(
+    std::span<const std::byte> count_bytes,
+    std::uint32_t last_offset,
+    std::uint64_t hard_bound) noexcept {
+    if (count_bytes.empty() || count_bytes.size() % sizeof(std::uint32_t) != 0u)
+        return std::nullopt;
+    constexpr std::uint32_t count_flag = std::uint32_t{1u}
+        << (std::numeric_limits<std::uint32_t>::digits - 1u);
+    constexpr std::uint64_t maximum_count =
+        (std::numeric_limits<std::uint32_t>::max)();
+    std::uint32_t last_count = 0u;
+    std::memcpy(&last_count,
+        count_bytes.data() + count_bytes.size() - sizeof(last_count), sizeof(last_count));
+    const std::uint64_t prefix_count = std::uint64_t{last_offset} + last_count;
+    if ((last_count & count_flag) != 0u || prefix_count > hard_bound
+        || prefix_count > maximum_count)
+        return std::nullopt;
+    if (hard_bound > maximum_count) {
+        std::uint64_t exact_count = 0u;
+        for (std::size_t offset = 0u; offset < count_bytes.size();
+             offset += sizeof(std::uint32_t)) {
+            std::uint32_t tile_count = 0u;
+            std::memcpy(&tile_count, count_bytes.data() + offset, sizeof(tile_count));
+            if ((tile_count & count_flag) != 0u
+                || tile_count > maximum_count - exact_count)
+                return std::nullopt;
+            exact_count += tile_count;
+        }
+        if (exact_count != prefix_count) return std::nullopt;
+    }
+    return prefix_count;
 }
 
 /**

@@ -387,7 +387,7 @@ TEST_CASE("vulkan minimizer: gated empty target retains count-dominant pretrim p
     REQUIRE(built->ownership.arena_trimmed_before_permit_shrink == 1u);
 }
 
-TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
+TEST_CASE("vulkan minimizer: tied endpoints exceed source length within the count bound",
           "[component:bioseq][layer:unit][feature:index][resource:gpu]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
@@ -401,9 +401,13 @@ TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
     for (auto& base : repeated_a) {
         base.assign_rank(0u);
     }
-    const std::uint64_t estimate = vk::estimate_vulkan_minimizer_capacity(dense_bp, window_size);
+    const std::uint64_t hard_bound = vk::target_minimizer_count_upper_bound(
+        dense_bp, static_cast<std::uint32_t>(kmer_size));
+    const std::uint64_t estimate = std::min(
+        vk::estimate_vulkan_minimizer_capacity(dense_bp, window_size), hard_bound);
     const auto scalar = cpu_sketch<minimap_sketch_data>(repeated_a, window_size, kmer_size);
-    REQUIRE(scalar.size() > estimate);
+    REQUIRE(scalar.size() > dense_bp);
+    REQUIRE(scalar.size() <= estimate);
 
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(repeated_a);
@@ -415,10 +419,11 @@ TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
-    REQUIRE(built->position_count > estimate);
+    REQUIRE(built->position_count > dense_bp);
+    REQUIRE(built->position_count <= hard_bound);
     REQUIRE(built->position_count == scalar.size());
     REQUIRE(built->ownership.target_minimizer_capacity_estimate == estimate);
-    REQUIRE(built->ownership.capacity_estimate_underestimated == 1u);
+    REQUIRE(built->ownership.capacity_estimate_underestimated == 0u);
     REQUIRE(built->ownership.counted_minimizer_count == built->position_count);
     REQUIRE(built->ownership.verified_emit_count == built->position_count);
     REQUIRE(built->ownership.count_emit_parity_verified == 1u);
@@ -432,7 +437,7 @@ TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
     auto adopted = idx::adopt_gpu_built_index(vk::runtime::instance(), std::move(*built), key);
     REQUIRE(adopted.has_value());
     REQUIRE((*adopted)->position_count == scalar.size());
-    REQUIRE((*adopted)->ownership.capacity_estimate_underestimated == 1u);
+    REQUIRE((*adopted)->ownership.capacity_estimate_underestimated == 0u);
 }
 
 TEST_CASE(

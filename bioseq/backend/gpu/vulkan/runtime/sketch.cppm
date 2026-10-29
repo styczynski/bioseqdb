@@ -130,6 +130,26 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                         max_minimizers,
                         params.letters_per_unit));
     }
+    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size);
+    bool unsupported_capacity = hard_bound > max_minimizers
+        || max_minimizers > (std::numeric_limits<std::uint32_t>::max)();
+    for (const std::uint64_t bytes : {
+             memory_plan.sequence_bytes, memory_plan.rank_lut_bytes,
+             memory_plan.tile_bytes, memory_plan.tile_count_bytes,
+             memory_plan.tile_offset_bytes, memory_plan.scan_block_bytes,
+             memory_plan.counter_bytes, memory_plan.arena_pair_value_bytes,
+             out_bytes, query_gate_bytes}) {
+        unsupported_capacity = unsupported_capacity || bytes > features_.max_storage_buffer_range;
+    }
+    // This route emits before its fence. Prove the full native bound fits before
+    // submission; direct callers cannot use an underestimated capacity safely.
+    if (unsupported_capacity) {
+        result.overflow = true;
+        if (!arena_trim.release_now())
+            throw vulkan_runtime_error("gpu sketch capacity rejection left live arena slices");
+        result.arena_trimmed_before_return = true;
+        return result;
+    }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     // Cap workgroups at the device limit. The shader loops over tile indices,
@@ -303,12 +323,14 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     deliver_vulkan_submission_test_fault_after_drain(submission_test_fault);
 #endif
 
-    std::uint32_t last_off = 0, last_cnt = 0;
+    std::uint32_t last_off = 0u;
     std::memcpy(&last_off, base + offsets_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
-    std::memcpy(&last_cnt, base + counts_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
-    const std::uint64_t total = static_cast<std::uint64_t>(last_off) + last_cnt;
+    const auto checked_total = checked_sketch_output_count(
+        {base + counts_s.offset, std::size_t{num_tiles} * sizeof(std::uint32_t)},
+        last_off, hard_bound);
+    const std::uint64_t total = checked_total.value_or(0u);
 
-    if (total > max_minimizers) {
+    if (!checked_total || total > max_minimizers) {
         result.overflow = true;
     } else {
         result.count = total;
@@ -354,7 +376,21 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     validate_native_sketch_contract(rank_lut, params);
     std::uint32_t previous_word_offset = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t previous_symbol_count = 0u;
-    for (const auto& tile : tiles) {
+    std::uint64_t hard_bound = 0u;
+    for (std::size_t tile_index = 0u; tile_index < tiles.size(); ++tile_index) {
+        const auto& tile = tiles[tile_index];
+        if (tile.replay_lo > tile.tile_lo || tile.tile_lo > tile.tile_hi
+            || tile.tile_hi > tile.bp_count)
+            throw vulkan_runtime_error("gpu sketch tile ranges are invalid");
+        // The shader's final global tile owns the remaining source suffix.
+        const std::uint32_t owned_hi = tile_index + 1u == tiles.size()
+            ? tile.bp_count : tile.tile_hi;
+        const std::uint64_t tile_bound = target_minimizer_count_upper_bound(
+            std::uint64_t{owned_hi} - tile.tile_lo, 1u);
+        if (tile_bound >= (std::uint64_t{1u}
+                << (std::numeric_limits<std::uint32_t>::digits - 1u)))
+            throw vulkan_runtime_error("gpu sketch tile count exceeds unflagged count ABI");
+        hard_bound = bioseq::common::saturating_add(hard_bound, tile_bound);
         if (tile.seq_word_offset != previous_word_offset || tile.bp_count != previous_symbol_count) {
             validate_native_sketch_window(packed_sequence, rank_lut, params, tile.bp_count, tile.seq_word_offset);
             previous_word_offset = tile.seq_word_offset;
@@ -385,6 +421,11 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     if (layout_tile_cursor != tiles.size()) {
         throw vulkan_runtime_error("gpu sketch query layout does not cover all tiles");
     }
+    if (materialization == vulkan_sketch_host_materialization::host_and_device
+        && hard_bound > max_minimizers) {
+        result.overflow = true;
+        return result;
+    }
 
     const std::uint32_t tile_count = static_cast<std::uint32_t>(tiles.size());
     const gpu_sketch_batch_arena_request arena_request =
@@ -393,6 +434,18 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         throw vulkan_runtime_error("gpu sketch tile batch arena request is invalid");
     }
     const std::uint32_t num_blocks = arena_request.num_blocks;
+    const std::array<std::uint64_t, 8> descriptor_bytes{
+        std::max<std::uint64_t>(packed_sequence.size(), 4u), sizeof(vulkan_rank_lut),
+        std::uint64_t{tile_count} * sizeof(gpu_sketch_tile_wire),
+        std::uint64_t{tile_count} * sizeof(std::uint32_t),
+        std::uint64_t{tile_count} * sizeof(std::uint32_t),
+        std::uint64_t{num_blocks} * sizeof(std::uint32_t), 8u, 16u};
+    for (const std::uint64_t bytes : descriptor_bytes) {
+        if (bytes > features_.max_storage_buffer_range) {
+            result.overflow = true;
+            return result;
+        }
+    }
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(tile_count, k_sketch_local_size), features_.max_workgroup_count_x);
     if (sketch_groups == 0u) {
@@ -407,6 +460,10 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             minimizer_device_bytes(
                 params.minimizer_word_kind, params.minimizer_words32, max_minimizers),
             4u);
+        if (pessimistic_output_bytes > features_.max_storage_buffer_range) {
+            result.overflow = true;
+            return result;
+        }
         host_materialized_out_words =
             create_device_buffer(pessimistic_output_bytes, k_compute_buffer_usage);
         if (host_materialized_out_words.mapped == nullptr) {
@@ -642,10 +699,16 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::memcpy(result.tile_offsets.data(),
                 base + offsets_s.offset,
                 result.tile_offsets.size() * sizeof(std::uint32_t));
-    const std::uint64_t total = static_cast<std::uint64_t>(result.tile_offsets.back()) +
-                                static_cast<std::uint64_t>(result.tile_counts.back());
+    const auto checked_total = checked_sketch_output_count(
+        std::as_bytes(std::span<const std::uint32_t>{result.tile_counts}),
+        result.tile_offsets.back(), hard_bound);
+    const std::uint64_t total = checked_total.value_or(0u);
+    const std::uint64_t exact_device_bytes = std::max<std::uint64_t>(
+        minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, total),
+        4u);
 
-    if (total > max_minimizers) {
+    if (!checked_total || total > max_minimizers
+        || exact_device_bytes > features_.max_storage_buffer_range) {
         result.overflow = true;
     } else if (materialization == vulkan_sketch_host_materialization::host_and_device) {
         result.count = total;
@@ -661,9 +724,6 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         // Allocate from the completed count, keeping a 4-byte buffer for an empty
         // result because Vulkan requires a nonzero size. Reuse the uploaded
         // sequence and tile counts for the submission that writes minimizers.
-        const std::uint64_t exact_device_bytes = std::max<std::uint64_t>(
-            minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, total),
-            4u);
         buffer out_words = create_device_buffer(exact_device_bytes, k_compute_buffer_usage);
         if (out_words.mapped == nullptr) {
             throw vulkan_runtime_error("gpu sketch tile batch non-unified exact output memory");

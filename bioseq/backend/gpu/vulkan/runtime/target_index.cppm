@@ -155,6 +155,20 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         out.failure_reason = gpu_index_build_failure::memory_plan_invalid;
         return out;
     }
+    for (const std::uint64_t descriptor_bytes : {
+             memory_plan.sequence_bytes,
+             memory_plan.rank_lut_bytes,
+             memory_plan.tile_bytes,
+             memory_plan.tile_count_bytes,
+             memory_plan.tile_offset_bytes,
+             memory_plan.scan_block_bytes,
+             memory_plan.counter_bytes,
+             query_gate_bytes}) {
+        if (descriptor_bytes > features_.max_storage_buffer_range) {
+            out.failure_reason = gpu_index_build_failure::memory_plan_invalid;
+            return out;
+        }
+    }
     const gpu_target_index_host_scratch_plan host_scratch_plan =
         make_gpu_target_index_host_scratch_plan(memory_plan, owned_sequence_staging_bytes);
     if (!host_scratch_plan.is_valid ||
@@ -397,22 +411,27 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                     base + tcounts_s.offset + std::uint64_t{num_tiles - 1u} * sizeof(std::uint32_t),
                     sizeof(last_count));
         out.ownership.exact_count_control_readbacks += 1u;
-        const std::uint64_t exact_count = static_cast<std::uint64_t>(last_offset) + last_count;
+        const std::uint64_t prefix_count = static_cast<std::uint64_t>(last_offset) + last_count;
         const std::uint64_t hard_bound =
             target_minimizer_count_upper_bound(bp, kmer_size);
-        if ((last_count & 0x80000000u) != 0u || exact_count > hard_bound ||
-            exact_count > static_cast<std::uint64_t>(bp) ||
-            exact_count > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        const auto checked_count = checked_sketch_output_count(
+            std::span<const std::byte>{
+                base + tcounts_s.offset,
+                static_cast<std::size_t>(num_tiles) * sizeof(std::uint32_t)},
+            last_offset,
+            hard_bound);
+        if (!checked_count) {
             bioseq_log<logging_level::error>(
-                "[gpu idx] exact target count={} violates hard bound={} "
-                "(capacity estimate={})",
-                exact_count,
+                "[gpu idx] target count validation failed "
+                "(prefix={}, hard bound={}, capacity estimate={})",
+                prefix_count,
                 hard_bound,
                 max_target_minimizers);
             out.failure_reason = gpu_index_build_failure::output_capacity_overflow;
             arena.rewind(mark);
             return out;
         }
+        const std::uint64_t exact_count = *checked_count;
         out.ownership.counted_minimizer_count = exact_count;
         out.ownership.capacity_estimate_underestimated =
             exact_count > max_target_minimizers ? 1u : 0u;
@@ -497,6 +516,21 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
+    const workgroup_plan peak_wg = plan_workgroups(emit_capacity, features_.max_workgroup_count_x);
+    // Check actual descriptor extents, not the worst-case bucket allocation
+    // used only for peak admission. Bucket storage is checked after counting
+    // distinct hashes below.
+    for (const std::uint64_t descriptor_bytes : {
+             std::max<std::uint64_t>(emit_capacity * 8u, emit_flag_scan_bytes),
+             emit_capacity * 8u,
+             std::uint64_t{peak_wg.num_workgroups} * 256u * 4u,
+             std::uint64_t{bioseq::common::ceil_div(emit_capacity, k_prefix_scan_block_size)} * 4u}) {
+        if (descriptor_bytes > features_.max_storage_buffer_range) {
+            out.failure_reason = gpu_index_build_failure::output_capacity_overflow;
+            arena.rewind(mark);
+            return out;
+        }
+    }
     // Find, the physical size Vulkan will allocate for a workspace buffer.
     const auto allocation_requirement = [this](std::uint64_t bytes) {
         return buffer_memory_requirement_locked(bytes, k_compute_buffer_usage);
@@ -513,7 +547,6 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const std::uint64_t scratch_key_requirement =
         allocation_requirement(std::max<std::uint64_t>(emit_capacity * 8u, exact_flag_scan_bytes));
     const std::uint64_t scratch_value_requirement = allocation_requirement(emit_capacity * 8u);
-    const workgroup_plan peak_wg = plan_workgroups(emit_capacity, features_.max_workgroup_count_x);
     const std::uint64_t histogram_requirement =
         allocation_requirement(std::uint64_t{peak_wg.num_workgroups} * 256u * 4u);
     const std::uint64_t scan_block_requirement = allocation_requirement(
@@ -968,19 +1001,24 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         return out;
     }
 
+    const std::uint64_t bucket_bytes = std::uint64_t{num_buckets} * 16u;
+    if (bucket_bytes > features_.max_storage_buffer_range) {
+        out.failure_reason = gpu_index_build_failure::output_capacity_overflow;
+        arena.rewind(mark);
+        return out;
+    }
     // Make one bucket per hash group, in hash order. Seed lookup can then
     // binary-search the buckets. The index keeps these buckets in slots and
     // keeps the matching encoded positions in positions.
     iblocks.reset();
     // CPU seed lookup reads these buckets directly.
-    buffer buckets = create_host_buffer(std::uint64_t{num_buckets} * 16u, k_compute_buffer_usage);
+    buffer buckets = create_host_buffer(bucket_bytes, k_compute_buffer_usage);
     if (buckets.mapped == nullptr) {
         out.failure_reason = gpu_index_build_failure::device_buffer_allocation_failed;
         arena.rewind(mark);
         return out;
     }
-    const std::uint64_t exact_bucket_requirement =
-        allocation_requirement(std::uint64_t{num_buckets} * 16u);
+    const std::uint64_t exact_bucket_requirement = allocation_requirement(bucket_bytes);
     if (buckets.allocation_bytes != exact_bucket_requirement) {
         out.failure_reason = gpu_index_build_failure::peak_allocation_exceeds_admission;
         arena.rewind(mark);
@@ -1106,8 +1144,10 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
         max_target_minimizers == 0u) {
         return out;
     }
+    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size);
     if (max_target_minimizers >
-        static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+            static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())
+        || hard_bound > (std::numeric_limits<std::uint32_t>::max)()) {
         return out;
     }
 
@@ -1124,6 +1164,14 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
                                     features_.max_workgroup_count_x);
     if (!memory_plan.is_valid) {
         return out;
+    }
+    for (const std::uint64_t bytes : {
+             memory_plan.sequence_bytes, memory_plan.rank_lut_bytes,
+             memory_plan.tile_bytes, memory_plan.tile_count_bytes,
+             memory_plan.tile_offset_bytes, memory_plan.scan_block_bytes,
+             memory_plan.counter_bytes, memory_plan.pair_key_bytes,
+             memory_plan.pair_value_bytes}) {
+        if (bytes > features_.max_storage_buffer_range) return out;
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
@@ -1252,16 +1300,20 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
         arena.rewind(mark);
         return out;
     }
-    if (pair_count > max_target_minimizers) {
+    if (pair_count > max_target_minimizers || pair_count > hard_bound) {
         arena.rewind(mark);
         return out;
     }
 
     const workgroup_plan sort_wg = plan_workgroups(pair_count, features_.max_workgroup_count_x);
+    const std::uint64_t histogram_bytes = std::uint64_t{sort_wg.num_workgroups} * 256u * 4u;
+    if (histogram_bytes > features_.max_storage_buffer_range) {
+        arena.rewind(mark);
+        return out;
+    }
     buffer keys_scratch = create_device_buffer(pair_count * 8u, k_compute_buffer_usage);
     buffer values_scratch = create_device_buffer(pair_count * 8u, k_compute_buffer_usage);
-    buffer histogram = create_device_buffer(std::uint64_t{sort_wg.num_workgroups} * 256u * 4u,
-                                            k_compute_buffer_usage);
+    buffer histogram = create_device_buffer(histogram_bytes, k_compute_buffer_usage);
     if (keys_scratch.mapped == nullptr || values_scratch.mapped == nullptr ||
         histogram.mapped == nullptr) {
         arena.rewind(mark);

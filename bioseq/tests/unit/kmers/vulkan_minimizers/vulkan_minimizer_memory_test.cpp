@@ -137,17 +137,17 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
 
     const std::uint64_t max_minimizers =
         vk::estimate_vulkan_minimizer_capacity(bp_size, window_size);
-    REQUIRE(max_minimizers == 150'000'192u);
+    REQUIRE(max_minimizers == 1'000'000'000u);
 
     const std::uint64_t pessimistic_initial_host_bytes = bioseq::common::saturating_mul(
         bioseq::common::saturating_mul(max_minimizers,
                                        static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    REQUIRE(pessimistic_initial_host_bytes == 2'400'003'072u);
+    REQUIRE(pessimistic_initial_host_bytes == 16'000'000'000ull);
 
     const std::uint64_t resident_requested_bytes =
         vk::vulkan_sketch_resident_bytes<minimap_sketch_data>(max_minimizers);
-    REQUIRE(resident_requested_bytes == 1'200'001'536u);
+    REQUIRE(resident_requested_bytes == 8'000'000'000ull);
     const vk::gpu_sketch_memory_plan plan =
         vk::make_gpu_sketch_memory_plan(bp_size,
                                         packed_sequence_bytes,
@@ -192,7 +192,7 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
         dispatch_without_host_result, pessimistic_initial_host_bytes);
 
     REQUIRE(split_dispatch_bytes < simultaneous_reservation_bytes);
-    REQUIRE(simultaneous_reservation_bytes - dispatch_without_host_result == 2'400'003'072u);
+    REQUIRE(simultaneous_reservation_bytes - dispatch_without_host_result == 16'000'000'000ull);
 
     // Keep the GPU allocations fixed and compare host staging for the same
     // 500-million-letter dna4 input. A fixed-size allocation needs less spare
@@ -353,17 +353,54 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
 
     const std::uint64_t semantic_hard_bound =
         vk::target_minimizer_count_upper_bound(bp_size, kmer_size);
-    REQUIRE(semantic_hard_bound == 499'999'986u);
+    REQUIRE(semantic_hard_bound == 999'999'972u);
     REQUIRE(exact_minimizer_count <= semantic_hard_bound);
     REQUIRE(semantic_hard_bound <= (std::numeric_limits<std::uint32_t>::max)());
     STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(14u, 15u) == 0u);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(bp_size, 0u) == 0u);
     STATIC_REQUIRE(
         vk::target_minimizer_count_upper_bound((std::numeric_limits<std::uint32_t>::max)(), 1u) ==
-        (std::numeric_limits<std::uint32_t>::max)());
+        std::uint64_t{2u} * (std::numeric_limits<std::uint32_t>::max)());
+    constexpr std::uint64_t maximum_count = (std::numeric_limits<std::uint64_t>::max)();
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u, 1u) ==
+                   maximum_count - 1u);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u + 1u, 1u) ==
+                   maximum_count);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count, 1u) == maximum_count);
+
+    const std::array<std::uint32_t, 2> ordinary_counts{3u, 5u};
+    const auto ordinary_count = vk::checked_sketch_output_count(
+        std::as_bytes(std::span{ordinary_counts}), 3u, 8u);
+    REQUIRE(ordinary_count.has_value());
+    REQUIRE(*ordinary_count == 8u);
+    constexpr std::uint32_t maximum_prefix = (std::numeric_limits<std::uint32_t>::max)();
+    constexpr std::uint64_t wide_bound = std::uint64_t{maximum_prefix} + 1u;
+    const std::array<std::uint32_t, 2> small_wide_counts{1u, 2u};
+    const auto small_wide_count = vk::checked_sketch_output_count(
+        std::as_bytes(std::span{small_wide_counts}), 1u, wide_bound);
+    REQUIRE(small_wide_count.has_value());
+    REQUIRE(*small_wide_count == 3u);
+    REQUIRE_FALSE(vk::checked_sketch_output_count(
+        std::as_bytes(std::span{small_wide_counts}), 0u, wide_bound));
+    const std::array<std::uint32_t, 3> final_overflow_counts{
+        maximum_prefix / 2u, maximum_prefix / 2u, 2u};
+    REQUIRE_FALSE(vk::checked_sketch_output_count(
+        std::as_bytes(std::span{final_overflow_counts}), maximum_prefix - 1u, wide_bound));
+    const std::array<std::uint32_t, 4> earlier_overflow_counts{
+        maximum_prefix / 2u, maximum_prefix / 2u, 2u, 1u};
+    REQUIRE_FALSE(vk::checked_sketch_output_count(
+        std::as_bytes(std::span{earlier_overflow_counts}), 0u, wide_bound + 1u));
+    constexpr std::uint32_t high_count_flag = maximum_prefix / 2u + 1u;
+    const std::array<std::uint32_t, 2> flagged_counts{high_count_flag, 0u};
+    REQUIRE_FALSE(vk::checked_sketch_output_count(
+        std::as_bytes(std::span{flagged_counts}), high_count_flag, wide_bound));
+    REQUIRE_FALSE(vk::checked_sketch_output_count(std::span<const std::byte>{}, 0u, wide_bound));
+    const std::array<std::byte, sizeof(std::uint32_t) - 1u> truncated_count{};
+    REQUIRE_FALSE(vk::checked_sketch_output_count(std::span{truncated_count}, 0u, wide_bound));
 
     const std::uint64_t pessimistic_capacity =
         vk::estimate_vulkan_minimizer_capacity(bp_size, window_size);
-    REQUIRE(pessimistic_capacity == 150'000'192u);
+    REQUIRE(pessimistic_capacity == 1'000'000'000u);
 
     // Compare buffers sized from the estimated capacity with buffers sized from
     // the measured minimizer count. The estimate exceeds this memory budgel.
@@ -371,7 +408,7 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
         bioseq::common::saturating_mul(pessimistic_capacity, 40u);
     const std::uint64_t exact_count_stream_floor =
         bioseq::common::saturating_mul(exact_minimizer_count, 40u);
-    REQUIRE(capacity_stream_floor == 6'000'007'680u);
+    REQUIRE(capacity_stream_floor == 40'000'000'000ull);
     REQUIRE(exact_count_stream_floor == 3'732'355'840u);
 
     const auto capacity_plan =

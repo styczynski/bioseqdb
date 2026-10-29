@@ -238,7 +238,7 @@ TEST_CASE("vulkan index: adoption rejects inconsistent stats without consuming s
 
     built.occupied_slots = built.position_count;
     built.ownership.distinct_minimizer_count = built.occupied_slots;
-    built.target_len = built.position_count - 1u;
+    built.target_len = (built.position_count - 1u) / 2u;
     adopted = idx_ns::adopt_gpu_built_index(
         runtime, std::move(built), idx_ns::gpu_minimizer_index_cache_key{});
     REQUIRE_FALSE(adopted.has_value());
