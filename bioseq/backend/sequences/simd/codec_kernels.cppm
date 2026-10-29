@@ -133,10 +133,11 @@ HWY_INLINE void decode_dna4_words_to_ascii(
     detail::decode_dna4_words_to_ascii_impl(words, dst, total_letters);
 }
 /**
- * Decodes dna4 words and adds a newline after each full output line.
+ * Decodes dna4 words and inserts newlines only between output letters.
  *
- * wrap_width must be positive. The initial line count must be at most that
- * width. A final full line also receives a newline.
+ * wrap_width must be positive. The initial line count may equal that width;
+ * its pending newline is emitted before the next letter. A final full line
+ * retains that pending newline for the next chunk or the record terminator.
  * @param words Packed dna4 sequence
  * @param total_letters Number of letters to decode.
  * @param wrap_width Letters per  output line.
@@ -165,7 +166,7 @@ HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
         out_cursor += this_run;
         in_cursor += this_run;
         line_position += this_run;
-        if (line_position == wrap_width) {
+        if (line_position == wrap_width && in_cursor < total_letters) {
             dst[out_cursor++] = static_cast<std::uint8_t>('\n');
             line_position = 0;
         }
@@ -578,10 +579,10 @@ HWY_INLINE void decode_words_to_ascii(
 /**
  * Decodes packed ranks into wrapped ASCII lines.
  *
- * wrap_width must be positive. Start with a line count smaller than that width.
- * The SIMD paths write a newline after a final full line. The scalar path leaves
- * that newline to the caler and can return wrap_width, which must be handled
- * before continuing the output.
+ * wrap_width must be positive and the initial line count must not exceed it.
+ * Every path writes newlines only between letters and can return wrap_width.
+ * A subsequent nonempty chunk emits that pending newline before its first
+ * letter; the record writer supplies the final record terminator.
  * @param words Packed sequence storage.
  * @param total_letters Logical letters to decode.
  * @param wrap_width Letters per output line.
@@ -629,7 +630,7 @@ template <sequence_alphabet p_alphabet,
             out_cursor += this_run;
             in_cursor += this_run;
             line_position += this_run;
-            if (line_position == wrap_width) {
+            if (line_position == wrap_width && in_cursor < total_letters) {
                 dst[out_cursor++] = static_cast<std::uint8_t>('\n');
                 line_position = 0;
             }

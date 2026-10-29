@@ -29,6 +29,7 @@ module;
 
 export module bioseq.io.writer;
 
+import bioseq.common.checked_arithmetic;
 import bioseq.common.logging;
 import bioseq.sequences;
 import bioseq.sequences.simd;
@@ -283,18 +284,31 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
                                                                    letters_per_unit>(
                     words_ptr, dst, slice_letters);
             } else {
-                // Exact byte count the wrapped kernel writes for this slice:
-                // slice_letters + one '\n' per completed line.
-                const std::size_t newline_count = (line_position + slice_letters) / wrap_width;
-                producer.decode_scratch.clear();
-                std::uint8_t* scratch = producer.decode_scratch.extend(slice_letters);
-                std::uint8_t* dst = producer.chunk.extend(slice_letters + newline_count);
-                line_position =
-                    bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<p_alphabet,
-                                                                               storage_unit,
-                                                                               bits_per_char,
-                                                                               letters_per_unit>(
-                        words_ptr, slice_letters, wrap_width, line_position, scratch, dst);
+                // Wrapped decoders omit the terminal newline, including an exact
+                // full line. Preserve that pending delimiter across empty slices.
+                if (slice_letters != 0u) {
+                    // floor((line_position + slice_letters - 1) / wrap_width),
+                    // without overflowing the intermediate coordinate sum.
+                    const std::size_t before_last = slice_letters - 1u;
+                    const std::size_t newline_count = before_last / wrap_width
+                        + static_cast<std::size_t>(line_position >=
+                            wrap_width - before_last % wrap_width);
+                    const auto output_bytes = bioseq::common::checked_add(slice_letters, newline_count);
+                    if (!output_bytes.has_value()
+                        || !bioseq::common::checked_add(producer.chunk.size, *output_bytes).has_value()) {
+                        stamp_error("FASTA streamed output byte count overflow");
+                        return false;
+                    }
+                    producer.decode_scratch.clear();
+                    std::uint8_t* scratch = producer.decode_scratch.extend(slice_letters);
+                    std::uint8_t* dst = producer.chunk.extend(*output_bytes);
+                    line_position =
+                        bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<p_alphabet,
+                                                                                   storage_unit,
+                                                                                   bits_per_char,
+                                                                                   letters_per_unit>(
+                            words_ptr, slice_letters, wrap_width, line_position, scratch, dst);
+                }
             }
             // Write this slice before decoding the next one.
             if (!flush_producer(producer))
