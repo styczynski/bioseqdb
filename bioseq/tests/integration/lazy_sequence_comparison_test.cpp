@@ -236,22 +236,55 @@ TEST_CASE("self casts preserve logical values across supported widths and layout
     REQUIRE(assigned_toast[1] == "ACGT");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+    // The explicit cast supplies the result typmod as well as native DNA5 ranks.
     exec_sql(ctx,
-        "CREATE TABLE sequence_acceptance_cast_dna5 "
-        " (value bioseq.seq('dna5',64));");
-    constexpr std::array cross_alphabet_explicit{
-        "SELECT 'A'::bioseq.seq('dna4',64)"
-        "         ::bioseq.seq('dna5',64);",
-        "SELECT ('A'::bioseq.seq('dna4',64) OPERATOR(bioseq.||) "
-        "        'C'::bioseq.seq('dna4',64))"
-        "         ::bioseq.seq('dna5',64);",
-        "SELECT s::bioseq.seq('dna5',64) "
-        "FROM sequence_acceptance_cast_source WHERE id=1;",
-    };
-    for (const char* query : cross_alphabet_explicit) {
-        CAPTURE(query);
-        REQUIRE(sql_error(ctx, query).sqlstate == "42804");
+        "CREATE TABLE sequence_acceptance_cast_dna5 AS "
+        "SELECT 'A'::bioseq.seq('dna4',64)::bioseq.seq('dna5',64) AS value "
+        "WITH NO DATA;");
+    const auto cast_typmod = query_one(ctx,
+        "SELECT pg_catalog.format_type(atttypid,atttypmod), "
+        "       atttypid='bioseq.seq'::regtype "
+        "FROM pg_catalog.pg_attribute "
+        "WHERE attrelid='sequence_acceptance_cast_dna5'::regclass "
+        "  AND attname='value';");
+    REQUIRE(cast_typmod[0] == "bioseq.seq('dna5',64)");
+    REQUIRE(cast_typmod[1] == "t");
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 3>
+        cross_alphabet_explicit{{
+            {"SELECT 'A'::bioseq.seq('dna4',64)::bioseq.seq('dna5',64)", "A"},
+            {"SELECT ('A'::bioseq.seq('dna4',64) OPERATOR(bioseq.||) "
+             "        'C'::bioseq.seq('dna4',64))::bioseq.seq('dna5',64)", "AC"},
+            {"SELECT s::bioseq.seq('dna5',64) "
+             "FROM sequence_acceptance_cast_source WHERE id=1", "ACGT"},
+        }};
+    for (const auto& [query, expected] : cross_alphabet_explicit) {
+        CAPTURE(query, expected);
+        const auto converted = query_one(ctx, fmt::format(
+            "WITH converted(value) AS ({}) "
+            "SELECT value::text, (value::bioseq.seq('dna4',64))::text, "
+            "       bioseq.len(value), "
+            "       value OPERATOR(bioseq.=) '{}'::bioseq.seq('dna5',64) "
+            "FROM converted;", query, expected));
+        REQUIRE(converted[0] == std::string{expected});
+        REQUIRE(converted[1] == std::string{expected});
+        REQUIRE(converted[2] == std::to_string(expected.size()));
+        REQUIRE(converted[3] == "t");
+        exec_sql(ctx, fmt::format(
+            "INSERT INTO sequence_acceptance_cast_dna5 {}", query));
     }
+    REQUIRE(query_scalar(ctx,
+        "SELECT string_agg(value::text,',' ORDER BY bioseq.len(value)) "
+        "FROM sequence_acceptance_cast_dna5;") == "A,AC,ACGT");
+    REQUIRE(query_scalar(ctx,
+        "SELECT s OPERATOR(bioseq.=) 'ACGT'::bioseq.seq('dna4',64) "
+        "FROM sequence_acceptance_cast_source WHERE id=1;") == "t");
+
+    const auto unrepresentable_dna4 = sql_error(ctx,
+        "SELECT 'ACGTN'::bioseq.seq('dna5',64)::bioseq.seq('dna4',64);");
+    REQUIRE(unrepresentable_dna4.sqlstate == "22023");
+    REQUIRE(unrepresentable_dna4.contains(
+        "source symbol has no representation under the requested conversion"));
+    REQUIRE(unrepresentable_dna4.contains("Source position: 4 (zero-based)."));
 
     constexpr std::array cross_alphabet_assignment{
         "INSERT INTO sequence_acceptance_cast_dna5 "
@@ -264,7 +297,10 @@ TEST_CASE("self casts preserve logical values across supported widths and layout
     };
     for (const char* query : cross_alphabet_assignment) {
         CAPTURE(query);
-        REQUIRE(sql_error(ctx, query).sqlstate == "42804");
+        const auto assignment_error = sql_error(ctx, query);
+        REQUIRE(assignment_error.sqlstate == "42804");
+        REQUIRE(assignment_error.contains(
+            "cross-alphabet bioseq.seq conversion requires an explicit cast"));
     }
 #endif
 }

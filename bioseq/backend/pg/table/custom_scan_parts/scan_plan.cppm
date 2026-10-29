@@ -274,8 +274,43 @@ export {
 
         const bioseq_stub_oids& plan_stub_oids = get_cached_stub_oids();
         const Index scan_relid = best_path->path.parent->relid;
+        /* Upper sequence materialization can keep a helper below another SQL
+         * function. Publish that helper as a whole child output so setrefs binds
+         * its occurrence to this scan instead of executing its scalar stub. */
+        List* requested_projections = list_copy(root->processed_tlist);
+        if (!locator_passthrough_requested) {
+            for (TargetEntry* entry : postgres_list<TargetEntry>(root->processed_tlist)) {
+                if (entry == nullptr || entry->expr == nullptr)
+                    continue;
+                Node* expression = reinterpret_cast<Node*>(entry->expr);
+                const auto collect_nested_helpers =
+                    [expression, &plan_stub_oids](pg_expression_walk_cursor,
+                                                  pg_node_view node,
+                                                  List*& projections) {
+                        /* PostgreSQL owns PHV placement and outer-join nulling. */
+                        if (node.try_cast<PlaceHolderVar>() != nullptr)
+                            return pg_walk_step::skip_subtree;
+                        FuncExpr* function = node.try_cast<FuncExpr>();
+                        if (function == nullptr ||
+                            !is_bioseq_projection_funcid(function->funcid, plan_stub_oids))
+                            return pg_walk_step::descend;
+                        if (node.get() != expression) {
+                            projections = lappend(
+                                projections,
+                                makeTargetEntry(reinterpret_cast<Expr*>(copyObject(function)),
+                                                InvalidAttrNumber,
+                                                nullptr,
+                                                false));
+                        }
+                        return pg_walk_step::skip_subtree;
+                    };
+                walk_pg_expression_including_root(expression,
+                                                   requested_projections,
+                                                   collect_nested_helpers);
+            }
+        }
         if (!locator_passthrough_requested)
-            for (auto n : postgres_list<TargetEntry>(root->processed_tlist)) {
+            for (auto n : postgres_list<TargetEntry>(requested_projections)) {
                 if (FuncExpr* fe = try_cast_pg_node<FuncExpr>(to_pg_node(n->expr))) {
                     bool belongs_to_scan = false;
                     if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)) {

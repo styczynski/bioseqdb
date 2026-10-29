@@ -11,6 +11,8 @@ module;
 export module bioseq.tests.integration.index_admin_test_support;
 
 import std;
+import bioseq.sequences.kmers.minimizer_physical_records;
+import bioseq.gpu.vulkan.abi;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::index_admin_test_support {
@@ -36,6 +38,8 @@ inline constexpr std::string_view k_table = "index_admin_t";
         long long expected_scheme_identity,
         long long expected_scheme_revision,
         long long expected_producer_identity) {
+    constexpr auto expected_producer_revision =
+        bioseq::minimizers::minimizer_profile_producer_identity_revision;
     const row_t inspected = query_one(ctx, fmt::format(
         "WITH inspected AS ("
         " SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
@@ -113,7 +117,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
         "  AND (j->'manifest'->'compatibility'->>"
         "       'count_semantics_revision')::bigint=1 "
         "  AND (j->'manifest'->'compatibility'->>"
-        "       'producer_backend_revision')::bigint=1 "
+        "       'producer_backend_revision')::bigint={} "
         "  AND (j->'manifest'->'compatibility'->>"
         "       'controls_per_block')::bigint=4096 "
         "  AND (j->'manifest'->'compatibility'->>'hash_seed')::bigint=0 "
@@ -160,7 +164,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
         "       'stored_posting_width_bytes')::bigint "
         " THEN '1' ELSE '0' END "
         "FROM inspected;",
-        table, index_name, sequence_rowno, index_name));
+        table, index_name, sequence_rowno, index_name, expected_producer_revision));
     REQUIRE(inspected.size() == 9);
     for (const auto& field : inspected) {
         REQUIRE(field.has_value());
@@ -174,7 +178,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     REQUIRE(inspected[5].value()
             == std::to_string(expected_scheme_revision));
     REQUIRE(inspected[6].value() == std::to_string(expected_producer_identity));
-    REQUIRE(inspected[7].value() == "1");
+    REQUIRE(inspected[7].value() == std::to_string(expected_producer_revision));
     REQUIRE(inspected[8].value() == "1");
     return generation_id;
 }
@@ -207,7 +211,8 @@ inline constexpr std::string_view k_table = "index_admin_t";
     REQUIRE(inspected[3].value() == "15");
     REQUIRE(inspected[4].value() == "10");
     // Check the format revisions expected by this fragment-index inspector
-    REQUIRE(inspected[5].value() == "3");
+    REQUIRE(inspected[5].value()
+            == std::to_string(bioseq::gpu::vulkan::k_gpu_grouped_soa_abi_revision));
     REQUIRE(inspected[6].value() == "2");
     REQUIRE(inspected[7].value()
             == std::to_string(expected_position_segment_span_bp));

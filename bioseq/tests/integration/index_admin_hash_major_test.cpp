@@ -480,7 +480,7 @@ TEST_CASE("ordinary locator-backed bounded ntHash update publishes hash-major wi
     REQUIRE(require_ready_hash_major_generation(
         ctx, table, "minimizers_per_sequence", rowno, 65'565,
         /*expected_scheme_identity=*/1,
-        /*expected_scheme_revision=*/1,
+        /*expected_scheme_revision=*/2,
         /*expected_producer_identity=*/3) > 0);
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
     const auto wrong_backend = sql_error(ctx, fmt::format(

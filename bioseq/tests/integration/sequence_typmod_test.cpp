@@ -149,19 +149,15 @@ TEMPLATE_TEST_CASE_SIG("bioseq.seq cross-typmod cast follows the active alphabet
     const auto invalid_dna4 =
         sql_error(ctx, fmt::format("SELECT 'ACGTN'::bioseq.seq('dna4', {})::text;", p_width));
     REQUIRE(invalid_dna4.sqlstate == "22P02");
+    REQUIRE(invalid_dna4.contains("cannot encode bioseq sequence at byte 4"));
+    REQUIRE(invalid_dna4.contains("offending byte=78"));
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    REQUIRE(invalid_dna4.contains("invalid symbol at byte 4 in unbound bioseq.seq"));
-    REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
-
     const auto unsupported_alphabet =
         sql_error(ctx, fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;", p_width));
     REQUIRE(unsupported_alphabet.sqlstate == "22023");
     REQUIRE(unsupported_alphabet.contains("bioseq.seq alphabet \"dna5\" is not supported"));
     REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
 #else
-    REQUIRE(invalid_dna4.contains("invalid symbol 'N' for bioseq alphabet dna4"));
-    REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
-
     REQUIRE(
         query_scalar(ctx, fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;", p_width)) ==
         "ACGTN");

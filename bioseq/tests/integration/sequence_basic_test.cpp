@@ -352,18 +352,9 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
     const auto invalid_dna4 = sql_error(
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 64)::text;");
     REQUIRE(invalid_dna4.sqlstate == "22P02");
-#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-    /* The DNA4-only build rejects N while parsing the unbound input. */
-    REQUIRE(invalid_dna4.contains(
-        "invalid symbol at byte 4 in unbound bioseq.seq"));
-    REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
-#else
-    /* With DNA5 available, input parsing accepts N. Casting that value to
-     * DNA4 must then reject it. */
-    REQUIRE(invalid_dna4.contains(
-        "invalid symbol 'N' for bioseq alphabet dna4"));
-    REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
-#endif
+    /* Lexical binding uses the checked encoder in every alphabet profile. */
+    REQUIRE(invalid_dna4.contains("cannot encode bioseq sequence at byte 4"));
+    REQUIRE(invalid_dna4.contains("offending byte=78"));
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     const auto unsupported_alphabet = sql_error(
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 64)::text;");
