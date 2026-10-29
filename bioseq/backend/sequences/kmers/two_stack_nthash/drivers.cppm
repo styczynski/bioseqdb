@@ -16,6 +16,7 @@ import bioseq.instrumentation;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
 import bioseq.highway.sources.minimizer_two_stack_nthash_resident_stream;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_vectors;
@@ -422,7 +423,9 @@ template<class p_minimizer_type,
                     invocation.sink};
                 two_stack_finalize_result native{};
                 if constexpr (
-                    exact_simd_minimizer_representation<p_minimizer_type>) {
+                    exact_simd_minimizer_representation<p_minimizer_type>
+                    && 15u <= std::numeric_limits<std::uint64_t>::digits
+                        / bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>) {
                     if (invocation.window == 10u
                         && invocation.kmer == 15u) {
                         native =
@@ -598,7 +601,10 @@ template<class p_minimizer_type,
     minimizer_kernel_invocation& invocation,
     minimizer_kernel_result& result)
 {
-    if constexpr (exact_simd_minimizer_representation<p_minimizer_type>) {
+    if constexpr (
+        exact_simd_minimizer_representation<p_minimizer_type>
+        && 15u <= std::numeric_limits<std::uint64_t>::digits
+            / bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>) {
         if (invocation.window == 10u && invocation.kmer == 15u) {
             run_fragmented_impl<
                 10u, 15u, p_minimizer_type, p_alphabet, p_storage_unit>(
