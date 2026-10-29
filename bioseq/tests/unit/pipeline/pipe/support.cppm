@@ -26,6 +26,7 @@ export import bioseq.sequences.kmers.two_stack_minimizers;
 export import bioseq.highway.dispatch_contract;
 export import bioseq.highway.test_support;
 export import bioseq.pipeline.pipe;
+export import bioseq.pipeline.runtime_contract;
 export import bioseq.storage.scanner;
 export import bioseq.storage.lazy_sequence;
 export import bioseq.chaining.simd;
@@ -89,25 +90,24 @@ static_assert(std::is_trivially_copyable_v<raw_sketch_append_fixture>);
 static_assert(sizeof(raw_sketch_append_fixture)
               == sizeof(raw_sketch_append_fixture::storage_type));
 
-struct alignas(8) source_direct_minimizer_fixture {
-    struct layout_type {
-        static constexpr std::uint32_t k_position_bits = 33u;
-        static constexpr std::uint32_t k_hash_bits = 30u;
-    };
-    std::uint64_t value = 0u;
-};
-static_assert(sizeof(source_direct_minimizer_fixture) == 8u);
-static_assert(alignof(source_direct_minimizer_fixture) == 8u);
+inline constexpr auto source_direct_minimizer_layout =
+    ::bioseq::minimizers::select_minimizer_physical_layout<::seq::dna4, std::uint32_t>(
+        ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer,
+        ::bioseq::simd::pipe_entry_detail::k_vulkan_fixed_host_adoption_target_minimum_bp,
+        15u, 10u);
+using source_direct_minimizer_fixture = ::bioseq::minimizers::minimizer_representation<
+    source_direct_minimizer_layout.record_position_log2,
+    source_direct_minimizer_layout.hash_bits>;
 
-struct alignas(8) incompatible_source_direct_minimizer_fixture {
-    struct layout_type {
-        static constexpr std::uint32_t k_position_bits = 32u;
-        static constexpr std::uint32_t k_hash_bits = 31u;
+struct alignas(alignof(source_direct_minimizer_fixture)) incompatible_source_direct_minimizer_fixture {
+    struct layout_type : source_direct_minimizer_fixture::layout_type {
+        static constexpr std::uint32_t k_hash_bits =
+            source_direct_minimizer_fixture::layout_type::k_hash_bits + 1u;
     };
-    std::uint64_t value = 0u;
+    std::array<std::byte, sizeof(source_direct_minimizer_fixture)> value{};
 };
-static_assert(sizeof(incompatible_source_direct_minimizer_fixture) == 8u);
-static_assert(alignof(incompatible_source_direct_minimizer_fixture) == 8u);
+static_assert(sizeof(incompatible_source_direct_minimizer_fixture) == sizeof(source_direct_minimizer_fixture));
+static_assert(alignof(incompatible_source_direct_minimizer_fixture) == alignof(source_direct_minimizer_fixture));
 
 struct budgeted_sketch_lifetime_probe {
     using storage_type = std::uint64_t;

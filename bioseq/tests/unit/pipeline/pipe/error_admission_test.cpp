@@ -194,12 +194,15 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         fixed_vulkan_target_host_adoption_route_selected;
     constexpr std::uint64_t minimum = pipe_entry_detail::
         k_vulkan_fixed_host_adoption_target_minimum_bp;
-    // The  size threshold uses target length. A long dna5 target with many N bases
-    // can produce very few minimizers. Keep their memory reserved if process
-    // memory measurements cannot account for the allocation.
-    constexpr std::uint64_t sparse_dna5_emitted_bytes =
+    constexpr std::uint32_t dna4_size = seqan3::alphabet_size<seq::dna4>;
+    constexpr std::uint32_t dna4_code = supported_biological_alphabets::index_of<seq::dna4>();
+    // The size threshold uses target length, not emitted storage. Small buffers
+    // keep their reservation if process measurements cannot account for them.
+    constexpr std::uint64_t small_emitted_bytes =
         2u * sizeof(minimap_sketch_data);
     minimap2_parameters params{};
+    params.kmer_size = source_direct_minimizer_layout.runtime_kmer_size;
+    params.window_size = source_direct_minimizer_layout.runtime_window_size;
     params.vulkan_enabled = true;
     params.vulkan_seed_hits_enabled = true;
     params.vulkan_fused_frontend_enabled = false;
@@ -208,30 +211,28 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         minimizer_algorithm::vulkan_minimap_integer;
 
     STATIC_REQUIRE(minimum == (std::uint64_t{256} << 20u));
-    STATIC_REQUIRE(sparse_dna5_emitted_bytes < (std::uint64_t{64} << 10u));
+    STATIC_REQUIRE(small_emitted_bytes < (std::uint64_t{64} << 10u));
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         source_direct_minimizer_fixture>(
         /*is_gpu_target_index_build=*/false,
         params,
-        /*alphabet_size=*/4u,
+        dna4_size, dna4_code,
         minimum - 1u));
-    REQUIRE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(
-        /*is_gpu_target_index_build=*/false,
-        params,
-        /*alphabet_size=*/4u,
-        minimum));
-    REQUIRE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(
-        /*is_gpu_target_index_build=*/false,
-        params,
-        /*alphabet_size=*/5u,
-        minimum));
+    const auto check_registered_alphabet = [&params, minimum]<class Alphabet>() {
+        REQUIRE(fixed_vulkan_target_host_adoption_route_selected<source_direct_minimizer_fixture>(
+            false, params,
+            static_cast<std::uint32_t>(seqan3::alphabet_size<Alphabet>),
+            static_cast<std::uint32_t>(supported_biological_alphabets::index_of<Alphabet>()),
+            minimum));
+    };
+    std::apply([&check_registered_alphabet](auto... entry) {
+        (check_registered_alphabet.template operator()<typename decltype(entry)::alphabet_type>(), ...);
+    }, supported_biological_alphabets::alphabet_entries_tuple{});
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         source_direct_minimizer_fixture>(
         /*is_gpu_target_index_build=*/true,
         params,
-        /*alphabet_size=*/4u,
+        dna4_size, dna4_code,
         minimum));
 
     params.vulkan_enabled = false;
@@ -239,52 +240,52 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         source_direct_minimizer_fixture>(
         /*is_gpu_target_index_build=*/false,
         params,
-        /*alphabet_size=*/4u,
+        dna4_size, dna4_code,
         minimum));
     params.vulkan_enabled = true;
 
     params.vulkan_seed_hits_enabled = false;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
     params.vulkan_seed_hits_enabled = true;
 
     params.vulkan_fused_frontend_enabled = true;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
     params.vulkan_fused_frontend_enabled = false;
 
     params.vulkan_gpu_index_build_enabled = true;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
     params.vulkan_gpu_index_build_enabled = false;
 
     params.minimizer_algorithm = minimizer_algorithm::two_stack_nthash;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
     params.minimizer_algorithm =
         minimizer_algorithm::vulkan_minimap_integer;
 
     params.kmer_size = 0;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
-    params.kmer_size = 27;
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
+    params.kmer_size = static_cast<std::int32_t>((std::numeric_limits<std::uint16_t>::max)()) + 1;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
-    params.kmer_size = 15;
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
+    params.kmer_size = source_direct_minimizer_layout.runtime_kmer_size;
 
     params.window_size = 0;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
-    params.window_size = 257;
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
+    params.window_size = static_cast<std::int32_t>((std::numeric_limits<std::uint16_t>::max)()) + 1;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 4u, minimum));
-    params.window_size = 10;
+        source_direct_minimizer_fixture>(false, params, dna4_size, dna4_code, minimum));
+    params.window_size = source_direct_minimizer_layout.runtime_window_size;
 
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 257u, minimum));
+        source_direct_minimizer_fixture>(false, params, 0u, dna4_code, minimum));
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         incompatible_source_direct_minimizer_fixture>(
-            false, params, 4u, minimum));
+            false, params, dna4_size, dna4_code, minimum));
 }
 
 TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases device",

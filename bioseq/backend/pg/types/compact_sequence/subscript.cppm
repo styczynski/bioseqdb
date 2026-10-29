@@ -26,6 +26,7 @@ export module bioseq.postgres.types.compact_sequence.subscript;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.support;
 import bioseq.storage.coordinates;
 
