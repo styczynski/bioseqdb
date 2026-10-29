@@ -350,11 +350,6 @@ TEST_CASE("Block production stats reduction is deterministic in parallel",
     }
 }
 
-TEST_CASE("Block SIMD scoring covers ranks above one shuffle table",
-          "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
-    SKIP("aa27 is outside the scheduler's generated alignment registry");
-}
-
 TEST_CASE("Block native L16 path matches the cross-lane golden",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context ctx;
