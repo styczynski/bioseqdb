@@ -28,6 +28,8 @@ extern "C" {
 
 module bioseq.postgres.storage.indexing.admin.policy_catalog;
 
+import bioseq.postgres.storage.indexing.admin.scheme_untagged_fragment_guard;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.type;
 import bioseq.indexing.symbol_counts;
 import bioseq.sequences.cigar;
@@ -165,14 +167,14 @@ void index_build_on_insert(Oid user_relid,
     const auto backend = resolve_index_sketch_backend(requested_algorithm);
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
         selected_minimizer_kernels_for_operation(backend, "bioseq INSERT index build");
-    if (backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
+    if (!bioseq::indexing::ordinary_minimizer_index_backend_supported(backend)) {
         constexpr auto k_index_types = pg_supported_indexes::list_types();
         for (std::size_t i = 0; i < k_index_types.size(); ++i) {
             if (k_index_types[i].second == sequence_index_layout::fragment_chunks &&
                 idx.enabled[i]
                 && idx.policy[i]
                     == bioseq::indexing::index_update_policy::update_on_insert) {
-                reject_bounded_nthash_for_scheme_untagged_fragment_layout(
+                reject_unsupported_scheme_untagged_fragment_storage(
                     backend, "bioseq INSERT index build");
             }
         }

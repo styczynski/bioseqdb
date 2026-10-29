@@ -157,13 +157,7 @@ selected_minimizer_kernels_for_operation(bioseq::minimizers::minimizer_sketch_ba
     return bind_selected_minimizer_kernels_for_operation(backend, operation);
 }
 
-/// Reject bounded ntHash when the storage format cannot record its  hash scheme.
-/// Otherwise an Exact, reader could accept incompatible hashes uder the same
-/// index name. Locator-based READY builds use a format that records the scheme.
-[[noreturn]] inline void reject_bounded_nthash_for_scheme_untagged_fragment_layout(
-    bioseq::minimizers::minimizer_sketch_backend backend, std::string_view operation) {
-    reject_bounded_nthash_for_scheme_untagged_fragment_storage(backend, operation);
-}
+
 
 // Index maintenance during insertion.
 /// Build the enabled update-on-insert indexes using the sequence payload and its locator.

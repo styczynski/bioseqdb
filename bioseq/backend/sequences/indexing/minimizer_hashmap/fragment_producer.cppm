@@ -22,6 +22,7 @@ module;
 
 export module bioseq.indexing.minimizer_hashmap:fragment_producer;
 
+import bioseq.sequences.kmers.hashers.base;
 import :exact_simd;
 import bioseq.pipeline.runtime_contract;
 import :grouped_soa;
@@ -128,14 +129,16 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
 }
 
 /// Visit each complete hash bucket in a serialized fragment index.
-/// Copy its positions into pos_scratch before  the callback. The pointer is
+/// Validate every bucket, then copy accepted positions into pos_scratch. The pointer is
 /// borrowed until the next bucket. Invalid headers, byte counts, or ranges
 /// call index_corruption_panic and terminate the process.
+/// @tparam p_predicate Metadata predicate accepting (hash, position_count).
 /// @tparam p_function Callable accepting (hash, position_count, positions).
-template <class p_function>
+template <class p_predicate, class p_function>
 void wire_for_each_bucket(const char* blob,
                           std::size_t blob_bytes,
                           std::vector<std::uint64_t>& pos_scratch,
+                          p_predicate&& accept_bucket,
                           p_function&& cb) {
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
@@ -160,6 +163,7 @@ void wire_for_each_bucket(const char* blob,
         if (static_cast<std::uint64_t>(bucket.pos_offset) + bucket.pos_count >
             decoded_header.total_positions)
             index_corruption_panic("index chunk: bucket range exceeds total_positions");
+        if (!accept_bucket(bucket.hash, bucket.pos_count)) continue;
         pos_scratch.resize(bucket.pos_count);
         if (bucket.pos_count > 0)
             std::memcpy(pos_scratch.data(),
@@ -320,14 +324,8 @@ class minimizer_fragment_generation_execution_receipt {
         return selected_route_accepted_(requires_backend_work_());
     }
 
-    /// Check a direct fragment build: one source scan with no geometry retry or
-    /// publication binding Accept the  registered algorithm identity or the
-    /// unbound compatibility path with k=15 and w=10.
+    /// Check a direct fragment build against its registered identity and saved execution fields.
     [[nodiscard]] bool direct_build_accepted() const noexcept {
-        const bool legacy_unbound_build =
-            kmer_size == 15u && window_size == 10u &&
-            !route_snapshot_present_ &&
-            algorithm_identity == minimizer_generation_algorithm_identity{};
         const bool registered_identity_build =
             route_snapshot_present_ && route_snapshot_matches_() &&
             algorithm_identity.runtime_kmer_size == kmer_size &&
@@ -338,7 +336,7 @@ class minimizer_fragment_generation_execution_receipt {
         return common_identity_accepted_() && producer_scan_count == 1u &&
                geometry_retry_count == 0u &&
                generation_layout == minimizer_generation_layout::invalid &&
-               (legacy_unbound_build || registered_identity_build) &&
+               registered_identity_build &&
                !publication_binding_present_ &&
                selected_route_accepted_(requires_backend_work_());
     }
@@ -2180,7 +2178,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
         return receipt;
     }
 
-    /// Build one blob per 32,768-base fragment with k=15 and w=10.
+    /// Build one blob per 32,768-base fragment with the alphabet-derived ordinary exact profile.
     /// Store fragment-local positions and their strand bits. Write the
     /// fragment-count manifest after all blobs. Collection or storage failures
     /// can leave a partially written  index
@@ -2194,7 +2192,14 @@ template <class p_storage> struct minimizers_per_fragment_index {
           const bioseq::minimizers::minimizer_kernels* kernels,
           minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
           std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
-        constexpr std::size_t w = 10, k = 15; // Fixed minimizer parameters for the ordinary fragment build.
+        alphabet_code = ordinary_minimizer_index_alphabet_code<p_alphabet>(alphabet_code);
+        if (!ordinary_minimizer_index_backend_supported(backend)) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+                "ordinary minimizer index requires the exact scheme; use identity-bearing generation"};
+        }
+        constexpr std::size_t w = k_ordinary_minimizer_index_window_size;
+        constexpr std::size_t k = ordinary_minimizer_index_kmer_size(
+            bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>);
         constexpr std::size_t frag_bp = 32'768u;
         constexpr std::size_t k_context_span = w + k; // Context collected on both sides of each core.
         static_assert(
@@ -2207,10 +2212,17 @@ template <class p_storage> struct minimizers_per_fragment_index {
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state,
                                                  "minimizers_per_fragment build"};
         }
-        if (backend == minimizer_sketch_backend::bounded_nthash_simd &&
-            (kernels == nullptr || kernels->bounded_nthash == nullptr)) {
-            throw packed_bounded_nthash_index_runtime_error{
-                packed_bounded_nthash_index_status::invalid_state, "minimizers_per_fragment build"};
+        const auto requested_algorithm = minimizer_algorithm_for_explicit_sketch_backend(backend);
+        if (!requested_algorithm) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_static_configuration,
+                "ordinary fragment build has an unknown backend"};
+        }
+        const auto ordinary_layout = select_minimizer_generation_physical_layout<p_alphabet>(
+            *requested_algorithm, std::min<std::uint64_t>(total_bp, frag_bp + 2u * k_context_span),
+            static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits), k, w);
+        if (!ordinary_layout) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+                "ordinary fragment build has no registered layout"};
         }
         if (execution_stats_out != nullptr) {
             *execution_stats_out = {};
@@ -2221,104 +2233,11 @@ template <class p_storage> struct minimizers_per_fragment_index {
             execution_stats_out->kmer_size = k;
             execution_stats_out->producer_scan_count = 1u;
             execution_stats_out->backend_bound = true;
-        }
-
-        // Collect adjacent fragments in one GPU window to share submission
-        // costs. Split the sorted global pairs back, into fragment-local blobs.
-        if (backend == minimizer_sketch_backend::vulkan_segment) {
-            const std::size_t fragments_per_batch = gpu_minimizer_fragments_per_batch(
-                nfrag, frag_bp, 2u * k_context_span, storage.run_buffer_bytes());
-            std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> per_fragment(
-                fragments_per_batch);
-            std::vector<char> blob;
-            // Replace one fragment chunk with its complete serialized blob.
-            const auto write_fragment_blob = [&storage](std::size_t fragment_no,
-                                                        const std::vector<char>& fragment_blob) {
-                const std::size_t bytes = fragment_blob.size();
-                storage.resize(static_cast<index_sub_key_t>(fragment_no), bytes);
-                storage.template write_to_each<char>(
-                    static_cast<index_sub_key_t>(fragment_no),
-                    [&fragment_blob,
-                     bytes](std::size_t chunk_no, char* buffer, std::size_t capacity_units) {
-                        DEBUG_ASSERT(chunk_no == 0u && capacity_units >= bytes,
-                                     "one fragment index fits one chunk");
-                        if (bytes != 0u) {
-                            std::memcpy(buffer, fragment_blob.data(), bytes);
-                        }
-                        return chunk_no;
-                    });
-            };
-
-            for (std::size_t batch_lo_frag = 0u; batch_lo_frag < nfrag;
-                 batch_lo_frag += fragments_per_batch) {
-                const std::size_t batch_hi_frag =
-                    std::min(nfrag, batch_lo_frag + fragments_per_batch);
-                const sequence_size_t core_lo =
-                    static_cast<sequence_size_t>(batch_lo_frag) * frag_bp;
-                const sequence_size_t core_hi =
-                    std::min(static_cast<sequence_size_t>(batch_hi_frag) * frag_bp, total_bp);
-                const sequence_size_t coll_lo =
-                    core_lo >= k_context_span ? core_lo - k_context_span : 0u;
-                const sequence_size_t coll_hi =
-                    std::min(core_hi + static_cast<sequence_size_t>(k_context_span), total_bp);
-                bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats stats{};
-                auto batch_pairs =
-                    bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                        seq,
-                        coll_lo,
-                        coll_hi,
-                        coll_lo,
-                        core_lo,
-                        core_hi,
-                        w,
-                        k,
-                        execution_stats_out != nullptr ? &stats : nullptr);
-                if (execution_stats_out != nullptr) {
-                    ++execution_stats_out->vulkan_core_runs;
-                    execution_stats_out->vulkan_stats.merge(stats);
-                    execution_stats_out->saturated = execution_stats_out->saturated ||
-                                                     execution_stats_out->vulkan_stats.saturated;
-                }
-                for (auto& fragment_pairs : per_fragment) {
-                    fragment_pairs.clear();
-                }
-                for (const auto& pair : batch_pairs.pairs) {
-                    const sequence_size_t global_pos =
-                        static_cast<sequence_size_t>(pair.second >> 1u);
-                    const std::size_t fragment_no = static_cast<std::size_t>(global_pos / frag_bp);
-                    if (fragment_no < batch_lo_frag || fragment_no >= batch_hi_frag) {
-                        continue;
-                    }
-                    const sequence_size_t fragment_lo =
-                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
-                    per_fragment[fragment_no - batch_lo_frag].emplace_back(
-                        pair.first,
-                        (static_cast<std::uint64_t>(global_pos - fragment_lo) << 1u) |
-                            (pair.second & 1u));
-                }
-                for (std::size_t fragment_no = batch_lo_frag; fragment_no < batch_hi_frag;
-                     ++fragment_no) {
-                    const sequence_size_t fragment_lo =
-                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
-                    const sequence_size_t fragment_hi =
-                        std::min(fragment_lo + static_cast<sequence_size_t>(frag_bp), total_bp);
-                    serialize_sorted_pairs_to_fragment_blob(
-                        std::span<const std::pair<std::uint64_t, std::uint64_t>>{
-                            per_fragment[fragment_no - batch_lo_frag]},
-                        fragment_hi - fragment_lo,
-                        blob);
-                    write_fragment_blob(fragment_no, blob);
-                }
+            const auto identity = make_minimizer_generation_algorithm_identity(*ordinary_layout);
+            if (!identity) {
+                index_corruption_panic("ordinary fragment receipt identity cannot be bound");
             }
-            const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
-            storage.resize(k_directory_sub_key, sizeof(std::int64_t));
-            storage.template write_to_each<std::int64_t>(
-                k_directory_sub_key,
-                [manifest](std::size_t chunk_no, std::int64_t* manifest_buffer, std::size_t) {
-                    manifest_buffer[0] = manifest;
-                    return chunk_no;
-                });
-            return;
+            execution_stats_out->algorithm_identity = *identity;
         }
 
         // Collect a core with surrounding context, then serialize its local positions.
@@ -2327,8 +2246,8 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                     kernels,
                                     alphabet_code,
                                     total_bp,
-                                    execution_stats_out](std::size_t fragment_no,
-                                                         sketch_collector& collector,
+                                    execution_stats_out,
+                                    ordinary_layout = *ordinary_layout](std::size_t fragment_no,
                                                          std::vector<minimap_sketch_data>& core,
                                                          std::vector<std::pair<std::uint64_t, std::uint64_t>>& wide_core,
                                                          std::vector<char>& out_blob) {
@@ -2339,128 +2258,64 @@ template <class p_storage> struct minimizers_per_fragment_index {
                 core_lo >= k_context_span ? core_lo - k_context_span : 0;
             const sequence_size_t coll_hi =
                 std::min(core_hi + static_cast<sequence_size_t>(k_context_span), total_bp);
-            collector.clear();
             const sequence_size_t emit_base = coll_lo;
             const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             core.clear();
             wide_core.clear();
-            if (collect_bp >= static_cast<sequence_size_t>(k_context_span)) {
-                if (backend == minimizer_sketch_backend::vulkan_segment) {
-                    auto pairs =
-                        bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                            seq, coll_lo, coll_hi, emit_base, core_lo, core_hi, w, k);
-                    core.reserve(pairs.pairs.size());
-                    for (const auto& pair : pairs.pairs) {
-                        const sequence_size_t global_pos =
-                            static_cast<sequence_size_t>(pair.second >> 1u);
-                        core.emplace_back(pair.first,
-                            static_cast<std::uint64_t>(global_pos - core_lo), pair.second & 1u);
-                    }
-                } else {
-                    if (backend == minimizer_sketch_backend::exact_simd ||
-                        backend == minimizer_sketch_backend::scalar) {
-                        const auto algorithm = backend == minimizer_sketch_backend::exact_simd
-                            ? bioseq::simd::minimizer_algorithm::two_stack_nthash
-                            : bioseq::simd::minimizer_algorithm::scalar;
-                        const auto layout = select_minimizer_generation_physical_layout<p_alphabet>(
-                            algorithm, collect_bp,
-                            static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits),
-                            k, w);
-                        if (!layout) {
+            if (collect_bp >= static_cast<sequence_size_t>(w + k - 1u)) {
+                const auto stats = bioseq::minimizers::visit_minimizer_physical_layout(
+                    ordinary_layout,
+                    [&seq, &core, &wide_core, alphabet_code, coll_lo, coll_hi, emit_base,
+                     core_lo, core_hi, backend, kernels]<class p_minimizer>() {
+                        struct canonical_pair_collector {
+                            std::vector<minimap_sketch_data>* narrow_output;
+                            std::vector<std::pair<std::uint64_t, std::uint64_t>>* wide_output;
+                            sequence_size_t emit_base;
+                            sequence_size_t core_lo;
+                            sequence_size_t core_hi;
+
+                            /** Preserve the complete hash and make positions fragment-local. */
+                            void collect(const p_minimizer& minimizer) {
+                                const sequence_size_t position = emit_base + minimizer.last_pos();
+                                if (position >= core_lo && position < core_hi) {
+                                    if constexpr (p_minimizer::k_hash_field_mask <=
+                                                  minimap_sketch_data::k_hash_field_mask) {
+                                        narrow_output->emplace_back(minimizer.kmer(),
+                                            position - core_lo, minimizer.strand());
+                                    } else {
+                                        wide_output->emplace_back(minimizer.kmer(),
+                                            ((position - core_lo) << 1u) | minimizer.strand());
+                                    }
+                                }
+                            }
+                        } direct_collector{&core, &wide_core, emit_base, core_lo, core_hi};
+                        if (backend == minimizer_sketch_backend::scalar) {
+                            bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
+                                direct_collector, seq, coll_lo, coll_hi, w, k);
+                            return exact_simd_index_execution_stats{};
+                        }
+                        if constexpr (
+                            bioseq::minimizers::two_stack_simd_minimizer_representation<
+                                p_minimizer>) {
+                            return collect_exact_simd_index_range_or_throw<p_minimizer>(
+                                direct_collector, seq, alphabet_code, coll_lo, coll_hi,
+                                w, k, 0u, kernels, "minimizers_per_fragment build");
+                        } else {
                             throw exact_simd_index_runtime_error{
                                 exact_simd_index_status::unsupported_representation,
                                 "minimizers_per_fragment build"};
+                            return exact_simd_index_execution_stats{};
                         }
-                        const auto stats = bioseq::minimizers::visit_minimizer_physical_layout(
-                            *layout,
-                            [&seq, &core, &wide_core, alphabet_code, coll_lo, coll_hi, emit_base,
-                             core_lo, core_hi, backend, kernels]<class p_minimizer>() {
-                                struct canonical_pair_collector {
-                                    std::vector<minimap_sketch_data>* narrow_output;
-                                    std::vector<std::pair<std::uint64_t, std::uint64_t>>* wide_output;
-                                    sequence_size_t emit_base;
-                                    sequence_size_t core_lo;
-                                    sequence_size_t core_hi;
-
-                                    /** Preserve the complete hash and make positions fragment-local. */
-                                    void collect(const p_minimizer& minimizer) {
-                                        const sequence_size_t position = emit_base + minimizer.last_pos();
-                                        if (position >= core_lo && position < core_hi) {
-                                            if constexpr (p_minimizer::k_hash_field_mask <=
-                                                          minimap_sketch_data::k_hash_field_mask) {
-                                                narrow_output->emplace_back(minimizer.kmer(),
-                                                    position - core_lo, minimizer.strand());
-                                            } else {
-                                                wide_output->emplace_back(minimizer.kmer(),
-                                                    ((position - core_lo) << 1u) | minimizer.strand());
-                                            }
-                                        }
-                                    }
-                                } direct_collector{&core, &wide_core, emit_base, core_lo, core_hi};
-                                if (backend == minimizer_sketch_backend::scalar) {
-                                    bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
-                                        direct_collector, seq, coll_lo, coll_hi, w, k);
-                                    return exact_simd_index_execution_stats{};
-                                }
-                                if constexpr (
-                                    bioseq::minimizers::two_stack_simd_minimizer_representation<
-                                        p_minimizer>) {
-                                    return collect_exact_simd_index_range_or_throw<p_minimizer>(
-                                        direct_collector, seq, alphabet_code, coll_lo, coll_hi,
-                                        w, k, 0u, kernels, "minimizers_per_fragment build");
-                                } else {
-                                    throw exact_simd_index_runtime_error{
-                                        exact_simd_index_status::unsupported_representation,
-                                        "minimizers_per_fragment build"};
-                                    return exact_simd_index_execution_stats{};
-                                }
-                            });
-                        if (execution_stats_out != nullptr) {
-                            if (backend == minimizer_sketch_backend::scalar) {
-                                ++execution_stats_out->scalar_core_runs;
-                            } else {
-                                ++execution_stats_out->exact_simd_core_runs;
-                                execution_stats_out->exact_simd_stats.merge(stats);
-                                execution_stats_out->exact_simd_stats_present = true;
-                                execution_stats_out->saturated = execution_stats_out->saturated ||
-                                    execution_stats_out->exact_simd_stats.saturated;
-                            }
-                        }
-                    } else if (backend == minimizer_sketch_backend::bounded_nthash_simd) {
-                        const auto result = collect_packed_bounded_nthash_index_lazy(seq,
-                                                                                     alphabet_code,
-                                                                                     coll_lo,
-                                                                                     coll_hi,
-                                                                                     collect_bp,
-                                                                                     w,
-                                                                                     k,
-                                                                                     kernels,
-                                                                                     collector);
-                        if (result.status != packed_bounded_nthash_index_status::ok) {
-                            throw packed_bounded_nthash_index_runtime_error{
-                                result.status, "minimizers_per_fragment build"};
-                        }
-                        if (execution_stats_out != nullptr) {
-                            ++execution_stats_out->bounded_nthash_core_runs;
-                            execution_stats_out->packed_bounded_status = result.status;
-                            execution_stats_out->packed_bounded_stats.merge(result.stats);
-                            execution_stats_out->packed_bounded_stats_present = true;
-                            execution_stats_out->saturated =
-                                execution_stats_out->saturated ||
-                                execution_stats_out->packed_bounded_stats.saturated;
-                        }
+                    });
+                if (execution_stats_out != nullptr) {
+                    if (backend == minimizer_sketch_backend::scalar) {
+                        ++execution_stats_out->scalar_core_runs;
                     } else {
-                        index_corruption_panic(
-                            "minimizers_per_fragment build: unsupported sketch backend");
-                    }
-                    for (const minimap_sketch_data& minimizer : collector.extract_sketches_data()) {
-                        const sequence_size_t global_pos =
-                            static_cast<sequence_size_t>(minimizer.last_pos()) + emit_base;
-                        if (global_pos < core_lo || global_pos >= core_hi) {
-                            continue;
-                        }
-                        core.emplace_back(minimizer.kmer(),
-                            static_cast<std::uint64_t>(global_pos - core_lo), minimizer.strand());
+                        ++execution_stats_out->exact_simd_core_runs;
+                        execution_stats_out->exact_simd_stats.merge(stats);
+                        execution_stats_out->exact_simd_stats_present = true;
+                        execution_stats_out->saturated = execution_stats_out->saturated ||
+                            execution_stats_out->exact_simd_stats.saturated;
                     }
                 }
             } else if (execution_stats_out != nullptr) {
@@ -2499,11 +2354,10 @@ template <class p_storage> struct minimizers_per_fragment_index {
         // Build and write one fragment on the calling thread.
         auto build_and_write_serial = [&build_fragment_blob,
                                        &write_fragment_blob](std::size_t fragment_no) {
-            sketch_collector collector;
             std::vector<minimap_sketch_data> core;
             std::vector<std::pair<std::uint64_t, std::uint64_t>> wide_core;
             std::vector<char> blob;
-            build_fragment_blob(fragment_no, collector, core, wide_core, blob);
+            build_fragment_blob(fragment_no, core, wide_core, blob);
             write_fragment_blob(fragment_no, blob);
         };
 
@@ -2543,11 +2397,10 @@ template <class p_storage> struct minimizers_per_fragment_index {
                     bioseq::parallelism::task_parallel_minimums::k_fragment_count,
                     bioseq::parallelism::task_parallel_region::fragment_build,
                     [&build_fragment_blob, &blobs, wave_lo](std::size_t lo, std::size_t hi) {
-                        sketch_collector collector;
                         std::vector<minimap_sketch_data> core;
                         std::vector<std::pair<std::uint64_t, std::uint64_t>> wide_core;
                         for (std::size_t rel = lo; rel < hi; ++rel) {
-                            build_fragment_blob(wave_lo + rel, collector, core, wide_core, blobs[rel]);
+                            build_fragment_blob(wave_lo + rel, core, wide_core, blobs[rel]);
                         }
                     });
 
@@ -2568,6 +2421,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                     return chunk_no;
                 });
         }
+        if (execution_stats_out != nullptr) execution_stats_out->capture_route_snapshot_();
     }
 
     /// Build using an explicit alhabet code and discard execution stats.
@@ -2599,16 +2453,15 @@ template <class p_storage> struct minimizers_per_fragment_index {
             minimizer_sketch_backend backend,
             const bioseq::minimizers::minimizer_kernels* kernels,
             std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        alphabet_code = ordinary_minimizer_index_alphabet_code<p_alphabet>(alphabet_code);
         if (backend == minimizer_sketch_backend::exact_simd &&
             (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state,
                                                  "minimizers_per_fragment rebuild"};
         }
-        if (backend == minimizer_sketch_backend::bounded_nthash_simd &&
-            (kernels == nullptr || kernels->bounded_nthash == nullptr)) {
-            throw packed_bounded_nthash_index_runtime_error{
-                packed_bounded_nthash_index_status::invalid_state,
-                "minimizers_per_fragment rebuild"};
+        if (!ordinary_minimizer_index_backend_supported(backend)) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+                "ordinary minimizer rebuild requires the exact scheme"};
         }
         storage.clear_entity();
         build(storage, seq, backend, kernels, nullptr, alphabet_code);
@@ -2781,6 +2634,28 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                                   clip_lo_bp,
                                                   clip_hi_bp,
                                                   scratch);
+    }
+
+    /// Assemble a prepared canonical query union without narrowing its hash values.
+    static minimizer_hashmap_fragment_index assemble_segment_for_query(
+        p_storage& storage, const canonical_query_hash_view query_hashes,
+        std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
+        sequence_size_t total_bp, sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,
+        minimizer_assembly_scratch& scratch) {
+        if (!query_hashes.storage_matches_width()) {
+            storage.index_error("minimizers_per_fragment: invalid canonical query hash view");
+        }
+        scratch.clear_query();
+        scratch.query_kmers.reserve(query_hashes.size());
+        for (std::size_t ordinal = 0u; ordinal < query_hashes.size(); ++ordinal) {
+            const std::uint64_t hash = query_hashes.at(ordinal);
+            if (ordinal != 0u && query_hashes.at(ordinal - 1u) >= hash) {
+                storage.index_error("ordinary minimizer query hashes must be sorted and unique");
+            }
+            scratch.query_kmers.push_back(hash);
+        }
+        return assemble_segment_for_sorted_query_(storage, frag_lo, frag_hi, frag_bp,
+                                                  total_bp, clip_lo_bp, clip_hi_bp, scratch);
     }
 
     /// Assemble the query's segment index from any registered minimizer record  type.

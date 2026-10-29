@@ -1,6 +1,6 @@
 /**
  * @file minimizer_sequence_index/read_assembly/build.cppm
- * @brief Builds direct minimizer buckets using scalar, SIMD or Vulkan sketching.
+ * @brief Builds ordinary exact minimizer buckets using scalar or SIMD sketching.
  */
 module;
 
@@ -23,6 +23,7 @@ module;
 
 export module bioseq.indexing.minimizer_sequence:read_assembly_build;
 
+import bioseq.sequences.kmers.hashers.base;
 import :read_assembly_contract;
 import bioseq.indexing.minimizer_sequence.admitted_runs;
 import bioseq.indexing.minimizer_sequence.bucket_codec;
@@ -30,8 +31,6 @@ import bioseq.indexing.minimizer_sequence.generation;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
-import bioseq.gpu.vulkan.abi;
-import bioseq.gpu.vulkan.runtime;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.storage;
@@ -43,14 +42,13 @@ import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
 /**
- * Build a saved minimizer index for one sequence with k=15 and w=10.
+ * Build a saved minimizer index with the alphabet-derived ordinary exact profile.
  * Collect global hash/position pairs into sorted runs, merge them into buckets,
  * then write the directory  after all buckets are stored. Memory pressure can
  * split collection ranges or defer them to the calling thread
@@ -66,10 +64,16 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     const bioseq::minimizers::minimizer_kernels* kernels,
     direct_minimizer_bucket_build_stats* scalar_build_stats_out,
     std::uint8_t alphabet_code) {
-    constexpr std::size_t w = 10, k = 15;
+    alphabet_code = ordinary_minimizer_index_alphabet_code<p_alphabet>(alphabet_code);
+    if (!ordinary_minimizer_index_backend_supported(backend)) {
+        throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+            "ordinary minimizer index requires the exact scheme; use identity-bearing generation"};
+    }
+    constexpr std::size_t w = k_ordinary_minimizer_index_window_size;
+        constexpr std::size_t k = ordinary_minimizer_index_kmer_size(
+            bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>);
     constexpr std::size_t lpu = 1u;
     constexpr std::size_t frag_bp = 32'768u;
-    constexpr std::size_t window_span = w + k - 2u;
     static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
     using detail::k_encoded_header_bytes;
     using detail::k_encoded_bucket_bytes;
@@ -80,11 +84,6 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
         throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state,
                                              "minimizers_per_sequence build"};
-    }
-    if (backend == minimizer_sketch_backend::bounded_nthash_simd &&
-        (kernels == nullptr || kernels->bounded_nthash == nullptr)) {
-        throw packed_bounded_nthash_index_runtime_error{
-            packed_bounded_nthash_index_status::invalid_state, "minimizers_per_sequence build"};
     }
 
     if (scalar_build_stats_out != nullptr) {
@@ -132,8 +131,6 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    // Vulkan selects minimizers on the GPU and sorts the resulting  global
-    // hash/position pairs on the host.
     /** Collect global hash/position pairs whose positions fall inside this core. */
     auto collect_core_range_pairs =
         [&seq, backend, kernels, alphabet_code](sequence_size_t core_lo,
@@ -165,45 +162,24 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
 
     /** Reserve scrotch memory, collect a deferred range, then sort and spill its pairs. */
     auto collect_sort_and_spill_backend_scratch =
-        [&backend,
-         &storage,
+        [&storage,
          &make_core_range,
          &collect_core_range_pairs,
          &capture_scalar_build_stats,
          &scalar_build_stats](auto& self, segment_unit_range range) -> void {
         const std::uint64_t bp = static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
-        constexpr std::uint64_t maximum_bounded_records_per_candidate = w + 1u;
-        const std::uint64_t maximum_output_pairs =
-            backend == minimizer_sketch_backend::bounded_nthash_simd
-                ? bioseq::common::saturating_mul(bp, maximum_bounded_records_per_candidate)
-                : bp;
+        const std::uint64_t maximum_output_pairs = bp;
         const std::uint64_t pair_preallocation_bytes =
             detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-        // The Vulkan helper reserves memory for its GPU work and returned pairs.
-        // This caller reserves only its own buffers.
-        const std::uint64_t backend_scratch_bytes = 0u;
         const std::uint64_t maximum_collection_candidates = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(range.ce_u - range.cs_u), static_cast<std::uint64_t>(lpu));
-        const std::uint64_t maximum_collector_sketches =
-            backend == minimizer_sketch_backend::vulkan_segment
-                ? 0u
-                : (backend == minimizer_sketch_backend::bounded_nthash_simd
-                       ? bioseq::common::saturating_mul(maximum_collection_candidates,
-                                                        maximum_bounded_records_per_candidate)
-                       : maximum_collection_candidates);
+        const std::uint64_t maximum_collector_sketches = maximum_collection_candidates;
         const std::uint64_t collector_headroom_bytes =
             detail::admitted_vector_preallocation_bytes<minimap_sketch_data>(
                 maximum_collector_sketches);
         const std::uint64_t admission_bytes = bioseq::common::saturating_add(
             pair_preallocation_bytes,
-            bioseq::common::saturating_add(collector_headroom_bytes, backend_scratch_bytes));
-        if (backend == minimizer_sketch_backend::vulkan_segment) {
-            if constexpr (requires(p_storage& s, std::uint64_t bytes) {
-                              s.demote_resident_runs_until_available(bytes);
-                          }) {
-                storage.demote_resident_runs_until_available(admission_bytes);
-            }
-        }
+            collector_headroom_bytes);
         auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
             admission_bytes);
         if (!permit) {
@@ -216,11 +192,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         }
         if (!permit) {
-            constexpr sequence_size_t k_scalar_minimum_core_bp = 4096;
-            constexpr sequence_size_t k_vulkan_minimum_core_bp = 256;
-            const sequence_size_t min_core_bp = backend == minimizer_sketch_backend::vulkan_segment
-                                                    ? k_vulkan_minimum_core_bp
-                                                    : k_scalar_minimum_core_bp;
+            constexpr sequence_size_t min_core_bp = 4096;
             if (range.core_hi_bp - range.core_lo_bp > min_core_bp) {
                 const sequence_size_t mid =
                     range.core_lo_bp + (range.core_hi_bp - range.core_lo_bp) / 2;
@@ -236,7 +208,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         if (!detail::reserve_admitted_vector_run_capacity(
                 scratch,
                 maximum_output_pairs,
-                bioseq::common::saturating_add(collector_headroom_bytes, backend_scratch_bytes))) {
+                collector_headroom_bytes)) {
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair capacity exceeded admission");
         }
@@ -256,7 +228,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
             const std::uint64_t live_before_collect = bioseq::common::saturating_add(
                 scratch.admitted_bytes,
-                bioseq::common::saturating_add(exact_collector_bytes, backend_scratch_bytes));
+                exact_collector_bytes);
             if (exact_collector_bytes > collector_headroom_bytes ||
                 live_before_collect > scratch.permit.bytes()) {
                 index_corruption_panic(
@@ -270,11 +242,9 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                                      capture_scalar_build_stats ? &scalar_build_stats : nullptr);
             const std::uint64_t live_after_collect = bioseq::common::saturating_add(
                 detail::admitted_vector_capacity_bytes(scratch.pairs),
-                bioseq::common::saturating_add(
-                    bioseq::common::saturating_mul(
+                bioseq::common::saturating_mul(
                         static_cast<std::uint64_t>(collector.extract_sketches_data().capacity()),
-                        static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
-                    backend_scratch_bytes));
+                        static_cast<std::uint64_t>(sizeof(minimap_sketch_data))));
             if (live_after_collect > scratch.permit.bytes()) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: collection grew beyond admission");
@@ -285,9 +255,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair collection exceeded admission");
         }
-        if (backend != minimizer_sketch_backend::vulkan_segment) {
-            detail::sort_pair_run(scratch.pairs);
-        }
+        detail::sort_pair_run(scratch.pairs);
         storage.spill_sorted_run(
             std::span<const pair_t>(scratch.pairs.data(), scratch.pairs.size()));
         scratch.release_capacity_before_permit();
@@ -307,9 +275,6 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 } catch (const exact_simd_index_runtime_error&) {
                     // Let the PostgreSQL error handler report the unsupported SIMD request
                     // using the original status.
-                    throw;
-                } catch (const packed_bounded_nthash_index_runtime_error&) {
-                    // Let the caller handle the bounded-kernel failure with its original status.
                     throw;
                 } catch (const std::exception& e) {
                     const std::string message =
@@ -349,8 +314,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
 
     /** Collect a range, within its memory reservation, splitting or deferring it when space is short */
     auto collect_range_admitted =
-        [&backend,
-         &storage,
+        [&storage,
          &make_core_range,
          &collect_core_range_pairs,
          &capture_scalar_build_stats](
@@ -361,45 +325,23 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         try {
             const std::uint64_t bp =
                 static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
-            constexpr std::uint64_t maximum_bounded_records_per_candidate = w + 1u;
-            const std::uint64_t maximum_output_pairs =
-                backend == minimizer_sketch_backend::bounded_nthash_simd
-                    ? bioseq::common::saturating_mul(bp, maximum_bounded_records_per_candidate)
-                    : bp;
+            const std::uint64_t maximum_output_pairs = bp;
             const std::uint64_t pair_preallocation_bytes =
                 detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-            const std::uint64_t backend_scratch_bytes = 0u;
             const std::uint64_t maximum_collection_candidates =
                 bioseq::common::saturating_mul(static_cast<std::uint64_t>(range.ce_u - range.cs_u),
                                                static_cast<std::uint64_t>(lpu));
-            const std::uint64_t maximum_collector_sketches =
-                backend == minimizer_sketch_backend::vulkan_segment
-                    ? 0u
-                    : (backend == minimizer_sketch_backend::bounded_nthash_simd
-                           ? bioseq::common::saturating_mul(maximum_collection_candidates,
-                                                            maximum_bounded_records_per_candidate)
-                           : maximum_collection_candidates);
+            const std::uint64_t maximum_collector_sketches = maximum_collection_candidates;
             const std::uint64_t collector_headroom_bytes =
                 detail::admitted_vector_preallocation_bytes<minimap_sketch_data>(
                     maximum_collector_sketches);
             const std::uint64_t admission_bytes = bioseq::common::saturating_add(
                 pair_preallocation_bytes,
-                bioseq::common::saturating_add(collector_headroom_bytes, backend_scratch_bytes));
-            if (backend == minimizer_sketch_backend::vulkan_segment) {
-                if constexpr (requires(p_storage& s, std::uint64_t bytes) {
-                                  s.demote_resident_runs_until_available(bytes);
-                              }) {
-                    storage.demote_resident_runs_until_available(admission_bytes);
-                }
-            }
+                collector_headroom_bytes);
             auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
                 admission_bytes);
             if (!permit) {
-                constexpr sequence_size_t k_scalar_minimum_core_bp = 4096;
-                constexpr sequence_size_t k_vulkan_minimum_core_bp = 256;
-                const sequence_size_t min_core_bp =
-                    backend == minimizer_sketch_backend::vulkan_segment ? k_vulkan_minimum_core_bp
-                                                                        : k_scalar_minimum_core_bp;
+                constexpr sequence_size_t min_core_bp = 4096;
                 if (range.core_hi_bp - range.core_lo_bp <= min_core_bp) {
                     if (!detail::ensure_admitted_vector_run_capacity(
                             result.deferred_for_backend_spill,
@@ -421,8 +363,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             if (!detail::reserve_admitted_vector_run_capacity(
                     run,
                     maximum_output_pairs,
-                    bioseq::common::saturating_add(collector_headroom_bytes,
-                                                   backend_scratch_bytes))) {
+                    collector_headroom_bytes)) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: worker pair capacity exceeded admission");
             }
@@ -441,7 +382,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                     static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
                 const std::uint64_t live_before_collect = bioseq::common::saturating_add(
                     run.admitted_bytes,
-                    bioseq::common::saturating_add(exact_collector_bytes, backend_scratch_bytes));
+                    exact_collector_bytes);
                 if (exact_collector_bytes > collector_headroom_bytes ||
                     live_before_collect > run.permit.bytes()) {
                     index_corruption_panic(
@@ -456,12 +397,10 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                                                                     : nullptr);
                 const std::uint64_t live_after_collect = bioseq::common::saturating_add(
                     detail::admitted_vector_capacity_bytes(run.pairs),
-                    bioseq::common::saturating_add(
-                        bioseq::common::saturating_mul(
+                    bioseq::common::saturating_mul(
                             static_cast<std::uint64_t>(
                                 collector.extract_sketches_data().capacity()),
-                            static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
-                        backend_scratch_bytes));
+                            static_cast<std::uint64_t>(sizeof(minimap_sketch_data))));
                 if (live_after_collect > run.permit.bytes()) {
                     index_corruption_panic("minimizers_per_sequence build: worker collection "
                                            "grew beyond admission");
@@ -472,44 +411,13 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 index_corruption_panic(
                     "minimizers_per_sequence build: worker pair collection exceeded admission");
             }
-            if (backend != minimizer_sketch_backend::vulkan_segment) {
-                detail::sort_pair_run(run.pairs);
-            }
+            detail::sort_pair_run(run.pairs);
             detail::compact_admitted_pair_run_after_sort(run);
             if (!detail::ensure_admitted_vector_run_capacity(result.runs,
                                                              result.runs.pairs.size() + 1u)) {
                 throw std::bad_alloc{};
             }
             result.runs.pairs.push_back(std::move(run));
-        } catch (const bioseq::gpu::vulkan::vulkan_runtime_error& err) {
-            const std::string_view message{err.what()};
-            const bool split_admission_decline =
-                message.starts_with("Vulkan segment minimizer pair build returned invalid ");
-            if (backend == minimizer_sketch_backend::vulkan_segment && split_admission_decline) {
-                constexpr sequence_size_t k_minimum_gpu_core_bp = 256;
-                if (range.core_hi_bp - range.core_lo_bp > k_minimum_gpu_core_bp) {
-                    const sequence_size_t mid =
-                        range.core_lo_bp + (range.core_hi_bp - range.core_lo_bp) / 2;
-                    self(self, make_core_range(range.core_lo_bp, mid), result);
-                    self(self, make_core_range(mid, range.core_hi_bp), result);
-                    return;
-                }
-            }
-            result.error = std::current_exception();
-            result.error_range = range;
-        } catch (const std::bad_alloc&) {
-            if (backend == minimizer_sketch_backend::vulkan_segment) {
-                constexpr sequence_size_t k_minimum_gpu_core_bp = 256;
-                if (range.core_hi_bp - range.core_lo_bp > k_minimum_gpu_core_bp) {
-                    const sequence_size_t mid =
-                        range.core_lo_bp + (range.core_hi_bp - range.core_lo_bp) / 2;
-                    self(self, make_core_range(range.core_lo_bp, mid), result);
-                    self(self, make_core_range(mid, range.core_hi_bp), result);
-                    return;
-                }
-            }
-            result.error = std::current_exception();
-            result.error_range = range;
         } catch (...) {
             result.error = std::current_exception();
             result.error_range = range;
@@ -520,11 +428,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         static_cast<std::uint64_t>(frag_bp), static_cast<std::uint64_t>(sizeof(pair_t)));
     const std::size_t scalar_fragments_per_block = std::max<std::size_t>(
         1, run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
-    // Limit GPU blocks so their local positions fit  the packed position fied.
-    const std::size_t fragments_per_block =
-        backend == minimizer_sketch_backend::vulkan_segment
-            ? detail::gpu_fragments_per_block(scalar_fragments_per_block, frag_bp, 2u * window_span)
-            : scalar_fragments_per_block;
+    const std::size_t fragments_per_block = scalar_fragments_per_block;
     detail::admitted_vector_run<segment_unit_range> admitted_window_ranges;
     const std::size_t maximum_window_ranges =
         nfrag == 0u ? 0u : (nfrag + fragments_per_block - 1u) / fragments_per_block;
@@ -559,10 +463,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     };
 
     auto& pool = bioseq::parallelism::global_pool::instance();
-    // Vulkan submits through one runtime queue. CPU ranges can run in parallel
-    // when the sequence scanner supports sharing between workers.
+    // Exact CPU ranges run in parallel when the source supports worker sharing.
     const bool may_parallel_collect =
-        backend != minimizer_sketch_backend::vulkan_segment &&
         bioseq::parallelism::has_parallel_tasks(pool.get_mode()) &&
         pool.maximum_concurrency() > 1 && bioseq::storage::is_worker_shareable(seq) &&
         nfrag >= bioseq::parallelism::task_parallel_minimums::k_fragment_count;
@@ -764,15 +666,13 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         storage.resize_chunks(k_directory_sub_key, std::span<const std::size_t>(plan));
         storage.template write_to_each<char>(
             k_directory_sub_key,
-            [&dir, &total_distinct, &total_positions, &backend](
+            [&dir, &total_distinct, &total_positions](
                 std::size_t c, char* outbuf, std::size_t) {
                 direct_minimizer_bucket_directory h;
                 h.magic = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic;
                 h.layout_revision =
                     direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision;
-                h.flags = backend == minimizer_sketch_backend::vulkan_segment
-                              ? direct_minimizer_bucket_directory::k_gpu_built
-                              : 0u;
+                h.flags = 0u;
                 h.num_buckets = dir.size();
                 h.total_distinct_kmers = total_distinct;
                 h.total_positions = total_positions;
@@ -826,15 +726,15 @@ inline void direct_minimizer_bucket_index<p_storage>::rebuild(
     minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels,
     std::uint8_t alphabet_code) {
+    alphabet_code = ordinary_minimizer_index_alphabet_code<p_alphabet>(alphabet_code);
     if (backend == minimizer_sketch_backend::exact_simd &&
         (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
         throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state,
                                              "minimizers_per_sequence rebuild"};
     }
-    if (backend == minimizer_sketch_backend::bounded_nthash_simd &&
-        (kernels == nullptr || kernels->bounded_nthash == nullptr)) {
-        throw packed_bounded_nthash_index_runtime_error{
-            packed_bounded_nthash_index_status::invalid_state, "minimizers_per_sequence rebuild"};
+    if (!ordinary_minimizer_index_backend_supported(backend)) {
+        throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+            "ordinary minimizer rebuild requires the exact scheme"};
     }
     storage.clear_entity();
     build(storage, seq, backend, kernels, nullptr, alphabet_code);

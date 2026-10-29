@@ -190,12 +190,12 @@ struct direct_minimizer_bucket_directory {
     /// Version of the saved directory layout.
     static constexpr std::uint32_t k_direct_minimizer_bucket_layout_revision = 2u;
     /// Flag indicating that Vulkan generated the buckets.
-    static constexpr std::uint32_t k_gpu_built = 1u << 0u;
     /// Directory format identifier.
     std::uint32_t magic = k_direct_minimizer_bucket_magic;
     /// Saved  directory layout version.
     std::uint32_t layout_revision = k_direct_minimizer_bucket_layout_revision;
     /// Flags describing how the buckets were generated.
+    /// Reserved; ordinary directories contain only the exact source-alphabet profile.
     std::uint32_t flags = 0;
     /// Reserved field written as zero in version 2.
     std::uint32_t reserved = 0;
@@ -249,7 +249,8 @@ struct direct_minimizer_bucket_directory_view {
         hdr = reinterpret_cast<const direct_minimizer_bucket_directory*>(owned.data());
         if (hdr->magic != direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic ||
             hdr->layout_revision !=
-                direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision) {
+                direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision ||
+            hdr->flags != 0u) {
             index_corruption_panic("directory: magic/layout revision");
         }
         n = static_cast<std::size_t>(hdr->num_buckets);
@@ -283,11 +284,7 @@ struct direct_minimizer_bucket_directory_view {
         }
         return nullptr;
     }
-    /** Return whether the saved directory marks its buckets as Vulkan-generated. */
-    [[nodiscard]] bool is_gpu_built() const noexcept {
-        return hdr != nullptr
-            && (hdr->flags & direct_minimizer_bucket_directory::k_gpu_built) != 0u;
-    }
+
 };
 
 namespace detail {

@@ -127,18 +127,6 @@ make_deterministic_test_range(std::size_t symbol_count) {
     return compact_sequence_range<p_config>(std::move(letters));
 }
 
-/// Sketch the full target with the test window and k-mer sizes.
-template <class p_config>
-[[nodiscard]] std::vector<minimap_sketch_data>
-make_deterministic_query_minimizers(compact_sequence_range<p_config>& range) {
-    sketch_collector collector;
-    collect_minimizers_view<minimap_int_hasher, minimap_sketch_data,
-        compact_sequence_range<p_config>, decltype(range.begin()), std::uint32_t,
-        sketch_collector, bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
-        collector, range, range.begin(), range.end(), 10, 15);
-    return collector.extract_sketches_data();
-}
-
 /// Look up each distinct hash and sort its unique positions.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
@@ -590,176 +578,27 @@ TEST_CASE("assemble_for_query drops an over-frequent kmer under a tiny max_occ",
     REQUIRE(idx.lookup(over_freq_kmer).empty());
 }
 
-// Both Vulkan index layouts must include all scalar reference positions.
-TEST_CASE("persisted minimizer indexes built with Vulkan match native CPU lookups",
-          "[component:bioseq][layer:unit][feature:index][resource:gpu]") {
-    if (!bioseq::gpu::vulkan::hardware_device_available(
-            bioseq::gpu::vulkan::runtime::instance())) {
-        SUCCEED("no hardware Vulkan device; skipped");
-        return;
-    }
-
-    using backend_t = minimizer_sketch_backend;
+// Ordinary payloads do not carry a scheme identity. Native32 must use a tagged generation.
+TEST_CASE("ordinary minimizer indexes reject non-exact schemes before writing",
+          "[component:bioseq][layer:unit][feature:index]") {
     using config_t = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    using cfg_range_t = compact_sequence_range<config_t>;
-    using storage_unit = typename cfg_range_t::traits::storage_unit;
-    using scanner_t =
-        chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = lazy_sequence<config_t, scanner_t>;
-    // Assemble stored fragments using their 32,768-base  size. Scanner
-    // read sizes are independent of these fragment boundaries.
-    constexpr std::size_t frag_bp = 32'768u;
-
-    cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
-    lazy_t lazy_scalar{scanner_t::from_range(target)};
-    lazy_t lazy_gpu{scanner_t::from_range(target)};
-    const auto scalar_sequence_view =
-        bioseq::storage::make_lazy_sequence_view(lazy_scalar);
-    const auto gpu_sequence_view =
-        bioseq::storage::make_lazy_sequence_view(lazy_gpu);
-
-    test_fragment_storage scalar_fragment_storage;
-    test_fragment_storage gpu_fragment_storage;
-    test_fragment_storage scalar_sequence_storage;
-    test_fragment_storage gpu_sequence_storage;
-
-    bioseq::indexing::minimizers_per_fragment_index<test_fragment_storage>::build(
-        scalar_fragment_storage, scalar_sequence_view, backend_t::bounded_nthash_simd, fixed_minimizer_kernels());
-    bioseq::indexing::minimizers_per_fragment_index<test_fragment_storage>::build(
-        gpu_fragment_storage, gpu_sequence_view, backend_t::vulkan_segment, nullptr);
-
-    bioseq::indexing::direct_minimizer_bucket_index<test_fragment_storage>::build(
-        scalar_sequence_storage, scalar_sequence_view, backend_t::bounded_nthash_simd, fixed_minimizer_kernels());
-    bioseq::indexing::direct_minimizer_bucket_index<test_fragment_storage>::build(
-        gpu_sequence_storage, gpu_sequence_view, backend_t::vulkan_segment, nullptr);
-
-    bioseq::indexing::minimizer_assembly_scratch scratch_scalar;
-    bioseq::indexing::minimizer_assembly_scratch scratch_gpu;
-    bioseq::indexing::minimizer_assembly_scratch fragment_scratch_scalar;
-    bioseq::indexing::minimizer_assembly_scratch fragment_scratch_gpu;
-    std::vector<minimap_sketch_data> query_minimizers =
-        make_deterministic_query_minimizers(target);
-    std::vector<std::uint64_t> kmers;
-    for (const auto& m : query_minimizers) {
-        kmers.push_back(m.kmer());
+    auto target = make_deterministic_test_range<config_t>(256u);
+    const auto sequence = bioseq::storage::make_lazy_sequence_view(target);
+    for (const auto backend : {minimizer_sketch_backend::bounded_nthash_simd,
+                               minimizer_sketch_backend::vulkan_segment}) {
+        test_fragment_storage fragments;
+        test_fragment_storage buckets;
+        REQUIRE_THROWS_AS(
+            bioseq::indexing::minimizers_per_fragment_index<test_fragment_storage>::build(
+                fragments, sequence, backend, nullptr),
+            bioseq::indexing::exact_simd_index_runtime_error);
+        REQUIRE_THROWS_AS(
+            bioseq::indexing::direct_minimizer_bucket_index<test_fragment_storage>::build(
+                buckets, sequence, backend, nullptr),
+            bioseq::indexing::exact_simd_index_runtime_error);
+        REQUIRE(fragments.number_of_chunks(bioseq::indexing::k_directory_sub_key) == 0u);
+        REQUIRE(buckets.number_of_chunks(bioseq::indexing::k_directory_sub_key) == 0u);
     }
-
-    const auto total_bp = target.bp_size();
-    const std::size_t nfrag =
-        static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
-
-    auto scalar_fragment_index =
-        bioseq::indexing::minimizers_per_fragment_index<
-            test_fragment_storage>::assemble_segment(
-                scalar_fragment_storage,
-                0,
-                nfrag,
-                frag_bp,
-                total_bp,
-                0,
-                total_bp,
-                fragment_scratch_scalar);
-    auto gpu_fragment_index =
-        bioseq::indexing::minimizers_per_fragment_index<
-            test_fragment_storage>::assemble_segment(
-                gpu_fragment_storage,
-                0,
-                nfrag,
-                frag_bp,
-                total_bp,
-                0,
-                total_bp,
-                fragment_scratch_gpu);
-    require_lookup_maps_equal(
-        lookup_map(gpu_fragment_index, kmers),
-        lookup_map(scalar_fragment_index, kmers));
-
-    auto scalar_index =
-        bioseq::indexing::direct_minimizer_bucket_index<
-            test_fragment_storage>::assemble_for_query(
-                scalar_sequence_storage,
-                query_minimizers,
-                total_bp,
-                (std::numeric_limits<int>::max)(),
-                scratch_scalar);
-    auto gpu_index =
-        bioseq::indexing::direct_minimizer_bucket_index<
-            test_fragment_storage>::assemble_for_query(
-                gpu_sequence_storage,
-                query_minimizers,
-                total_bp,
-                (std::numeric_limits<int>::max)(),
-                scratch_gpu);
-
-    require_lookup_maps_equal(
-        lookup_map(gpu_index, kmers),
-        lookup_map(scalar_index, kmers));
-
-    bioseq::indexing::minimizer_assembly_scratch scratch_scalar_max_occ;
-    bioseq::indexing::minimizer_assembly_scratch scratch_gpu_max_occ;
-    auto scalar_max_occ_index =
-        bioseq::indexing::direct_minimizer_bucket_index<
-            test_fragment_storage>::assemble_for_query(
-                scalar_sequence_storage,
-                query_minimizers,
-                total_bp,
-                1,
-                scratch_scalar_max_occ);
-    auto gpu_max_occ_index =
-        bioseq::indexing::direct_minimizer_bucket_index<
-            test_fragment_storage>::assemble_for_query(
-                gpu_sequence_storage,
-                query_minimizers,
-                total_bp,
-                1,
-                scratch_gpu_max_occ);
-    const auto gpu_max_occ_lookup = lookup_map(gpu_max_occ_index, kmers);
-    const auto scalar_max_occ_lookup = lookup_map(scalar_max_occ_index, kmers);
-    require_lookup_maps_equal(gpu_max_occ_lookup, scalar_max_occ_lookup);
-    REQUIRE(bioseq::indexing::detail::effective_max_occ_threshold(1) == 1u);
-    REQUIRE(bioseq::indexing::detail::effective_max_occ_threshold(-1)
-        == (std::numeric_limits<std::uint32_t>::max)());
-    std::size_t scalar_useful_kmers_at_threshold = 0;
-    for (const auto& [kmer, scalar_positions] : scalar_max_occ_lookup) {
-        if (scalar_positions.empty()) {
-            continue;
-        }
-        ++scalar_useful_kmers_at_threshold;
-        const auto gpu_it = gpu_max_occ_lookup.find(kmer);
-        REQUIRE(gpu_it != gpu_max_occ_lookup.end());
-        REQUIRE(std::includes(
-            gpu_it->second.begin(),
-            gpu_it->second.end(),
-            scalar_positions.begin(),
-            scalar_positions.end()));
-    }
-    REQUIRE(scalar_useful_kmers_at_threshold > 0);
-
-    bioseq::indexing::minimizer_assembly_scratch scratch_gpu_zero_occ;
-    auto gpu_zero_occ_index =
-        bioseq::indexing::direct_minimizer_bucket_index<
-            test_fragment_storage>::assemble_for_query(
-                gpu_sequence_storage,
-                query_minimizers,
-                total_bp,
-                0,
-                scratch_gpu_zero_occ);
-    const auto gpu_unlimited_lookup = lookup_map(gpu_index, kmers);
-    const auto gpu_zero_occ_lookup = lookup_map(gpu_zero_occ_index, kmers);
-    std::size_t gpu_nonzero_kmers_filtered = 0;
-    for (const auto& [kmer, gpu_positions] : gpu_unlimited_lookup) {
-        if (gpu_positions.empty()) {
-            continue;
-        }
-        ++gpu_nonzero_kmers_filtered;
-        const auto filtered_it = gpu_zero_occ_lookup.find(kmer);
-        REQUIRE(filtered_it != gpu_zero_occ_lookup.end());
-        REQUIRE(filtered_it->second.empty());
-        break;
-    }
-    REQUIRE(gpu_nonzero_kmers_filtered > 0);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

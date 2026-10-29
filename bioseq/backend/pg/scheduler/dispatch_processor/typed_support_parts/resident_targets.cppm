@@ -14,6 +14,9 @@ extern "C" {
 
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_targets;
 
+import bioseq.indexing.hash_major_minimizer_index;
+import bioseq.postgres.storage.indexing.residency;
+import bioseq.postgres.scheduler.dispatch_processor.fragment_storage_opener;
 import std;
 export import bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_target_materialization;
 import bioseq.postgres.scheduler.dispatch_processor.typed_support.transient_storage;
@@ -32,6 +35,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.postgres.storage.indexing.external_file_producer_contract;
 import bioseq.sequences;
@@ -137,6 +141,15 @@ struct transient_physical_query {
     bioseq::minimizers::minimizer_physical_layout_selection layout{};
     std::vector<std::uint32_t> hashes_u32;
     std::vector<std::uint64_t> hashes_u64;
+
+    /** Borrow the canonical hashes retained with this query's memory permit. */
+    [[nodiscard]] bioseq::indexing::canonical_query_hash_view canonical_query_hash_view() const {
+        const std::uint8_t width = layout.hash_width ==
+            bioseq::minimizers::minimizer_scalar_width::u32
+                ? sizeof(std::uint32_t) : sizeof(std::uint64_t);
+        return {.values32 = hashes_u32, .values64 = hashes_u64,
+                .width_bytes = width, .storage_width_bytes = width};
+    }
 
     transient_physical_query() = default;
     transient_physical_query(const transient_physical_query&) = delete;
@@ -372,6 +385,156 @@ inline void record_transient_query_execution(
     collection.record_completed_minimizer_algorithm_identity(
         query.layout.effective_algorithm);
 #endif
+}
+
+/**
+ * Plan the simultaneous ordinary-reader allocations with existing heap/table planners.
+ * Pairs and bucket scratch allow vector growth plus the retiring allocation. The
+ * metadata predicate bounds copied MPS buckets by max_occ before any position copy.
+ * Query minimizer owners and their retained sorted keys keep a separate permit.
+ */
+[[nodiscard]] inline std::uint64_t ordinary_minimizer_assembly_peak_bytes(
+    const std::uint64_t target_bp, const std::uint64_t clip_bp,
+    const std::uint64_t query_hash_count, const std::size_t directory_bytes,
+    const bool fragment_layout, const std::int32_t max_occ) {
+    using bioseq::common::saturating_add;
+    using bioseq::common::saturating_mul;
+    const auto allocation = [](const std::uint64_t bytes) {
+        if (bytes >= (std::numeric_limits<std::size_t>::max)()) {
+            raise_typed_dispatch_pg_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                "ordinary minimizer assembly allocation overflows");
+        }
+        return static_cast<std::uint64_t>(bioseq::common::heap_allocation_detail::
+            plan_heap_allocation(static_cast<std::size_t>(bytes)).allocation_requirement_bytes);
+    };
+    constexpr std::uint64_t growing_vector_peak_factor =
+        2u * bioseq::parallelism::k_vector_preallocation_headroom_factor;
+    const auto table = bioseq::indexing::plan_minimizer_hashmap_table_allocation(clip_bp);
+    if (!table.valid || clip_bp > (std::numeric_limits<std::uint32_t>::max)()) {
+        raise_typed_dispatch_pg_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            "ordinary minimizer assembly exceeds lookup geometry");
+    }
+    std::uint64_t peak = saturating_add(
+        // A rehash can retain both old and new table allocations.
+        saturating_mul(2u, table.allocation_bytes),
+        bioseq::indexing::minimizer_hashmap_fragment_index::table_owner_allocation_requirement_bytes());
+    peak = saturating_add(peak, allocation(saturating_mul(
+        saturating_mul(growing_vector_peak_factor, clip_bp),
+        sizeof(std::pair<std::uint64_t, std::uint64_t>))));
+    peak = saturating_add(peak, allocation(saturating_mul(clip_bp, sizeof(std::uint64_t))));
+    peak = saturating_add(peak, allocation(saturating_mul(query_hash_count, sizeof(std::uint64_t))));
+    if (!fragment_layout) {
+        peak = saturating_add(peak, allocation(saturating_mul(
+            saturating_mul(growing_vector_peak_factor, query_hash_count),
+            sizeof(bioseq::indexing::index_sub_key_t))));
+        const auto bucket_positions = std::min(target_bp, static_cast<std::uint64_t>(
+            bioseq::indexing::detail::effective_max_occ_threshold(max_occ)));
+        peak = saturating_add(peak, allocation(saturating_mul(
+            saturating_mul(growing_vector_peak_factor, bucket_positions), sizeof(std::uint64_t))));
+        const auto directory_units = bioseq::common::ceil_div(
+            static_cast<std::uint64_t>(directory_bytes), sizeof(std::int64_t));
+        peak = saturating_add(peak, allocation(saturating_mul(directory_units, sizeof(std::int64_t))));
+    }
+    if (peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        raise_typed_dispatch_pg_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            "ordinary minimizer assembly peak overflows");
+    }
+    return peak;
+}
+
+/** Assemble one ordinary index range through the existing full-width bucket decoders. */
+[[nodiscard]] inline bioseq::indexing::minimizer_hashmap_fragment_index
+assemble_ordinary_minimizer_index(
+    typed_dispatch_fragment_read_view& storage,
+    const bioseq::indexing::canonical_query_hash_view hashes,
+    const bool fragment_layout, const sequence_size_t total_bp,
+    const sequence_size_t clip_lo_bp, const sequence_size_t clip_hi_bp,
+    const std::int32_t max_occ, bioseq::indexing::minimizer_assembly_scratch& scratch) {
+    if (!fragment_layout) {
+        return storage.assemble_sequence_segment_for_query(
+            hashes, total_bp, max_occ, clip_lo_bp, clip_hi_bp, scratch);
+    }
+    constexpr auto fragment_bp = bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp;
+    const std::size_t first_fragment = static_cast<std::size_t>(clip_lo_bp / fragment_bp);
+    const std::size_t end_fragment = static_cast<std::size_t>(
+        bioseq::common::ceil_div(clip_hi_bp, fragment_bp));
+    return storage.assemble_fragment_segment_for_query(
+        hashes, first_fragment, end_fragment, fragment_bp, total_bp,
+        clip_lo_bp, clip_hi_bp, scratch);
+}
+
+/**
+ * Read an ordinary wide-hash index with one admitted physical query owner.
+ * Reuse the existing segment planner, assembled-index cache, and physical alignment entry.
+ * Borrow sequence storage throughout; only index postings and query minimizers are owned.
+ */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection read_and_align_ordinary_minimizer_index(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_view,
+    const transient_physical_query& query,
+    typed_dispatch_fragment_read_view& storage, const bool fragment_layout,
+    pipe::statement_execution_plan_owner execution_plan,
+    const std::size_t target_letters_per_unit,
+    bioseq::storage::indexing::assembled_index_key cache_identity) {
+    const auto& params = execution_plan->frozen_parameters;
+    const auto total_bp = target_view.bp_size();
+    const auto hashes = query.canonical_query_hash_view();
+    cache_identity.query_signature = bioseq::storage::indexing::query_minimizer_signature(
+        hashes, params.kmer_size, params.window_size, params.max_occ);
+    const auto run_segment = [query_view, target_view, &query, &storage, fragment_layout,
+                              execution_plan, total_bp, hashes, cache_identity](
+                                 const sequence_size_t clip_lo_bp,
+                                 const sequence_size_t clip_hi_bp) {
+        auto key = cache_identity;
+        key.clip_lo_bp = clip_lo_bp;
+        key.clip_hi_bp = clip_hi_bp;
+        if (const auto cached = bioseq::storage::indexing::lookup_assembled_index(key)) {
+            return minimap_port_fragment_index_physical_pg_checked(
+                query_view, target_view, query.minimizers, *cached->index, execution_plan,
+                nullptr, bioseq::indexing::gpu_index_cache_identity{}, false);
+        }
+        const auto peak = ordinary_minimizer_assembly_peak_bytes(total_bp,
+            clip_hi_bp - clip_lo_bp, hashes.size(),
+            storage.chunk_byte_size(bioseq::indexing::k_directory_sub_key, 0u),
+            fragment_layout, execution_plan->frozen_parameters.max_occ);
+        auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(peak);
+        if (!permit) {
+            raise_typed_dispatch_pg_error_as_cpp(
+                ERRCODE_OUT_OF_MEMORY, "ordinary persisted minimizer index cannot be admitted");
+        }
+        bioseq::indexing::minimizer_assembly_scratch scratch;
+        auto index = assemble_ordinary_minimizer_index(
+            storage, hashes, fragment_layout, total_bp, clip_lo_bp, clip_hi_bp,
+            execution_plan->frozen_parameters.max_occ, scratch);
+        auto result = minimap_port_fragment_index_physical_pg_checked(
+            query_view, target_view, query.minimizers, index, execution_plan,
+            nullptr, bioseq::indexing::gpu_index_cache_identity{}, false);
+        bioseq::storage::indexing::store_assembled_index(key, std::move(index));
+        return result;
+    };
+    match_result_collection collection;
+    if (total_bp <= postgres_segmentation_threshold_bp) {
+        collection = run_segment(0u, total_bp);
+    } else {
+        for (const auto range : pg_segment_unit_ranges(
+                 total_bp, query_view.bp_size(), target_letters_per_unit, params)) {
+            const auto clip_lo = static_cast<sequence_size_t>(range.cs_u) * target_letters_per_unit;
+            const auto clip_hi = std::min(total_bp,
+                static_cast<sequence_size_t>(range.ce_u) * target_letters_per_unit);
+            auto segment = run_segment(clip_lo, clip_hi);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            collection.prepare_result_append(segment.results.size());
+#endif
+            collection.combine_execution_stats(segment);
+            for (auto& match : segment.results) {
+                if (match.target_start >= range.core_lo_bp && match.target_start < range.core_hi_bp)
+                    collection.results.push_back(std::move(match));
+            }
+        }
+    }
+    record_transient_query_execution(collection, query);
+    return collection;
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
@@ -1708,10 +1871,10 @@ stage_recompute_minimizer_sequence_build_if_selected(const p_scanner_pg_context&
         throw std::invalid_argument("transient index operation requires a statement plan owner");
     }
     const minimap2_parameters& params = execution_plan->frozen_parameters;
-    if (!can_defer_recompute_minimizer_persist(ctx, params)) {
+    if (!can_defer_recompute_minimizer_persist(ctx, params, alphabet_code)) {
         if (ctx.recompute_async_persist_active &&
-            target_backend_from_params_for_recompute(params) ==
-                bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
+            !bioseq::indexing::ordinary_minimizer_index_backend_supported(
+                target_backend_from_params_for_recompute(params))) {
             bioseq_log<logging_level::debug>(
                 "[bioseq] index: recompute async minimizer-sequence build skipped row={} "
                 "target_bp={} reason={} because persistence requires a scheme-tagged READY "
@@ -1720,11 +1883,12 @@ stage_recompute_minimizer_sequence_build_if_selected(const p_scanner_pg_context&
                 static_cast<unsigned long long>(loc.logical_length),
                 reason);
         } else if (ctx.recompute_async_persist_active &&
-                   (params.kmer_size != 15 || params.window_size != 10)) {
+                   !bioseq::indexing::ordinary_minimizer_index_parameters_match(
+                       alphabet_code, params.kmer_size, params.window_size)) {
             bioseq_log<logging_level::debug>(
                 "[bioseq] index: recompute async minimizer-sequence build skipped row={} "
                 "target_bp={} reason={} because active params are k={} w={} but persisted "
-                "minimizer indexes are pinned to k=15 w=10",
+                "minimizer indexes require the source alphabet's fixed exact profile",
                 static_cast<unsigned long long>(sequence_rowno),
                 static_cast<unsigned long long>(loc.logical_length),
                 reason,

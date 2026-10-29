@@ -31,6 +31,7 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.residency;
 
+import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.storage.size;
@@ -630,6 +631,21 @@ query_minimizer_signature(std::span<const bioseq::indexing::minimap_sketch_data>
     hash = residency_detail::fnv_mix(hash, max_occ);
     for (const bioseq::indexing::minimap_sketch_data& minimizer : minimizers) {
         hash = residency_detail::fnv_mix(hash, minimizer.kmer());
+    }
+    return hash;
+}
+
+/** Hash all native-width query keys and their query parameters for assembled-index reuse. */
+[[nodiscard]] std::uint64_t query_minimizer_signature(
+    const bioseq::indexing::canonical_query_hash_view minimizers,
+    const std::uint32_t kmer_size, const std::uint32_t window_size,
+    const std::uint32_t max_occ) noexcept {
+    std::uint64_t hash = 1469598103934665603ull;
+    hash = residency_detail::fnv_mix(hash, kmer_size);
+    hash = residency_detail::fnv_mix(hash, window_size);
+    hash = residency_detail::fnv_mix(hash, max_occ);
+    for (std::size_t ordinal = 0u; ordinal < minimizers.size(); ++ordinal) {
+        hash = residency_detail::fnv_mix(hash, minimizers.at(ordinal));
     }
     return hash;
 }

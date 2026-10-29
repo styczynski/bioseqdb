@@ -1138,43 +1138,21 @@ TEST_CASE("bounded ntHash lazy index admits native and fragmented DNA5 for both 
     }
 }
 
-TEST_CASE("Vulkan fragment build records accepted operation-originated batched stats",
-          "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
+TEST_CASE("ordinary fragment build rejects Vulkan before recording execution evidence",
+          "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
-    if (!::bioseq::gpu::vulkan::hardware_device_available(
-            ::bioseq::gpu::vulkan::runtime::instance())) {
-        SUCCEED("no hardware Vulkan device; skipped");
-        return;
-    }
-    constexpr std::size_t source_fragment_units = 64u;
-    constexpr std::size_t persisted_fragment_bp = 32'768u;
-    using chunked = chunked_span_sequence_scanner<std::uint64_t, source_fragment_units>;
-    using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
-    auto data = make_dna4(98'417u, 0x4D504656554C4B4EULL);
+    auto data = make_dna4(256u, 0x4D504656554C4B4EULL);
     range_t range(data);
-    lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
-    const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
+    const auto view = bioseq::storage::make_lazy_sequence_view(range);
     fake_fragment_storage<> storage;
-    storage.run_buffer_bytes_ = 64u << 20u;
     minimizer_fragment_generation_execution_receipt evidence;
-    index_type::build(storage, view, minimizer_sketch_backend::vulkan_segment, nullptr, &evidence);
-
-    REQUIRE_FALSE(evidence.is_accepted());
-    REQUIRE(evidence.direct_build_accepted());
-    REQUIRE(evidence.selected_backend == minimizer_sketch_backend::vulkan_segment);
-    REQUIRE(evidence.backend_bound);
-    REQUIRE(evidence.target_length == range.bp_size());
-    REQUIRE(evidence.scalar_core_runs == 0u);
-    REQUIRE(evidence.exact_simd_core_runs == 0u);
-    REQUIRE(evidence.bounded_nthash_core_runs == 0u);
-    REQUIRE(evidence.vulkan_core_runs > 0u);
-    REQUIRE(evidence.vulkan_stats.is_internally_consistent(true));
-    REQUIRE(evidence.vulkan_stats.completed_roundtrips == evidence.vulkan_core_runs);
-    const std::size_t expected_fragments = static_cast<std::size_t>(
-        (range.bp_size() + persisted_fragment_bp - 1u) / persisted_fragment_bp);
-    REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 1u);
-    REQUIRE(*storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u) ==
-            static_cast<std::int64_t>(expected_fragments));
+    REQUIRE_THROWS_AS(
+        minimizers_per_fragment_index<fake_fragment_storage<>>::build(
+            storage, view, minimizer_sketch_backend::vulkan_segment, nullptr, &evidence),
+        exact_simd_index_runtime_error);
+    REQUIRE_FALSE(evidence.backend_bound);
+    REQUIRE_FALSE(evidence.direct_build_accepted());
+    REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 0u);
 }
 
 TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments without merging them",

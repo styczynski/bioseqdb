@@ -1709,14 +1709,14 @@ template <class p_scanner_pg_context>
 template <class p_scanner_pg_context>
 [[nodiscard]] bool
 can_defer_recompute_minimizer_persist(const p_scanner_pg_context& ctx,
-                                      const minimap2_parameters& params) noexcept {
+                                      const minimap2_parameters& params,
+                                      const std::uint8_t alphabet_code) noexcept {
     return ctx.recompute_async_persist_active && ctx.index_async_persist_active &&
-           OidIsValid(ctx.user_relid) && params.kmer_size == 15 &&
-           params.window_size == 10
-           // This asynchronous format cannot identify the bounded ntHash scheme.
-           // Its results need a scheme-tagged generation before, they can be saved.
-           && pipe::target_index_sketch_backend_from_params(params) !=
-                  bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd;
+           OidIsValid(ctx.user_relid) &&
+           bioseq::indexing::ordinary_minimizer_index_parameters_match(
+               alphabet_code, params.kmer_size, params.window_size) &&
+           bioseq::indexing::ordinary_minimizer_index_backend_supported(
+               pipe::target_index_sketch_backend_from_params(params));
 }
 
 // Choose the  target-sketch implementation from the minimizer settings.

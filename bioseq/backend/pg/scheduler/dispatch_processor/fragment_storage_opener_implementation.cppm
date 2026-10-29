@@ -11,6 +11,7 @@ module;
 
 module bioseq.postgres.scheduler.dispatch_processor.fragment_storage_opener;
 
+import bioseq.indexing.hash_major_minimizer_index;
 import std;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
@@ -78,6 +79,68 @@ typed_dispatch_fragment_read_view::assemble_sequence_segment_for_query(
         clip_lo_bp,
         clip_hi_bp,
         scratch);
+}
+
+namespace {
+/** Reopen the concrete reader only inside its owning PG implementation boundary. */
+[[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index
+assemble_fragment_for_canonical_query(
+    void* storage_owner,
+    const bioseq::indexing::canonical_query_hash_view query_minimizers,
+    const std::size_t frag_lo,
+    const std::size_t frag_hi,
+    const bioseq::storage::sequence_size_t frag_bp,
+    const bioseq::storage::sequence_size_t total_bp,
+    const bioseq::storage::sequence_size_t clip_lo_bp,
+    const bioseq::storage::sequence_size_t clip_hi_bp,
+    bioseq::indexing::minimizer_assembly_scratch& scratch) {
+    auto& storage =
+        *static_cast<bioseq::storage::indexing::fragment_index_storage*>(storage_owner);
+    return bioseq::indexing::minimizers_per_fragment_index<
+        bioseq::storage::indexing::fragment_index_storage>::assemble_segment_for_query(
+        storage,
+        query_minimizers,
+        frag_lo,
+        frag_hi,
+        frag_bp,
+        total_bp,
+        clip_lo_bp,
+        clip_hi_bp,
+        scratch);
+}
+
+/** Invoke the shared sequence-bucket assembly with native-width query hashes. */
+[[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index
+assemble_sequence_for_canonical_query(
+    void* storage_owner,
+    const bioseq::indexing::canonical_query_hash_view query_minimizers,
+    const bioseq::storage::sequence_size_t target_len,
+    const std::int32_t max_occ,
+    const bioseq::storage::sequence_size_t clip_lo_bp,
+    const bioseq::storage::sequence_size_t clip_hi_bp,
+    bioseq::indexing::minimizer_assembly_scratch& scratch) {
+    auto& storage =
+        *static_cast<bioseq::storage::indexing::fragment_index_storage*>(storage_owner);
+    return bioseq::indexing::direct_minimizer_bucket_index<
+        bioseq::storage::indexing::fragment_index_storage>::assemble_for_query_segment(
+        storage,
+        query_minimizers,
+        target_len,
+        max_occ,
+        clip_lo_bp,
+        clip_hi_bp,
+        scratch);
+}
+
+} // namespace
+
+const typed_dispatch_fragment_read_view::canonical_query_methods&
+typed_dispatch_fragment_read_view::canonical_query_methods_() {
+    static const canonical_query_methods methods{
+        .fragment = assemble_fragment_for_canonical_query,
+        .sequence = assemble_sequence_for_canonical_query,
+    };
+    return methods;
 }
 
 void

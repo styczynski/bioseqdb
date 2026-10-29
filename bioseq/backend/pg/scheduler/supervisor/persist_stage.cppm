@@ -25,6 +25,7 @@ extern "C" {
 
 module bioseq.postgres.scheduler.supervisor;
 
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.instrumentation.clock;
@@ -89,9 +90,7 @@ minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
 minimizer_backend_allowed_in_async_minimizer_sequence(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     const auto backend = static_cast<minimizer_sketch_backend>(backend_value);
-    return backend == minimizer_sketch_backend::scalar ||
-           backend == minimizer_sketch_backend::vulkan_segment ||
-           backend == minimizer_sketch_backend::exact_simd;
+    return bioseq::indexing::ordinary_minimizer_index_backend_supported(backend);
 }
 
 /** @brief Tracks whether this backend installed its transaction callback. */

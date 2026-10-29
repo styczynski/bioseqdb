@@ -28,6 +28,7 @@ extern "C" {
 
 module bioseq.postgres.scheduler.supervisor;
 
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.common.logging;
 import bioseq.instrumentation.clock;
 import bioseq.parallelism.concepts;
@@ -294,12 +295,12 @@ void process_minimizer_sequence_build_claim_cpp(const persist_claim& claim,
         bioseq::parallelism::memory_admission_controller::instance().set_index_memory_cap_bytes(
             worker_index_cap_bytes);
 
-        if (worker_backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
+        if (!bioseq::indexing::ordinary_minimizer_index_backend_supported(worker_backend)) {
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 ereport(
                     ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("asynchronous bounded_nthash_simd persistence requires the "
+                     errmsg("asynchronous non-exact minimizer persistence requires the "
                             "scheme-tagged READY-generation storage layout"),
                      errdetail(
                          "unsupported minimizer-sequence payloads do not record a minimizer-scheme "

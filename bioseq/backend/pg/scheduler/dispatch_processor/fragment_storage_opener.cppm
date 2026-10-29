@@ -15,6 +15,7 @@ typedef struct MemoryContextData* MemoryContext;
 
 export module bioseq.postgres.scheduler.dispatch_processor.fragment_storage_opener;
 
+import bioseq.indexing.hash_major_minimizer_index;
 import std;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.type;
@@ -89,7 +90,49 @@ class typed_dispatch_fragment_read_view final {
         bioseq::storage::sequence_size_t clip_hi_bp,
         bioseq::indexing::minimizer_assembly_scratch& scratch);
 
+    /** Read a native-width query union through the opaque storage owner. */
+    [[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index
+    assemble_fragment_segment_for_query(
+        bioseq::indexing::canonical_query_hash_view query_minimizers,
+        std::size_t frag_lo, std::size_t frag_hi,
+        bioseq::storage::sequence_size_t frag_bp, bioseq::storage::sequence_size_t total_bp,
+        bioseq::storage::sequence_size_t clip_lo_bp, bioseq::storage::sequence_size_t clip_hi_bp,
+        bioseq::indexing::minimizer_assembly_scratch& scratch) {
+        return canonical_query_methods_().fragment(storage_, query_minimizers, frag_lo, frag_hi,
+            frag_bp, total_bp, clip_lo_bp, clip_hi_bp, scratch);
+    }
+
+    /** Read native-width query hashes from ordinary sequence buckets. */
+    [[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index
+    assemble_sequence_segment_for_query(
+        bioseq::indexing::canonical_query_hash_view query_minimizers,
+        bioseq::storage::sequence_size_t target_len, std::int32_t max_occ,
+        bioseq::storage::sequence_size_t clip_lo_bp, bioseq::storage::sequence_size_t clip_hi_bp,
+        bioseq::indexing::minimizer_assembly_scratch& scratch) {
+        return canonical_query_methods_().sequence(storage_, query_minimizers, target_len,
+            max_occ, clip_lo_bp, clip_hi_bp, scratch);
+    }
+
   private:
+    /** The two cold callbacks preserve this facade's opaque PostgreSQL storage boundary. */
+    struct canonical_query_methods {
+        bioseq::indexing::minimizer_hashmap_fragment_index (*fragment)(
+            void*, bioseq::indexing::canonical_query_hash_view, std::size_t, std::size_t,
+            bioseq::storage::sequence_size_t, bioseq::storage::sequence_size_t,
+            bioseq::storage::sequence_size_t, bioseq::storage::sequence_size_t,
+            bioseq::indexing::minimizer_assembly_scratch&);
+        bioseq::indexing::minimizer_hashmap_fragment_index (*sequence)(
+            void*, bioseq::indexing::canonical_query_hash_view,
+            bioseq::storage::sequence_size_t, std::int32_t,
+            bioseq::storage::sequence_size_t, bioseq::storage::sequence_size_t,
+            bioseq::indexing::minimizer_assembly_scratch&);
+    };
+    // Method-table declaration exception: concrete callbacks require fragment_index_storage.
+    // Importing that PG implementation into this scanner-facing facade reintroduces the
+    // dependency closure that exhausted Clang's source-location space. The implementation
+    // defines the function-local static table after its callbacks; no storage type escapes.
+    [[nodiscard]] static const canonical_query_methods& canonical_query_methods_();
+
     explicit typed_dispatch_fragment_read_view(void* storage) noexcept : storage_(storage) {}
 
     void* storage_ = nullptr;

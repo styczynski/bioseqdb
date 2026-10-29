@@ -837,16 +837,16 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     any_col = true;
                     continue;
                 }
+                if (is_minimizer_index && !use_grouped_soa_generation &&
+                    !bioseq::indexing::ordinary_minimizer_index_backend_supported(backend)) {
+                    reject_unsupported_scheme_untagged_fragment_storage(
+                        backend, "bioseq.update_index");
+                }
                 if (is_minimizer_index && !minimizer_runtime_ready) {
                     minimizer_kernels = bind_selected_minimizer_kernels_for_operation(
                         backend, "bioseq.update_index");
                     ensure_vulkan_index_build_runtime_ready(backend);
                     minimizer_runtime_ready = true;
-                }
-                if (is_minimizer_index && !use_grouped_soa_generation &&
-                    backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
-                    reject_bounded_nthash_for_scheme_untagged_fragment_storage(
-                        backend, "bioseq.update_index");
                 }
                 if (is_locator_stub(hdr)) {
                     const sequence_locator loc = decode_locator_from_stub(hdr);

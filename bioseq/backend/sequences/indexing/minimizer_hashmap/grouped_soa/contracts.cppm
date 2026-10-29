@@ -207,6 +207,50 @@ minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept
     return {};
 }
 
+/// The ordinary untagged format has one exact profile per source alphabet.
+/// Its window stays fixed; its k is bounded by the exact hash word capacity.
+inline constexpr std::size_t k_ordinary_minimizer_index_window_size = 10u;
+
+/** Derive the ordinary index's fixed k from native exact-rank width, without changing query k. */
+[[nodiscard]] constexpr std::size_t ordinary_minimizer_index_kmer_size(
+    const std::size_t exact_rank_bits) noexcept {
+    constexpr std::size_t default_kmer_size = 15u;
+    constexpr std::size_t hash_capacity = std::numeric_limits<std::uint64_t>::digits;
+    return exact_rank_bits == 0u || exact_rank_bits > hash_capacity
+        ? 0u : std::min(default_kmer_size, hash_capacity / exact_rank_bits);
+}
+
+/** Check a requested query against the ordinary format identified by its source alphabet. */
+[[nodiscard]] constexpr bool ordinary_minimizer_index_parameters_match(
+    const std::size_t alphabet_code,
+    const std::int64_t kmer_size,
+    const std::int64_t window_size) noexcept {
+    const auto rank_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(alphabet_code);
+    return rank_bits.has_value() && kmer_size > 0 &&
+        static_cast<std::uint64_t>(kmer_size) == ordinary_minimizer_index_kmer_size(*rank_bits) &&
+        window_size == static_cast<std::int64_t>(k_ordinary_minimizer_index_window_size);
+}
+
+/** Bind the optional erased alphabet code to the typed ordinary source before any writes. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline std::uint8_t ordinary_minimizer_index_alphabet_code(
+    const std::uint8_t requested_code) {
+    constexpr auto typed_code = bioseq::minimizers::minimizer_profile_alphabet_id<p_alphabet>();
+    static_assert(typed_code < bioseq::minimizers::k_unbound_packed_alphabet_code);
+    if (requested_code != bioseq::minimizers::k_unbound_packed_alphabet_code &&
+        requested_code != typed_code) {
+        throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_alphabet,
+            "ordinary minimizer source alphabet disagrees with its typed registry identity"};
+    }
+    return static_cast<std::uint8_t>(typed_code);
+}
+
+/** Ordinary storage has no scheme tag and can contain only exact minimap hashes. */
+[[nodiscard]] constexpr bool ordinary_minimizer_index_backend_supported(
+    const minimizer_sketch_backend backend) noexcept {
+    return minimizer_scheme_identity_for_backend(backend) == k_minimap_scheme_identity;
+}
+
 /**
  * Get the algorithm for callers that select a sketch backend directly.
  * Unknown backends return nullopt. Production plans carry the requested and

@@ -34,6 +34,7 @@ import bioseq.postgres.scheduler.dispatch_processor.typed_support.transient_stor
 import bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_targets;
 import bioseq.highway.dispatch_contract;
 import bioseq.common.checked_arithmetic;
+import bioseq.common.heap_allocation;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
@@ -258,20 +259,23 @@ template <class p_sequence,
                 const auto requested_target_backend =
                     target_backend_from_params_for_recompute(params);
                 const bool stored_minimizer_scheme_compatible =
-                    requested_target_backend !=
-                    bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd;
+                    bioseq::indexing::ordinary_minimizer_index_backend_supported(
+                        requested_target_backend);
+                const bool ordinary_index_parameters_compatible =
+                    bioseq::indexing::ordinary_minimizer_index_parameters_match(
+                        alphabet_code, params.kmer_size, params.window_size);
                 if (scanner_pg_ctx->read_index_active && !stored_minimizer_scheme_compatible) {
                     bioseq_log<logging_level::debug>(
                         "[bioseq] index: persisted read skipped for inapplicable storage profile "
                         "row={} "
-                        "backend=bounded_nthash_simd reason=payload_has_no_scheme_identity",
+                        "reason=payload_has_no_scheme_identity",
                         static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[row_index]));
                 }
                 const bool opportunistic_minimizer_fragment_recompute_requested =
                     !scanner_pg_ctx->read_index_active &&
                     scanner_pg_ctx->recompute_async_persist_active &&
                     scanner_pg_ctx->index_async_persist_active &&
-                    stored_minimizer_scheme_compatible &&
+                    stored_minimizer_scheme_compatible && ordinary_index_parameters_compatible &&
                     scanner_pg_ctx->active_index == minimizers_per_fragment_index_name;
                 const bool transient_minimizer_generation_requested =
                     !persisted_required &&
@@ -507,7 +511,7 @@ template <class p_sequence,
                         transient_minimizer_generation_requested;
                     const bool legacy_optional_index_read_active =
                         scanner_pg_ctx->read_index_active &&
-                        stored_minimizer_scheme_compatible &&
+                        stored_minimizer_scheme_compatible && ordinary_index_parameters_compatible &&
                         legacy_query_destination_selected &&
                         !prepared_physical_query_destination;
                     if (prepared_generated_query_route) {
@@ -539,7 +543,97 @@ template <class p_sequence,
                                 "no-index retained query owner does not match its generated "
                                 "layout");
                         }
-                        if (want_seq) {
+                        if (scanner_pg_ctx->read_index_active &&
+                            stored_minimizer_scheme_compatible && ordinary_index_parameters_compatible &&
+                            ((!prepared_group->target_index &&
+                              !prepared_group->transient_grouped_soa_reader.has_value()) ||
+                             prepared_group->target_index_source ==
+                                 ::bioseq::pipeline_stats::target_index_source::persisted)) {
+                            with_fragment_storage(scanner_pg_ctx->active_index,
+                                [&assembled, &collection, prepared_group, cpu_prepared_target,
+                                 retained_prepared_query_sketch, fq_pg_view, ft_pg_view,
+                                 execution_plan, &loc_opt, want_fragment](
+                                    typed_dispatch_fragment_read_view& storage) {
+                                    if (prepared_group->target_index == nullptr) {
+                                        if (storage.number_of_chunks(bioseq::indexing::k_directory_sub_key) == 0u)
+                                            return;
+                                        if (prepared_group->target_index_permit.has_value() ||
+                                            prepared_group->target_index_builds != 0u ||
+                                            prepared_group->transient_grouped_soa_reader.has_value()) {
+                                            raise_typed_dispatch_pg_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+                                                "ordinary prepared reader already owns another target");
+                                        }
+                                        const auto directory_bytes = storage.chunk_byte_size(
+                                            bioseq::indexing::k_directory_sub_key, 0u);
+                                        const bool fragment_layout = want_fragment || directory_bytes == sizeof(std::int64_t);
+                                        bioseq::parallelism::memory_permit permit;
+                                        std::uint64_t shared_owner_bytes = 0u;
+                                        auto retained_index = make_admitted_transient_target_owner<
+                                            bioseq::indexing::minimizer_hashmap_fragment_index>(permit,
+                                                shared_owner_bytes,
+                                                bioseq::indexing::minimizer_hashmap_fragment_index::defer_table_allocation);
+                                        const auto peak = bioseq::common::saturating_add(shared_owner_bytes,
+                                            ordinary_minimizer_assembly_peak_bytes(loc_opt->logical_length,
+                                                loc_opt->logical_length, prepared_group->canonical_query_hash_view().size(),
+                                                directory_bytes, fragment_layout,
+                                                execution_plan->frozen_parameters.max_occ));
+                                        if (!permit.grow_to(peak)) raise_typed_dispatch_pg_error_as_cpp(ERRCODE_OUT_OF_MEMORY,
+                                            "ordinary prepared index cannot be admitted");
+                                        {
+                                            bioseq::indexing::minimizer_assembly_scratch scratch;
+                                            auto index = assemble_ordinary_minimizer_index(storage,
+                                                prepared_group->canonical_query_hash_view(), fragment_layout,
+                                                loc_opt->logical_length, 0u, loc_opt->logical_length,
+                                                execution_plan->frozen_parameters.max_occ, scratch);
+                                            *retained_index = std::move(index);
+                                        }
+                                        const auto positions_bytes = static_cast<std::uint64_t>(
+                                            bioseq::common::heap_allocation_detail::allocator_reported_bytes(
+                                                retained_index->positions.data()));
+                                        const auto retained_bytes = bioseq::common::saturating_add(shared_owner_bytes,
+                                            bioseq::common::saturating_add(positions_bytes,
+                                                bioseq::common::saturating_add(
+                                                    retained_index->table_owner_allocation_bytes(),
+                                                    retained_index->table_allocation_bytes())));
+                                        if (retained_bytes > permit.bytes() ||
+                                            positions_bytes < retained_index->positions.size() * sizeof(std::uint64_t)) {
+                                            raise_typed_dispatch_pg_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+                                                "ordinary prepared index exceeded its allocation plan");
+                                        }
+                                        permit.shrink_to(retained_bytes);
+                                        prepared_group->target_index = std::move(retained_index);
+                                        prepared_group->target_index_permit.emplace(std::move(permit));
+                                        if (!cpu_prepared_target->release_group_canonical_query_hashes_noexcept(
+                                                *prepared_group)) {
+                                            raise_typed_dispatch_pg_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+                                                "ordinary prepared reader could not release its query union");
+                                        }
+                                        prepared_group->target_index_source =
+                                            ::bioseq::pipeline_stats::target_index_source::persisted;
+                                        prepared_group->target_index_builds = 1u;
+                                        prepared_group->build_set_checksum = prepared_group->key_set_checksum;
+                                        prepared_group->build_set_checksum_present = true;
+                                        ++cpu_prepared_target->physical_target_index_reads;
+                                    } else {
+                                        if (!prepared_group->target_index_permit.has_value() ||
+                                            prepared_group->target_index_source !=
+                                                ::bioseq::pipeline_stats::target_index_source::persisted ||
+                                            !prepared_group->build_set_checksum_present ||
+                                            prepared_group->build_set_checksum != prepared_group->key_set_checksum) {
+                                            raise_typed_dispatch_pg_error_as_cpp(ERRCODE_DATA_CORRUPTED,
+                                                "ordinary prepared reader ownership changed");
+                                        }
+                                        ++prepared_group->target_index_reuses;
+                                    }
+                                    collection = minimap_port_fragment_index_physical_pg_checked(
+                                        fq_pg_view, ft_pg_view, retained_prepared_query_sketch->minimizers,
+                                        *prepared_group->target_index, execution_plan, nullptr,
+                                        bioseq::indexing::gpu_index_cache_identity{
+                                            .assembly_identity = prepared_group->key_set_checksum}, false);
+                                    assembled = true;
+                                });
+                        }
+                        if (!assembled && want_seq) {
                             collection =
                                 build_and_align_prepared_transient_minimizer_sequence(
                                     fq_pg_view,
@@ -552,7 +646,7 @@ template <class p_sequence,
                                     *retained_prepared_query_sketch,
                                     *prepared_group,
                                     *cpu_prepared_target);
-                        } else {
+                        } else if (!assembled) {
                             collection =
                                 build_and_align_prepared_transient_minimizer_fragment(
                                     fq_pg_view,
@@ -568,7 +662,7 @@ template <class p_sequence,
                         row_consumed_prepared_query_sketch = true;
                         assembled = true;
                         scanner_pg_ctx->target_index_sources[row_index] =
-                            ::bioseq::pipeline_stats::target_index_source::recomputed;
+                            prepared_group->target_index_source;
                     }
                     if (persisted_required) {
                         const bool has_fragment_reader =
@@ -785,6 +879,43 @@ template <class p_sequence,
                             prepared_group->persisted_generation_id;
                         scanner_pg_ctx->persisted_source_identities[row_index] =
                             prepared_group->persisted_source_identity;
+                    }
+                    if (!assembled && !persisted_required && prepared_group == nullptr &&
+                        scanner_pg_ctx->read_index_active && stored_minimizer_scheme_compatible &&
+                        ordinary_index_parameters_compatible && !legacy_query_destination_selected) {
+                        with_fragment_storage(scanner_pg_ctx->active_index,
+                            [&assembled, &collection, fq_pg_view, ft_pg_view, execution_plan,
+                             query_storage_unit_byte_width = static_cast<std::uint8_t>(sizeof(query_storage_unit)),
+                             scanner_pg_ctx, row_index, &loc_opt, want_fragment,
+                             target_letters_per_unit, selected_query_backend](
+                                typed_dispatch_fragment_read_view& storage) {
+                                if (storage.number_of_chunks(bioseq::indexing::k_directory_sub_key) == 0u)
+                                    return;
+                                auto query = prepare_transient_physical_query(fq_pg_view,
+                                    execution_plan->frozen_parameters, query_storage_unit_byte_width, true);
+                                const bool fragment_layout = want_fragment ||
+                                    storage.chunk_byte_size(bioseq::indexing::k_directory_sub_key, 0u)
+                                        == sizeof(std::int64_t);
+                                const auto backend = *selected_query_backend;
+                                const bioseq::storage::indexing::assembled_index_key cache_identity{
+                                    .db_oid = scanner_pg_ctx->db_oid,
+                                    .user_relid = scanner_pg_ctx->user_relid,
+                                    .tablespace_oid = scanner_pg_ctx->tablespace_oid,
+                                    .main_relfilenode = scanner_pg_ctx->main_relfilenode,
+                                    .column_attno = scanner_pg_ctx->mmsearch_seq_attno,
+                                    .index_name_hash = bioseq::storage::indexing::index_name_hash(
+                                        scanner_pg_ctx->db_oid, scanner_pg_ctx->tablespace_oid,
+                                        scanner_pg_ctx->main_relfilenode, scanner_pg_ctx->mmsearch_seq_attno,
+                                        scanner_pg_ctx->active_index),
+                                    .sketch_backend = backend,
+                                    .minimizer_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(backend),
+                                    .query_key = static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]),
+                                };
+                                collection = read_and_align_ordinary_minimizer_index(
+                                    fq_pg_view, ft_pg_view, query, storage, fragment_layout,
+                                    execution_plan, target_letters_per_unit, cache_identity);
+                                assembled = true;
+                            });
                     }
                     if (legacy_optional_index_read_active && !persisted_required &&
                         prepared_group != nullptr && prepared_group->target_index) {
@@ -1349,7 +1480,7 @@ template <class p_sequence,
                             const auto resident_target_view = resident->owner.view();
                             const bool can_defer_recompute_persist =
                                 !generic_raw_optional_scalar &&
-                                can_defer_recompute_minimizer_persist(*scanner_pg_ctx, params);
+                                can_defer_recompute_minimizer_persist(*scanner_pg_ctx, params, alphabet_code);
                             const auto deferred_persist_choice =
                                 can_defer_recompute_persist
                                     ? choose_deferred_minimizer_persist_index(*scanner_pg_ctx)
@@ -1373,11 +1504,11 @@ template <class p_sequence,
                                 collection = minimap_port_segmented_pg_checked(
                                     lazy_query_view, resident_target_view, execution_plan);
                                 if (scanner_pg_ctx->recompute_async_persist_active &&
-                                    (params.kmer_size != 15 || params.window_size != 10)) {
+                                    !ordinary_index_parameters_compatible) {
                                     bioseq_log<logging_level::debug>(
                                         "[bioseq] index: recompute async-persist skipped row={} "
                                         "target_bp={} because active params are k={} w={} but "
-                                        "persisted minimizer indexes are pinned to k=15 w=10",
+                                        "persisted minimizer indexes require the alphabet's fixed exact profile",
                                         static_cast<unsigned long long>(
                                             scanner_pg_ctx->target_rownos[row_index]),
                                         static_cast<unsigned long long>(loc_opt->logical_length),

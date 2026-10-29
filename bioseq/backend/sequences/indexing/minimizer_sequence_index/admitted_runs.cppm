@@ -401,48 +401,6 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
     }
 }
 
-/** Limit the collected base count to the range supported by packed GPU positions. */
-[[nodiscard]] inline sequence_size_t clamp_gpu_collected_bp(
-    sequence_size_t wanted_bp) noexcept
-{
-    constexpr sequence_size_t max_bp =
-        static_cast<sequence_size_t>(minimap_sketch_data::k_position_field_mask);
-    return wanted_bp > max_bp ? max_bp : wanted_bp;
-}
-
-/**
- * Choose a GPU block  size within the packed-position and dispatch limits,
- * allowing for halo bases. Return at least one fragment, even if those limits
- * leave no room for a full fragment.
- */
-[[nodiscard]] inline std::size_t gpu_fragments_per_block(
-    std::size_t scalar_fragments_per_block,
-    std::size_t frag_bp,
-    std::size_t halo_bp) noexcept
-{
-    constexpr std::size_t max_bp =
-        static_cast<std::size_t>(minimap_sketch_data::k_position_field_mask);
-    if (frag_bp == 0u) {
-        return 1u;
-    }
-    if (halo_bp >= max_bp) {
-        return 1u;
-    }
-    constexpr std::size_t gpu_segment_local_size = 128u;
-    constexpr std::size_t gpu_segment_max_workgroups = 65535u;
-    const std::size_t allowed_core_bp = max_bp - halo_bp;
-    const std::size_t by_pos_field =
-        std::max<std::size_t>(1u, allowed_core_bp / frag_bp);
-    const std::size_t max_dispatch_bp = gpu_segment_local_size * gpu_segment_max_workgroups;
-    const std::size_t by_dispatch =
-        halo_bp >= max_dispatch_bp
-            ? 1u
-            : std::max<std::size_t>(1u, (max_dispatch_bp - halo_bp) / frag_bp);
-    return std::max<std::size_t>(
-        1u,
-        std::min({scalar_fragments_per_block, by_pos_field, by_dispatch}));
-}
-
 }  // namespace detail
 
 } // namespace bioseq::indexing
