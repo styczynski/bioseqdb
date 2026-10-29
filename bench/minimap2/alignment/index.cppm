@@ -935,9 +935,11 @@ template<bool Inverse, seqan3::aminoacid_alphabet Alphabet>
         admission.reserved_bytes() > baseline_admission ? admission.reserved_bytes() - baseline_admission : 0u);
     const auto begin = bioseq::instrumentation::clock::now_ns();
     if (algorithm == "native_packed_conversion") {
+        const auto transform = bioseq::simd_dispatch::highway_test_kernel_table()
+            .common.transform_sequence_rank_chunk;
         const auto converted = conversion::convert_packed_into<source_alphabet, instance>(
             observed.view(), 0u, source.bp_size(), conversion::translation_options{},
-            std::span<std::uint64_t>{result.words}, true);
+            std::span<std::uint64_t>{result.words}, true, transform);
         if (!converted) throw std::runtime_error("native packed conversion benchmark failed");
         result.packed_result = *converted;
     } else if (algorithm == "scalar_packed_conversion_oracle") {

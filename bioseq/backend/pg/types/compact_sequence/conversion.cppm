@@ -13,6 +13,8 @@ export module bioseq.postgres.types.compact_sequence:conversion;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.common.seqan_adapter;
+import bioseq.highway.dispatch_contract;
+import bioseq.simd.utils;
 import bioseq.postgres.support;
 import bioseq.sequences;
 import bioseq.sequences.simd;
@@ -144,11 +146,25 @@ namespace {
                     converted = std::unexpected(sequence_conversion_error{
                         sequence_conversion_error_code::size_overflow}); return;
                 }
+                bioseq::simd::sequence_rank_transform_kernel transform{};
+                if constexpr (forward || backward) {
+                    const auto plan = bioseq::simd_dispatch::registered_highway_dispatch_plan();
+                    if (plan.planned_target != 0) {
+                        const auto& binding = bioseq::simd_dispatch::registered_highway_target_binding(
+                            plan.planned_target);
+                        if (binding.kernels != nullptr)
+                            transform = binding.kernels->common.transform_sequence_rank_chunk;
+                    }
+                    if (transform == nullptr) {
+                        converted = std::unexpected(sequence_conversion_error{
+                            sequence_conversion_error_code::output_contract_violation}); return;
+                    }
+                }
                 auto* owner = make_pg_sequence_call_owner<Source>(session, dispatch, descriptor);
                 const auto view = owner->view();
                 pg_sequence_expression_backend<Destination> backend{session};
                 auto output = backend.template generate<sequence_conversion_error>(
-                    output_count, destination, [view, options, descriptor](auto& writer, auto units) {
+                    output_count, destination, [view, options, descriptor, transform](auto& writer, auto units) {
                     using writer_type = std::remove_cvref_t<decltype(writer)>;
                     using instance = sequence_custom_alphabet<Destination, typename writer_type::storage_unit>;
                     const auto source = [view, options] {
@@ -164,7 +180,7 @@ namespace {
                     const bool parallel = source.worker_shareable
                         && descriptor.kind == pg_sequence_datum_kind::flat_bound;
                     return bioseq::sequences::convert_packed_into<Source, instance>(
-                        source, 0u, view.bp_size(), options, units, parallel);
+                        source, 0u, view.bp_size(), options, units, parallel, transform);
                 });
                 if (!output) { converted = std::unexpected(output.error()); return; }
                 converted = backend.publish(*output);

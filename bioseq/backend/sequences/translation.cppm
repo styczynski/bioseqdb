@@ -10,7 +10,6 @@ import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.coordinates;
 import bioseq.simd.utils;
-import bioseq.highway.dispatch_contract;
 
 export namespace bioseq::sequences {
 
@@ -172,18 +171,11 @@ template<sequence_conversion_sink Writer>
 
 namespace bioseq::sequences::translation_detail {
 
-/** Select the existing runtime Highway binding once for a conversion traversal. */
-[[nodiscard]] inline simd::sequence_rank_transform_kernel selected_transform() {
-    const auto plan = simd_dispatch::registered_highway_dispatch_plan();
-    if (plan.planned_target == 0) return nullptr;
-    const auto& binding = simd_dispatch::registered_highway_target_binding(plan.planned_target);
-    return binding.kernels == nullptr ? nullptr : binding.kernels->common.transform_sequence_rank_chunk;
-}
-
 /** Borrow bounded native tiles, invoke the selected target, and immediately pack output. */
 template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
 [[nodiscard]] auto translate_rank_windows(const storage::borrowed_rank_window_source& source,
-        translation_geometry geometry, bool reverse, Writer& writer)
+        translation_geometry geometry, bool reverse, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     using destination = typename Writer::traits::alphabet_type;
     static_assert(seqan3::aminoacid_alphabet<destination>);
@@ -191,7 +183,6 @@ template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
     constexpr const auto& table = translation_ranks<Source, destination>;
     constexpr auto capacity = simd::sequence_rank_io_chunk_capacity;
     static_assert(capacity <= std::numeric_limits<std::size_t>::max() / 3u);
-    const auto transform = selected_transform();
     if (transform == nullptr) return std::unexpected(sequence_conversion_error{
         sequence_conversion_error_code::output_contract_violation});
     std::array<std::uint8_t, 3u * capacity> scratch{};
@@ -225,7 +216,8 @@ template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
 /** Expand bounded amino-acid rank tiles through the same generated numerical entry. */
 template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
 [[nodiscard]] auto back_translate_rank_windows(const storage::borrowed_rank_window_source& source,
-        std::size_t begin, std::size_t end, Writer& writer)
+        std::size_t begin, std::size_t end, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     using destination = typename Writer::traits::alphabet_type;
     static_assert(seqan3::nucleotide_alphabet<destination>);
@@ -233,7 +225,6 @@ template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
     constexpr const auto& table = reverse_translation_gather<Source, destination>;
     constexpr auto capacity = simd::sequence_rank_io_chunk_capacity;
     static_assert(capacity <= std::numeric_limits<std::size_t>::max() / 3u);
-    const auto transform = selected_transform();
     if (transform == nullptr) return std::unexpected(sequence_conversion_error{
         sequence_conversion_error_code::output_contract_violation});
     std::array<std::uint8_t, capacity> scratch{};
@@ -268,10 +259,12 @@ template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
 
 export namespace bioseq::sequences {
 
-/** Translate an already oriented checked source; typed callers choose the orientation once. */
+/** Translate an oriented checked source using a caller-selected target kernel.
+ * A null kernel returns output_contract_violation before reading or writing. */
 template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
 [[nodiscard]] auto translate_into(const storage::borrowed_rank_window_source& source,
-        std::size_t begin, std::size_t end, const translation_options& options, Writer& writer)
+        std::size_t begin, std::size_t end, const translation_options& options, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     const auto geometry = make_translation_geometry(source.symbol_count, begin, end, options);
     if (!geometry) return std::unexpected(geometry.error());
@@ -281,13 +274,15 @@ template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
         || source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
     return translation_detail::translate_rank_windows<Source>(
-        source, *geometry, options.frame < 0, writer);
+        source, *geometry, options.frame < 0, writer, transform);
 }
 
-/** Validate inverse options and checked output length before synthesizing any codon. */
+/** Validate inverse options and output length, then use the caller-selected kernel.
+ * A null kernel returns output_contract_violation before reading or writing. */
 template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
 [[nodiscard]] auto back_translate_into(const storage::borrowed_rank_window_source& source,
-        std::size_t begin, std::size_t end, const back_translation_options& options, Writer& writer)
+        std::size_t begin, std::size_t end, const back_translation_options& options, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     if (options.code != seqan3::genetic_code::canonical)
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::unsupported_genetic_code});
@@ -298,17 +293,19 @@ template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
     if (source.orientation != storage::sequence_transform::identity
         || source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
-    return translation_detail::back_translate_rank_windows<Source>(source, begin, end, writer);
+    return translation_detail::back_translate_rank_windows<Source>(source, begin, end, writer, transform);
 }
 
 /** Convert native biological ranks into caller-admitted packed storage.
  * Parallel work uses the existing pool only when the caller and source permit it.
+ * The caller selects transform once; workers receive that function pointer by value.
+ * Translation requires a nonnull kernel; same-family recoding ignores the parameter.
  * No worker acquires an input owner, allocates output, or publishes a result. */
 template<sequence_alphabet Source, supports_compact_sequence_range Instance>
 [[nodiscard]] auto convert_packed_into(const storage::borrowed_rank_window_source& source,
         std::size_t begin, std::size_t end, const translation_options& options,
         std::span<typename compact_sequence_range<Instance>::traits::storage_unit> output,
-        bool allow_parallel)
+        bool allow_parallel, simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     using destination = typename compact_sequence_range<Instance>::traits::alphabet_type;
     constexpr bool forward = seqan3::nucleotide_alphabet<Source> && seqan3::aminoacid_alphabet<destination>;
@@ -339,7 +336,7 @@ template<sequence_alphabet Source, supports_compact_sequence_range Instance>
     }
     return generate_packed_ranges<Instance>(output, output_count, backward ? 3u : 1u,
         allow_parallel && source.worker_shareable,
-        [source, options, geometry, begin](std::size_t offset, std::size_t count, auto& writer) {
+        [source, options, geometry, begin, transform](std::size_t offset, std::size_t count, auto& writer) {
             if constexpr (forward) {
                 const auto oriented_begin = geometry.oriented_begin + 3u * offset;
                 const auto task_begin = options.frame < 0
@@ -347,10 +344,10 @@ template<sequence_alphabet Source, supports_compact_sequence_range Instance>
                 auto task_options = options;
                 task_options.frame = options.frame < 0 ? -1 : 1;
                 task_options.trailing = incomplete_codon_policy::reject;
-                return translate_into<Source>(source, task_begin, task_begin + 3u * count, task_options, writer);
+                return translate_into<Source>(source, task_begin, task_begin + 3u * count, task_options, writer, transform);
             } else if constexpr (backward) {
                 return back_translate_into<Source>(source, begin + offset / 3u,
-                    begin + (offset + count) / 3u, back_translation_options{options.code}, writer);
+                    begin + (offset + count) / 3u, back_translation_options{options.code}, writer, transform);
             } else {
                 return simd::active_target::recode_into<Source>(source,
                     begin + offset, begin + offset + count, writer);
@@ -361,24 +358,26 @@ template<sequence_alphabet Source, supports_compact_sequence_range Instance>
 /** Adapt compact native storage to the shared checked source without expanding the input. */
 template<supports_compact_sequence_range R, sequence_conversion_sink Writer>
 [[nodiscard]] auto translate_into(const compact_sequence_range<R>& source,
-        std::size_t begin, std::size_t end, const translation_options& options, Writer& writer)
+        std::size_t begin, std::size_t end, const translation_options& options, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     using alphabet = typename compact_sequence_range<R>::traits::alphabet_type;
     static_assert(seqan3::nucleotide_alphabet<alphabet>);
     if (options.frame < 0)
-        return translate_into<alphabet>(storage::make_borrowed_rank_source<true>(source), begin, end, options, writer);
-    return translate_into<alphabet>(storage::make_borrowed_rank_source<false>(source), begin, end, options, writer);
+        return translate_into<alphabet>(storage::make_borrowed_rank_source<true>(source), begin, end, options, writer, transform);
+    return translate_into<alphabet>(storage::make_borrowed_rank_source<false>(source), begin, end, options, writer, transform);
 }
 
 /** Adapt compact amino-acid storage to the same representative synthesis traversal. */
 template<supports_compact_sequence_range R, sequence_conversion_sink Writer>
 [[nodiscard]] auto back_translate_into(const compact_sequence_range<R>& source,
-        std::size_t begin, std::size_t end, const back_translation_options& options, Writer& writer)
+        std::size_t begin, std::size_t end, const back_translation_options& options, Writer& writer,
+        simd::sequence_rank_transform_kernel transform)
     -> std::expected<rank_pack_result, sequence_conversion_error> {
     using alphabet = typename compact_sequence_range<R>::traits::alphabet_type;
     static_assert(seqan3::aminoacid_alphabet<alphabet>);
     return back_translate_into<alphabet>(storage::make_borrowed_rank_source<false>(source),
-        begin, end, options, writer);
+        begin, end, options, writer, transform);
 }
 
 } // namespace bioseq::sequences
