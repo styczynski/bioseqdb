@@ -38,13 +38,12 @@ extern "C" {
 #undef snprintf
 #undef vsnprintf
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <limits>
+// Declare global allocation functions before importing standard-library templates.
+#include <new>
 
 export module bioseq.postgres.table:custom_scan_slice_execution_resource_lifecycle;
+
+import std;
 
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.storage.scanner;
