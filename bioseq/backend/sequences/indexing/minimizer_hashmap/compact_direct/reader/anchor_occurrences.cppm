@@ -343,7 +343,7 @@ prepared_minimizer_fragment_reader::prepare_query_occurrences_(
         }
         prepare_native_occurrences(scratch.packed_occurrences_, scratch.wide_occurrences_);
     } else {
-        switch (profile_.hash_width) {
+        switch (scratch.occurrence_hash_width_) {
         case minimizer_scalar_width::u32:
             prepare_native_occurrences(scratch.packed_occurrences_, scratch.wide_occurrences_);
             break;

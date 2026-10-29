@@ -1542,7 +1542,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 scratch.wide_occurrences_,
                                 scratch.query_plans_);
         } else {
-            switch (profile_.hash_width) {
+            switch (scratch.occurrence_hash_width_) {
             case minimizer_scalar_width::u32:
                 finish_native_batch(scratch.packed_occurrences_,
                                     scratch.wide_occurrences_,

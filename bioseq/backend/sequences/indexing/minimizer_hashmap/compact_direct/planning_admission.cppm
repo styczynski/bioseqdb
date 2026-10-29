@@ -341,8 +341,11 @@ class query_wave_scratch {
         bucket_direct_matcher_active_ = false;
     }
 
-    /// Free occurrence and plan buffers for the unused hash width.
-    void select_occurrence_hash_width_(const minimizer_scalar_width width) {
+    /// Select lossless canonical occurrence storage for the physical hash width,
+    /// then free buffers belonging to the unused storage width.
+    void select_occurrence_hash_width_(const minimizer_scalar_width physical_width) {
+        const auto width = static_cast<minimizer_scalar_width>(
+            canonical_minimizer_query_hash_storage_width(physical_width));
         if (width == minimizer_scalar_width::u32) {
             std::vector<packed_query_occurrence_h64> empty_packed;
             std::vector<wide_query_occurrence_h64> empty_wide;
