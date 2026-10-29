@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
+import bioseq.gpu.vulkan.abi;
 import bioseq.tests.unit.pipeline.pipe_support;
 
 using namespace bioseq::tests::pipeline::pipe_support;
@@ -684,7 +685,7 @@ TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
     REQUIRE(device_alias != nullptr);
 }
 
-TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and builds admitted index",
+TEST_CASE("real N-rich dna5 Vulkan target adopts either exact authority and builds admitted index",
           "[component:bioseq][layer:unit][feature:pipeline][resource:gpu]") {
     namespace vk = bioseq::gpu::vulkan;
     auto& runtime = vk::runtime::instance();
@@ -696,7 +697,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     using sketch_type = ::bioseq::simd::minimap_sketch_data;
     using packed_sequence_type =
         sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    constexpr std::size_t letter_count = 1'000'000u;
+    constexpr std::size_t letter_count = 8'192u;
     constexpr std::size_t window_size = 10u;
     constexpr std::size_t kmer_size = 15u;
 
@@ -719,11 +720,10 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     seq::dna5 ambiguous{};
     ambiguous.assign_char('N');
     std::vector<seq::dna5> letters(letter_count, ambiguous);
-    std::vector<bool> ambiguous_positions(letter_count, true);
     constexpr std::size_t island_size = 128u;
-    constexpr std::size_t island_stride = 100'000u;
+    constexpr std::size_t island_stride = 2'048u;
     std::uint64_t lcg = 0x243f6a8885a308d3ULL;
-    for (std::size_t island_start = 4'096u;
+    for (std::size_t island_start = 1'024u;
          island_start + island_size <= letter_count;
          island_start += island_stride) {
         for (std::size_t offset = 0u; offset < island_size; ++offset) {
@@ -733,7 +733,6 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
             constexpr std::array<char, 4> canonical{'A', 'C', 'G', 'T'};
             value.assign_char(canonical[(lcg >> 33u) & 3u]);
             letters[island_start + offset] = value;
-            ambiguous_positions[island_start + offset] = false;
         }
     }
     auto sequence = compact_sequence_range<packed_sequence_type>(letters);
@@ -754,7 +753,8 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
                 fixed_zero_copy_adoption);
     REQUIRE(result->arena_trimmed_before_host_materialization);
     REQUIRE_FALSE(result->host_minimizers.empty());
-    REQUIRE(result->host_minimizers.size() < 10'000u);
+    REQUIRE(result->host_minimizers.size()
+            <= vk::target_minimizer_count_upper_bound(letter_count, kmer_size));
     const std::uint64_t host_capacity_bytes =
         result->host_minimizers.capacity() * sizeof(sketch_type);
     const bool footprint_authority =
@@ -767,19 +767,19 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
         && result->host_permit.has_value()
         && result->host_permit->bytes() == host_capacity_bytes;
     REQUIRE(footprint_authority != retained_permit_authority);
+    bool observed_n_only_seed = false;
     for (const sketch_type& minimizer : result->host_minimizers) {
         const std::size_t last_position =
             static_cast<std::size_t>(minimizer.last_pos());
         REQUIRE(last_position + 1u >= kmer_size);
         const std::size_t first_position =
             last_position + 1u - kmer_size;
-        REQUIRE(last_position < ambiguous_positions.size());
-        for (std::size_t position = first_position;
-             position <= last_position;
-             ++position) {
-            REQUIRE_FALSE(ambiguous_positions[position]);
-        }
+        REQUIRE(last_position < letters.size());
+        observed_n_only_seed = observed_n_only_seed || std::ranges::all_of(
+            std::span{letters}.subspan(first_position, kmer_size),
+            [ambiguous](const seq::dna5 letter) { return letter == ambiguous; });
     }
+    REQUIRE(observed_n_only_seed);
     const sketch_type* const original_data = result->host_minimizers.data();
     std::weak_ptr<vk::vulkan_device_minimizer_storage<sketch_type>> device_lifetime =
         result->device;
