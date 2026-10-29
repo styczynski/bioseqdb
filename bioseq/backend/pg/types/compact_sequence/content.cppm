@@ -38,6 +38,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.lazy_sequence;
 import bioseq.common.context;
 import bioseq.postgres.support.sql_boundary;
+import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.sequences.cigar_alphabet;
 

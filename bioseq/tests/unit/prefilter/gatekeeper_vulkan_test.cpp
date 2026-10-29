@@ -14,6 +14,7 @@ import bioseq.prefilter.gatekeeper.vulkan;
 import bioseq.prefilter.types;
 import bioseq.sequences;
 import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
 import bioseq.common.seqan_adapter;
 
 using namespace bioseq::prefilter;

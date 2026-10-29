@@ -65,6 +65,7 @@ import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
 import bioseq.highway.test_support;
 import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
 import bioseq.instrumentation;
 import bioseq.parallelism.memory_admission;
 import bioseq.bench.framework;

@@ -9,6 +9,7 @@
 
 import std;
 import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
 import bioseq.sequences;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences.edit_distance_threshold;
