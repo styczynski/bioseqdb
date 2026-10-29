@@ -5,11 +5,6 @@
 module;
 #include <bioseq/pg_compat.h>
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
 #include <new>
 
 // Include libc++ allocation declarations before header-based module dependencies.
@@ -32,6 +27,8 @@ extern "C" {
 }
 
 module bioseq.postgres.table;
+
+import std;
 
 import :custom_scan_scan_runtime_tuple_production_contracts;
 import :custom_scan_scan_runtime_execution_callbacks_contracts;
