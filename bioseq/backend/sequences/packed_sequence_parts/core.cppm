@@ -142,14 +142,14 @@ concept is_sequence_custom_alphabet_bit_castable_to = (
     && p_destination_type::leftover_bits == 0
 );
 
-/** @brief Random-access sized range whose elements are alphabet symbols. */
+/** @brief Const-readable random-access sized range of alphabet symbols. */
 
 template<typename p_range_type>
 concept sequence_proper_container =
-    sequence_alphabet<std::remove_reference_t<
-        std::ranges::range_reference_t<p_range_type>>>
-    && std::ranges::sized_range<p_range_type>
-    && std::ranges::random_access_range<p_range_type>;
+    std::ranges::sized_range<const p_range_type>
+    && std::ranges::random_access_range<const p_range_type>
+    && sequence_alphabet<std::remove_cvref_t<
+        std::ranges::range_reference_t<const p_range_type>>>;
 
 /** Recognizes the marker on a compact_sequence_stdc_instance type. */
 template<typename p_candidate_type>

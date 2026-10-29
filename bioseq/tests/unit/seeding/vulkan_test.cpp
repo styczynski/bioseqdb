@@ -15,6 +15,8 @@
 import std;
 import bioseq.common.logging;
 import bioseq.common.context;
+import bioseq.common.seqan_adapter;
+import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.pipeline.minimap_port;         // collect_seed_hits
 import bioseq.chaining.core;                 // anchor / arena_slab / make_arena_slab
@@ -24,6 +26,9 @@ import bioseq.seeding.vulkan;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.size;
+import bioseq.storage.lazy_sequence;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 
 namespace {
 
@@ -34,6 +39,39 @@ namespace ch = bioseq::chaining;
 namespace seed = bioseq::seeding;
 namespace vk = bioseq::gpu::vulkan;
 namespace idx_ns = bioseq::indexing;
+
+/** Generates source letters only when a bounded seed window is requested. */
+struct fixture_seed_letter {
+    bool reverse_target_regions = false;
+
+    /** Supplies exact forward or reverse-complement source content for the fixed postings. */
+    [[nodiscard]] seq::dna4 operator()(std::uint64_t position) const noexcept {
+        const bool reverse_region = reverse_target_regions &&
+            ((position >= 35u && position < 50u) || (position >= 106u && position < 121u));
+        return seqan3::assign_char_to(reverse_region ? 'T' : 'A', seq::dna4{});
+    }
+};
+
+/** Owns a virtual source so large-coordinate fixtures never allocate a whole target. */
+struct fixture_seed_source {
+    using symbols_type = std::ranges::transform_view<
+        std::ranges::iota_view<std::uint64_t, std::uint64_t>, fixture_seed_letter>;
+    using sequence_type = compact_sequence_range<symbols_type>;
+    static_assert(std::random_access_iterator<typename sequence_type::iterator>);
+    static_assert(!sequence_type::traits::is_bit_packed);
+    symbols_type symbols;
+    sequence_type sequence;
+
+    /** Binds the virtual interval; only the seed-window packer materializes requested letters. */
+    explicit fixture_seed_source(std::uint64_t length, bool reverse_target_regions = false)
+        : symbols(std::views::iota(std::uint64_t{}, length),
+                  fixture_seed_letter{reverse_target_regions}), sequence(symbols) {}
+
+    /** Borrows this fixture for synchronous GPU source-window preparation. */
+    [[nodiscard]] auto view() const noexcept {
+        return bioseq::storage::make_lazy_sequence_view(sequence);
+    }
+};
 
 /**
  * @brief Pack a target position with its strand in the low bit.
@@ -49,11 +87,11 @@ namespace idx_ns = bioseq::indexing;
 /** Build an index with repeated hashes on both strands and a position above 2^32. */
 [[nodiscard]] static minimizer_hashmap_fragment_index build_target() {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
-    pairs.emplace_back(0x111ULL, encode_position_strand(5u, 0u));
-    pairs.emplace_back(0x222ULL, encode_position_strand(9u, 1u));
-    pairs.emplace_back(0x222ULL, encode_position_strand(40u, 0u));
-    pairs.emplace_back(0x222ULL, encode_position_strand(100u, 1u));
-    pairs.emplace_back(0x333ULL, encode_position_strand(13u, 0u));
+    pairs.emplace_back(0x111ULL, encode_position_strand(25u, 0u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(49u, 1u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(80u, 0u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(120u, 1u));
+    pairs.emplace_back(0x333ULL, encode_position_strand(145u, 0u));
     pairs.emplace_back(0x444ULL, encode_position_strand(std::uint64_t{0x1'0000'0005ULL}, 1u));
     minimizer_hashmap_fragment_index target_index;
     target_index.build_from_pairs(
@@ -646,6 +684,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     }
 
     const auto idx = build_target();
+    const fixture_seed_source query_source{200u};
+    const fixture_seed_source target_source{idx.target_len, true};
     const auto query = build_query();
     const bioseq::storage::sequence_size_t query_len = 200;
     constexpr std::int32_t max_occ = 500;
@@ -658,9 +698,13 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
 
     auto cpu_slab = ch::make_arena_slab<anchor>();
     cpu_slab.reserve(64);
-    ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
+    const auto equality_counter =
+        bioseq::simd_dispatch::highway_test_kernel_table().common.count_equal_rank_chunk;
+    const auto cpu_result = ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        idx, query_len, max_occ, kmer_size, cpu_slab);
+        idx, query_source.view(), target_source.view(), equality_counter,
+        max_occ, kmer_size, cpu_slab);
+    REQUIRE(cpu_result.has_value());
 
     idx_ns::gpu_minimizer_index_cache cache{std::uint64_t{64} << 20};
     const auto key = idx_ns::make_gpu_index_cache_key(idx, idx_ns::gpu_index_cache_identity{});
@@ -671,7 +715,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     seed::vulkan_seed_lookup_decline decline{};
     gpu_completion = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        std::nullopt, std::addressof(idx), resident, /*vulkan_enabled=*/true,
+        std::nullopt, std::addressof(idx), resident, query_source.view(), target_source.view(),
+        /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, /*submitted_ordinal=*/0u,
         gpu_batch, /*context_backing_is_admitted=*/false,
         /*fused_frontend=*/false, &decline);
@@ -710,7 +755,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     seed::vulkan_seed_lookup_decline fused_decline{};
     fused_completion = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        std::nullopt, std::addressof(idx), resident, /*vulkan_enabled=*/true,
+        std::nullopt, std::addressof(idx), resident, query_source.view(), target_source.view(),
+        /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, /*submitted_ordinal=*/0u,
         fused_batch, /*context_backing_is_admitted=*/false,
         /*fused_frontend=*/true, &fused_decline);
@@ -733,6 +779,8 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     }
 
     const auto idx = build_target();
+    const fixture_seed_source query_source{200u};
+    const fixture_seed_source target_source{idx.target_len, true};
     const auto query = build_query();
     constexpr bioseq::storage::sequence_size_t query_len = 200u;
     constexpr std::int32_t max_occ = 500;
@@ -743,9 +791,13 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     context::installed_context_scope install{ctx};
     auto cpu_slab = ch::make_arena_slab<anchor>();
     cpu_slab.reserve(64u);
-    ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
+    const auto equality_counter =
+        bioseq::simd_dispatch::highway_test_kernel_table().common.count_equal_rank_chunk;
+    const auto cpu_result = ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        idx, query_len, max_occ, kmer_size, cpu_slab);
+        idx, query_source.view(), target_source.view(), equality_counter,
+        max_occ, kmer_size, cpu_slab);
+    REQUIRE(cpu_result.has_value());
 
     const auto plan = idx_ns::plan_gpu_index_materialization(
         idx.table_size(), idx.positions.size(),
@@ -784,7 +836,8 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     seed::vulkan_seed_lookup_decline decline{};
     completion = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        std::nullopt, std::addressof(idx), resident, /*vulkan_enabled=*/true,
+        std::nullopt, std::addressof(idx), resident, query_source.view(), target_source.view(),
+        /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, /*submitted_ordinal=*/3u,
         gpu_batch, /*context_backing_is_admitted=*/false,
         /*fused_frontend=*/false, &decline);
@@ -826,6 +879,8 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
                 pairs.data(), pairs.size()},
             target_length);
 
+        const fixture_seed_source query_source{static_cast<std::uint64_t>(anchor_count) + 15u};
+        const fixture_seed_source target_source{target_length};
         std::vector<minimap_sketch_data> query;
         query.reserve(anchor_count);
         for (std::uint32_t ordinal = 0; ordinal < anchor_count; ++ordinal) {
@@ -842,7 +897,7 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
         seed::vulkan_seed_lookup_decline decline{};
         completion = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
             std::span<const minimap_sketch_data>{query.data(), query.size()},
-            std::nullopt, std::addressof(idx), resident, true,
+            std::nullopt, std::addressof(idx), resident, query_source.view(), target_source.view(), true,
             /*query_len=*/static_cast<std::uint64_t>(anchor_count) + 15u,
             /*max_occ=*/500, /*kmer_size=*/15,
             /*submitted_ordinal=*/9u,
@@ -904,6 +959,8 @@ TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target"
     }
 
     const auto idx = build_target();
+    const fixture_seed_source query_source{200u};
+    const fixture_seed_source target_source{idx.target_len, true};
     std::vector<minimap_sketch_data> query{
         minimap_sketch_data{0xABCULL, 14u, 0u}};
 
@@ -918,7 +975,8 @@ TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target"
     seed::vulkan_seed_lookup_decline decline{};
     const bool ok = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        std::nullopt, std::addressof(idx), resident, true, 200, 500, 15,
+        std::nullopt, std::addressof(idx), resident, query_source.view(), target_source.view(),
+        true, 200, 500, 15,
         /*submitted_ordinal=*/11u,
         gpu_batch, /*context_backing_is_admitted=*/false,
         /*fused_frontend=*/false, &decline);
@@ -944,12 +1002,15 @@ TEST_CASE("vulkan seeding: empty query succeeds without fabricated dispatch stat
     context::installed_context_scope install{ctx};
     minimizer_hashmap_fragment_index idx;
     std::vector<minimap_sketch_data> empty;
+    const fixture_seed_source query_source{200u};
+    const fixture_seed_source target_source{0u};
     bioseq::simd::canonical_seed_batch batch{};
     seed::vulkan_seed_lookup_decline decline{};
 
     REQUIRE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{empty.data(), empty.size()},
-        std::nullopt, std::addressof(idx), nullptr, /*vulkan_enabled=*/true,
+        std::nullopt, std::addressof(idx), nullptr, query_source.view(), target_source.view(),
+        /*vulkan_enabled=*/true,
         /*query_len=*/200u, /*max_occ=*/500, /*kmer_size=*/15,
         /*submitted_ordinal=*/12u,
         batch, /*context_backing_is_admitted=*/false,
@@ -971,6 +1032,8 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
           "[component:bioseq][layer:unit][feature:seeding]") {
     const auto query = build_query();
     const auto idx = build_target();
+    const fixture_seed_source query_source{200u};
+    const fixture_seed_source target_source{idx.target_len, true};
 
     // Keep the context installed while seed batches may allocate arena, storage.
     context::context ctx;
@@ -983,6 +1046,8 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         std::nullopt,
         std::addressof(idx),
         nullptr,
+        query_source.view(),
+        target_source.view(),
         /*vulkan_enabled=*/false,
         200,
         500,
@@ -1001,6 +1066,8 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         std::nullopt,
         std::addressof(idx),
         nullptr,
+        query_source.view(),
+        target_source.view(),
         /*vulkan_enabled=*/true,
         200,
         500,
@@ -1013,11 +1080,14 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
     REQUIRE(decline.reason
             == seed::vulkan_seed_lookup_decline_reason::invalid_kmer_size);
 
+    const fixture_seed_source oversized_query_source{std::uint64_t{1} << 32};
     REQUIRE_FALSE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt,
         std::addressof(idx),
         nullptr,
+        oversized_query_source.view(),
+        target_source.view(),
         /*vulkan_enabled=*/true,
         std::uint64_t{1} << 32,
         500,
@@ -1036,6 +1106,8 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         std::nullopt,
         std::addressof(idx),
         nullptr,
+        query_source.view(),
+        target_source.view(),
         /*vulkan_enabled=*/true,
         200,
         500,
@@ -1175,5 +1247,6 @@ TEST_CASE("vulkan seeding: every typed decline reason has a stable metric name",
                 != "unknown");
     }
 }
+
 
 }  // namespace

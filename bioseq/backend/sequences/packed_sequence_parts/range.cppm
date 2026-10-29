@@ -66,7 +66,7 @@ struct compact_sequence_range_base {
     struct traits {
         using alphabet_type = p_alphabet;
         using storage_unit = p_packed_unit;
-        static constexpr bool is_bit_packed = true;
+        static constexpr bool is_bit_packed = p_bits_per_character != 0;
         static constexpr bool is_run_encoded = false;
 
         static constexpr std::size_t bits_per_char =
@@ -796,16 +796,16 @@ requires (
 )
 struct compact_sequence_range<p_range_type> : public compact_sequence_range_base<
     compact_sequence_range<p_range_type>,
-    std::remove_reference_t<std::ranges::range_reference_t<p_range_type>>,
+    std::remove_cvref_t<std::ranges::range_reference_t<const p_range_type>>,
     typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<
-        std::remove_reference_t<std::ranges::range_reference_t<p_range_type>>
+        std::remove_cvref_t<std::ranges::range_reference_t<const p_range_type>>
     >)>::least,
     0
 > {
 public:
     using traits = typename compact_sequence_range<
         p_range_type>::compact_sequence_range_base::traits;
-    using base_iterator_type = decltype(std::declval<p_range_type>().cbegin());
+    using base_iterator_type = std::ranges::iterator_t<const p_range_type>;
 
     const p_range_type& data_;
 
@@ -826,7 +826,7 @@ public:
         unpacked_rank_iterator,
         base_iterator_type,
         typename traits::storage_unit,
-        boost::use_default,
+        boost::random_access_traversal_tag,
         typename traits::storage_unit
     > {
     private:
@@ -834,7 +834,7 @@ public:
             unpacked_rank_iterator,
             base_iterator_type,
             typename traits::storage_unit,
-            boost::use_default,
+            boost::random_access_traversal_tag,
             typename traits::storage_unit
         > super_t;
     public:
@@ -844,6 +844,11 @@ public:
         template <typename p_friend_range_type>
         friend struct compact_sequence_range;
 
+        // Symbol views may yield values; rank traversal still supports constant-time jumps.
+        using iterator_category = std::random_access_iterator_tag;
+        using iterator_concept = std::random_access_iterator_tag;
+        using difference_type = std::iter_difference_t<base_iterator_type>;
+
         unpacked_rank_iterator() = default;
 
         /** @brief Binds a source alphabet iterator. */
@@ -851,49 +856,48 @@ public:
             : super_t(it) {}
 
 
-        auto operator <=>(const unpacked_rank_iterator&) const = default;
-
         /** @brief Returns the integer rank of the current alphabet symbol. */
         traits::storage_unit dereference() const {
             return static_cast<traits::storage_unit>(seqan3::to_rank(*this->base()));
         };
 
-        /** @brief Returns the source-element distance from another iterator. */
-        size_t operator-(unpacked_rank_iterator const& other) const {
-            return static_cast<size_t>(this->base() - other.base());
-        };
+        /** @brief Returns a rank at a signed offset without creating a proxy reference. */
+        typename traits::storage_unit operator[](difference_type offset) const {
+            return static_cast<typename traits::storage_unit>(
+                seqan3::to_rank(this->base()[offset]));
+        }
     };
 
     using iterator = unpacked_rank_iterator;
 
     /** Returns a read-only rank iterator to the first symbol. */
     unpacked_rank_iterator begin() {
-        return unpacked_rank_iterator(data_.cbegin());
+        return unpacked_rank_iterator(std::ranges::begin(data_));
     }
 
     /** Returns a read-only rank iterator past the  last symbol. */
     unpacked_rank_iterator end() {
-        return unpacked_rank_iterator(data_.cend());
+        return unpacked_rank_iterator(std::ranges::begin(data_) + std::ranges::distance(data_));
     }
 
     /** @brief Returns a constant adapter iterator to the first symbol. */
     unpacked_rank_iterator begin() const {
-        return unpacked_rank_iterator(data_.cbegin());
+        return unpacked_rank_iterator(std::ranges::begin(data_));
     }
 
     /** @brief Returns a constant adapter iterator past the final symbol. */
     unpacked_rank_iterator end() const {
-        return unpacked_rank_iterator(data_.cend());
+        return unpacked_rank_iterator(std::ranges::begin(data_) + std::ranges::distance(data_));
     }
 
     /** @brief Returns a constant adapter iterator to the first symbol. */
     unpacked_rank_iterator cbegin() const {
-        return unpacked_rank_iterator(data_.cbegin());
+        return unpacked_rank_iterator(std::ranges::begin(data_));
     }
 
     /** @brief Returns a constant adapter iterator past the final symbol. */
     unpacked_rank_iterator cend() const {
-        return unpacked_rank_iterator(data_.cend());
+        return unpacked_rank_iterator(std::ranges::begin(data_) + std::ranges::distance(data_));
     }
 
 
@@ -901,12 +905,13 @@ public:
 
     /** @brief Returns the rank at a logical symbol index. */
     const traits::storage_unit operator[](size_t index) const {
-        return static_cast<traits::storage_unit>(seqan3::to_rank(data_[index]));
+        return static_cast<traits::storage_unit>(seqan3::to_rank(
+            std::ranges::begin(data_)[static_cast<std::ranges::range_difference_t<const p_range_type>>(index)]));
     }
 
     /** @brief Returns the number of logical symbols. */
     constexpr size_t size() const {
-        return data_.size();
+        return std::ranges::size(data_);
     }
 
     /** @brief Tests equality of the borrowed alphabet ranges. */
@@ -924,7 +929,8 @@ public:
      * The cast leaves the backing object's C++ type unchanged.
      */
     constexpr static const typename traits::storage_unit* read_cptr(
-        const unpacked_rank_iterator& it) {
+        const unpacked_rank_iterator& it)
+        requires std::contiguous_iterator<base_iterator_type> {
         static_assert(sizeof(typename traits::alphabet_type)
                       == sizeof(typename traits::storage_unit));
         static_assert(
