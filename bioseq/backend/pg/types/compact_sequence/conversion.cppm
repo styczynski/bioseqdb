@@ -196,17 +196,17 @@ Datum translate(
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'aa27'"}})]] const std::string& target_alphabet,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"1"}})]] std::int32_t frame,
     [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"1"}})]] std::int32_t genetic_code,
-    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'reject'"}})]] const std::string& trailing) {
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'reject'"}})]] const std::string& trailing_policy) {
     if (frame == 0 || frame < -3 || frame > 3)
         pg_raise_sequence_conversion_error({sequence_conversion_error_code::invalid_frame});
     if (genetic_code != static_cast<std::int32_t>(seqan3::genetic_code::canonical))
         pg_raise_sequence_conversion_error({sequence_conversion_error_code::unsupported_genetic_code});
-    if (trailing != "reject" && trailing != "drop")
+    if (trailing_policy != "reject" && trailing_policy != "drop")
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
             errmsg("translation trailing policy must be 'reject' or 'drop'")));
     const bioseq::sequences::translation_options options{
         .frame = static_cast<std::int8_t>(frame), .code = seqan3::genetic_code::canonical,
-        .trailing = trailing == "drop" ? bioseq::sequences::incomplete_codon_policy::drop
+        .trailing = trailing_policy == "drop" ? bioseq::sequences::incomplete_codon_policy::drop
                                       : bioseq::sequences::incomplete_codon_policy::reject};
     return convert_sequence(source, conversion_destination(target_alphabet), conversion_direction::translate, options);
 }
