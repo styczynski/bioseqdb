@@ -1,6 +1,7 @@
 /**
  * @file index.cppm
- * Export the PostgreSQL sequence type and load its SQL operations.
+ * Export shared PostgreSQL sequence types and sequence operations.
+ * SQL-only interfaces remain separately owned to keep importer closures bounded.
  */
 export module bioseq.postgres.types.compact_sequence;
 
@@ -12,11 +13,6 @@ export import :view_session;
 export import :packed_output;
 
 export import :conversion;
-import :io;
-import :content;
+export import :io;
 export import :letter;
-import :subscript;
-import :concat_reverse;
-import :array_string;
 export import :cigar;
-import :sql_catalog;

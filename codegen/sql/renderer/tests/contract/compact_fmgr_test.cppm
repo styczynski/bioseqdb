@@ -100,15 +100,21 @@ inline constexpr std::array<routine_owner, 65> expected_routines{{
     {"tree_ops", "piece_tree_self_test", 0},
 }};
 
+// SQL-only owners are standalone modules so importing the compact sequence
+// value API does not load these unrelated SQL implementations into every user.
+inline constexpr std::array<std::string_view, 4> ordinary_routine_owners{{
+    "array_string", "concat_reverse", "content", "subscript",
+}};
+
 inline constexpr std::array<std::string_view, 9> expected_imports{{
-    "import :array_string;",
-    "import :concat_reverse;",
-    "import :content;",
+    "import bioseq.postgres.types.compact_sequence.array_string;",
+    "import bioseq.postgres.types.compact_sequence.concat_reverse;",
+    "import bioseq.postgres.types.compact_sequence.content;",
     "import :flat_abi;",
     "import :io;",
     "import :letter;",
     "import :packed_output;",
-    "import :subscript;",
+    "import bioseq.postgres.types.compact_sequence.subscript;",
     "import :tree_ops;",
 }};
 
@@ -129,9 +135,11 @@ inline constexpr std::array<std::string_view, 9> expected_imports{{
   }
   identity += ")";
 
+  const bool ordinary_owner = std::ranges::find(
+      ordinary_routine_owners, owner.partition) != ordinary_routine_owners.end();
   const std::string source_module =
-      "bioseq.postgres.types.compact_sequence:" +
-      std::string{owner.partition};
+      std::string{"bioseq.postgres.types.compact_sequence"} +
+      (ordinary_owner ? "." : ":") + std::string{owner.partition};
   return normalized_entity{
       .source =
           collected_entity{
@@ -192,7 +200,7 @@ inline void run_compact_fmgr_contract_tests() {
       "compact owners share the configured owner key");
   compact_fmgr_contract_detail::require(
       module.source_module
-          == "bioseq.postgres.types.compact_sequence:array_string",
+          == "bioseq.postgres.types.compact_sequence.array_string",
       "representative source owner is deterministic");
   compact_fmgr_contract_detail::require(
       module.module_name == "bioseq.postgres.types.compact_sequence:"
@@ -205,6 +213,12 @@ inline void run_compact_fmgr_contract_tests() {
         module.content.contains(expected_import),
         "generated partition imports every natural owner and ABI "
         "support partition");
+  }
+  for (const std::string_view ordinary_owner :
+       compact_fmgr_contract_detail::ordinary_routine_owners) {
+    compact_fmgr_contract_detail::require(
+        !module.content.contains("import :" + std::string{ordinary_owner} + ";"),
+        "standalone SQL owners must not be rewritten as sibling partitions");
   }
   const std::vector<std::string_view> expected_symbols =
       compact_fmgr_contract_detail::expected_symbols();

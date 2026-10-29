@@ -22,14 +22,10 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.postgres.types.compact_sequence:subscript;
+export module bioseq.postgres.types.compact_sequence.subscript;
 
 import bioseq.codegen.sql.annotation_model;
-import :flat_abi;
-import :tree_types;
-import :view_session;
-import :packed_output;
-import :letter;
+import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.support;
 import bioseq.storage.coordinates;
 

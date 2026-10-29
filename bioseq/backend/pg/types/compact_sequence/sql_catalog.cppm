@@ -2,11 +2,11 @@
  * @file sql_catalog.cppm
  * @brief Register default B-tree and hash support for letters and sequences.
  */
-export module bioseq.postgres.types.compact_sequence:sql_catalog;
+export module bioseq.postgres.types.compact_sequence.sql_catalog;
 
 import bioseq.codegen.sql.annotation_model;
-import :content;
-import :letter;
+import bioseq.postgres.types.compact_sequence.content;
+import bioseq.postgres.types.compact_sequence;
 
 namespace bioseq::pg_types::sql_catalog {
 

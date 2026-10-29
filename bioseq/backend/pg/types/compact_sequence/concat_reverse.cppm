@@ -14,14 +14,10 @@ extern "C" {
 #include "utils/builtins.h"
 }
 
-export module bioseq.postgres.types.compact_sequence:concat_reverse;
+export module bioseq.postgres.types.compact_sequence.concat_reverse;
 
 import bioseq.codegen.sql.annotation_model;
-import :flat_abi;
-import :io;
-import :tree_types;
-import :view_session;
-import :packed_output;
+import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 

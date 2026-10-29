@@ -24,18 +24,13 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.postgres.types.compact_sequence:array_string;
+export module bioseq.postgres.types.compact_sequence.array_string;
 
 import bioseq.postgres.support;
 
 import bioseq.codegen.sql.annotation_model;
-import :flat_abi;
-import :tree_types;
-import :view_session;
-import :packed_output;
-import :io;
-import :letter;
-import :subscript;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.postgres.types.compact_sequence.subscript;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.cigar;

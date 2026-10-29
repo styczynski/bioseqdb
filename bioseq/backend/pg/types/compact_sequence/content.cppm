@@ -31,14 +31,10 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.postgres.types.compact_sequence:content;
+export module bioseq.postgres.types.compact_sequence.content;
 
 import bioseq.codegen.sql.annotation_model;
-import :flat_abi;
-import :source_abi;
-import :tree_types;
-import :view_session;
-import :packed_output;
+import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.lazy_sequence;
 import bioseq.common.context;
 import bioseq.postgres.support.sql_boundary;
