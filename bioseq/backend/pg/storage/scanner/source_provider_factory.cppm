@@ -4,7 +4,16 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+#include "utils/relcache.h"
+#include "utils/snapshot.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 export module bioseq.postgres.storage.scanner.source_provider_factory;
 
@@ -21,5 +30,14 @@ export namespace bioseq::storage {
 [[nodiscard]] pg_sequence_source_provider*
 create_scan_pg_sequence_source_provider(Relation owning_relation,
                                         Snapshot authoritative_registered_snapshot);
+
+// The existing implementation unit owns cleanup so callers need only this contract,
+// without importing the complete scanner and its template implementations.
+/// Close and free a source provider. A null pointer does nothing.
+/// @param is_commit Report cleanup errors when true. Suppress them during abort.
+/// @throws PostgreSQL ERROR if commit cleanup fails or detects invalid state.
+/// @param provider Provider  to close, or null. Invalid after a successful return.
+void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
+                                       bool is_commit);
 
 } // namespace bioseq::storage

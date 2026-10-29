@@ -32,7 +32,7 @@ export import :custom_scan_per_row_join_runtime_contracts;
 export import :custom_scan_aligner_options_codec_contracts;
 
 import bioseq.common.logging;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.source_provider_factory;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
 

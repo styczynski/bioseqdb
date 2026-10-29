@@ -228,22 +228,6 @@ inline void release_pg_sequence_source_registry_lease_noexcept(
     maybe_destroy_registry_control(registry);
 }
 
-/// Close and free a source provider. A null pointer does nothing.
-/// @param is_commit Report cleanup errors when true. Suppress them during abort.
-/// @throws PostgreSQL ERROR if commit cleanup fails or detects invalid state.
-/// @param provider Provider  to close, or null. Invalid after a successful return.
-inline void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
-                                              bool is_commit) {
-    if (provider == nullptr) {
-        return;
-    }
-    if (is_commit) {
-        sequence_source_detail::close_provider_checked(*provider, true);
-    } else {
-        sequence_source_detail::close_provider_abort_noerror(*provider);
-    }
-}
-
 /// Clean up unused read domains while keeping this registry reference.
 /// @param boundary Cleanup event. A rescan can keep matching readers for reuse.
 /// @param is_commit Report cleanup errors when true. Suppress them during abort.

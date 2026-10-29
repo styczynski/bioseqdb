@@ -57,7 +57,6 @@ import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.storage.manager.sequence_storage.sql_entities;
 import bioseq.postgres.storage.manager.sql_rows;
-import bioseq.postgres.storage.scanner;
 import bioseq.storage.layout;
 import bioseq.postgres.table.am_cache;
 import bioseq.postgres.types.compact_sequence;

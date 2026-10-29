@@ -8,6 +8,7 @@ export module bioseq.postgres.storage.scanner;
 
 export import bioseq.postgres.storage.scanner.fragment_scanner;
 export import bioseq.postgres.storage.scanner.lazy_binding;
+export import bioseq.postgres.storage.scanner.source_provider_factory;
 export import :source_registry;
 export import :source_scanner;
 

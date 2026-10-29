@@ -24,7 +24,7 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_slice_path_runtime_contract;
 
 import std;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.source_provider_contract;
 import bioseq.postgres.types.compact_sequence;
 export import :custom_scan_slice_path_diagnostic_fixture_contracts;
 export import :custom_scan_planner_method_contracts;
