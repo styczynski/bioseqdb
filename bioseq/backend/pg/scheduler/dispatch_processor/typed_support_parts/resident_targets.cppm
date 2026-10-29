@@ -144,9 +144,8 @@ struct transient_physical_query {
 
     /** Borrow the canonical hashes retained with this query's memory permit. */
     [[nodiscard]] bioseq::indexing::canonical_query_hash_view canonical_query_hash_view() const {
-        const std::uint8_t width = layout.hash_width ==
-            bioseq::minimizers::minimizer_scalar_width::u32
-                ? sizeof(std::uint32_t) : sizeof(std::uint64_t);
+        const std::uint8_t width =
+            bioseq::indexing::canonical_minimizer_query_hash_storage_width(layout.hash_width);
         return {.values32 = hashes_u32, .values64 = hashes_u64,
                 .width_bytes = width, .storage_width_bytes = width};
     }
@@ -279,7 +278,9 @@ template <sequence_alphabet p_alphabet>
             result.layout = layout;
             if (retain_sorted_hashes) {
                 const std::uint64_t physical_owner_bytes = result.minimizers.capacity_bytes();
-                if (layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u32) {
+                const auto canonical_width =
+                    bioseq::indexing::canonical_minimizer_query_hash_storage_width(layout.hash_width);
+                if (canonical_width == sizeof(std::uint32_t)) {
                     if (!ensure_transient_vector_capacity(result.permit,
                                                           result.hashes_u32,
                                                           result.minimizers.size(),
@@ -308,12 +309,7 @@ template <sequence_alphabet p_alphabet>
                     std::ranges::sort(result.hashes_u32);
                     result.hashes_u32.erase(std::ranges::unique(result.hashes_u32).begin(),
                                             result.hashes_u32.end());
-                } else if (
-                    layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u64 ||
-                    (bioseq::minimizers::minimizer_physical_record_detail::
-                         k_has_32_bit_record &&
-                     layout.hash_width ==
-                         bioseq::minimizers::minimizer_scalar_width::u16)) {
+                } else if (canonical_width == sizeof(std::uint64_t)) {
                     if (!ensure_transient_vector_capacity(result.permit,
                                                           result.hashes_u64,
                                                           result.minimizers.size(),
@@ -1551,25 +1547,12 @@ template <sequence_alphabet p_alphabet>
             ERRCODE_FEATURE_NOT_SUPPORTED,
             "transient MPF query and target selected incompatible generated records");
     }
-    std::uint8_t canonical_hash_storage_width = 0u;
-    if (query.layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u32) {
-        canonical_hash_storage_width = static_cast<std::uint8_t>(sizeof(std::uint32_t));
-    } else if (
-        query.layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u64 ||
-        (bioseq::minimizers::minimizer_physical_record_detail::k_has_32_bit_record &&
-         query.layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u16)) {
-        canonical_hash_storage_width = static_cast<std::uint8_t>(sizeof(std::uint64_t));
-    } else {
+    const auto canonical_hashes = query.canonical_query_hash_view();
+    if (!canonical_hashes.storage_matches_width()) {
         raise_typed_dispatch_pg_error_as_cpp(
             ERRCODE_FEATURE_NOT_SUPPORTED,
             "transient MPF query selected an unsupported canonical hash width");
     }
-    const bioseq::indexing::canonical_query_hash_view canonical_hashes{
-        .values32 = std::span<const std::uint32_t>{query.hashes_u32},
-        .values64 = std::span<const std::uint64_t>{query.hashes_u64},
-        .width_bytes = canonical_hash_storage_width,
-        .storage_width_bytes = canonical_hash_storage_width,
-    };
     auto target_owner = build_admitted_transient_mpf_index(
         target_view,
         params,
@@ -1794,7 +1777,7 @@ template <sequence_alphabet p_alphabet>
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     std::expected<bioseq::indexing::prepared_grouped_soa_query_reader,
                   bioseq::indexing::minimizer_generation_encoding_error>
-        prepared = query.layout.hash_width == bioseq::minimizers::minimizer_scalar_width::u32
+        prepared = query.canonical_query_hash_view().width_bytes == sizeof(std::uint32_t)
             ? bioseq::indexing::prepared_grouped_soa_query_reader::begin(
                   admission,
                   encoded->head,

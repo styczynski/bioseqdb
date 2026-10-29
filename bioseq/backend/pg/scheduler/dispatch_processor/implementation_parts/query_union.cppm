@@ -474,7 +474,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
             effective_union_storage == cpu_query_union_storage::canonical_hashes;
         if (materialize_canonical) {
             group.canonical_query_hash_width =
-                static_cast<std::uint8_t>(group.execution_layout.hash_width);
+                bioseq::indexing::canonical_minimizer_query_hash_storage_width(
+                    group.execution_layout.hash_width);
         }
         for (cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
             const std::uint64_t retained_minimizer_bytes = retained.minimizers.capacity_bytes();
@@ -545,7 +546,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                     effective_union_storage ==
                         cpu_query_union_storage::canonical_hashes_sequential_fallback) {
                     group.canonical_query_hash_width =
-                        static_cast<std::uint8_t>(group.execution_layout.hash_width);
+                        bioseq::indexing::canonical_minimizer_query_hash_storage_width(
+                            group.execution_layout.hash_width);
                     const auto append_canonical =
                         [query_ordinal,
                          &group,

@@ -722,6 +722,20 @@ struct grouped_soa_bucket_directory_entry;
            width == minimizer_scalar_width::u64;
 }
 
+/**
+ * Choose the existing canonical query transport for a physical hash width.
+ * The narrow grouped reader accepts H32 only; H16 uses the existing general
+ * uint64 reader, as H64 does. This does not change the physical hash identity.
+ * Return zero for an unsupported physical width.
+ */
+[[nodiscard]] constexpr std::uint8_t canonical_minimizer_query_hash_storage_width(
+    const minimizer_scalar_width physical_width) noexcept {
+    if (!is_minimizer_scalar_width(physical_width)) return 0u;
+    return physical_width == minimizer_scalar_width::u32
+        ? static_cast<std::uint8_t>(sizeof(std::uint32_t))
+        : static_cast<std::uint8_t>(sizeof(std::uint64_t));
+}
+
 /// Return the largest unsigned integer for this width, or zero for an unknown width.
 [[nodiscard]] constexpr std::uint64_t
 minimizer_scalar_width_max(minimizer_scalar_width width) noexcept {

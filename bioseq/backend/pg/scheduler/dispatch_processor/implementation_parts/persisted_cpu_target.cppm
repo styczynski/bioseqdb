@@ -591,7 +591,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
         !group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u ||
         (!group.compact_direct_query_set_validation_pending &&
          group.canonical_query_hash_width_bytes() !=
-             static_cast<std::uint8_t>(algorithm_identity->hash_width)) ||
+             bioseq::indexing::canonical_minimizer_query_hash_storage_width(
+                 algorithm_identity->hash_width)) ||
         group.persisted_fragment_mapping_guard || group.persisted_fragment_reader ||
         group.persisted_grouped_soa_reader || group.persisted_hash_major_reader ||
         group.target_index) {

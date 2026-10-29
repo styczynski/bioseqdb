@@ -543,12 +543,15 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
         receipt.configured_core_span_bp = core_span_bp == 0 ? default_core_span : core_span_bp;
         const bool unfiltered = selected_hash_width == 0u && selected_hashes_u32.empty() &&
                                 selected_hashes_u64.empty();
+        // Canonical query keys may widen a physical hash field (for example H16
+        // into uint64_t). Require enough value bits; the checked generated identity
+        // below still binds the original hash definition and physical record.
         const bool selected_u32 =
             selected_hash_width == sizeof(std::uint32_t) && selected_hashes_u64.empty() &&
-            algorithm_identity.hash_width == bioseq::minimizers::minimizer_scalar_width::u32;
+            algorithm_identity.hash_bits <= std::numeric_limits<std::uint32_t>::digits;
         const bool selected_u64 =
             selected_hash_width == sizeof(std::uint64_t) && selected_hashes_u32.empty() &&
-            algorithm_identity.hash_width == bioseq::minimizers::minimizer_scalar_width::u64;
+            algorithm_identity.hash_bits <= std::numeric_limits<std::uint64_t>::digits;
         const auto sorted_unique = []<class p_hash>(std::span<const p_hash> hashes) noexcept {
             return std::ranges::is_sorted(hashes) &&
                    std::adjacent_find(hashes.begin(), hashes.end()) == hashes.end();

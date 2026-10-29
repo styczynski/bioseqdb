@@ -27,6 +27,7 @@ import bioseq.highway.dispatch_contract;
 import bioseq.postgres.support;
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.minimizer_physical_registry;
@@ -451,8 +452,8 @@ void append_cpu_prepared_query_sketch_view(
         }
         destination.insert(destination.end(), sketches.begin(), sketches.end());
     } else {
-        if (static_cast<std::uint8_t>(execution_layout.hash_width) !=
-            sizeof(p_destination_value)) {
+        if (bioseq::indexing::canonical_minimizer_query_hash_storage_width(
+                execution_layout.hash_width) != sizeof(p_destination_value)) {
             throw std::invalid_argument{
                 "canonical CPU query destination disagrees with its generated hash width"};
         }
