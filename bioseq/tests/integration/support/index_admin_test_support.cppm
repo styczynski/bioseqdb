@@ -11,8 +11,6 @@ module;
 export module bioseq.tests.integration.index_admin_test_support;
 
 import std;
-import bioseq.sequences.kmers.minimizer_physical_records;
-import bioseq.gpu.vulkan.abi;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::index_admin_test_support {
@@ -38,8 +36,8 @@ inline constexpr std::string_view k_table = "index_admin_t";
         long long expected_scheme_identity,
         long long expected_scheme_revision,
         long long expected_producer_identity) {
-    constexpr auto expected_producer_revision =
-        bioseq::minimizers::minimizer_profile_producer_identity_revision;
+    // This SQL-only fixture independently pins the persisted producer format.
+    constexpr unsigned expected_producer_revision = 2;
     const row_t inspected = query_one(ctx, fmt::format(
         "WITH inspected AS ("
         " SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
@@ -211,8 +209,7 @@ inline constexpr std::string_view k_table = "index_admin_t";
     REQUIRE(inspected[3].value() == "15");
     REQUIRE(inspected[4].value() == "10");
     // Check the format revisions expected by this fragment-index inspector
-    REQUIRE(inspected[5].value()
-            == std::to_string(bioseq::gpu::vulkan::k_gpu_grouped_soa_abi_revision));
+    REQUIRE(inspected[5].value() == "4");
     REQUIRE(inspected[6].value() == "2");
     REQUIRE(inspected[7].value()
             == std::to_string(expected_position_segment_span_bp));
