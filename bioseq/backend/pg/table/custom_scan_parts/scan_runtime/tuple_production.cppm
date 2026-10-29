@@ -16,6 +16,7 @@ extern "C" {
 #include "catalog/pg_language_d.h"
 #include "catalog/pg_proc.h"
 #include "commands/extension.h"
+#include "jit/jit.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/planmain.h"
 #include "storage/dsm.h"
@@ -543,6 +544,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 bool match_accepted = true;
                 std::exception_ptr projection_error;
                 MemoryContext saved_context = CurrentMemoryContext;
+                const int saved_jit_flags = node->ps.state->es_jit_flags;
                 ErrorData* volatile projection_pg_error = nullptr;
 #if PG_VERSION_NUM >= 190000
                 // PG19 specializes projections for the input slot type. Compile  against
@@ -588,8 +590,12 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                         if (runtime.match_result_quals != NIL) {
                             MemoryContext previous_context =
                                 MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+                            /* This predicate is compiled for one match only. JIT code
+                             * belongs to EState and survives the tuple-context reset. */
+                            node->ps.state->es_jit_flags = saved_jit_flags & ~PGJIT_EXPR;
                             ExprState* match_qual =
                                 ExecInitQual(runtime.match_result_quals, &node->ps);
+                            node->ps.state->es_jit_flags = saved_jit_flags;
                             match_accepted = ExecQual(match_qual, econtext);
                             MemoryContextSwitchTo(previous_context);
                         }
@@ -610,6 +616,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
 #endif
                         restore_mmsearch_sources(next->scan_slot_copy, source_restore);
                     } catch (...) {
+                        node->ps.state->es_jit_flags = saved_jit_flags;
 #if PG_VERSION_NUM >= 190000
                         restore_scan_projection_metadata();
 #endif
@@ -620,6 +627,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 }
                 PG_CATCH();
                 {
+                    node->ps.state->es_jit_flags = saved_jit_flags;
 #if PG_VERSION_NUM >= 190000
                     restore_scan_projection_metadata();
 #endif
