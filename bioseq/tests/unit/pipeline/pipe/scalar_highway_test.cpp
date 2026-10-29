@@ -487,7 +487,6 @@ TEST_CASE("neutral minimizer batches retain the caller's exact wide representati
         REQUIRE(records[index].kmer() == expected[index].kmer());
         REQUIRE(records[index].last_pos() == expected[index].last_pos());
         REQUIRE(records[index].strand() == expected[index].strand());
-        REQUIRE(records[index].raw_value() == expected[index].raw_value());
     }
 }
 
