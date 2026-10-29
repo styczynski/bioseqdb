@@ -99,6 +99,108 @@ template<class D, sequence_rank_transform Operation>
     return false;
 }
 
+/**
+ * Find the first rank-equal pattern within a bounded logical source interval.
+ *
+ * Candidate first/last ranks are compared in SIMD tiles; surviving candidates
+ * use the existing rank-equality kernel on bounded interior tiles. Both ranges
+ * are borrowed, and only MaxLanes-sized rank scratch is decoded at a time.
+ * Reduced alphabets compare their native ranks without a character round trip.
+ *
+ * @param tag Byte-lane Highway descriptor for the caller's selected target.
+ * @param source Native packed, unpacked, or run-encoded sequence to search.
+ * @param begin First logical source position, inclusive.
+ * @param end Last logical source position, exclusive.
+ * @param pattern Borrowed native pattern; a CSR over span<const Alphabet> works.
+ * @param start_position First candidate offset relative to begin.
+ * @return First match offset relative to begin, or nullopt for no match or an
+ * invalid interval/start. An empty pattern matches start_position when in range.
+ */
+template<class D, supports_compact_sequence_range Source,
+         supports_compact_sequence_range Pattern>
+    requires (std::same_as<hn::TFromD<D>, std::uint8_t>
+        && std::same_as<typename compact_sequence_range<Source>::traits::alphabet_type,
+                        typename compact_sequence_range<Pattern>::traits::alphabet_type>
+        && compact_sequence_range<Source>::traits::alphabet_size <=
+            std::size_t{1u} + std::numeric_limits<std::uint8_t>::max()
+        && requires(const compact_sequence_range<Source>& source,
+                    const compact_sequence_range<Pattern>& pattern,
+                    std::span<std::uint8_t> scratch) {
+            source.template to_encoded_into<false>(scratch, std::size_t{}, std::size_t{});
+            pattern.template to_encoded_into<false>(scratch, std::size_t{}, std::size_t{});
+        })
+[[nodiscard]] HWY_INLINE std::optional<std::size_t> find_symbol_subsequence(
+    D tag, const compact_sequence_range<Source>& source,
+    const std::size_t begin, const std::size_t end,
+    const compact_sequence_range<Pattern>& pattern,
+    const std::size_t start_position = 0u) {
+    if (begin > end || end > source.bp_size()) return std::nullopt;
+    const std::size_t interval_length = end - begin;
+    if (start_position > interval_length) return std::nullopt;
+    const std::size_t pattern_length = pattern.bp_size();
+    if (pattern_length == 0u) return start_position;
+    if (pattern_length > interval_length - start_position) return std::nullopt;
+
+    const std::size_t lane_count = hn::Lanes(tag);
+    HWY_ALIGN std::array<std::uint8_t, hn::MaxLanes(D{})> source_tile{};
+    HWY_ALIGN std::array<std::uint8_t, hn::MaxLanes(D{})> pattern_tile{};
+    pattern.template to_encoded_into<false>(
+        std::span{pattern_tile}.first(1u), 0u, 1u);
+    const auto first_rank = hn::Set(tag, pattern_tile.front());
+    pattern.template to_encoded_into<false>(
+        std::span{pattern_tile}.first(1u), pattern_length - 1u, pattern_length);
+    const auto last_rank = hn::Set(tag, pattern_tile.front());
+    const std::size_t last_candidate = interval_length - pattern_length;
+    for (std::size_t candidate_base = start_position;
+         candidate_base <= last_candidate;) {
+        const std::size_t active_lanes =
+            std::min(lane_count, last_candidate - candidate_base + 1u);
+        const std::size_t source_begin = begin + candidate_base;
+        source.template to_encoded_into<false>(
+            std::span{source_tile}.first(active_lanes), source_begin,
+            source_begin + active_lanes);
+        auto candidates = hn::And(hn::FirstN(tag, active_lanes),
+            hn::Eq(hn::LoadU(tag, source_tile.data()), first_rank));
+        if (pattern_length != 1u && !hn::AllFalse(tag, candidates)) {
+            const std::size_t last_begin = source_begin + pattern_length - 1u;
+            source.template to_encoded_into<false>(
+                std::span{pattern_tile}.first(active_lanes), last_begin,
+                last_begin + active_lanes);
+            candidates = hn::And(candidates,
+                hn::Eq(hn::LoadU(tag, pattern_tile.data()), last_rank));
+        }
+        while (!hn::AllFalse(tag, candidates)) {
+            const std::size_t lane =
+                static_cast<std::size_t>(hn::FindFirstTrue(tag, candidates));
+            const std::size_t candidate = candidate_base + lane;
+            bool equal = true;
+            const std::size_t interior_end = pattern_length - 1u;
+            for (std::size_t verified = 1u; verified < interior_end;) {
+                const std::size_t count = std::min(lane_count, interior_end - verified);
+                const std::size_t candidate_begin = begin + candidate + verified;
+                source.template to_encoded_into<false>(
+                    std::span{source_tile}.first(count), candidate_begin,
+                    candidate_begin + count);
+                pattern.template to_encoded_into<false>(
+                    std::span{pattern_tile}.first(count), verified, verified + count);
+                const auto compared = count_equal_rank_chunk_for<
+                    D, sequence_rank_validation::none>(
+                        tag, source_tile.data(), pattern_tile.data(), count, 0u);
+                if (compared.equal_symbols != count) {
+                    equal = false;
+                    break;
+                }
+                verified += count;
+            }
+            if (equal) return candidate;
+            // Consume candidates in source order without narrow lane-index arithmetic.
+            candidates = hn::And(candidates, hn::Not(hn::FirstN(tag, lane + 1u)));
+        }
+        candidate_base += active_lanes;
+    }
+    return std::nullopt;
+}
+
 /** @brief Choose between full-lane processing and the masked final chunk. */
 enum class sequence_iteration_part : std::uint8_t {
     full_matrix,

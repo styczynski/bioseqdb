@@ -372,35 +372,6 @@ struct compact_sequence_range_base {
         );
     };
 
-    /**
-     * @brief Finds a symbol subsequence in a packed-word interval.
-     *
-     * Decodes the interval and pattern to strings before searching.
-     * @param begin First packed word.
-     * @param end Iterator past the  last word.
-     * @param subsequence Symbols to find.
-     * @param start_position First symbol offset to search, relative to begin.
-     * @return Offset of the first match within the interval, or, no value.
-     */
-
-    template<typename p_iterator_type>
-    requires (valid_derived_iterator<p_iterator_type>::value == true)
-    constexpr std::optional<std::size_t> find_symbol_subsequence(
-        p_iterator_type begin,
-        p_iterator_type end,
-        std::vector<typename traits::alphabet_type> subsequence,
-        std::size_t start_position = 0) const
-    {
-        const auto sequence_string = to_string(begin, end);
-        const auto subsequence_string = symbols_vector_to_string(subsequence);
-        const auto position =
-            sequence_string.find(subsequence_string, start_position);
-        if (position == std::string::npos) {
-            return std::nullopt;
-        }
-        return position;
-    }
-
     template<typename p_iterator_type>
     requires (valid_derived_iterator<p_iterator_type>::value == true)
     constexpr std::string to_string(
