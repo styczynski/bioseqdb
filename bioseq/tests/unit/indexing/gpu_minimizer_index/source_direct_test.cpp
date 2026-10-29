@@ -12,6 +12,7 @@
 import std;
 import bioseq.common.seqan_adapter;
 import bioseq.common.logging;
+import bioseq.pipeline.runtime_contract;
 import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.gpu_minimizer_index;
