@@ -80,10 +80,13 @@ export {
     void require_bound_conversion_operand(Node* expression, const bioseq_stub_oids& oids) {
         bool dynamic_destination = false;
         const auto visit = [&oids](pg_expression_walk_cursor, pg_node_view node, bool& found) {
-            if (RelabelType* relabel = node.try_cast<RelabelType>(); relabel != nullptr &&
-                relabel->resulttype == oids.bioseq_seq_type_oid &&
-                batch_join_typmod_is_supported(relabel->resulttypmod))
-                return pg_walk_step::skip_subtree;
+            if (Node* expression_node = node.get();
+                expression_node != nullptr && IsA(expression_node, RelabelType)) {
+                const auto* relabel = reinterpret_cast<RelabelType*>(expression_node);
+                if (relabel->resulttype == oids.bioseq_seq_type_oid &&
+                    batch_join_typmod_is_supported(relabel->resulttypmod))
+                    return pg_walk_step::skip_subtree;
+            }
             FuncExpr* function = node.try_cast<FuncExpr>();
             if (function == nullptr || function->funcresulttype != oids.bioseq_seq_type_oid)
                 return pg_walk_step::descend;
