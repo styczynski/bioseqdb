@@ -450,8 +450,8 @@ struct first_var_visitor final {
 };
 
 /**
- * Keep a projection beside its source relation when a query has joins or
- * aggregates. Use the first column reference to build a PlaceHolderVar.
+ * Keep a projection beside its source relation when a query has joins,
+ * aggregates, or windows. Use the first column reference to build a PlaceHolderVar.
  * Return nullptr if the request cannot be rewritten or has no column reference.
  */
 [[nodiscard]] Node* try_wrap_in_placeholder(
@@ -465,7 +465,9 @@ struct first_var_visitor final {
 	const bool has_joins = planner_root->hasJoinRTEs;
 	const bool has_aggregates =
 		planner_root->parse != nullptr && planner_root->parse->hasAggs;
-	if (!has_joins && !has_aggregates) {
+	const bool has_windows =
+		planner_root->parse != nullptr && planner_root->parse->hasWindowFuncs;
+	if (!has_joins && !has_aggregates && !has_windows) {
 		return nullptr;
 	}
 	first_var_finder finder{};
@@ -502,7 +504,7 @@ namespace bioseq::pg::sql_routines {
 
 /**
  * Give direct symbol counting a high planner cost and keep its projection
- * at the source relation in queries with joins or aggregates.
+ * at the source relation in queries with joins, aggregates, or windows.
  */
 Datum bioseq_symbol_count_support(
         Datum request_datum) {
@@ -520,8 +522,8 @@ Datum bioseq_symbol_count_support(
 	}
 	if (SupportRequestSimplify* simplify_request =
 			try_cast_pg_node<SupportRequestSimplify>(request_node)) {
-		/* Evaluate symbol_count at  its source relation so joins or aggregates
-		 * do not duplicate the projection work. */
+		/* Evaluate symbol_count at its source relation so joins, aggregates,
+		 * or windows do not duplicate the projection work. */
 		Node* const placeholder = try_wrap_in_placeholder(simplify_request);
 		if (placeholder != nullptr) {
 			return PointerGetDatum(placeholder);
@@ -568,7 +570,7 @@ Datum mmsearch_support(
 
 /**
  * Keep alignment-result projections at the scan that supplies their values
- * when the query contains joins or aggregates. Return NULL if PostgreSQL
+ * when the query contains joins, aggregates, or windows. Return NULL if PostgreSQL
  * should keep the original function expression.
  */
 Datum bioseq_placeholder_support(
