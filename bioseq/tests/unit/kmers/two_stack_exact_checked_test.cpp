@@ -599,7 +599,9 @@ TEST_CASE("two_stack_nthash checked table — resident vector-stream fingerprint
         fingerprint = (fingerprint ^ raw) * 1099511628211ULL;
     }
     REQUIRE(result.records.size() == 754u);
-    REQUIRE(fingerprint == 0x0f4a56dc592b279dULL);
+    // Independent full-window enumeration preserves every canonical rank bit;
+    // the historical golden cleared bit 0 before scrambling 305 selected codes.
+    REQUIRE(fingerprint == 0x9fb367ffc996e029ULL);
     const auto& stats = result.kernel.stats.two_stack;
     REQUIRE(stats.is_internally_consistent(true));
     REQUIRE(stats.resident_vector_stream_kernel_calls == 1u);
@@ -627,7 +629,7 @@ TEST_CASE("two_stack_nthash checked table — K15/W10 tie chronology is exact",
     REQUIRE(stats.tie_raw_verification_batches > 0u);
 }
 
-TEST_CASE("two_stack_nthash checked table — reachable K15 hash sentinel is not emitted",
+TEST_CASE("two_stack_nthash checked table — maximum K15 hash remains a valid record",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     using representation = minimizer_representation<31u, 32u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
@@ -644,28 +646,25 @@ TEST_CASE("two_stack_nthash checked table — reachable K15 hash sentinel is not
     REQUIRE((bioseq::simd::minimap_int_hasher<seq::dna4>::template
         scramble<std::uint32_t>(canonical, std::uint32_t{0x3fffffffu}))
         == 0x3fffffffu);
-    const std::string bases =
-        std::string{"GTCGAGTACCGTACGATCGTACGATCG"}
-        + std::string{sentinel_kmer}
-        + std::string{"CTAGGCTACGATTCGACGTAGCTAGCA"};
     std::vector<seq::dna4> data;
-    data.reserve(bases.size());
-    for (const char base : bases) {
+    data.reserve(sentinel_kmer.size());
+    for (const char base : sentinel_kmer) {
         seq::dna4 symbol{};
         symbol.assign_char(base);
         data.push_back(symbol);
     }
     const auto result = run_resident<
-        seq::dna4, std::uint32_t, representation>(data, 10u, 15u);
-    require_success(result, dna4_oracle<representation>(data, 10u, 15u));
-    REQUIRE(std::ranges::none_of(result.records, [](const exact_record& record) {
-        return record.hash == 0x3fffffffull;
-    }));
+        seq::dna4, std::uint32_t, representation>(data, 1u, 15u);
+    require_success(result, dna4_oracle<representation>(data, 1u, 15u));
+    REQUIRE(result.records.size() == 1u);
+    REQUIRE(result.records.front().hash == 0x3fffffffu);
+    REQUIRE(result.records.front().position == sentinel_kmer.size() - 1u);
+    REQUIRE(result.records.front().strand == 0u);
 }
 
 TEST_CASE("two_stack_nthash checked table — 33-bit emitted positions remain exact",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<31u, 32u>;
+    using representation = minimizer_representation<63u, 32u>;
     constexpr std::size_t output_base = static_cast<std::size_t>(
         (std::numeric_limits<std::uint32_t>::max)()) + 8192u;
     const auto data = fixture(257u);

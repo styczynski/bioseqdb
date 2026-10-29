@@ -122,8 +122,8 @@ private:
             self.protocol_ok = false;
             return false;
         }
-        if constexpr (std::same_as<typename p_minimizer_type::storage_type,
-                                   std::uint64_t>) {
+        if constexpr (bioseq::minimizers::exact_simd_minimizer_representation<
+                          p_minimizer_type>) {
             try {
                 const auto decoded = std::span<const std::uint64_t>{raw, count}
                     | std::views::transform([](const std::uint64_t value) {
@@ -632,14 +632,16 @@ TEST_CASE("two_stack continuation — window and k-mer supported boundaries",
     }
 
     SECTION("maximum supported window and k-mer sizes") {
+        // Logical K31 needs 62 hash bits, independently of position capacity.
+        using representation = minimizer_representation<63u, 64u>;
         constexpr std::size_t w = k_max_two_stack_window;
         constexpr std::size_t k = k_max_exact_two_stack_kmer;
         const auto data = fixture(k + w + 41u);
-        const auto result = run_fragmented(
+        const auto result = run_fragmented<representation>(
             data,
             adjacent_specs({{0u, 37u}, {37u, 181u}, {181u, data.size()}}),
             w, k);
-        require_success(result, scalar_oracle(data, w, k));
+        require_success(result, scalar_oracle<representation>(data, w, k));
     }
 }
 
@@ -663,7 +665,7 @@ TEST_CASE("two_stack continuation — unaligned packed source range",
     REQUIRE(result.stats.packed_word_boundary_merges > 0u);
 }
 
-TEST_CASE("two_stack continuation — real hash sentinel is never emitted",
+TEST_CASE("two_stack continuation — maximum K15 hash remains a valid record",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     using representation = minimizer_representation<31u, 32u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
@@ -682,13 +684,16 @@ TEST_CASE("two_stack continuation — real hash sentinel is never emitted",
     const std::uint32_t canonical = std::min(forward, reverse);
     REQUIRE((bioseq::simd::minimap_int_hasher<seq::dna4>::template
         scramble<std::uint32_t>(canonical, std::uint32_t{0x3fffffffu}))
-        == representation::k_hash_field_mask);
+        == 0x3fffffffu);
     const auto expected = scalar_oracle<representation>(data, 1u, 15u);
     const auto result = run_fragmented<representation>(
         data, adjacent_specs({{0u, 3u}, {3u, data.size()}}), 1u, 15u);
     require_success(result, expected);
-    REQUIRE(result.records.empty());
-    REQUIRE(result.stats.final_flush_records == 0u);
+    REQUIRE(result.records.size() == 1u);
+    REQUIRE(result.records.front().hash == 0x3fffffffu);
+    REQUIRE(result.records.front().position == sentinel_kmer.size() - 1u);
+    REQUIRE(result.records.front().strand == 0u);
+    REQUIRE(result.stats.final_flush_records == 1u);
 }
 
 TEST_CASE("two_stack continuation — unsupported layout rejects before stats work",

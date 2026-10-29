@@ -422,13 +422,13 @@ TEST_CASE("hash-major exact wire codecs preserve the grouped-SoA layout",
         std::byte{0xaa},
     };
     const std::array<std::byte, 32> expected_storage_profile_digest{
-        std::byte{0x18}, std::byte{0xdb}, std::byte{0x2e}, std::byte{0x20}, std::byte{0x33},
-        std::byte{0x2c}, std::byte{0xeb}, std::byte{0x74}, std::byte{0xbe}, std::byte{0xb2},
-        std::byte{0x4d}, std::byte{0xda}, std::byte{0x8e}, std::byte{0xf6}, std::byte{0xa5},
-        std::byte{0xd2}, std::byte{0x82}, std::byte{0x17}, std::byte{0x34}, std::byte{0x18},
-        std::byte{0x50}, std::byte{0xbe}, std::byte{0x23}, std::byte{0x94}, std::byte{0x7f},
-        std::byte{0xd8}, std::byte{0x46}, std::byte{0x35}, std::byte{0x26}, std::byte{0x2e},
-        std::byte{0xa1}, std::byte{0xfb},
+        std::byte{0xc3}, std::byte{0x1a}, std::byte{0x16}, std::byte{0xdd}, std::byte{0x55},
+        std::byte{0x13}, std::byte{0xd3}, std::byte{0xf7}, std::byte{0x57}, std::byte{0xf9},
+        std::byte{0x5d}, std::byte{0x9b}, std::byte{0x2a}, std::byte{0x0e}, std::byte{0x9b},
+        std::byte{0x0b}, std::byte{0x81}, std::byte{0x27}, std::byte{0xf4}, std::byte{0xf9},
+        std::byte{0x22}, std::byte{0x03}, std::byte{0xdc}, std::byte{0x9a}, std::byte{0xa4},
+        std::byte{0x78}, std::byte{0x1b}, std::byte{0x3c}, std::byte{0x15}, std::byte{0xb6},
+        std::byte{0x9a}, std::byte{0x9a},
     };
     REQUIRE(decoded_head->source_identity == expected_source_identity);
     REQUIRE(decoded_head->storage_profile_digest == expected_storage_profile_digest);
@@ -442,27 +442,27 @@ TEST_CASE("hash-major exact wire codecs preserve the grouped-SoA layout",
     REQUIRE(decoded_manifest->streams[0].stream_crc64 == 0xd9cbbef0ecb8f6a4ULL);
     REQUIRE(decoded_manifest->streams[1].stream_crc64 == 0xbfd39c3c3e488c19ULL);
     REQUIRE(decoded_manifest->streams[2].stream_crc64 == 0x5cf59f98c6058b27ULL);
-    REQUIRE(decoded_manifest->generation_crc64 == 0xedd9cd57f12d5423ULL);
-    REQUIRE(decoded_head->manifest_payload_crc64 == 0xe8bab5bdeba98b87ULL);
-    REQUIRE(decoded_head->manifest_address_bound_row_crc64 == 0x8fdbf93d04832856ULL);
-    REQUIRE(decoded_head->head_crc64 == 0xdc5d0729f8d20fc8ULL);
+    REQUIRE(decoded_manifest->generation_crc64 == 0x109db33f8bfbb7edULL);
+    REQUIRE(decoded_head->manifest_payload_crc64 == 0xa1c203df0ece81fbULL);
+    REQUIRE(decoded_head->manifest_address_bound_row_crc64 == 0xc6a34f5fe1e4222aULL);
+    REQUIRE(decoded_head->head_crc64 == 0xe300183f498b3d6dULL);
 
     // Compare every encoded byte with fixed expected images, including
     // padding, checksums, and control records.
     REQUIRE(hash_major_hex(fixture.metadata.encoded_head) ==
             "42534551474836000600e000000000005b000000000000001100000000000000"
             "17000000000000009ee739aa80f743dc1ff3353ea504e3aaefcdab8967452301"
-            "18db2e20332ceb74beb24dda8ef6a5d28217341850be23947fd84635262ea1fb"
+            "c31a16dd5513d3f757f95d9b2a0e9b0b8127f4f92203dc9aa4781b3c15b69a9a"
             "0000000000000000000000000000000000000000000000005001000001000000"
-            "562883043df9db8f878ba9ebbdb5bae8c80fd2f829075ddc0000000000000000"
+            "2a22e4e15f4fa3c6fb81ce0edf03c2a16d3d8b493f1800e30000000000000000"
             "0000000000000000000000000000000000000000000000000000000000000000"
             "0000000000000000000000000000000000000000000000000000000000000000");
     REQUIRE(hash_major_hex(fixture.metadata.encoded_manifest) ==
             "425345514e4c36000600c000000000005b000000000000001700000000000000"
             "9ee739aa80f743dc1ff3353ea504e3aaefcdab89674523016400000000000000"
             "0300000000000000050000000000000000000000000000000f000a0004040003"
-            "0100010001000100010000000010000018db2e20332ceb74beb24dda8ef6a5d2"
-            "8217341850be23947fd84635262ea1fba4f6b8ecf0becbd923542df157cdd9ed"
+            "01000100010001000200000000100000c31a16dd5513d3f757f95d9b2a0e9b0b"
+            "8127f4f92203dc9aa4781b3c15b69a9aa4f6b8ecf0becbd9edb7fb8b3fb39d10"
             "4800000000000000140000000000000001000000000000000000000000000000"
             "0100010050000000010000000000000050000000000000000100000000000000"
             "a4f6b8ecf0becbd9000000000000000002000100000000000300000000000000"

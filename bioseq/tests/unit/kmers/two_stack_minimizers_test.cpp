@@ -350,8 +350,10 @@ void require_fixed_resident_vector_stream_parity(
 
     // Compare a fingerprint after sorting and removing duplicates, so repeated
     // output from overlapping SIMD streams does not change the expected result.
-    // The reference comes from commit 847df443500008b453250ebedfa0d802b5dade88,
-    // source blob e9e433d0d58c1e71eef2d550bada0c4bd1b92e56.
+    // Independently enumerate every K15/W10 window, select the minimum
+    // (u32(canonical * 0x9e3779b9) & 0xffff0000, endpoint), then scramble
+    // the complete canonical code. Preserving rank bit 0 changes 305 of the
+    // 754 records: the old strand-in-bit-0 encoding discarded that rank bit.
     std::uint64_t normalized_fingerprint = 1469598103934665603ULL;
     for (const minimizer_record& record : actual) {
         const auto raw = minimap_sketch_data{
@@ -360,7 +362,7 @@ void require_fixed_resident_vector_stream_parity(
             (normalized_fingerprint ^ raw) * 1099511628211ULL;
     }
     REQUIRE(actual.size() == 754u);
-    REQUIRE(normalized_fingerprint == 0x0f4a56dc592b279dULL);
+    REQUIRE(normalized_fingerprint == 0x9fb367ffc996e029ULL);
 
     const auto& stats = result.stats.two_stack;
     REQUIRE(stats.is_internally_consistent(true));

@@ -104,7 +104,9 @@ using range_type = compact_sequence_range<dna4_u64>;
     parameters.mismatch_pen = 4;
     parameters.gap_open1 = 20;
     parameters.gap_ext1 = 5;
-    parameters.gap_open2 = 40;
+    // Preserve two affine branches within KSW's narrow-difference score contract:
+    // 4 * max(20 + 5, 26 + 2) + 2 * max(2, 4) == 120.
+    parameters.gap_open2 = 26;
     parameters.gap_ext2 = 2;
     parameters.bandwidth = 64;
     parameters.zdrop = 100;

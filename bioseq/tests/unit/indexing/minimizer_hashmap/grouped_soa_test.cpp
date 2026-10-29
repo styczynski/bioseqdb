@@ -338,7 +338,9 @@ TEST_CASE("READY identity uses generated fragment and sequence position classes"
         32u,
         20u,
         15u);
-    REQUIRE_FALSE(narrow_reference_k20.has_value());
+    // Packed source words and exact rolling hash lanes have independent widths.
+    REQUIRE(narrow_reference_k20.has_value());
+    REQUIRE(narrow_reference_k20->packed_storage_bits == 32u);
     const auto wide_reference_k20 = select_minimizer_generation_algorithm_identity_runtime(
         minimizer_algorithm::simd_minimap2_reference,
         32'768u,
@@ -348,6 +350,9 @@ TEST_CASE("READY identity uses generated fragment and sequence position classes"
         15u);
     REQUIRE(wide_reference_k20.has_value());
     REQUIRE(wide_reference_k20->packed_storage_bits == 64u);
+    REQUIRE(narrow_reference_k20->physical_record_id == wide_reference_k20->physical_record_id);
+    REQUIRE(narrow_reference_k20->hash_bits == wide_reference_k20->hash_bits);
+    REQUIRE(narrow_reference_k20->highway_owner_id == wide_reference_k20->highway_owner_id);
     REQUIRE(wide_reference_k20->runtime_kmer_size == 20u);
     REQUIRE(wide_reference_k20->runtime_window_size == 15u);
     REQUIRE(minimizer_sketch_backend_for_effective_algorithm(
