@@ -697,7 +697,8 @@ template <class p_sequence,
                                 *prepared_group->persisted_hash_major_reader,
                                 execution_plan,
                                 /*gpu_index_cache=*/nullptr,
-                                bioseq::indexing::gpu_index_cache_identity{});
+                                bioseq::indexing::gpu_index_cache_identity{},
+                                /*allow_gpu_target_index_build=*/false);
                         } else if (has_fragment_reader) {
                             collection = run_aligner_pg_checked(
                                 "fragment-native single-query anchor preparation",
@@ -768,7 +769,8 @@ template <class p_sequence,
                                 *prepared_group->persisted_grouped_soa_reader,
                                 execution_plan,
                                 /*gpu_index_cache=*/nullptr,
-                                bioseq::indexing::gpu_index_cache_identity{});
+                                bioseq::indexing::gpu_index_cache_identity{},
+                                /*allow_gpu_target_index_build=*/false);
                         }
                         if (prepared_group->persisted_reader_queries == 0u &&
                             prepared_group->persisted_reader_load_host_wall_ns != 0u) {
@@ -795,7 +797,8 @@ template <class p_sequence,
                             execution_plan,
                             /*gpu_index_cache=*/nullptr,
                             bioseq::indexing::gpu_index_cache_identity{
-                                .assembly_identity = prepared_group->key_set_checksum});
+                                .assembly_identity = prepared_group->key_set_checksum},
+                            /*allow_gpu_target_index_build=*/false);
                         ++prepared_group->target_index_reuses;
                         assembled = true;
                         scanner_pg_ctx->target_index_sources[row_index] =
@@ -923,7 +926,8 @@ template <class p_sequence,
                                         *cached_index_entry->index,
                                         execution_plan,
                                         pg_gpu_index_cache_ptr,
-                                        gpu_identity);
+                                        gpu_identity,
+                                        /*allow_gpu_target_index_build=*/false);
                                 }
                             if (prepared_group != nullptr &&
                                 !prepared_group->target_index_permit.has_value()) {
@@ -965,7 +969,8 @@ template <class p_sequence,
                                     execution_plan,
                                     /*gpu_index_cache=*/nullptr,
                                     bioseq::indexing::gpu_index_cache_identity{
-                                        .assembly_identity = prepared_group->key_set_checksum});
+                                        .assembly_identity = prepared_group->key_set_checksum},
+                                    /*allow_gpu_target_index_build=*/false);
                             }
                             match_result_collection match_collection =
                                 minimap_port_fragment_index_vector_pg_checked(
@@ -975,7 +980,8 @@ template <class p_sequence,
                                     assembled_index,
                                     execution_plan,
                                     pg_gpu_index_cache_ptr,
-                                    gpu_identity);
+                                    gpu_identity,
+                                    /*allow_gpu_target_index_build=*/false);
                             bioseq::storage::indexing::store_assembled_index(
                                 cache_key, std::move(assembled_index));
                             return match_collection;
@@ -1105,7 +1111,8 @@ template <class p_sequence,
                                                             *cached_index_entry->index,
                                                             execution_plan,
                                                             pg_gpu_index_cache_ptr,
-                                                            gpu_identity);
+                                                            gpu_identity,
+                                                            /*allow_gpu_target_index_build=*/false);
                                                     }
                                                 if (prepared_group != nullptr &&
                                                     !prepared_group->target_index_permit
@@ -1167,7 +1174,8 @@ template <class p_sequence,
                                                         /*gpu_index_cache=*/nullptr,
                                                         bioseq::indexing::gpu_index_cache_identity{
                                                             .assembly_identity =
-                                                                prepared_group->key_set_checksum});
+                                                                prepared_group->key_set_checksum},
+                                                        /*allow_gpu_target_index_build=*/false);
                                                 }
                                                 match_result_collection match_collection =
                                                     minimap_port_fragment_index_vector_pg_checked(
@@ -1177,7 +1185,8 @@ template <class p_sequence,
                                                         assembled_index,
                                                         execution_plan,
                                                         pg_gpu_index_cache_ptr,
-                                                        gpu_identity);
+                                                        gpu_identity,
+                                                        /*allow_gpu_target_index_build=*/false);
                                                 bioseq::storage::indexing::store_assembled_index(
                                                     cache_key, std::move(assembled_index));
                                                 return match_collection;
