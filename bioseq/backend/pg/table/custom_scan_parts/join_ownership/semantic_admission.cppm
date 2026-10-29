@@ -412,6 +412,25 @@ export {
             if (validation.invalid)
                 return false;
         }
+        /* A match-result predicate can be pushed into its target base relation
+         * before the join owns mmsearch. Carry its whole helpers and ordinary
+         * input columns through the same support path as SELECT expressions;
+         * PlanCustomPath moves the predicate to the emitting match owner. */
+        if (target_relid >= static_cast<Index>(root->simple_rel_array_size) ||
+            root->simple_rel_array[target_relid] == nullptr) {
+            return false;
+        }
+        for (RestrictInfo* restriction : postgres_list<RestrictInfo>(
+                 root->simple_rel_array[target_relid]->baserestrictinfo)) {
+            Node* predicate = restriction == nullptr
+                                  ? nullptr
+                                  : reinterpret_cast<Node*>(restriction->clause);
+            if (!batch_join_expression_has_match_helper(predicate, *validation.oids))
+                continue;
+            walk_pg_expression_including_root(predicate, validation, visitor);
+            if (validation.invalid)
+                return false;
+        }
         return true;
     }
 

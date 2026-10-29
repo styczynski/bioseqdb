@@ -38,6 +38,7 @@ import :custom_scan_join_ownership_semantic_admission_contracts;
 import :custom_scan_join_ownership_descendant_neutralization_contracts;
 import :custom_scan_join_plan_placeholder_registration_contracts;
 import :custom_scan_join_plan_setrefs_contracts;
+import :custom_scan_per_row_join_paths_carrier_contracts;
 export import :custom_scan_join_plan_plan_construction_contracts;
 
 using namespace bioseq::postgres::support;
@@ -287,6 +288,79 @@ export {
                 per_row_append_unique_expression(current_owner_helper_identities, identity);
             }
         }
+        /* PostgreSQL pushes target-only helper predicates into base scans before
+         * the per-row mmsearch owner exists. Move whole conjuncts, including any
+         * OR/CASE/NULL behavior, to this owner's normal ExecScan qual. Descendant
+         * match owners and subqueries keep their own predicates and scope. */
+        List* match_result_quals = NIL;
+        List* pending_plans = list_make1(child_plan);
+        while (pending_plans != NIL) {
+            Plan* descendant = reinterpret_cast<Plan*>(linitial(pending_plans));
+            pending_plans = list_delete_first(pending_plans);
+            if (descendant == nullptr || IsA(descendant, SubqueryScan))
+                continue;
+            if (IsA(descendant, CustomScan)) {
+                auto* scan = reinterpret_cast<CustomScan*>(descendant);
+                if (scan->methods == bioseq_batch_join_scan_methods())
+                    continue;
+                if (scan->methods == bioseq_column_scan_scan_methods()) {
+                    /* A base match owner defers its own predicates in field four;
+                     * its remaining filters stay within that descendant scope. */
+                    if (list_length(scan->custom_exprs) < 4 ||
+                        list_nth(scan->custom_exprs, 3) != nullptr)
+                        continue;
+                    List* retained = NIL;
+                    List* moved = NIL;
+                    for (Node* predicate : postgres_list<Node>(descendant->qual)) {
+                        bool saw_helper = false;
+                        if (!per_row_expression_uses_available_helpers(
+                                predicate, current_owner_helper_identities, saw_helper) ||
+                            !saw_helper) {
+                            retained = lappend(retained, predicate);
+                            continue;
+                        }
+                        if (contain_subplans(predicate) || expression_returns_set(predicate)) {
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                     errmsg("unsupported BioseqPerRowMmsearch match-result predicate"),
+                                     errhint("Apply subquery or set-returning predicates in a "
+                                             "separate query level.")));
+                        }
+                        moved = lappend(moved, predicate);
+                        match_result_quals = lappend(match_result_quals, predicate);
+                    }
+                    if (moved != NIL) {
+                        descendant->qual = retained;
+                        /* These are the storage/plain/vector copies of the same
+                         * predicates. Preserve the owned-mmsearch and local
+                         * post-match fields at positions three and four. */
+                        for (int index = 0; index < 3; ++index) {
+                            auto* expressions = reinterpret_cast<List*>(
+                                list_nth(scan->custom_exprs, index));
+                            lfirst(list_nth_cell(scan->custom_exprs, index)) =
+                                list_difference(expressions, moved);
+                        }
+                    }
+                    continue;
+                }
+                pending_plans = list_concat(pending_plans, list_copy(scan->custom_plans));
+                continue;
+            }
+            if (IsA(descendant, Append)) {
+                pending_plans = list_concat(pending_plans,
+                    list_copy(reinterpret_cast<Append*>(descendant)->appendplans));
+                continue;
+            }
+            if (IsA(descendant, MergeAppend)) {
+                pending_plans = list_concat(pending_plans,
+                    list_copy(reinterpret_cast<MergeAppend*>(descendant)->mergeplans));
+                continue;
+            }
+            if (outerPlan(descendant) != nullptr)
+                pending_plans = lappend(pending_plans, outerPlan(descendant));
+            if (innerPlan(descendant) != nullptr && innerPlan(descendant) != outerPlan(descendant))
+                pending_plans = lappend(pending_plans, innerPlan(descendant));
+        }
         for (Node* identity : postgres_list<Node>(plan_owner_support.helper_identities)) {
             if (!batch_join_descendant_owns_helper_identity(child_plan, identity))
                 continue;
@@ -531,6 +605,19 @@ export {
                      errmsg("BioseqPerRowMmsearch plan-only helper binding count is invalid")));
         }
         validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
+        List* executable_match_quals = NIL;
+        List* predicate_bindings = NIL;
+        for (Node* predicate : postgres_list<Node>(match_result_quals)) {
+            Expr* executable = batch_join_rewrite_output_for_setrefs(
+                reinterpret_cast<Expr*>(predicate), combined_tlist, oids,
+                current_site_first_resno, inherited_helper_identities);
+            executable_match_quals = lappend(executable_match_quals, executable);
+            predicate_bindings = lappend(predicate_bindings,
+                makeTargetEntry(executable,
+                                static_cast<AttrNumber>(list_length(predicate_bindings) + 1),
+                                nullptr, true));
+        }
+        validate_batch_join_setrefs_coverage(predicate_bindings, combined_tlist);
         /* PostgreSQL uses custom_restrictinfo while planning, including
          * filters that do not depend on a row, and may pass NIL clauses here.
          * The checked mmsearch expression and child-plan audit establish
@@ -544,7 +631,7 @@ export {
         cscan->flags = best_path->flags;
         cscan->scan.scanrelid = 0;
         cscan->scan.plan.targetlist = output_tlist;
-        cscan->scan.plan.qual = NIL;
+        cscan->scan.plan.qual = executable_match_quals;
         cscan->custom_exprs = NIL;
         cscan->custom_plans = custom_plans;
         cscan->custom_scan_tlist = combined_tlist;
