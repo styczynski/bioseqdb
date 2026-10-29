@@ -89,20 +89,21 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N is a native seedable rank)",
         k,
         w);
     const auto gpu = triples(gpu_values);
-    // Check that every emitted k-mer avoids N in the decoded input.
+    // The ten 15-mers ending at positions 20 through 29 all overlap N, so
+    // that complete window must select at least one N-containing minimizer.
     const auto decoded = compact_sequence_range<seq_type>(dna5_with_n).to_string();
     std::vector<std::size_t> n_positions;
     for (std::size_t i = 0; i < decoded.size(); ++i)
         if (decoded[i] == 'N')
             n_positions.push_back(i);
+    bool saw_n_containing_minimizer = false;
     for (const auto& [last_pos, kmer, strand] : gpu) {
         const std::size_t lo = (last_pos + 1 >= k) ? (last_pos + 1 - k) : 0;
         for (const std::size_t np : n_positions) {
-            ASSERT(np < lo || np > last_pos,
-                   fmt::format("GPU minimizer at {} spans an N at {}", last_pos, np),
-                   last_pos);
+            saw_n_containing_minimizer |= np >= lo && np <= last_pos;
         }
     }
+    REQUIRE(saw_n_containing_minimizer);
 }
 
 TEST_CASE("vulkan minimizer: dna5 tile-boundary extras are bounded",

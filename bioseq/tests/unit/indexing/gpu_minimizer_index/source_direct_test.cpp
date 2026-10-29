@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 import std;
+import bioseq.common.seqan_adapter;
 import bioseq.common.logging;
 import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
@@ -251,18 +252,27 @@ TEST_CASE("vulkan source-direct fill consumes each source position once",
 TEST_CASE("vulkan source-direct cache keys cannot upload or replace",
           "[component:bioseq][layer:unit][feature:index]") {
     using cache_type = idx_ns::gpu_minimizer_index_cache;
+    constexpr auto native_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            bioseq::simd::minimizer_algorithm::vulkan_minimap_integer,
+            100u, 15u, 10u);
+    using native_minimizer = bioseq::minimizers::minimizer_representation<
+        native_layout.record_position_log2, native_layout.hash_bits>;
     cache_type cache{0u};
     idx_ns::gpu_index_cache_identity identity{
         .table_size = 2u,
         .position_count = 3u,
         .operation_identity = 0x1234u,
-        .alphabet_size = 4u,
-        .kmer_size = 15u,
-        .window_size = 10u,
-        .minimizer_size = 8u,
-        .minimizer_alignment = 8u,
-        .minimizer_hash_bits = 30u,
-        .minimizer_position_bits = 33u,
+        .alphabet_size = seq::alphabet_size<seq::dna4>,
+        .alphabet_code = native_layout.alphabet_id,
+        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
+        .packed_storage_bits = native_layout.packed_storage_bits,
+        .kmer_size = native_layout.runtime_kmer_size,
+        .window_size = native_layout.runtime_window_size,
+        .minimizer_size = sizeof(native_minimizer),
+        .minimizer_alignment = alignof(native_minimizer),
+        .minimizer_hash_bits = native_layout.hash_bits,
+        .minimizer_position_bits = native_layout.record_position_log2,
         .sorted_dense_abi_revision =
             idx_ns::k_minimizer_sorted_dense_gpu_abi_revision,
         .representation = idx_ns::gpu_index_representation::

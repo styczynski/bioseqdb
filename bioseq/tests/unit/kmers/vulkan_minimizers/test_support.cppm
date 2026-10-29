@@ -426,7 +426,7 @@ inline std::vector<seq::dna4> dna4_fixture{
 inline std::vector<seq::dna5> dna5_with_t{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5};
-/** dna5 input with runs of N that interrupt valid k-mers. */
+/** dna5 input with native seedable N ranks inside complete minimizer windows. */
 inline std::vector<seq::dna5> dna5_with_n{
     "ACGTACGTGGCATTACGNNNNNATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATC"
     "GTTACGATNNCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACG"_dna5};

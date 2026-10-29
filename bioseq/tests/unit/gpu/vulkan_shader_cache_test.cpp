@@ -41,7 +41,7 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 50);
+    REQUIRE(keys.size() == 53);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
         return gv::cache_file_stem(left) < gv::cache_file_stem(right);
@@ -53,6 +53,12 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
         contains_key(keys, gv::make_shader_key(gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u)));
     CHECK(contains_key(
         keys, gv::make_shader_key(gv::shader_kind::seed_lookup_anchors, 384u, 128u, 256u)));
+    CHECK(contains_key(
+        keys, gv::make_shader_key(gv::shader_kind::seed_verify_count, 384u, 128u, 1u)));
+    CHECK(contains_key(
+        keys, gv::make_shader_key(gv::shader_kind::seed_verify_emit, 384u, 128u, 1u)));
+    CHECK(contains_key(
+        keys, gv::make_shader_key(gv::shader_kind::seed_native_coverage, 384u, 128u, 1u)));
     for (const std::uint32_t capacity : gv::k_ordered_sketch_window_capacities) {
         CHECK(contains_key(keys,
                            gv::make_shader_key(

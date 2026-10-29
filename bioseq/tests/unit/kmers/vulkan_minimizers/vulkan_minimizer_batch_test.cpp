@@ -65,9 +65,10 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
         vk::vulkan_sketch_host_materialization::device_only);
     REQUIRE_FALSE(nondispatchable.has_value());
 
-    std::vector<seq::dna5> all_n = "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
-                                   "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"_dna5;
+    // N is seedable. Dispatch a valid k-mer range that lacks a complete window.
+    std::vector<seq::dna5> all_n(kmer_size + window_size - 2u, 'N'_dna5);
     REQUIRE(all_n.size() >= kmer_size);
+    REQUIRE(all_n.size() < kmer_size + window_size - 1u);
     auto all_n_sequence = compact_sequence_range<seq_type>(all_n);
     const std::array<vk::sequence_upload_view, 1> all_n_uploads{
         vk::make_sequence_upload_view(all_n_sequence),

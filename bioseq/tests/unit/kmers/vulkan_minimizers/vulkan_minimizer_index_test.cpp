@@ -294,7 +294,7 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
         bioseq::common::saturating_add(baseline, steady_cache_metadata - cache_metadata_before));
 }
 
-TEST_CASE("vulkan minimizer: ungated all-N target publishes a validated empty index",
+TEST_CASE("vulkan minimizer: ungated incomplete window publishes a validated empty index",
           "[component:bioseq][layer:unit][feature:index][resource:gpu]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
@@ -302,13 +302,17 @@ TEST_CASE("vulkan minimizer: ungated all-N target publishes a validated empty in
     }
 
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    std::vector<seq::dna5> all_n = "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"_dna5;
+    constexpr std::size_t window_size = 10u;
+    constexpr std::size_t kmer_size = 15u;
+    // N is seedable. Count on the GPU without a complete minimizer window.
+    std::vector<seq::dna5> all_n(kmer_size + window_size - 2u, 'N'_dna5);
     auto sequence = compact_sequence_range<seq_type>(all_n);
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(sequence);
     const auto sequence_view = bioseq::storage::make_lazy_sequence_view(sequence_owner);
     vk::vulkan_sketch_decline decline{};
     auto built =
-        vk::build_gpu_index_on_device<minimap_sketch_data>(sequence_view, 10u, 15u, {}, &decline);
+        vk::build_gpu_index_on_device<minimap_sketch_data>(
+            sequence_view, window_size, kmer_size, {}, &decline);
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);

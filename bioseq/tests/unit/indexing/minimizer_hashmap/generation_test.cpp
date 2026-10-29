@@ -576,7 +576,7 @@ TEST_CASE("generation manifest rejects corrupt headers and invalid geometry",
     require_wire_error(decode_minimizer_generation_manifest(
                            std::span<const std::byte>{good.data(), good.size() - 1}),
                        minimizer_generation_encoding_error::encoded_size);
-    std::array<std::byte, 161> oversized{};
+    std::array<std::byte, minimizer_generation_manifest::encoded_bytes + 1u> oversized{};
     std::copy(good.begin(), good.end(), oversized.begin());
     require_wire_error(decode_minimizer_generation_manifest(oversized),
                        minimizer_generation_encoding_error::encoded_size);
@@ -606,7 +606,8 @@ TEST_CASE("generation manifest rejects corrupt headers and invalid geometry",
         require_wire_error(decode_minimizer_generation_manifest(corrupted),
                            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
-    for (const std::uint8_t unsupported_revision : {0u, 2u, 255u}) {
+    for (const std::uint8_t unsupported_revision :
+         {0u, 1u, static_cast<unsigned>(k_minimizer_producer_identity_revision) + 1u, 255u}) {
         corrupted = good;
         test_write_le<std::uint8_t>(corrupted, 127, unsupported_revision);
         require_wire_error(decode_minimizer_generation_manifest(corrupted),
@@ -622,7 +623,8 @@ TEST_CASE("generation manifest rejects corrupt headers and invalid geometry",
         {k_minimap_scheme_id, k_bounded_nthash_u32_r7_sum_scheme_revision},
         {k_bounded_nthash_u32_r7_sum_scheme_id, k_minimap_scheme_revision},
         {2u, k_bounded_nthash_u32_r7_sum_scheme_revision},
-        {k_bounded_nthash_u32_r7_sum_scheme_id, 2u},
+        {k_bounded_nthash_u32_r7_sum_scheme_id,
+         static_cast<std::uint16_t>(k_bounded_nthash_u32_r7_sum_scheme_revision + 1u)},
     }};
     for (const auto [scheme_id, scheme_revision] : unsupported_schemes) {
         INFO("unsupported minimizer scheme " << scheme_id << "/" << scheme_revision);

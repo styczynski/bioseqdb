@@ -21,7 +21,6 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
     using simd_dispatch::highway_kernel_mask;
 
     STATIC_REQUIRE(std::is_same_v<std::underlying_type_t<highway_kernel>, std::uint8_t>);
-    STATIC_REQUIRE(simd_dispatch::highway_kernel_count == 9u);
     STATIC_REQUIRE(std::is_standard_layout_v<simd_dispatch::highway_target_binding>);
     STATIC_REQUIRE(std::is_trivially_copyable_v<simd_dispatch::highway_target_binding>);
     STATIC_REQUIRE(std::is_standard_layout_v<simd_dispatch::highway_dispatch_plan>);
@@ -29,7 +28,7 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
 
     simd_dispatch::highway_kernel_table table{};
     highway_kernel_mask expected{};
-    constexpr std::array<std::string_view, simd_dispatch::highway_kernel_count> expected_names{
+    constexpr auto expected_names = std::to_array<std::string_view>({
         "minimizer::minimap2_reference",
         "minimizer::two_stack_nthash",
         "minimizer::bounded_nthash",
@@ -39,12 +38,15 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
         "alignment::ksw2_batched",
         "alignment::block_aligner",
         "sequence::rank_equality",
-    };
+        "sequence::rank_transform",
+    });
+    STATIC_REQUIRE(simd_dispatch::highway_kernel_count == expected_names.size());
 
     REQUIRE_FALSE(table.available_kernels.any());
     REQUIRE(table.has_all_kernels(expected));
     REQUIRE(table.common.sneaky_snake_simd_batch == nullptr);
     REQUIRE(table.common.count_equal_rank_chunk == nullptr);
+    REQUIRE(table.common.transform_sequence_rank_chunk == nullptr);
     REQUIRE(table.chaining.chain_anchors_simd == nullptr);
 
     for (std::size_t index = 0; index < simd_dispatch::highway_kernel_count; ++index) {
@@ -77,6 +79,7 @@ TEST_CASE("Highway alignment tables require all six typed callables",
     const auto& generated_root = simd_dispatch::highway_test_kernel_table();
     REQUIRE(binding.kernels == &generated_root);
     REQUIRE(generated_root.is_complete());
+    REQUIRE(generated_root.common.transform_sequence_rank_chunk != nullptr);
 
     const auto* identity = generated_root.resolve_alphabet_identity<seq::dna4>();
     REQUIRE(identity != nullptr);
@@ -119,6 +122,11 @@ TEST_CASE("Highway alignment tables require all six typed callables",
     simd_dispatch::highway_kernel_table synthetic_root = generated_root;
     synthetic_root.alignment_by_alphabet =
         std::span<const bioseq::simd::alignment_table_entry>{entries};
+    REQUIRE(synthetic_root.is_complete());
+    synthetic_root.common.transform_sequence_rank_chunk = nullptr;
+    REQUIRE_FALSE(synthetic_root.is_complete());
+    synthetic_root.common.transform_sequence_rank_chunk =
+        generated_root.common.transform_sequence_rank_chunk;
     REQUIRE(synthetic_root.is_complete());
 
     entries.front().typed_table_complete = false;

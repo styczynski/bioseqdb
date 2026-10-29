@@ -267,7 +267,8 @@ hash_major_test_options(std::uint64_t target_length) {
                 .hash_semantics_revision = 1u,
                 .count_semantics_revision = 1u,
                 .producer_backend_identity = 1u,
-                .producer_backend_revision = 1u,
+                .producer_backend_revision =
+                    bioseq::indexing::k_minimizer_producer_identity_revision,
                 .controls_per_block = bioseq::indexing::k_hash_major_minimizer_controls_per_block,
                 .hash_seed = 0u,
             },

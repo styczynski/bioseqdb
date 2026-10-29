@@ -67,7 +67,8 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE(shape(16u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u32);
     STATIC_REQUIRE(shape(17u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u64);
     STATIC_REQUIRE(shape(31u, 32'768u, 65'534u).has_value());
-    STATIC_REQUIRE_FALSE(shape(32u, 32'768u, 65'534u).has_value());
+    STATIC_REQUIRE(shape(32u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u64);
+    STATIC_REQUIRE_FALSE(shape(33u, 32'768u, 65'534u).has_value());
     STATIC_REQUIRE(
         derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity,
                                              k_minimizer_persisted_dna5_alphabet_code,
@@ -505,6 +506,9 @@ TEST_CASE("grouped-SoA fixed records use exact 176-byte and 128-byte layouts",
     constexpr auto encoded_manifest = encode_minimizer_generation_manifest(manifest);
     STATIC_REQUIRE(encoded_manifest.has_value());
     STATIC_REQUIRE(encoded_manifest->size() == 176u);
+    // Independent wire fixture: GPU ABI 4 at byte 108; producer revision 2 at
+    // byte 127; l15_h32 record ID 12 at byte 164; payload ABI 2 at byte 168.
+    // The scalar Highway owner at byte 166 remains 0.
     constexpr std::array<std::byte, 176> expected_manifest{
         b(0x47), b(0x4f), b(0x49), b(0x42), b(0x05), b(0x00), b(0xb0), b(0x00), b(0x08), b(0x07),
         b(0x06), b(0x05), b(0x04), b(0x03), b(0x02), b(0x01), b(0x18), b(0x17), b(0x16), b(0x15),
@@ -516,19 +520,19 @@ TEST_CASE("grouped-SoA fixed records use exact 176-byte and 128-byte layouts",
         b(0x62), b(0x61), b(0x78), b(0x77), b(0x76), b(0x75), b(0x74), b(0x73), b(0x72), b(0x71),
         b(0x10), b(0x0f), b(0x0e), b(0x0d), b(0x0c), b(0x0b), b(0x0a), b(0x09), b(0x03), b(0x00),
         b(0x00), b(0x00), b(0x44), b(0x33), b(0x22), b(0x11), b(0x88), b(0x77), b(0x66), b(0x55),
-        b(0x00), b(0x00), b(0x08), b(0x00), b(0x0f), b(0x00), b(0x0a), b(0x00), b(0x03), b(0x00),
+        b(0x00), b(0x00), b(0x08), b(0x00), b(0x0f), b(0x00), b(0x0a), b(0x00), b(0x04), b(0x00),
         b(0x00), b(0x00), b(0x08), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
-        b(0x02), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x01), b(0x01), b(0x53), b(0x4f),
+        b(0x02), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x01), b(0x02), b(0x53), b(0x4f),
         b(0x49), b(0x42), b(0x02), b(0x00), b(0x30), b(0x00), b(0x04), b(0x02), b(0x02), b(0x01),
         b(0x01), b(0x01), b(0x02), b(0x00), b(0xff), b(0xff), b(0xff), b(0x3f), b(0x00), b(0x00),
         b(0x00), b(0x00), b(0x0a), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
-        b(0x00), b(0x00), b(0x0f), b(0x00), b(0x01), b(0x00), b(0x00), b(0x00), b(0x01), b(0x00),
+        b(0x00), b(0x00), b(0x0f), b(0x00), b(0x0c), b(0x00), b(0x00), b(0x00), b(0x02), b(0x00),
         b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
     };
     STATIC_REQUIRE(*encoded_manifest == expected_manifest);
     STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 4) == 5u);
     STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 6) == 176u);
-    STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded_manifest, 108) == 3u);
+    STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded_manifest, 108) == 4u);
     STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded_manifest, 128) ==
                    k_grouped_soa_extension_magic);
     STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 132) == 2u);
@@ -547,9 +551,9 @@ TEST_CASE("grouped-SoA fixed records use exact 176-byte and 128-byte layouts",
     STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 161) == 0u);
     STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 162) == 15u);
     STATIC_REQUIRE((*encoded_manifest)[163] == std::byte{0});
-    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 164) == 1u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 164) == 12u);
     STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 166) == 0u);
-    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 168) == 1u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 168) == 2u);
     constexpr auto decoded_manifest =
         decode_minimizer_generation_manifest(std::span<const std::byte>{*encoded_manifest});
     STATIC_REQUIRE(decoded_manifest.has_value());
