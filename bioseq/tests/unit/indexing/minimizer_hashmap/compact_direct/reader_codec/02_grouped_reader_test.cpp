@@ -702,8 +702,16 @@ TEST_CASE("registered scalar K20 H64 reader produces authenticated anchors",
     };
     vector_replay_minimizer_producer producer{pairs};
     collecting_minimizer_row_sink sink;
+    const auto query_layout =
+        ::bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::scalar, 100u, 20u, 15u);
+    REQUIRE(query_layout.record_position_log2 <
+            std::numeric_limits<std::uint64_t>::digits - 1u);
+    // Force a wider registered target position field without changing the hash domain.
+    const std::uint64_t target_position_extent =
+        (std::uint64_t{1u} << query_layout.record_position_log2) + 1u;
     auto options = test_grouped_soa_generation_options(
-        100u, 65'534u, minimizer_algorithm::scalar, 2'000'000u, 20u, 15u);
+        100u, 65'534u, minimizer_algorithm::scalar, target_position_extent, 20u, 15u);
     options.position_segment_span_bp = std::uint64_t{1} << 15u;
     const auto generation = encode_minimizer_generation(producer, sink, options);
     REQUIRE(generation.has_value());
@@ -729,11 +737,11 @@ TEST_CASE("registered scalar K20 H64 reader produces authenticated anchors",
         std::span<const std::byte>{payload->data(), payload->size()});
     REQUIRE(reader.has_value());
 
-    const auto query_layout =
-        ::bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
-            minimizer_algorithm::scalar, 100u, 20u, 15u);
     // Query and target positions can use different widths with the same hash type.
     REQUIRE(query_layout.record_id != generation->manifest.algorithm_identity.physical_record_id);
+    REQUIRE(query_layout.record_position_log2 <
+            generation->manifest.algorithm_identity.record_position_log2);
+    REQUIRE(query_layout.hash_bits == generation->manifest.algorithm_identity.hash_bits);
     const bool checked = ::bioseq::minimizers::visit_minimizer_physical_layout(
         query_layout,
         [&admission, &reader, hash]<class p_record>() {
