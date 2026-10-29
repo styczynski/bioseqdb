@@ -21,6 +21,10 @@ extern "C" {
 #include "rewrite/rewriteManip.h"
 }
 
+// Anchor libc++ allocation declarations before Clang loads the compiled modules.
+// This matches the existing PostgreSQL storage owners that combine std and containers.
+#include <new>
+
 export module bioseq.postgres.table:custom_scan_slice_rewrite_path_cloning;
 
 import std;
