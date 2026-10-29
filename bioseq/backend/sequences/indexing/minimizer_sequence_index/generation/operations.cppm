@@ -1016,7 +1016,10 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                         source_owners.push_back(
                                             std::move(*candidate_owner));
                                         upload_batch.push_back(std::move(upload));
-                                        geometries.push_back(geometry);
+                                        // Clang 22.1.6/libc++ module instantiation miscompiled push_back's
+                                        // captured end pointer into global storage here. Count-insert bypasses
+                                        // that lambda while retaining vector growth and one geometry copy.
+                                        geometries.insert(geometries.end(), std::size_t{1}, geometry);
                                         if (geometry.range.core_hi_bp <= candidate_core_lo) {
                                             return std::unexpected(
                                                 minimizer_generation_encoding_error::
@@ -1048,7 +1051,12 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                         !plan->bind_accepted_uploads(upload_batch.view())) {
                                         throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                             "Vulkan spill batch admission did not bind its "
-                                            "exact prefix"};
+                                            "exact prefix: accepted="
+                                            + std::to_string(accepted_count)
+                                            + ", geometries=" + std::to_string(geometries.size())
+                                            + ", uploads=" + std::to_string(upload_batch.size())
+                                            + ", source_owners="
+                                            + std::to_string(source_owners.size())};
                                     }
                                     std::uint64_t accepted_prefix_hi = core_lo;
                                     for (const auto& geometry : geometries) {

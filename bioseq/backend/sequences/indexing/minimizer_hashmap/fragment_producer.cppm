@@ -16,6 +16,7 @@ module;
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -752,6 +753,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             return std::unexpected(
                 minimizer_generation_encoding_error::arithmetic_overflow);
         }
+        // Clang 22.1.6/libc++ miscompiles push_back's module-captured vector end.
+        // End inserts below preserve moving each run's owned event vector.
         std::vector<vulkan_segment_core_run> completed_runs;
         std::optional<canonical_window> pending_owner;
         std::optional<vulkan_core_geometry> pending_geometry;
@@ -819,7 +822,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                     return std::unexpected(run.error());
                 }
                 if (!run->empty()) {
-                    completed_runs.push_back(vulkan_segment_core_run{
+                    completed_runs.insert(completed_runs.end(), vulkan_segment_core_run{
                         .output_segment_lo = geometry->output_segment_lo,
                         .events = std::move(*run),
                     });
@@ -898,7 +901,10 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 }
                 source_owners.push_back(std::move(*candidate_owner));
                 upload_batch.push_back(std::move(upload));
-                geometries.push_back(geometry);
+                // Clang 22.1.6/libc++ module instantiation miscompiled push_back's
+                // captured end pointer into global storage here. Count-insert bypasses
+                // that lambda while retaining vector growth and one geometry copy.
+                geometries.insert(geometries.end(), std::size_t{1}, geometry);
                 if (geometry.next_core_lo <= candidate_core_lo) {
                     return std::unexpected(
                         minimizer_generation_encoding_error::arithmetic_overflow);
@@ -918,7 +924,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                     return std::unexpected(run.error());
                 }
                 if (!run->empty()) {
-                    completed_runs.push_back(vulkan_segment_core_run{
+                    completed_runs.insert(completed_runs.end(), vulkan_segment_core_run{
                         .output_segment_lo = geometry->output_segment_lo,
                         .events = std::move(*run),
                     });
@@ -931,7 +937,11 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             if (accepted_count != geometries.size()
                 || !plan->bind_accepted_uploads(upload_batch.view())) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error{
-                    "Vulkan fragment batch admission did not bind its exact prefix"};
+                    "Vulkan fragment batch admission did not bind its exact prefix: "
+                    "accepted=" + std::to_string(accepted_count)
+                    + ", geometries=" + std::to_string(geometries.size())
+                    + ", uploads=" + std::to_string(upload_batch.size())
+                    + ", source_owners=" + std::to_string(source_owners.size())};
             }
             auto batch_result = bioseq::gpu::vulkan::
                 execute_admitted_minimap_sketch_data_vulkan_upload_batch<
@@ -1020,7 +1030,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 auto& run = pending_runs[core_index];
                 increment_route_counter_(vulkan_core_runs_);
                 if (!run.empty()) {
-                    completed_runs.push_back(vulkan_segment_core_run{
+                    completed_runs.insert(completed_runs.end(), vulkan_segment_core_run{
                         .output_segment_lo =
                             geometries[core_index].output_segment_lo,
                         .events = std::move(run),
