@@ -851,6 +851,54 @@ public:
 
         unpacked_rank_iterator() = default;
 
+        // Expose Boost's namespace-level operator surface at this named-module boundary.
+        // Keep navigation in iterator_adaptor and expose this iterator's free surface here.
+        using super_t::operator++;
+
+        /** @brief Advances once and returns the previous iterator value. */
+        unpacked_rank_iterator operator++(int) {
+            auto previous = *this;
+            ++*this;
+            return previous;
+        }
+
+        /** @brief Compares source positions through Boost's existing equality hook. */
+        [[nodiscard]] friend bool operator==(
+            const unpacked_rank_iterator& left,
+            const unpacked_rank_iterator& right) {
+            return boost::iterators::operator==(left, right);
+        }
+
+        /** @brief Returns the signed source-position distance through Boost's hook. */
+        [[nodiscard]] friend difference_type operator-(
+            const unpacked_rank_iterator& left,
+            const unpacked_rank_iterator& right) {
+            return boost::iterators::operator-(left, right);
+        }
+
+        /** @brief Orders source positions without requiring a three-way source comparator. */
+        [[nodiscard]] friend std::strong_ordering operator<=>(
+            const unpacked_rank_iterator& left,
+            const unpacked_rank_iterator& right) {
+            return (left - right) <=> difference_type{};
+        }
+
+        /** @brief Returns an iterator shifted by a signed offset in constant time. */
+        [[nodiscard]] friend unpacked_rank_iterator operator+(
+            unpacked_rank_iterator position,
+            difference_type offset) {
+            position += offset;
+            return position;
+        }
+
+        /** @brief Returns an iterator shifted by a signed offset in constant time. */
+        [[nodiscard]] friend unpacked_rank_iterator operator+(
+            difference_type offset,
+            unpacked_rank_iterator position) {
+            position += offset;
+            return position;
+        }
+
         /** @brief Binds a source alphabet iterator. */
         explicit unpacked_rank_iterator(base_iterator_type const& it)
             : super_t(it) {}
