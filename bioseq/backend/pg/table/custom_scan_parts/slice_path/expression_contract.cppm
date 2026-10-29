@@ -28,6 +28,7 @@ export module bioseq.postgres.table:custom_scan_slice_path_expression_contract;
 
 import bioseq.postgres.support;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.compact_sequence_typmod;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 import :custom_scan_join_ownership_expression_signature_contract;
 
