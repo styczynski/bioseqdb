@@ -251,7 +251,7 @@ align_single_fill(fill_descriptor& fill,
             is_long_fill);
     }
 
-    ksw_flags flags{};
+    ksw_flags flags{.score_only = !params.do_cigar && !params.compute_edit_distance};
     int32_t end_bonus_for_fill = -1;
     if (fill.kind == fill_kind::left_extension) {
         flags.right_align    = true;
@@ -740,8 +740,11 @@ template <sequence_alphabet p_alphabet>
     // Keep the CIGAR slab objects in an owning vector because they need
     // destructors. Their payloads use the chain arena and remain available
     // until all fills have been stitched into the region results.
+    const bool trace_enabled = params.do_cigar || params.compute_edit_distance;
     std::vector<::bioseq::chaining::arena_slab<bioseq::cigar_run>> cigar_scratch_pool;
-    cigar_scratch_pool.reserve(detail_ksw2_batched::estimated_fill_count(regions));
+    if (trace_enabled) {
+        cigar_scratch_pool.reserve(detail_ksw2_batched::estimated_fill_count(regions));
+    }
 
     for (std::size_t region_index = 0;
          region_index < regions.size(); ++region_index)
@@ -809,11 +812,13 @@ template <sequence_alphabet p_alphabet>
             return std::unexpected(region_numeric.error());
         }
 
-        // Reserve CIGAR space for the full interval, including end extensions.
-        region.cigar.reserve(
-            detail_ksw2_batched::estimated_cigar_operation_count(
-                outer_query_end - outer_query_start,
-                outer_ref_end   - outer_ref_start));
+        // Only traceback requests need CIGAR storage for the aligned interval.
+        if (trace_enabled) {
+            region.cigar.reserve(
+                detail_ksw2_batched::estimated_cigar_operation_count(
+                    outer_query_end - outer_query_start,
+                    outer_ref_end   - outer_ref_start));
+        }
         region.cigar.clear();
         region.dp_score = 0;
         region.edit_distance = 0;
@@ -859,12 +864,15 @@ template <sequence_alphabet p_alphabet>
 
         // Collect the optional left-extension fill.
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
-            auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-            fill_cigar_scratch->reserve(static_cast<std::size_t>(
-                std::max(seed_query_start - outer_query_start,
-                         seed_ref_start   - outer_ref_start)) + 16u);
+            ::bioseq::chaining::arena_slab<bioseq::cigar_run>* fill_cigar_scratch = nullptr;
+            if (trace_enabled) {
+                cigar_scratch_pool.push_back(
+                    ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
+                fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+                fill_cigar_scratch->reserve(static_cast<std::size_t>(
+                    std::max(seed_query_start - outer_query_start,
+                             seed_ref_start   - outer_ref_start)) + 16u);
+            }
             fill_descriptor* fill =
                 detail_ksw2_batched::append_fill(fills,
                                                  alignment_context,
@@ -903,12 +911,15 @@ template <sequence_alphabet p_alphabet>
                     return std::unexpected(alignment_contract_error::coordinates);
                 }
                 if (gap_query_length == 0 && gap_reference_length == 0) continue;
-                cigar_scratch_pool.push_back(
-                    ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
-                auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-                fill_cigar_scratch->reserve(
-                    static_cast<std::size_t>(std::max(gap_query_length, gap_reference_length)) +
-                    16u);
+                ::bioseq::chaining::arena_slab<bioseq::cigar_run>* fill_cigar_scratch = nullptr;
+                if (trace_enabled) {
+                    cigar_scratch_pool.push_back(
+                        ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
+                    fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+                    fill_cigar_scratch->reserve(
+                        static_cast<std::size_t>(std::max(gap_query_length, gap_reference_length)) +
+                        16u);
+                }
                 fill_descriptor* fill =
                     detail_ksw2_batched::append_fill(fills,
                                                      alignment_context,
@@ -929,12 +940,15 @@ template <sequence_alphabet p_alphabet>
 
         // Collect the optional right-extension fill.
         if (seed_query_end < outer_query_end && seed_ref_end < outer_ref_end) {
-            cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
-            auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-            fill_cigar_scratch->reserve(static_cast<std::size_t>(
-                std::max(outer_query_end - seed_query_end,
-                         outer_ref_end   - seed_ref_end)) + 16u);
+            ::bioseq::chaining::arena_slab<bioseq::cigar_run>* fill_cigar_scratch = nullptr;
+            if (trace_enabled) {
+                cigar_scratch_pool.push_back(
+                    ::bioseq::chaining::make_arena_slab<bioseq::cigar_run>());
+                fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+                fill_cigar_scratch->reserve(static_cast<std::size_t>(
+                    std::max(outer_query_end - seed_query_end,
+                             outer_ref_end   - seed_ref_end)) + 16u);
+            }
             fill_descriptor* fill =
                 detail_ksw2_batched::append_fill(fills,
                                                  alignment_context,

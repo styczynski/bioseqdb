@@ -32,6 +32,7 @@ import bioseq.postgres.support;
 import :custom_scan_plan_abi_constants;
 import :custom_scan_runtime_match_contracts;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 import :custom_scan_oid_expression_support_expression_analysis_contracts;
 import :custom_scan_planner_aligner_contracts;
 import :custom_scan_planner_method_contracts;
@@ -273,8 +274,9 @@ export {
             return NIL;
         }
 
-        /* Use finalized helper bindings to enable CIGAR, edit distance,
+        /* Use finalized helper bindings to enable alignment scores, CIGAR, edit distance,
          * divergence and MAPQ, matching BeginCustomScan. */
+        params.compute_alignment_score = false;
         params.do_cigar = false;
         params.compute_divergence = false;
         params.compute_mapq = false;
@@ -319,6 +321,8 @@ export {
                 return NIL;
             }
             seen_resnos = bms_add_member(seen_resnos, resno);
+            params.compute_alignment_score = params.compute_alignment_score ||
+                is_bioseq_alignment_score_funcid(funcid, oids);
             params.do_cigar = params.do_cigar || funcid == oids.cigar_oid ||
                               funcid == oids.has_cigar_oid || funcid == oids.edit_oid;
             params.compute_edit_distance = params.compute_edit_distance || funcid == oids.edit_oid;

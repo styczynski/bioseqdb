@@ -477,12 +477,15 @@ export {
                         estate, static_cast<std::uint32_t>(plan_node_id));
                 params.downstream_active_wall = bioseq::postgres::table::alignment_execution::
                         borrow_downstream_active_wall_tracker(runtime->alignment_registration);
+                params.compute_alignment_score = false;
                 params.do_cigar = false;
                 params.compute_divergence = false;
                 params.compute_mapq = false;
                 params.compute_edit_distance = false;
                 const bioseq_stub_oids& batch_oids = get_cached_stub_oids();
                 for (const batch_join_placeholder_site& site : runtime->placeholder_sites) {
+                    params.compute_alignment_score = params.compute_alignment_score ||
+                        is_bioseq_alignment_score_funcid(site.funcid, batch_oids);
                     params.do_cigar = params.do_cigar || site.funcid == batch_oids.cigar_oid ||
                                       site.funcid == batch_oids.has_cigar_oid ||
                                       site.funcid == batch_oids.edit_oid;

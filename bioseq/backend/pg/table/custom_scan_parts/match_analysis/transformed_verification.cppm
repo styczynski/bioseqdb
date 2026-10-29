@@ -215,7 +215,8 @@ export {
         if (IsA(plan, CustomScan)) {
             auto* custom = reinterpret_cast<CustomScan*>(plan);
             if (batch_join_expression_has_match_helper(
-                    reinterpret_cast<Node*>(custom->custom_exprs), oids)) {
+                    reinterpret_cast<Node*>(custom->custom_exprs), oids) &&
+                !base_scan_custom_expressions_have_only_finalized_match_helpers(custom, oids)) {
                 record_batch_join_plan_helper_audit_failure(first_failure,
                                                             plan,
                                                             current_parent,

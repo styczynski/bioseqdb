@@ -330,7 +330,7 @@ void compute_mapping_quality(std::span<alignment_region> regions,
         .secondary_chain_score = region.secondary_score,
         .divergence = region.divergence,
         .is_primary = (region.parent == region.region_id),
-        .has_cigar = region.has_alignment,
+        .has_cigar = region.has_alignment && !region.cigar.empty(),
         .cigar = std::move(region.cigar),
         .edit_distance = region.edit_distance,
     };

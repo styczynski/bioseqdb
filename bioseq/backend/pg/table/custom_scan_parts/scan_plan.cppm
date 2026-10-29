@@ -37,6 +37,7 @@ import :custom_scan_oid_expression_support_expression_analysis_contracts;
 import :custom_scan_oid_expression_support_restriction_ownership_contracts;
 import :custom_scan_oid_expression_support_semantic_analysis_contracts;
 import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_helper_presence_contracts;
 import :custom_scan_planner_aligner_contracts;
 import :custom_scan_planner_method_contracts;
 import :custom_scan_semantic_payload_payload_contracts;
@@ -219,15 +220,30 @@ export {
             }
         }
 
-        /* Evaluate the edit-distance bound after alignment has produced a
-         * match. Other scan filters can run before alignment. */
+        /* Result-dependent predicates run once per emitted match. Keep the strict
+         * edit bound on its existing specialized prefilter and exact-check path. */
+        List* match_result_quals = NIL;
         std::optional<strict_edit_predicate> strict_edit_predicate;
         {
             const bioseq_stub_oids& edit_oids = get_cached_stub_oids();
             postgres_list<Node> pre_alignment_quals;
             for (Node* qual : postgres_list<Node>(cscan->scan.plan.qual)) {
                 if (!contains_bioseq_edit(qual, edit_oids)) {
-                    pre_alignment_quals.append(qual);
+                    if (owned_mmsearch_exprs != NIL &&
+                        batch_join_expression_has_match_helper(qual, edit_oids)) {
+                        if (contain_subplans(qual) || expression_returns_set(qual)) {
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                     errmsg("unsupported BioseqScan match-result predicate"),
+                                     errhint("Apply subquery or set-returning predicates in a "
+                                             "separate query level.")));
+                        }
+                        /* Preserve OR/CASE and SQL NULL semantics: defer the whole
+                         * conjunct, never only the helper-dependent subtree. */
+                        match_result_quals = lappend(match_result_quals, qual);
+                    } else {
+                        pre_alignment_quals.append(qual);
+                    }
                     continue;
                 }
                 if (planner_owned_target_evaluated) {
@@ -272,12 +288,55 @@ export {
             }
         }
 
+        /* Storage pruning must not evaluate result helpers either. The lists use
+         * copied expression nodes, so remove by expression equality, not address. */
+        if (match_result_quals != NIL) {
+            postgres_list<List> expression_lists(cscan->custom_exprs);
+            cscan->custom_exprs = list_make2(
+                list_difference(expression_lists.get_first(), match_result_quals),
+                list_difference(expression_lists.get_second(), match_result_quals));
+        }
+
         const bioseq_stub_oids& plan_stub_oids = get_cached_stub_oids();
         const Index scan_relid = best_path->path.parent->relid;
         /* Upper sequence materialization can keep a helper below another SQL
          * function. Publish that helper as a whole child output so setrefs binds
          * its occurrence to this scan instead of executing its scalar stub. */
         List* requested_projections = list_copy(root->processed_tlist);
+        for (Node* predicate : postgres_list<Node>(match_result_quals)) {
+            /* Whole helper carriers reuse the existing ownership, setrefs and
+             * feature-detection authorities. Never project the predicate itself. */
+            const auto collect_predicate_helpers =
+                [planner_owned_target_recipe, &plan_stub_oids](pg_expression_walk_cursor,
+                                                              pg_node_view node,
+                                                              List*& projections) {
+                    FuncExpr* function = node.try_cast<FuncExpr>();
+                    if (function == nullptr ||
+                        !is_bioseq_projection_funcid(function->funcid, plan_stub_oids))
+                        return pg_walk_step::descend;
+                    FuncExpr* helper =
+                        batch_join_well_formed_match_helper(node.get(), plan_stub_oids);
+                    if (helper == nullptr ||
+                        (!batch_join_match_helper_names_recipe(helper, planner_owned_target_recipe) &&
+                         !batch_join_match_helper_names_base_lineage(
+                             helper, planner_owned_target_recipe, plan_stub_oids))) {
+                        ereport(ERROR,
+                                (errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+                                 errmsg("BioseqScan match-result predicate has an unowned helper"),
+                                 errhint("Use the exact mmsearch target recipe or its unique base "
+                                         "source lineage.")));
+                    }
+                    projections = lappend(
+                        projections,
+                        makeTargetEntry(reinterpret_cast<Expr*>(copyObject(helper)),
+                                        InvalidAttrNumber,
+                                        nullptr,
+                                        true));
+                    return pg_walk_step::skip_subtree;
+                };
+            walk_pg_expression_including_root(
+                predicate, requested_projections, collect_predicate_helpers);
+        }
         if (!locator_passthrough_requested) {
             for (TargetEntry* entry : postgres_list<TargetEntry>(root->processed_tlist)) {
                 if (entry == nullptr || entry->expr == nullptr)
@@ -500,6 +559,9 @@ export {
         cscan->custom_exprs =
             lappend(cscan->custom_exprs,
                     owned_mmsearch_exprs != NIL ? copyObject(owned_mmsearch_exprs) : NIL);
+        /* PostgreSQL rewrites Vars and outer Params in the fifth expression list.
+         * These predicates are evaluated only against populated match placeholders. */
+        cscan->custom_exprs = lappend(cscan->custom_exprs, copyObject(match_result_quals));
 
         /* Save the scan's algorithm and index settings after applying SQL options
          * and the transformed-target rule. Execution, EXPLAIN and cached-plan checks

@@ -32,6 +32,7 @@ import :custom_scan_oid_expression_support_oid_catalog_contracts;
 import :custom_scan_planner_method_contracts;
 import :custom_scan_match_finalization_contracts;
 import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_helper_presence_contracts;
 import :custom_scan_match_analysis_carrier_validation_contracts;
 export import :custom_scan_match_analysis_semantic_analysis_contracts;
 
@@ -306,6 +307,60 @@ export {
                 return 2u;
         }
         return matches;
+    }
+
+    /**
+     * @brief Allows only locally owned helper calls in deferred base-scan quals.
+     *
+     * PostgreSQL has already applied setrefs. The first four expression stores
+     * keep their existing prohibition on executable helpers. The fifth contains
+     * boolean predicates whose helpers must each have a whole target-list carrier
+     * bound to this scan's finalized match identity. A remaining PlaceHolderVar
+     * is invalid here; executor expressions must already have concrete references.
+     */
+    [[nodiscard]] bool base_scan_custom_expressions_have_only_finalized_match_helpers(
+        CustomScan* scan, const bioseq_stub_oids& oids) {
+        if (scan == nullptr || scan->methods != bioseq_column_scan_scan_methods() ||
+            list_length(scan->custom_exprs) != 5)
+            return false;
+        for (int index = 0; index < 4; ++index) {
+            if (batch_join_expression_has_match_helper(
+                    reinterpret_cast<Node*>(list_nth(scan->custom_exprs, index)), oids))
+                return false;
+        }
+        Node* stored_quals = reinterpret_cast<Node*>(list_nth(scan->custom_exprs, 4));
+        if (stored_quals == nullptr)
+            return true;
+        if (!IsA(stored_quals, List))
+            return false;
+        bool invalid = false;
+        const auto validate_helper =
+            [scan, &oids](pg_expression_walk_cursor,
+                          pg_node_view node,
+                          bool& invalid_identity) {
+                if (node.try_cast<PlaceHolderVar>() != nullptr) {
+                    invalid_identity = true;
+                    return pg_walk_step::stop;
+                }
+                FuncExpr* function = node.try_cast<FuncExpr>();
+                if (function == nullptr ||
+                    !is_bioseq_projection_funcid(function->funcid, oids))
+                    return pg_walk_step::descend;
+                if (finalized_base_owner_matching_site_count(
+                        scan, reinterpret_cast<Node*>(function), oids) != 1u) {
+                    invalid_identity = true;
+                    return pg_walk_step::stop;
+                }
+                return pg_walk_step::skip_subtree;
+            };
+        for (Node* qual : postgres_list<Node>(reinterpret_cast<List*>(stored_quals))) {
+            if (qual == nullptr || exprType(qual) != BOOLOID || expression_returns_set(qual))
+                return false;
+            walk_pg_expression_including_root(qual, invalid, validate_helper);
+            if (invalid)
+                return false;
+        }
+        return true;
     }
 
     /**

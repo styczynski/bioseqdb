@@ -43,7 +43,7 @@ struct match_result {
     std::int32_t secondary_chain_score = 0; ///< Best competing secondary chain score for this primary.
     float divergence = -1.f;                ///< Divergence estimated from minimizers, or -1 when unavailable.
     bool is_primary = true;                  ///< Whether this region is its own primary parent
-    bool has_cigar = false;                  ///< Whether base alignment was performed.
+    bool has_cigar = false;                  ///< Whether this result owns CIGAR operations.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     alignment_result_vector<bioseq::cigar_run> cigar;  ///< CIGAR operations with their benchmark memory reservation.
 #else

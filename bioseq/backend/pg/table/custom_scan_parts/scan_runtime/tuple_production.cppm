@@ -48,6 +48,7 @@ import bioseq.postgres.vectorization.types;
 
 import :access_common;
 import :custom_scan_join_runtime_tuple_injection_contracts;
+import :custom_scan_join_ownership_helper_presence_contracts;
 import :custom_scan_join_runtime_scan_fetch_contracts;
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 import :custom_scan_scan_runtime_state_contracts;
@@ -284,6 +285,14 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
 
         runtime.newtargetlist = reinterpret_cast<List*>(
             var_injector(reinterpret_cast<Node*>(targetlist), &injector_ctx));
+        runtime.match_result_quals = reinterpret_cast<List*>(
+            var_injector(reinterpret_cast<Node*>(runtime.match_result_quals), &injector_ctx));
+        if (batch_join_expression_has_match_helper(
+                reinterpret_cast<Node*>(runtime.match_result_quals), oids_snapshot)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+                     errmsg("BioseqScan match-result predicate helper has no finalized owner")));
+        }
         derive_mmsearch_source_lifetime_roles(
             runtime,
             ps.plan,
@@ -531,6 +540,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                                              econtext->ecxt_per_tuple_memory,
                                              mmsearch_source_capture_role::output_projection);
                 TupleTableSlot* projected = nullptr;
+                bool match_accepted = true;
                 std::exception_ptr projection_error;
                 MemoryContext saved_context = CurrentMemoryContext;
                 ErrorData* volatile projection_pg_error = nullptr;
@@ -572,16 +582,32 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                         node->ps.scanopsset = true;
                         node->ps.scanopsfixed = true;
 #endif
-                        ProjectionInfo* proj =
-                            ExecBuildProjectionInfo(runtime.newtargetlist,
-                                                    econtext,
-                                                    node->ps.ps_ResultTupleSlot,
-                                                    &(node->ps),
-                                                    next->scan_slot_copy->tts_tupleDescriptor);
+                        /* Compiled Const steps capture values, so compile only after
+                         * this match populated them. Per-output memory bounds this
+                         * work even when one input row yields many matches. */
+                        if (runtime.match_result_quals != NIL) {
+                            MemoryContext previous_context =
+                                MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+                            ExprState* match_qual =
+                                ExecInitQual(runtime.match_result_quals, &node->ps);
+                            match_accepted = ExecQual(match_qual, econtext);
+                            MemoryContextSwitchTo(previous_context);
+                        }
+                        if (match_accepted) {
+                            ProjectionInfo* proj =
+                                ExecBuildProjectionInfo(runtime.newtargetlist,
+                                                        econtext,
+                                                        node->ps.ps_ResultTupleSlot,
+                                                        &(node->ps),
+                                                        next->scan_slot_copy->tts_tupleDescriptor);
+#if PG_VERSION_NUM >= 190000
+                            restore_scan_projection_metadata();
+#endif
+                            projected = ExecProject(proj);
+                        }
 #if PG_VERSION_NUM >= 190000
                         restore_scan_projection_metadata();
 #endif
-                        projected = ExecProject(proj);
                         restore_mmsearch_sources(next->scan_slot_copy, source_restore);
                     } catch (...) {
 #if PG_VERSION_NUM >= 190000
@@ -611,6 +637,10 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 }
                 if (projection_error != nullptr) {
                     std::rethrow_exception(projection_error);
+                }
+                if (!match_accepted) {
+                    InstrCountFiltered1(node, 1);
+                    continue;
                 }
                 return projected;
             }

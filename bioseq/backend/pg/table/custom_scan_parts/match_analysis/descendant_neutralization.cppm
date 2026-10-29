@@ -59,7 +59,8 @@ export {
                      errdetail("store=Plan.qual plan_node_id=%d", scan->scan.plan.plan_node_id)));
         }
         if (batch_join_expression_has_match_helper(reinterpret_cast<Node*>(scan->custom_exprs),
-                                                   oids)) {
+                                                   oids) &&
+            !base_scan_custom_expressions_have_only_finalized_match_helpers(scan, oids)) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqScan inherited match helper remains executable after setrefs"),

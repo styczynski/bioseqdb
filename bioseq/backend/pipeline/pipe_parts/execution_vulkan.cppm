@@ -963,6 +963,9 @@ export {
                // Each dedicated target  route decides whether MAPQ runs and records
                // its completion.
                !params.compute_divergence && !params.compute_edit_distance &&
+               // Dedicated GPU result routes provide coordinates or CIGAR;
+               // score-only requests must retain the normal post-seed stage.
+               (!params.compute_alignment_score || params.do_cigar) &&
                !params.exact_edit_filter_enabled && !params.prefilter_enabled &&
                params.max_occ >= 0 && (!params.do_cigar || params.vulkan_extend_enabled);
     }
@@ -1003,8 +1006,9 @@ export {
                    ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer &&
                params.chaining_algorithm ==
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming &&
-               !params.do_cigar && !params.compute_divergence && !params.compute_mapq &&
-               !params.compute_edit_distance && !params.exact_edit_filter_enabled &&
+               !params.requires_base_alignment() &&
+               !params.compute_divergence && !params.compute_mapq &&
+               !params.exact_edit_filter_enabled &&
                !params.prefilter_enabled && params.max_occ >= 0;
     }
 

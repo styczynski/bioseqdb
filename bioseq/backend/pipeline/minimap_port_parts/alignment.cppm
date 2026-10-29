@@ -226,6 +226,7 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     if (forbidden_block_stats != nullptr) {
         abort_forbidden_ksw2_fallback(*forbidden_block_stats);
     }
+    ksw_flags.score_only = !params.do_cigar && !params.compute_edit_distance;
     if (scalar_execution_stats != nullptr) {
         scalar_execution_stats->record_ksw2_call(
             scalar_stage,
@@ -1075,6 +1076,7 @@ struct selected_alignment_region_storage_plan {
         *initial_reserve > (std::numeric_limits<std::size_t>::max)()) {
         return std::unexpected(alignment_contract_error::coordinates);
     }
+    const bool trace_enabled = params.do_cigar || params.compute_edit_distance;
     return alignment_region_storage_plan{
         .has_work = true,
         .anchor_begin = anchor_begin,
@@ -1088,9 +1090,9 @@ struct selected_alignment_region_storage_plan {
         .outer_query_end = outer_query_end,
         .outer_query_extent = query_extent,
         .outer_reference_extent = reference_extent,
-        .final_cigar_step_bound = static_cast<std::size_t>(*cigar_steps),
-        .final_cigar_capacity_bytes = *cigar_bytes,
-        .initial_cigar_reserve = static_cast<std::size_t>(*initial_reserve),
+        .final_cigar_step_bound = trace_enabled ? static_cast<std::size_t>(*cigar_steps) : 0u,
+        .final_cigar_capacity_bytes = trace_enabled ? *cigar_bytes : 0u,
+        .initial_cigar_reserve = trace_enabled ? static_cast<std::size_t>(*initial_reserve) : 0u,
     };
 }
 
@@ -1129,7 +1131,7 @@ derive_selected_alignment_region_storage_plan(
     selected_alignment_region_storage_plan selected{.has_work = true};
     const bool is_dual_affine = params.gap_open1 != params.gap_open2 ||
                                 params.gap_ext1 != params.gap_ext2;
-    const bool block_trace_enabled = params.do_cigar || params.compute_edit_distance;
+    const bool trace_enabled = params.do_cigar || params.compute_edit_distance;
     const std::size_t block_lane_count = target_geometry.simd_lane_count;
     const std::size_t ksw2_byte_lane_count = target_geometry.ksw2_byte_lane_count;
     const std::size_t ksw2_full_score_bytes = target_geometry.ksw2_full_score_bytes;
@@ -1137,7 +1139,7 @@ derive_selected_alignment_region_storage_plan(
     const auto record_fill = [&selected,
                               &params,
                               is_dual_affine,
-                              block_trace_enabled,
+                              trace_enabled,
                               block_lane_count,
                               ksw2_byte_lane_count,
                               ksw2_full_score_bytes](
@@ -1169,7 +1171,7 @@ derive_selected_alignment_region_storage_plan(
                 reference_extent,
                 maximum_block_size,
                 block_lane_count,
-                block_trace_enabled);
+                trace_enabled);
             if (!plan) {
                 return false;
             }
@@ -1184,7 +1186,7 @@ derive_selected_alignment_region_storage_plan(
                 band_width,
                 exact_max_tracking,
                 ksw2_full_score_bytes,
-                /*compute_cigar=*/true);
+                /*compute_cigar=*/trace_enabled);
             if (!plan) {
                 return false;
             }

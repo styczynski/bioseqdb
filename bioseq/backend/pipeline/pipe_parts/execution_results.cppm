@@ -174,7 +174,7 @@ export {
                 &alignment_kernels,
                 query_seq,
                 target_seq,
-                params.do_cigar || params.compute_edit_distance,
+                params.requires_base_alignment(),
                 alignment_stats_dst,
                 host_timing_dst,
                 attempt_memory},

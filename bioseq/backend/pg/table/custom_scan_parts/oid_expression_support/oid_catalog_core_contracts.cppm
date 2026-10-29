@@ -69,6 +69,12 @@ export [[nodiscard]] const bioseq_stub_oids& get_cached_stub_oids();
 /** @brief Returns Bioseq OIDs, or null when required extension objects are unavailable. */
 export [[nodiscard]] const bioseq_stub_oids* try_get_cached_stub_oids();
 
+/** @brief Checks whether the helper requires a base-alignment score. */
+export [[nodiscard]] constexpr bool
+is_bioseq_alignment_score_funcid(const Oid funcid, const bioseq_stub_oids& o) noexcept {
+    return funcid == o.score_oid || funcid == o.dp_score_oid || funcid == o.dp_max_score_oid;
+}
+
 /** @brief Checks whether the function is a  match-result helper such as score or cigar. */
 export [[nodiscard]] constexpr bool
 is_bioseq_projection_funcid(const Oid funcid, const bioseq_stub_oids& o) noexcept {

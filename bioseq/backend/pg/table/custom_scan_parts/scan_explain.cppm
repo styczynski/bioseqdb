@@ -699,6 +699,14 @@ export {
         ExplainPropertyText("Bioseq Projected Columns", projected_columns_str, es);
 
         CustomScan* cscan = expect_pg_node<CustomScan>(to_pg_node(node->ss.ps.plan));
+        List* match_result_quals = list_length(cscan->custom_exprs) >= 5
+                                       ? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 4))
+                                       : NIL;
+        if (match_result_quals != NIL) {
+            const char* match_filter =
+                bioseq_column_pushdown_clauses_str(context, match_result_quals);
+            ExplainPropertyText("Bioseq Match Filter", match_filter, es);
+        }
         List* chunk_group_filter = storage_prunable_quals_without_mmsearch(
             postgres_list<List>(cscan->custom_exprs).get_second(), get_cached_stub_oids());
         if (chunk_group_filter != nullptr) {

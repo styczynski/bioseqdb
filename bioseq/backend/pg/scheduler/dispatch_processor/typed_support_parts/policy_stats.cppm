@@ -559,10 +559,10 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
             observed_minimizer_algorithm_identity(execution_stats),
             pipeline_chaining_algorithm_identity(params.chaining_algorithm),
             observed_chaining_algorithm_identity(execution_stats),
-            params.do_cigar
+            params.requires_base_alignment()
                 ? pipeline_base_alignment_algorithm_identity(params.base_alignment_algorithm)
                 : ::bioseq::pipeline_stats::base_alignment_algorithm_identity::none,
-            params.do_cigar ? observed_base_alignment_algorithm_identity(execution_stats)
+            params.requires_base_alignment() ? observed_base_alignment_algorithm_identity(execution_stats)
                             : ::bioseq::pipeline_stats::base_alignment_algorithm_identity::none);
         if (execution_stats->mapq_execution_available) {
             stats.operational.record_mapq_execution(execution_stats->mapq_executed);
@@ -815,7 +815,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     // Accept that completed empty result without requiring a KSW2 call, after
     // checking that its counters contain no chaining or alignment  work.
     const bool completed_zero_anchor_scalar_chain =
-        selected_all_scalar && params.do_cigar && execution_stats != nullptr &&
+        selected_all_scalar && params.requires_base_alignment() && execution_stats != nullptr &&
         execution_stats->scalar_pipeline_execution_stats_available &&
         execution_stats->size() == 0u &&
         !execution_stats->scalar_pipeline_stats.is_saturated &&
@@ -829,7 +829,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         execution_stats->scalar_pipeline_stats.ksw2_right_calls == 0u &&
         execution_stats->scalar_pipeline_stats.ksw2_input_cell_area == 0u;
     const bool require_scalar_alignment =
-        params.do_cigar && !completed_zero_anchor_scalar_chain;
+        params.requires_base_alignment() && !completed_zero_anchor_scalar_chain;
     const bool accepted_all_scalar =
         cpu_target_authority_consistent && selected_all_scalar && execution_stats != nullptr &&
         execution_stats->is_all_scalar_execution_consistent(require_collection_target_sketch,
@@ -842,7 +842,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                                            params.base_alignment_algorithm,
                                                            params.simd_chaining_policy,
                                                            require_collection_target_sketch,
-                                                           /*require_alignment=*/params.do_cigar);
+                                                           /*require_alignment=*/params.requires_base_alignment());
     const bool accepted_hybrid_host_seed =
         cpu_target_authority_consistent &&
         execution_plan->route == pipe::seed_chain_route::host_seed_vulkan_chain &&
@@ -852,7 +852,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         execution_stats->is_selected_components_execution_consistent(
             params.minimizer_algorithm, params.chaining_algorithm,
             params.base_alignment_algorithm, params.simd_chaining_policy,
-            require_collection_target_sketch, /*require_alignment=*/params.do_cigar);
+            require_collection_target_sketch, /*require_alignment=*/params.requires_base_alignment());
     const bool accepted_hybrid_gpu_seed =
         cpu_target_authority_consistent &&
         (execution_plan->route == pipe::seed_chain_route::vulkan_seed_host_chain ||
@@ -865,7 +865,7 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
             params.base_alignment_algorithm,
             params.simd_chaining_policy,
             /*require_target_sketch=*/false,
-            /*require_alignment=*/params.do_cigar,
+            /*require_alignment=*/params.requires_base_alignment(),
             shared_vulkan_seed);
     const bool accepted_selected = accepted_all_simd || accepted_all_scalar ||
                                    accepted_mixed_cpu || accepted_hybrid_host_seed ||

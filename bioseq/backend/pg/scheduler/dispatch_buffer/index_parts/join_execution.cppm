@@ -277,6 +277,23 @@ namespace bioseq::scheduler {
                 scanner_pg_ctx.target_locators[query_index] = target.seq_loc;
                 scanner_pg_ctx.target_rownos[query_index] = target.sequence_rowno;
                 scanner_pg_ctx.query_ordinals[query_index] = join_queries[query_index].ordinal;
+                /* Publish the retained GPU generation identity through the same row
+                 * fields used by ordinary scans and native CPU persisted readers. */
+                if (const auto* const prepared_mpf_target =
+                        scanner_pg_ctx.gpu_prepared_mpf_target;
+                    prepared_mpf_target != nullptr && prepared_mpf_target->persisted) {
+                    scanner_pg_ctx.persisted_generation_ids[query_index] =
+                        prepared_mpf_target->persisted_generation_id;
+                    scanner_pg_ctx.persisted_source_identities[query_index] =
+                        prepared_mpf_target->persisted_source_identity;
+                } else if (const auto* const prepared_mps_target =
+                               scanner_pg_ctx.gpu_prepared_grouped_soa_target;
+                           prepared_mps_target != nullptr && prepared_mps_target->persisted) {
+                    scanner_pg_ctx.persisted_generation_ids[query_index] =
+                        prepared_mps_target->resident_view.generation_id;
+                    scanner_pg_ctx.persisted_source_identities[query_index] =
+                        prepared_mps_target->resident_view.source_identity;
+                }
             }
             const bool wave_has_recipe_or_locator =
                 join_cpu_preparation_pending || target.seq_loc.has_value() ||

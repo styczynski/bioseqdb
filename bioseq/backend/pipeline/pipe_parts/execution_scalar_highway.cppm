@@ -1055,6 +1055,9 @@ export {
                 p_kernel::populate_runtime_params(parameters(), algo.parameters);
                 algo.computed_properties =
                     p_kernel::template static_properties<p_aligner_parameters>();
+                algo.computed_properties.push_back({
+                    "traceback", parameters().do_cigar || parameters().compute_edit_distance
+                        ? "enabled" : "disabled"});
                 algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
                 desc.algorithm = std::move(algo);
             }

@@ -12,6 +12,7 @@ import bioseq.postgres.support;
 import :custom_scan_scan_feature_contracts;
 import :custom_scan_oid_expression_support_expression_analysis_contracts;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 export import :custom_scan_oid_expression_support_edit_sequence_recipe_contracts;
 
 using namespace bioseq::postgres::support;
@@ -54,6 +55,9 @@ export struct feature_flag_visitor {
             // stage as has_cigar; its result alphabet is not a reference filter.
             if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
                 detector.flags.uses_cigar = true;
+            }
+            if (is_bioseq_alignment_score_funcid(fe->funcid, *o)) {
+                detector.flags.uses_alignment_score = true;
             }
             if (fe->funcid == o->edit_oid) {
                 detector.flags.uses_edit = true;

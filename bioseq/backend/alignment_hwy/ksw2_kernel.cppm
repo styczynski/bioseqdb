@@ -864,6 +864,10 @@ template<
         previous_band_end   = band_end;
     }
 
+    // Endpoint selection is part of scoring, including calls without traceback.
+    result.has_reached_end = !result.is_z_dropped && flags.extz_only &&
+                             result.mqe + end_bonus > result.max;
+
     // Reconstruct the CIGAR from the selected endpoint.
     if (should_compute_cigar) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -875,10 +879,7 @@ template<
         if (!result.is_z_dropped && !flags.extz_only) {
             ksw_backtrack_cigar(backtrack, true, output_reversed, 0,
                                 target_length_i32 - 1, query_length_i32 - 1, result.cigar);
-        } else if (!result.is_z_dropped && flags.extz_only
-                   && result.mqe + end_bonus > result.max)
-        {
-            result.has_reached_end = true;
+        } else if (result.has_reached_end) {
             ksw_backtrack_cigar(backtrack, true, output_reversed, 0,
                                 result.mqe_t, query_length_i32 - 1, result.cigar);
         } else if (result.max_t >= 0 && result.max_q >= 0) {

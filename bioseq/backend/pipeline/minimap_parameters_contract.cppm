@@ -1058,6 +1058,8 @@ struct minimap2_parameters {
 
     /** Enable base-level alignment and CIGAR generation. */
     bool do_cigar = true;
+    /** Compute base-alignment scores without requiring CIGAR or edit counts. */
+    bool compute_alignment_score = false;
     /** Compute the divergence estimate from seeds. */
     bool compute_divergence = true;
     /** Compute mapping quality for output regions. */
@@ -1121,6 +1123,11 @@ struct minimap2_parameters {
     /** Stored radix digit width. Current Vulkan kernels do not use this option. */
     std::uint32_t vulkan_radix_digit_bits = 8;
 
+    /** @return Whether requested result fields require base-level alignment. */
+    [[nodiscard]] constexpr bool requires_base_alignment() const noexcept {
+        return compute_alignment_score || do_cigar || compute_edit_distance;
+    }
+
     /**
      * @brief Copy chaining settings and prepare values derived from them.
      * @return Parameters whose mode follows chaining_algorithm and whose
@@ -1160,7 +1167,7 @@ struct minimap2_parameters {
         }
         parameters.vulkan_enabled = vulkan_enabled;
         parameters.coordinate_only =
-            !do_cigar && !compute_divergence && !compute_mapq;
+            !requires_base_alignment() && !compute_divergence && !compute_mapq;
         parameters.prepare();
         return parameters;
     }

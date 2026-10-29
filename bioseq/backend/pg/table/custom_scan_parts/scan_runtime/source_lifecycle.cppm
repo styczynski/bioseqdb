@@ -230,7 +230,7 @@ export {
     /**
      * @brief Finds which sequence sources are needed before alignment and during output.
      *
-     * Uses the rewritten output list for projection sources and plan.qual for
+     * Uses the rewritten output list and result predicates for output sources and plan.qual for
      * pre-alignment filters. Evaluated operands add their source columns to the
      * pre-alignment  set, so their expressions can read sequences safely.
      */
@@ -248,6 +248,11 @@ export {
             runtime.mmsearch_output_source_bound,
             relation_descriptor,
             reinterpret_cast<Node*>(runtime.newtargetlist),
+            sequence_type_oid);
+        mark_mmsearch_sequence_sources_from_expression(
+            runtime.mmsearch_output_source_bound,
+            relation_descriptor,
+            reinterpret_cast<Node*>(runtime.match_result_quals),
             sequence_type_oid);
         if (plan != nullptr)
             mark_mmsearch_sequence_sources_from_expression(runtime.mmsearch_pre_eval_source_bound,

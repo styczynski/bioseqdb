@@ -95,6 +95,9 @@ export {
             alignment_registration{};
         placeholder_constants placeholder_consts{};
         List* newtargetlist = nullptr;
+        /* Final executor expressions; injected once, compiled after each match's
+         * Const values are populated, because ExprState copies Const Datums. */
+        List* match_result_quals = NIL;
         per_scan_aligner_state aligner_state{};
         mmsearch_parameter_rebind param_rebind{};
         bool edit_predicate_active = false;

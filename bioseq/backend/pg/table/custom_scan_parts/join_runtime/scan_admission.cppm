@@ -93,6 +93,7 @@ export {
         runtime.mmsearch_pre_eval_sources_present = false;
         runtime.locator_parent_token = 0;
         runtime.locator_rowno_resno = InvalidAttrNumber;
+        runtime.match_result_quals = NIL;
         runtime.edit_predicate_active = false;
         runtime.edit_exclusive_upper_bound = 0;
         runtime.edit_sequence_attno = InvalidAttrNumber;
@@ -247,6 +248,23 @@ export {
         List* owned_mmsearch_quals = list_length(cscan->custom_exprs) >= 4
                                          ? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
                                          : NIL;
+        if (list_length(cscan->custom_exprs) != 5) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqScan expression-list layout is invalid")));
+        }
+        Node* match_result_quals_node = reinterpret_cast<Node*>(list_nth(cscan->custom_exprs, 4));
+        if (match_result_quals_node != nullptr && !IsA(match_result_quals_node, List)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqScan match-result predicate list is invalid")));
+        }
+        runtime.match_result_quals = reinterpret_cast<List*>(match_result_quals_node);
+        if (runtime.match_result_quals != NIL && owned_mmsearch_quals == NIL) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("BioseqScan match-result predicates have no alignment owner")));
+        }
         if (list_length(owned_mmsearch_quals) > 2) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
@@ -329,6 +347,8 @@ export {
          * cells only and leave the private expression out of SQL evaluation. */
         List* attr_needed_custom_expressions = list_concat_copy(
             bioseq_scan_state->vectorization.qualifiers.get(), owned_mmsearch_quals);
+        attr_needed_custom_expressions = list_concat(
+            attr_needed_custom_expressions, list_copy(runtime.match_result_quals));
         bioseq_scan_state->attributes_needed = bioseq::postgres::support::postgres_bitmapset{
             collect_needed_column_attributes(&cscanstate->ss, attr_needed_custom_expressions)};
         list_free(attr_needed_custom_expressions);
@@ -1007,6 +1027,7 @@ export {
         pending_parameters.downstream_active_wall = features.has_mmsearch
             ? bioseq::postgres::table::alignment_execution::
                 borrow_downstream_active_wall_tracker(runtime.alignment_registration) : nullptr;
+        pending_parameters.compute_alignment_score = features.uses_alignment_score;
         pending_parameters.do_cigar = features.uses_cigar || features.uses_edit;
         pending_parameters.compute_divergence = features.uses_divergence;
         pending_parameters.compute_mapq = features.uses_mapq;

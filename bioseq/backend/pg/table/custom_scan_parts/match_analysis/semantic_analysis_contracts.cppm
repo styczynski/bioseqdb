@@ -32,6 +32,11 @@ export [[nodiscard]] std::size_t finalized_base_owner_matching_site_count(
     Node* identity,
     const bioseq_stub_oids& oids);
 
+/** @brief Validates that deferred base-scan quals use only locally finalized helper carriers. */
+export [[nodiscard]] bool base_scan_custom_expressions_have_only_finalized_match_helpers(
+    CustomScan* scan,
+    const bioseq_stub_oids& oids);
+
 /**
  * @brief Counts matching helper owners in a plan subtree, stopping  at subqueries.
  *
