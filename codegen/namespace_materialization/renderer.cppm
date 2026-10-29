@@ -483,7 +483,6 @@ scheduler_sibling_declaration_required(const generation_plan& plan,
             || imported == "bioseq.instrumentation.runtime"
             || imported == "bioseq.storage.size"
             || imported == "bioseq.storage.layout"
-            || imported == "bioseq.postgres.storage.scanner"
             || imported == "bioseq.parallelism.pool";
     }
     return true;

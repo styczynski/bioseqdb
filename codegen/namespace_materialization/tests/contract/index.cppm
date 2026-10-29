@@ -1842,6 +1842,8 @@ inline void verify_production_declaration_heads_and_probes(
                 "import :cpu_preparation;") == 0U
                 && !implementation.content.contains(
                     "import :typed_flat_api;")
+                && !implementation.content.contains(
+                    "import bioseq.postgres.storage.scanner;")
                 && occurrences(
                     implementation.content,
                     "namespace " + std::string{identity} + " {")

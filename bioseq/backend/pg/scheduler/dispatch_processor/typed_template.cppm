@@ -79,7 +79,6 @@ import bioseq.instrumentation.runtime;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
