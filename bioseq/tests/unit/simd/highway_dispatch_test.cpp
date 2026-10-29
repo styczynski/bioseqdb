@@ -44,7 +44,7 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
 
     REQUIRE_FALSE(table.available_kernels.any());
     REQUIRE(table.has_all_kernels(expected));
-    REQUIRE(table.common.sneaky_snake_simd_batch == nullptr);
+    REQUIRE_FALSE(static_cast<bool>(table.common.sneaky_snake_simd_batch));
     REQUIRE(table.common.count_equal_rank_chunk == nullptr);
     REQUIRE(table.common.transform_sequence_rank_chunk == nullptr);
     REQUIRE(table.chaining.chain_anchors_simd == nullptr);
