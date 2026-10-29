@@ -146,14 +146,15 @@ template <sequence_alphabet p_alphabet,
                 reinterpret_cast<const char*>(slab_data + cursor + remaining));
             return record_parse_result{parse_outcome::incomplete, slab_size};
         }
-        std::size_t header_size = newline_offset;
-        if (header_size > 0 && slab_data[cursor + header_size - 1] == '\r') {
-            header_size -= 1;
-        }
         state.header_storage->insert(
             state.header_storage->end(),
             reinterpret_cast<const char*>(slab_data + cursor),
-            reinterpret_cast<const char*>(slab_data + cursor + header_size));
+            reinterpret_cast<const char*>(slab_data + cursor + newline_offset));
+        // The terminating carriage return may have arrived in an earlier refill.
+        if (state.header_storage->size() > state.header_start_offset &&
+            state.header_storage->back() == '\r') {
+            state.header_storage->pop_back();
+        }
         cursor += newline_offset + 1; // consume '\n'
         state.progress = fasta_parser_progress::at_body_line_start;
     }
