@@ -159,6 +159,14 @@ export {
             per_row_without_restriction(original_extra.mergeclause_list, owned);
         JoinCostWorkspace workspace{};
         if (IsA(incumbent, NestPath)) {
+            /* The incumbent may have moved ordinary join clauses into its old
+             * parameterized inner path. Child replacement removes that proof.
+             * Restore the original restrictions while retaining any additional
+             * incumbent parameter clauses. PostgreSQL's create_nestloop_path
+             * removes serials still enforced by the selected inner path. Use
+             * pointer identity so distinct volatile clauses keep their count. */
+            filtered_restrictions =
+                list_union_ptr(filtered_restrictions, filtered_extra.restrictlist);
             Relids calculated_required_outer =
                 calc_nestloop_required_outer(outer_path->parent->relids,
                                              PATH_REQ_OUTER(outer_path),
