@@ -59,8 +59,8 @@ template <class Value, class Error>
         seqan3::assign_rank_to(query_ranks[index] % seqan3::alphabet_size<seq::aa27>, query_letters[index]);
     for (std::size_t index = 0; index < target_ranks.size(); ++index)
         seqan3::assign_rank_to(target_ranks[index] % seqan3::alphabet_size<seq::aa27>, target_letters[index]);
-    const compact_sequence_range query{query_letters};
-    const compact_sequence_range target{target_letters};
+    const compact_sequence_range<seq::aa27> query{query_letters};
+    const compact_sequence_range<seq::aa27> target{target_letters};
     return run_gatekeeper_vulkan_batch(bioseq::storage::make_lazy_sequence_view(query),
                                        bioseq::storage::make_lazy_sequence_view(target), jobs);
 }
