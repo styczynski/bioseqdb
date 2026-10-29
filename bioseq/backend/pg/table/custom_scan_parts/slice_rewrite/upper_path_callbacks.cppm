@@ -29,6 +29,7 @@ import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 
 import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_join_ownership_helper_presence_contracts;
 import :custom_scan_slice_path_codec_contract;
 import :custom_scan_slice_path_carrier_lineage;
 import :custom_scan_slice_path_plan_construction;
@@ -76,6 +77,14 @@ export {
         slice_project_ir_builder builder{.oids = oids, .command_type = root->parse->commandType};
         if (!slice_project_discover_target(projection_target, builder))
             return;
+        /* A match helper is a value produced by its owning scan or join, not
+         * a base sequence source. Pulling its argument through a lazy consumer
+         * would request raw columns that the owner need not publish. Leave
+         * these consumers in the ordinary projection above the match owner. */
+        for (Node* expression : postgres_list<Node>(builder.expressions)) {
+            if (batch_join_expression_has_match_helper(expression, *oids))
+                return;
+        }
         for (Node* expression : postgres_list<Node>(projection_target->exprs)) {
             if (bioseq_expr_uses_lazy_sequence_projection(expression) &&
                 contain_volatile_functions(expression))
