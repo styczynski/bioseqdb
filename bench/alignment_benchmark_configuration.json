@@ -1,5 +1,7 @@
 {
   "params": {
+    "native_packed_conversion": {"_": {"type": "integer", "default": 0, "description": "Production packed conversion, default scheduling; checked read counters included"}},
+    "scalar_packed_conversion_oracle": {"_": {"type": "integer", "default": 0, "description": "Benchmark-only bounded SeqAn scalar oracle and native checked packing"}},
     "sneakysnake_original": {
       "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold passed to the bundled exact SneakySnake.c source"}
     },
@@ -50,6 +52,14 @@
   },
 
   "test_cases": {
+    "PACKED_TRANSLATE_AA10LI": {"data": {"alphabet": "aa10li", "inverse": false, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; canonical translation"},
+    "PACKED_BACK_TRANSLATE_AA10LI": {"data": {"alphabet": "aa10li", "inverse": true, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; representative synthesis"},
+    "PACKED_TRANSLATE_AA10MURPHY": {"data": {"alphabet": "aa10murphy", "inverse": false, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; canonical translation"},
+    "PACKED_BACK_TRANSLATE_AA10MURPHY": {"data": {"alphabet": "aa10murphy", "inverse": true, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; representative synthesis"},
+    "PACKED_TRANSLATE_AA20": {"data": {"alphabet": "aa20", "inverse": false, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; canonical translation"},
+    "PACKED_BACK_TRANSLATE_AA20": {"data": {"alphabet": "aa20", "inverse": true, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; representative synthesis"},
+    "PACKED_TRANSLATE_AA27": {"data": {"alphabet": "aa27", "inverse": false, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; canonical translation"},
+    "PACKED_BACK_TRANSLATE_AA27": {"data": {"alphabet": "aa27", "inverse": true, "residues": 1048577}, "description": "Packed DNA5 codon cycle including ambiguous codons and X; representative synthesis"},
     "NATIVE_DNA4_EXACT": {
       "data": {
         "alphabet": "dna4",
@@ -2653,6 +2663,86 @@
           "type": "region",
           "region": "sort_run",
           "rules": []
+        }
+      }
+    }
+  },
+
+  "bench_native_packed_conversions": {
+    "tags": [
+      "sequence",
+      "conversion",
+      "protein"
+    ],
+    "description": "Actual native packed conversion against an independent bounded scalar SeqAn oracle. Source and expected packed fixtures are built untimed; fresh admitted destination allocation plus production conversion/default scheduling are timed. Both paths include checked read counter atomics. Conversion and packing time is combined. Payload bytes are not hardware DRAM traffic; admission highwater is sampled, not a complete stack/scratch peak. Rank-tile bytes are declared per-task buffers and exclude target-local packing scratch/registers. No nucleotide translation is inserted into alignment.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 1402
+    },
+    "matrix": {
+      "for": {
+        "PACKED_TRANSLATE_AA10LI": 3,
+        "PACKED_BACK_TRANSLATE_AA10LI": 3,
+        "PACKED_TRANSLATE_AA10MURPHY": 3,
+        "PACKED_BACK_TRANSLATE_AA10MURPHY": 3,
+        "PACKED_TRANSLATE_AA20": 3,
+        "PACKED_BACK_TRANSLATE_AA20": 3,
+        "PACKED_TRANSLATE_AA27": 3,
+        "PACKED_BACK_TRANSLATE_AA27": 3
+      },
+      "over": {
+        "native_packed_conversion": {},
+        "scalar_packed_conversion_oracle": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {},
+        "packed_equal": {
+          "type": "evaluation"
+        },
+        "input_symbols": {
+          "type": "evaluation"
+        },
+        "output_symbols": {
+          "type": "evaluation"
+        },
+        "packed_input_payload_bytes": {
+          "type": "evaluation"
+        },
+        "packed_output_payload_bytes": {
+          "type": "evaluation"
+        },
+        "decoded_read_bytes": {
+          "type": "evaluation"
+        },
+        "checked_read_calls": {
+          "type": "evaluation"
+        },
+        "maximum_read_symbols": {
+          "type": "evaluation"
+        },
+        "allocation_ns": {
+          "type": "evaluation"
+        },
+        "conversion_and_packing_ns": {
+          "type": "evaluation"
+        },
+        "output_symbols_per_second": {
+          "type": "evaluation"
+        },
+        "retained_output_admission_bytes": {
+          "type": "evaluation"
+        },
+        "sampled_admission_highwater_bytes": {
+          "type": "evaluation"
+        },
+        "declared_rank_tile_bytes_per_task": {
+          "type": "evaluation"
         }
       }
     }

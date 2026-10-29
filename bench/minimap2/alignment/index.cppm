@@ -53,6 +53,9 @@ import bioseq.common.context;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.sequences.translation;
+import bioseq.sequences.rank_pack;
+import bioseq.simd.utils;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.chaining.simd;
@@ -704,6 +707,299 @@ template<sequence_alphabet Alphabet, std::unsigned_integral Storage = std::uint3
         });
     return std::move(*input);
 }
+
+namespace conversion_benchmark {
+namespace conversion = bioseq::sequences;
+namespace storage = bioseq::storage;
+
+/** Native words stay packed throughout fixture ownership and measured processing. */
+template<sequence_alphabet Alphabet>
+using packed = compact_sequence_range<sequence_custom_alphabet<Alphabet, std::uint64_t>>;
+
+/** One amino-acid alphabet, both native sources, and independent packed expected outputs. */
+template<sequence_alphabet Alphabet>
+struct input_for {
+    using alphabet_type = Alphabet;
+    packed<seq::dna5> nucleotides;
+    packed<Alphabet> residues;
+    packed<seq::dna5> expected_inverse;
+    bool inverse{};
+};
+using input = decltype([]<class... Entries>(std::tuple<Entries...>) {
+    return std::variant<input_for<typename Entries::alphabet_type>...>{};
+}(supported_biological_alphabets::alphabet_entries_tuple{}));
+
+/** The permit outlives the vector; framework evaluation observes the actual generated words. */
+struct output {
+    bioseq::parallelism::memory_permit permit;
+    std::vector<std::uint64_t> words;
+    conversion::rank_pack_result packed_result{};
+    std::uint64_t allocation_ns{}, conversion_and_pack_ns{};
+    std::uint64_t packed_input_bytes{}, packed_output_bytes{}, input_symbols{}, output_symbols{};
+    std::uint64_t decoded_read_bytes{}, read_calls{}, maximum_read_symbols{};
+    std::uint64_t retained_output_admission_bytes{}, sampled_admission_highwater_bytes{};
+};
+
+/** Count checked reads and sample admission without changing source ownership or scheduling. */
+struct observed_source {
+    storage::borrowed_rank_window_source original;
+    std::uint64_t baseline_admission{};
+    mutable std::atomic<std::uint64_t> bytes{}, calls{}, maximum_read{}, admission_highwater{};
+
+    /** Raise a diagnostic high-water sample using relaxed atomics, valid for parallel readers. */
+    static void observe_max(std::atomic<std::uint64_t>& maximum, std::uint64_t value) {
+        auto previous = maximum.load(std::memory_order_relaxed);
+        while (previous < value && !maximum.compare_exchange_weak(
+            previous, value, std::memory_order_relaxed)) {}
+    }
+    /** Forward one bounded checked read, recording logical bytes rather than guessed DRAM traffic. */
+    [[nodiscard]] static const std::uint8_t* read(const void* state,
+        storage::sequence_size_t begin, std::size_t count, std::span<std::uint8_t> scratch) {
+        const auto& source = *static_cast<const observed_source*>(state);
+        const auto result = source.original.read_checked(begin, count, scratch);
+        if (!result) return nullptr;
+        source.bytes.fetch_add(count, std::memory_order_relaxed);
+        source.calls.fetch_add(1u, std::memory_order_relaxed);
+        observe_max(source.maximum_read, count);
+        const auto reserved = bioseq::parallelism::memory_admission_controller::instance().reserved_bytes();
+        observe_max(source.admission_highwater,
+            reserved > source.baseline_admission ? reserved - source.baseline_admission : 0u);
+        return result->data();
+    }
+    /** Return a monitored descriptor retaining the original source's worker-shareability. */
+    [[nodiscard]] storage::borrowed_rank_window_source view() const {
+        auto result = original;
+        result.context = this;
+        result.read_at = &read;
+        return result;
+    }
+};
+
+/** Benchmark-only inverse oracle: public SeqAn translation, independent of production LUTs. */
+template<seqan3::aminoacid_alphabet Alphabet>
+[[nodiscard]] consteval auto inverse_oracle() {
+    std::array<std::optional<std::array<std::uint8_t, 3>>, seqan3::alphabet_size<Alphabet>> table{};
+    std::array<std::pair<bool, std::size_t>, seqan3::alphabet_size<Alphabet>> preference{};
+    constexpr auto nucleotide_count = seqan3::alphabet_size<seq::dna5>;
+    for (std::size_t first = 0; first < nucleotide_count; ++first)
+        for (std::size_t second = 0; second < nucleotide_count; ++second)
+            for (std::size_t third = 0; third < nucleotide_count; ++third) {
+                const std::array<std::uint8_t, 3> codon{static_cast<std::uint8_t>(first),
+                    static_cast<std::uint8_t>(second), static_cast<std::uint8_t>(third)};
+                const auto first_base = seq::dna5{}.assign_rank(codon[0]);
+                const auto second_base = seq::dna5{}.assign_rank(codon[1]);
+                const auto third_base = seq::dna5{}.assign_rank(codon[2]);
+                const char amino_character = seqan3::to_char(seqan3::translate_triplet(
+                    first_base, second_base, third_base));
+                const auto reduced = seqan3::assign_char_to(amino_character, Alphabet{});
+                const char reduced_character = seqan3::to_char(reduced);
+                if (amino_character == '*' && reduced_character != '*') continue;
+                const auto rank = seqan3::to_rank(reduced);
+                const auto score = std::pair{amino_character != reduced_character,
+                    static_cast<std::size_t>(seqan3::to_char(first_base) == 'N')
+                    + static_cast<std::size_t>(seqan3::to_char(second_base) == 'N')
+                    + static_cast<std::size_t>(seqan3::to_char(third_base) == 'N')};
+                if (!table[rank] || score < preference[rank]) {
+                    table[rank] = codon;
+                    preference[rank] = score;
+                }
+            }
+    return table;
+}
+
+/** Bounded scalar oracle writes native packed output through the existing checked sink. */
+template<bool Inverse, seqan3::aminoacid_alphabet Alphabet, class Writer>
+[[nodiscard]] conversion::rank_pack_result scalar_reference(
+    const storage::borrowed_rank_window_source& source, Writer& writer) {
+    constexpr auto tile = bioseq::simd::sequence_rank_io_chunk_capacity;
+    constexpr auto input_quantum = Inverse ? 1u : 3u;
+    std::array<std::uint8_t, tile * input_quantum> scratch{};
+    constexpr auto representatives = inverse_oracle<Alphabet>();
+    const auto output_symbols = Inverse ? source.symbol_count * 3u : source.symbol_count / 3u;
+    for (std::size_t begin = 0; begin < source.symbol_count;) {
+        const auto count = std::min(scratch.size(), static_cast<std::size_t>(source.symbol_count - begin));
+        const auto ranks = source.read_checked(begin, count, scratch);
+        if (!ranks) throw std::runtime_error("conversion benchmark scalar source read failed");
+        for (std::size_t offset = 0; offset < count; offset += input_quantum) {
+            if constexpr (Inverse) {
+                const auto rank = (*ranks)[offset];
+                if (rank >= representatives.size() || !representatives[rank])
+                    throw std::runtime_error("conversion benchmark inverse oracle has no representative");
+                for (const auto base : *representatives[rank])
+                    if (writer.append_rank(base) != conversion::rank_pack_status::ok)
+                        throw std::runtime_error("conversion benchmark scalar packing failed");
+            } else {
+                const auto amino = seqan3::translate_triplet(
+                    seq::dna5{}.assign_rank((*ranks)[offset]),
+                    seq::dna5{}.assign_rank((*ranks)[offset + 1u]),
+                    seq::dna5{}.assign_rank((*ranks)[offset + 2u]));
+                const auto rank = seqan3::to_rank(seqan3::assign_char_to(seqan3::to_char(amino), Alphabet{}));
+                if (writer.append_rank(rank) != conversion::rank_pack_status::ok)
+                    throw std::runtime_error("conversion benchmark scalar packing failed");
+            }
+        }
+        begin += count;
+    }
+    constexpr auto letters_per_unit = Writer::traits::letters_per_unit;
+    const auto result = writer.finish(output_symbols,
+        output_symbols / letters_per_unit + (output_symbols % letters_per_unit != 0u));
+    if (!result) throw std::runtime_error("conversion benchmark scalar packing finish failed");
+    return result;
+}
+
+/** Populate the expected native words outside every timed run without expanded whole-input buffers. */
+template<bool Inverse, seqan3::aminoacid_alphabet Alphabet, class SourceRange>
+[[nodiscard]] auto expected_packed(const SourceRange& source) {
+    using destination = std::conditional_t<Inverse, seq::dna5, Alphabet>;
+    using instance = sequence_custom_alphabet<destination, std::uint64_t>;
+    using sink = conversion::growing_rank_pack_unit_sink<std::uint64_t>;
+    std::vector<std::uint64_t> words;
+    conversion::checked_rank_pack_sink<instance, conversion::invalid_rank_policy::reject,
+        conversion::pack_capacity_policy::grow_vector, sink> writer{sink{words}};
+    const auto result = scalar_reference<Inverse, Alphabet>(storage::make_borrowed_rank_source(source), writer);
+    return packed<destination>::from_packed(std::move(words), result.padding_letters);
+}
+
+/** Estimate packed fixture/expected/output ownership, leaving reader scratch bounded. */
+[[nodiscard]] run_constraints estimate(std::string_view, std::string_view, simdjson::dom::element data) {
+    const auto residues = read_int_field(data, "residues", 1048577);
+    if (residues < 1 || residues > 16777216)
+        throw std::invalid_argument("conversion benchmark residue count is outside the bounded fixture range");
+    return {.base_memory = static_cast<std::size_t>(residues) * 16u,
+            .extra_memory = static_cast<std::size_t>(residues) * 16u};
+}
+
+/** Cycle all125 DNA5 codons; ambiguity and AA27 X are present, and every inverse source is representable. */
+[[nodiscard]] input build(std::string_view, std::string_view, simdjson::dom::element data,
+                          const run_constraints&) {
+    const auto count = read_int_field(data, "residues", 1048577);
+    if (count < 1 || count > 16777216) throw std::invalid_argument("invalid conversion fixture size");
+    bool inverse{};
+    if (data["inverse"].get(inverse) != simdjson::SUCCESS)
+        throw std::invalid_argument("conversion fixture requires direction");
+    std::optional<input> result;
+    supported_biological_alphabets::dispatch_alphabet_by_code(native_benchmark_alphabet_code(data),
+        [&result, count, inverse]<class Alphabet>() {
+            if constexpr (seqan3::aminoacid_alphabet<Alphabet>) {
+                input_for<Alphabet> fixture;
+                fixture.inverse = inverse;
+                using instance = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+                using sink = conversion::growing_rank_pack_unit_sink<std::uint64_t>;
+                conversion::checked_rank_pack_sink<instance, conversion::invalid_rank_policy::reject,
+                    conversion::pack_capacity_policy::grow_vector, sink> writer{sink{fixture.nucleotides.packed_units}};
+                constexpr auto cardinality = seqan3::alphabet_size<seq::dna5>;
+                for (std::size_t ordinal = 0; ordinal < static_cast<std::size_t>(count); ++ordinal) {
+                    const auto codon = ordinal % (cardinality * cardinality * cardinality);
+                    for (const auto rank : {codon / (cardinality * cardinality),
+                                           (codon / cardinality) % cardinality, codon % cardinality})
+                        if (writer.append_rank(static_cast<std::uint8_t>(rank)) != conversion::rank_pack_status::ok)
+                            throw std::runtime_error("conversion fixture packing failed");
+                }
+                const auto finished = writer.finish();
+                if (!finished) throw std::runtime_error("conversion fixture finish failed");
+                fixture.nucleotides.padding_letters = finished.padding_letters;
+                fixture.residues = expected_packed<false, Alphabet>(fixture.nucleotides);
+                fixture.expected_inverse = expected_packed<true, Alphabet>(fixture.residues);
+                result.emplace(std::in_place_type<input_for<Alphabet>>, std::move(fixture));
+            } else throw std::invalid_argument("conversion fixture requires an amino-acid alphabet");
+        });
+    return std::move(*result);
+}
+
+/** Allocate an admitted destination and run the real default production scheduling or scalar oracle. */
+template<bool Inverse, seqan3::aminoacid_alphabet Alphabet>
+[[nodiscard]] output run_typed(std::string_view algorithm, const input_for<Alphabet>& fixture) {
+    using source_alphabet = std::conditional_t<Inverse, Alphabet, seq::dna5>;
+    using destination = std::conditional_t<Inverse, seq::dna5, Alphabet>;
+    using instance = sequence_custom_alphabet<destination, std::uint64_t>;
+    const auto& source = [&fixture]() -> const auto& {
+        if constexpr (Inverse) return fixture.residues;
+        else return fixture.nucleotides;
+    }();
+    const auto& expected = [&fixture]() -> const auto& {
+        if constexpr (Inverse) return fixture.expected_inverse;
+        else return fixture.residues;
+    }();
+    output result;
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline_admission = admission.reserved_bytes();
+    const auto allocate_begin = bioseq::instrumentation::clock::now_ns();
+    bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error>(
+        result.words, result.permit, expected.size());
+    result.words.resize(expected.size());
+    result.allocation_ns = bioseq::instrumentation::clock::now_ns() - allocate_begin;
+    result.retained_output_admission_bytes = result.permit.bytes();
+    observed_source observed{storage::make_borrowed_rank_source(source), baseline_admission};
+    observed_source::observe_max(observed.admission_highwater,
+        admission.reserved_bytes() > baseline_admission ? admission.reserved_bytes() - baseline_admission : 0u);
+    const auto begin = bioseq::instrumentation::clock::now_ns();
+    if (algorithm == "native_packed_conversion") {
+        const auto converted = conversion::convert_packed_into<source_alphabet, instance>(
+            observed.view(), 0u, source.bp_size(), conversion::translation_options{},
+            std::span<std::uint64_t>{result.words}, true);
+        if (!converted) throw std::runtime_error("native packed conversion benchmark failed");
+        result.packed_result = *converted;
+    } else if (algorithm == "scalar_packed_conversion_oracle") {
+        using sink = conversion::fixed_rank_pack_unit_sink<std::uint64_t>;
+        conversion::checked_rank_pack_sink<instance, conversion::invalid_rank_policy::reject,
+            conversion::pack_capacity_policy::fixed_span, sink> writer{sink{result.words}};
+        result.packed_result = scalar_reference<Inverse, Alphabet>(observed.view(), writer);
+    } else throw std::invalid_argument("unknown conversion benchmark algorithm");
+    result.conversion_and_pack_ns = bioseq::instrumentation::clock::now_ns() - begin;
+    result.packed_input_bytes = source.size() * sizeof(std::uint64_t);
+    result.packed_output_bytes = result.words.size() * sizeof(std::uint64_t);
+    result.input_symbols = source.bp_size();
+    result.output_symbols = expected.bp_size();
+    result.decoded_read_bytes = observed.bytes.load(std::memory_order_relaxed);
+    result.read_calls = observed.calls.load(std::memory_order_relaxed);
+    result.maximum_read_symbols = observed.maximum_read.load(std::memory_order_relaxed);
+    result.sampled_admission_highwater_bytes = observed.admission_highwater.load(std::memory_order_relaxed);
+    return result;
+}
+
+/** Dispatch just the selected AA family and direction, keeping source and result native. */
+[[nodiscard]] output run(std::string_view algorithm, const parameter_map&, const input& fixture) {
+    return std::visit([algorithm](const auto& typed) -> output {
+        using alphabet = typename std::remove_cvref_t<decltype(typed)>::alphabet_type;
+        if constexpr (seqan3::aminoacid_alphabet<alphabet>) {
+            if (typed.inverse) return run_typed<true>(algorithm, typed);
+            return run_typed<false>(algorithm, typed);
+        } else throw std::logic_error("non-AA conversion fixture alternative");
+    }, fixture);
+}
+
+/** Validate every packed word and padding outside timing; report scoped, observable byte counts. */
+[[nodiscard]] std::map<std::string, double> evaluate(std::string_view algorithm, const parameter_map&,
+                                                   const input& fixture, const output& result) {
+    std::visit([&result](const auto& typed) {
+        const auto& expected = typed.inverse ? typed.expected_inverse.packed_units : typed.residues.packed_units;
+        const auto padding = typed.inverse ? typed.expected_inverse.padding() : typed.residues.padding();
+        if (!result.packed_result || result.words != expected || result.packed_result.padding_letters != padding
+            || result.packed_result.emitted_symbols != result.output_symbols
+            || result.packed_result.written_units != result.words.size()
+            || result.decoded_read_bytes != result.input_symbols)
+            throw std::runtime_error("packed conversion disagrees with independent scalar oracle");
+    }, fixture);
+    const auto nanoseconds = result.allocation_ns + result.conversion_and_pack_ns;
+    return {{"packed_equal", 1.0}, {"input_symbols", static_cast<double>(result.input_symbols)},
+        {"output_symbols", static_cast<double>(result.output_symbols)},
+        {"packed_input_payload_bytes", static_cast<double>(result.packed_input_bytes)},
+        {"packed_output_payload_bytes", static_cast<double>(result.packed_output_bytes)},
+        {"decoded_read_bytes", static_cast<double>(result.decoded_read_bytes)},
+        {"checked_read_calls", static_cast<double>(result.read_calls)},
+        {"maximum_read_symbols", static_cast<double>(result.maximum_read_symbols)},
+        {"allocation_ns", static_cast<double>(result.allocation_ns)},
+        {"conversion_and_packing_ns", static_cast<double>(result.conversion_and_pack_ns)},
+        {"output_symbols_per_second", nanoseconds == 0u ? 0.0
+            : 1.0e9 * static_cast<double>(result.output_symbols) / static_cast<double>(nanoseconds)},
+        {"retained_output_admission_bytes", static_cast<double>(result.retained_output_admission_bytes)},
+        {"sampled_admission_highwater_bytes", static_cast<double>(result.sampled_admission_highwater_bytes)},
+        {"declared_rank_tile_bytes_per_task", static_cast<double>(bioseq::simd::sequence_rank_io_chunk_capacity
+            * (algorithm == "native_packed_conversion" ? 4u
+               : std::visit([](const auto& typed) { return typed.inverse ? 1u : 3u; }, fixture)))}};
+}
+} // namespace conversion_benchmark
+
 
 /// Encode a fixed ACGT fixture outside every timed callback.
 [[nodiscard]] bench_sequence_t compact_dna4_from_acgt(
@@ -5147,6 +5443,16 @@ int run(int argc, char** argv) {
     auto native_eval = std::function<std::map<std::string, double>(
         std::string_view, const parameter_map&, const native_aligner_input&,
         const aligner_output&)>{evaluate_native_aligner};
+    auto conversion_estimate = std::function<run_constraints(
+        std::string_view, std::string_view, simdjson::dom::element)>{conversion_benchmark::estimate};
+    auto conversion_build = std::function<conversion_benchmark::input(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const run_constraints&)>{conversion_benchmark::build};
+    auto conversion_run = std::function<conversion_benchmark::output(
+        std::string_view, const parameter_map&, const conversion_benchmark::input&)>{conversion_benchmark::run};
+    auto conversion_eval = std::function<std::map<std::string, double>(
+        std::string_view, const parameter_map&, const conversion_benchmark::input&,
+        const conversion_benchmark::output&)>{conversion_benchmark::evaluate};
     auto estimate_endpoint = std::function<run_constraints(
         std::string_view, std::string_view, simdjson::dom::element)>{
             estimate_endpoint_qualification_resources};
@@ -5178,6 +5484,9 @@ int run(int argc, char** argv) {
             "SneakySnake full-pipeline regional impact",
             "bench_prefilter_pipeline",
             config_path, estimate, build, run, eval_prefilter_pipeline),
+        create_benchmark<conversion_benchmark::input, conversion_benchmark::output>(
+            "Native packed biological conversion", "bench_native_packed_conversions", config_path,
+            conversion_estimate, conversion_build, conversion_run, conversion_eval),
         create_benchmark<native_aligner_input, aligner_output>(
             "Native biological alphabet planted alignments",
             "bench_aligners_native_alphabets", config_path,
