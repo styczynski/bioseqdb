@@ -443,7 +443,7 @@ struct window_traversal {
         while (matched < limit) {
             const auto count = std::min(read_size, limit - matched);
             const auto target_ranks = target.window(position + matched, count);
-            const auto query_ranks = query.window(query_index + matched, count);
+            const auto query_ranks = query.window(query_index + matched, count, candidates);
             if (query.failure->has_value()) return 0u;
             const auto run = comparison.diagonal_run(query_ranks, target_ranks, 0u,
                 static_cast<std::uint32_t>(count), 0u);

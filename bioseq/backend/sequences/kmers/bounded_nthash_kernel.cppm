@@ -235,7 +235,7 @@ requires bounded_nthash_seeded_alphabet<
     } else {
         // Native rank gather scales with lane count, not alphabet cardinality.
         return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
-            [&simd_tag, &ranks](auto stream_constant) [[gnu::always_inline]] {
+            [&simd_tag, &ranks] [[gnu::always_inline]] (auto stream_constant) {
                 constexpr std::size_t k_stream_index = decltype(stream_constant)::value;
                 const hn::Rebind<std::int32_t, p_simd_tag> signed_tag;
                 // Inactive padded lanes may contain unused rank bit patterns.
@@ -681,14 +681,14 @@ struct packed_iteration_state {
             static_cast<std::uint32_t>(symbols_seen - active_kmer_size);
         const vector_stream_type position = vector_stream_type::splat(
             simd_tag, local_kmer_position);
-        const vector_stream_type canonical_hash = [this]() [[gnu::always_inline]] {
+        const vector_stream_type canonical_hash = [this] [[gnu::always_inline]] () {
             if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
                 return add(forward_hash, reverse_hash[0]);
             } else {
                 return forward_hash;
             }
         }();
-        const mask_stream_type reverse_strand = [this, &simd_tag]() [[gnu::always_inline]] {
+        const mask_stream_type reverse_strand = [this, &simd_tag] [[gnu::always_inline]] () {
             if constexpr (bounded_nthash_seed_policy<alphabet_type>::canonical_reverse_complement) {
                 return less(reverse_hash[0], forward_hash);
             } else {

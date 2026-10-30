@@ -62,17 +62,16 @@ template<class p_simd_tag>
 
 /**
  * Builds wide minimizer records from the selected hash and position streams.
- * Each record receives its position, strand, and runtime k-mer length.
+ * Preserves hash, position, strand, and selected-record order.
  * Returns the collector status when the collector provides one.
  */
 template<class p_minimizer_type, class p_collector_type>
 requires wide_simd_minimizer_representation<p_minimizer_type>
-[[nodiscard]] inline bool append_wide_minimizer_records(
+[[nodiscard, gnu::always_inline]] inline bool append_wide_minimizer_records(
     p_collector_type& collector,
     const std::uint64_t* HWY_RESTRICT hashes,
     const std::uint64_t* HWY_RESTRICT position_strands,
-    std::size_t count,
-    [[maybe_unused]] std::size_t runtime_k)
+    std::size_t count)
 {
     static_assert(requires (
         p_collector_type& output,
@@ -706,8 +705,7 @@ process_chronological_candidate_block(
                 collector,
                 compressed_hash.data(),
                 compressed_position_strand.data(),
-                compressed_count,
-                k)) {
+                compressed_count)) {
             return reject_continuation(
                 state, two_stack_continuation_status::collector_overflow);
         }
@@ -943,8 +941,7 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
                 collector,
                 final_hash.data(),
                 final_position_strand.data(),
-                final_count,
-                state.kmer_size())) {
+                final_count)) {
             return reject_continuation(
                 state, two_stack_continuation_status::collector_overflow);
         }
