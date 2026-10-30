@@ -1188,6 +1188,9 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
         target_symbols[i] = (state >> 30u) & 3u;
     }
     target_symbols[200] = (target_symbols[208] + 1u) & 3u;
+    // Disambiguate the left boundary too: target[199] == target[207] would
+    // permit an equally optimal 199M8D193M prefix instead of 200M8D192M.
+    target_symbols[207] = (target_symbols[199] + 1u) & 3u;
 
     std::vector<std::uint32_t> query_symbols;
     query_symbols.reserve(k_target_length);
