@@ -671,9 +671,9 @@ template <class p_traits>
 /**
  * @brief Builds shader lookup tables for forward and complemented ranks.
  *
- * Nucleotide alphabets map, to A/C/G/T codes through nt4_normalize. Ambiguous
- * symbols map to code 4. For generic alphabets, only ranks 0 through 3 and
- * complement ranks in that range are valid codes.
+ * Forward codes preserve every valid native alphabet rank. Complement codes
+ * are populated only when the shared seed policy supports canonical reverse
+ * complements; all other entries retain the invalid-rank sentinel.
  */
 template <class p_sequence>
 [[nodiscard]] vulkan_rank_lut make_vulkan_rank_lut() {

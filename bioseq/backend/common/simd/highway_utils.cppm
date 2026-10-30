@@ -110,6 +110,12 @@ template<class Traits, bool QueryReversed, class D>
             }
         }
         const auto different = hn::Xor(query_packed, target_packed);
+        // Valid equal batches contribute no mismatches; retain their vector-work count.
+        if (hn::AllFalse(descriptor,
+                hn::And(active, hn::Ne(different, hn::Zero(descriptor))))) {
+            ++result.vector_batches;
+            continue;
+        }
         auto different_symbols = different;
         bioseq::common::templating::for_each_index<Traits::bits_per_char - 1>([different, &different_symbols]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
             different_symbols = hn::Or(different_symbols, hn::ShiftRight<Shift + 1>(different));
