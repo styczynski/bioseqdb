@@ -678,6 +678,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
     REQUIRE(direct.gpu_index_source_direct_pipeline_completions == 1u);
     REQUIRE(direct.gpu_index_fully_touched_bytes == direct.gpu_index_actual_allocation_bytes);
     REQUIRE(direct.target_index_build_dispatches == 0u);
+    REQUIRE(ordered_sketch.target_index_build_dispatches == 1u);
     REQUIRE(direct.seed_host_sort_fallbacks == 0u);
     REQUIRE(direct.post_seed_owned_cpu_index_releases == 0u);
     REQUIRE(direct.post_seed_owned_cpu_position_bytes_released == 0u);
