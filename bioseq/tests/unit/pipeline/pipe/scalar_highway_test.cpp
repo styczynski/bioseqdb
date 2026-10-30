@@ -978,16 +978,26 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty stats",
     REQUIRE_FALSE(tampered.is_ksw2_batched_execution_consistent(true));
 }
 
-TEST_CASE("bounded ntHash materializes DNA4 slices and supports DNA5 packed widths",
+TEST_CASE("bounded ntHash preserves native widths across resident and materialized ranges",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint8_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint16_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint32_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint64_t>();
-    check_bounded_nthash_dna5_coordinate<std::uint8_t>();
-    check_bounded_nthash_dna5_coordinate<std::uint16_t>();
-    check_bounded_nthash_dna5_coordinate<std::uint32_t>();
-    check_bounded_nthash_dna5_coordinate<std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::dna4, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::dna4, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::dna5, std::uint8_t>();
+    check_bounded_nthash_native_coordinates<seq::dna5, std::uint16_t>();
+    check_bounded_nthash_native_coordinates<seq::dna5, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::dna5, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::aa10li, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::aa10li, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::aa10murphy, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::aa10murphy, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::aa20, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::aa20, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::aa27, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::aa27, std::uint64_t>();
 }
 
 TEST_CASE("fragmented bounded ntHash unwinds its vector and memory permit for every scanner PostgreSQL leaf failure",

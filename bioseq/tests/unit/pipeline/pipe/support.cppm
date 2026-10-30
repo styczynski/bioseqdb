@@ -640,12 +640,23 @@ void check_fragmented_bounded_nthash_range_materialization() {
     }
     range_type range(data);
     auto resident_owner = bioseq::storage::make_resident_lazy_sequence(range);
+    std::size_t resident_payload_allocations = 0u;
+    const bioseq::storage::sequence_payload_allocation_observer observer{
+        .context = std::addressof(resident_payload_allocations),
+        // Count a temporary materialization even after its permit is released.
+        .publish = [](void* context,
+                      const bioseq::storage::sequence_payload_allocation_event&,
+                      std::uint64_t, std::uint64_t) noexcept {
+            ++*static_cast<std::size_t*>(context);
+        },
+    };
     const auto resident_view =
-        bioseq::storage::make_lazy_sequence_view(resident_owner);
+        bioseq::storage::make_lazy_sequence_view(resident_owner)
+            .with_payload_allocation_observer(std::addressof(observer));
     REQUIRE(range.size() > 12u);
     REQUIRE(range.padding() != 0u);
     using sequence_size_type = bioseq::storage::sequence_size_t;
-    const auto check_slice = [&range, &resident_view](sequence_size_type lo_unit,
+    const auto check_slice = [&range, &resident_view, &resident_payload_allocations](sequence_size_type lo_unit,
                                                       sequence_size_type hi_unit) {
         CAPTURE(lo_unit, hi_unit, sizeof(p_storage_unit));
         constexpr sequence_size_type letters_per_unit =
@@ -654,6 +665,7 @@ void check_fragmented_bounded_nthash_range_materialization() {
         const sequence_size_type hi_bp = std::min(
             hi_unit * letters_per_unit,
             static_cast<sequence_size_type>(range.bp_size()));
+        const auto allocations_before = resident_payload_allocations;
         collector_type resident_collector;
         const auto resident_stats = minimizer_dispatch_range<minimizer_type>(
             resident_collector,
@@ -669,6 +681,17 @@ void check_fragmented_bounded_nthash_range_materialization() {
             minimizer_sketch_backend::bounded_nthash_simd,
             resident_stats,
             /*require_nonempty_vector_work=*/true));
+
+        constexpr auto resident_width = static_cast<std::uint8_t>(
+            std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
+        constexpr auto resident_letters = bioseq::storage::packed_letters_per_unit(
+            resident_width, range_type::traits::bits_per_char);
+        REQUIRE(resident_stats.bounded_nthash.source_storage_unit_bytes == resident_width);
+        REQUIRE(resident_stats.bounded_nthash.input_storage_units ==
+                bioseq::common::ceil_div(hi_bp - lo_bp,
+                    static_cast<sequence_size_type>(resident_letters)));
+        REQUIRE(resident_payload_allocations == allocations_before +
+                static_cast<std::size_t>(sizeof(p_storage_unit) < sizeof(std::uint32_t)));
 
         auto& admission =
             bioseq::parallelism::memory_admission_controller::instance();
@@ -699,8 +722,19 @@ void check_fragmented_bounded_nthash_range_materialization() {
              * Statistics record this width because it is what the kernel reads. */
             REQUIRE(fragmented_stats.bounded_nthash.source_storage_unit_bytes
                     == sizeof(std::uint32_t));
-            REQUIRE(fragmented_stats.bounded_nthash
-                    == resident_stats.bounded_nthash);
+            constexpr auto fragmented_letters = bioseq::storage::packed_letters_per_unit(
+                sizeof(std::uint32_t), range_type::traits::bits_per_char);
+            REQUIRE(fragmented_stats.bounded_nthash.input_storage_units ==
+                    bioseq::common::ceil_div(hi_bp - lo_bp,
+                        static_cast<sequence_size_type>(fragmented_letters)));
+            // DNA4 uses the same normalized u32 traversal. Only original input
+            // storage geometry differs between native u64 and the copied u32.
+            auto comparable_resident = resident_stats.bounded_nthash;
+            comparable_resident.source_storage_unit_bytes =
+                fragmented_stats.bounded_nthash.source_storage_unit_bytes;
+            comparable_resident.input_storage_units =
+                fragmented_stats.bounded_nthash.input_storage_units;
+            REQUIRE(fragmented_stats.bounded_nthash == comparable_resident);
 
             collector_type rejected_collector;
             REQUIRE_THROWS_AS(
@@ -743,13 +777,14 @@ void check_fragmented_bounded_nthash_range_materialization() {
     check_slice(5u, static_cast<sequence_size_type>(range.size()));
 }
 
-template <class p_storage_unit>
-void check_bounded_nthash_dna5_coordinate() {
+/** Check native/full and staged/unaligned bounded ranges, geometry and allocation ownership. */
+template <sequence_alphabet p_alphabet, class p_storage_unit>
+void check_bounded_nthash_native_coordinates() {
     using ::bioseq::simd::minimizer_sketch_backend;
     using ::bioseq::simd::pipe::minimizer_dispatch_range;
     using ::bioseq::simd::pipe::minimizer_range_stats_matches_backend;
     using packed_sequence =
-        sequence_custom_alphabet<seq::dna5, p_storage_unit>;
+        sequence_custom_alphabet<p_alphabet, p_storage_unit>;
     using range_type = compact_sequence_range<packed_sequence>;
     using chunked_scanner = bioseq::storage::chunked_span_sequence_scanner<
         p_storage_unit, 2>;
@@ -757,14 +792,25 @@ void check_bounded_nthash_dna5_coordinate() {
     using collector_type =
         ::bioseq::simd::basic_sketch_collector<minimizer_type>;
 
-    std::vector<seq::dna5> data(4'123u);
+    std::vector<p_alphabet> data(4'123u);
     for (std::size_t index = 0u; index < data.size(); ++index) {
-        data[index].assign_rank(static_cast<std::uint8_t>(index % 5u));
+        data[index].assign_rank(static_cast<seqan3::alphabet_rank_t<p_alphabet>>(index % seqan3::alphabet_size<p_alphabet>));
     }
     range_type range(data);
     auto resident_owner = bioseq::storage::make_resident_lazy_sequence(range);
+    std::size_t resident_payload_allocations = 0u;
+    const bioseq::storage::sequence_payload_allocation_observer observer{
+        .context = std::addressof(resident_payload_allocations),
+        // Count each successful packed materialization during these synchronous calls.
+        .publish = [](void* context,
+                      const bioseq::storage::sequence_payload_allocation_event&,
+                      std::uint64_t, std::uint64_t) noexcept {
+            ++*static_cast<std::size_t*>(context);
+        },
+    };
     const auto resident_view =
-        bioseq::storage::make_lazy_sequence_view(resident_owner);
+        bioseq::storage::make_lazy_sequence_view(resident_owner)
+            .with_payload_allocation_observer(std::addressof(observer));
     auto& admission =
         bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t reserved_before = admission.reserved_bytes();
@@ -783,8 +829,54 @@ void check_bounded_nthash_dna5_coordinate() {
         minimizer_sketch_backend::bounded_nthash_simd,
         resident_stats, /*require_nonempty_vector_work=*/true));
     REQUIRE_FALSE(resident_collector.extract_sketches_data().empty());
-    REQUIRE(resident_stats.bounded_nthash.source_storage_unit_bytes ==
-            std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
+    constexpr auto resident_width = static_cast<std::uint8_t>(
+        std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
+    constexpr auto resident_letters = bioseq::storage::packed_letters_per_unit(
+        resident_width, range_type::traits::bits_per_char);
+    REQUIRE(resident_stats.bounded_nthash.source_storage_unit_bytes == resident_width);
+    REQUIRE(resident_stats.bounded_nthash.input_storage_units ==
+            bioseq::common::ceil_div(static_cast<bioseq::storage::sequence_size_t>(data.size()),
+                static_cast<bioseq::storage::sequence_size_t>(resident_letters)));
+    REQUIRE(resident_payload_allocations ==
+            static_cast<std::size_t>(sizeof(p_storage_unit) < sizeof(std::uint32_t)));
+
+    // The whole source fixes the selected width. An unaligned slice must stage
+    // at that same width so strict segment-statistics aggregation stays valid.
+    const auto allocations_before_slice = resident_payload_allocations;
+    const auto selected_width =
+        ::bioseq::simd::pipe::bounded_minimizer_storage_width(resident_view);
+    REQUIRE(selected_width == resident_width);
+    const auto slice_admission_bytes =
+        bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
+            resident_view.bp_size() - 2u, selected_width);
+    auto admitted_slice = admission.try_reserve(slice_admission_bytes);
+    REQUIRE(admitted_slice.has_value());
+    auto slice_permit = std::move(*admitted_slice);
+    collector_type unaligned_collector;
+    const auto unaligned_stats = minimizer_dispatch_range<minimizer_type>(
+        unaligned_collector, resident_view, 1u, resident_view.bp_size() - 1u,
+        10u, 15u, minimizer_sketch_backend::bounded_nthash_simd,
+        exact_simd_range_route::require_continuation, fixed_highway_kernels(),
+        ::bioseq::simd::pipe::exact_simd_input_storage::preserve_native_width,
+        std::addressof(slice_permit));
+    REQUIRE_FALSE(static_cast<bool>(slice_permit));
+    REQUIRE(admission.reserved_bytes() == reserved_before);
+    REQUIRE(minimizer_range_stats_matches_backend(
+        minimizer_sketch_backend::bounded_nthash_simd, unaligned_stats, true));
+    REQUIRE(unaligned_stats.bounded_nthash.source_storage_unit_bytes == resident_width);
+    REQUIRE(unaligned_stats.bounded_nthash.input_storage_units ==
+            bioseq::common::ceil_div(resident_view.bp_size() - 2u,
+                static_cast<bioseq::storage::sequence_size_t>(resident_letters)));
+    REQUIRE(resident_payload_allocations == allocations_before_slice + 1u);
+    REQUIRE_FALSE(unaligned_collector.extract_sketches_data().empty());
+    for (const auto& minimizer : unaligned_collector.extract_sketches_data()) {
+        REQUIRE(minimizer.last_pos() < data.size() - 2u);
+    }
+    auto combined_stats = resident_stats.bounded_nthash;
+    combined_stats.merge(unaligned_stats.bounded_nthash);
+    REQUIRE(combined_stats.is_internally_consistent(true));
+    REQUIRE(combined_stats.segments_combined == 2u);
+    REQUIRE_FALSE(combined_stats.aggregation_mismatch);
 
     collector_type fragmented_collector;
     {

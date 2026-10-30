@@ -139,6 +139,19 @@ export {
         return std::nullopt;
     }
 
+    /** Select one bounded-kernel word width for every range of a source.
+     * Use its whole native word layout when available; otherwise use u32.
+     * Unaligned ranges materialize at this same width so their execution
+     * statistics and packed-range memory reservations remain compatible.
+     */
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] inline std::uint8_t bounded_minimizer_storage_width(
+        bioseq::storage::lazy_sequence_view<p_alphabet> sequence) {
+        const auto resident =
+            try_word_minimizer_resident_packed(sequence, 0u, sequence.bp_size());
+        return resident.has_value() ? resident->storage_unit_width : sizeof(std::uint32_t);
+    }
+
     /**
      * Pass  Highway minimizer batches to the caller's collector.
      * The callbacks cannot throw acros the kernel interface, so they save any
@@ -628,7 +641,7 @@ export {
             {
                 const std::uint8_t requested_storage_width = execution_layout != nullptr
                     ? execution_layout->packed_storage_bits / 8u
-                    : sizeof(std::uint32_t);
+                    : bounded_minimizer_storage_width(seq);
                 auto run_bounded =
                     [highway, window_size, kmer_size, execution_layout,
                      requested_storage_width, &collector](const auto& p_descriptor) {
@@ -698,13 +711,7 @@ export {
                     return run_bounded(owner->descriptor());
                 };
 
-                ::bioseq::minimizers::minimizer_kernel_result result{};
-                if (auto resident = try_word_minimizer_resident_packed(seq, lo_bp, hi_bp);
-                    resident.has_value() && resident->storage_unit_width == requested_storage_width) {
-                    result = run_bounded(*resident);
-                } else {
-                    result = run_selected_access();
-                }
+                const auto result = run_selected_access();
                 if (!result.is_ok() || !result.stats.bounded_nthash.is_internally_consistent(
                                            /*require_nonempty_vector_work=*/false)) {
                     throw bounded_nthash_runtime_error(

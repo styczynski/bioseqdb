@@ -855,6 +855,9 @@ export {
         };
 
         constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
+        const std::uint8_t bounded_storage_width = bounded_nthash_segmented_route
+            ? pipe::bounded_minimizer_storage_width(target_seq)
+            : sizeof(std::uint32_t);
         /// Bound the collected length by the  core, both overlaps and the target length.
         auto collected_bp_upper_bound = [target_len,
                                          overlap_bp](sequence_size_t core_bp) -> std::uint64_t {
@@ -871,12 +874,13 @@ export {
         /// Estimate the packed copy needed by bounded ntHash for a segment and its overap.
         auto packed_range_peak_for_segment_core_bp =
             [bounded_nthash_segmented_route,
+             bounded_storage_width,
              &collected_bp_upper_bound](sequence_size_t core_bp) -> std::uint64_t {
             if (!bounded_nthash_segmented_route) {
                 return 0u;
             }
             return bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
-                collected_bp_upper_bound(core_bp), sizeof(std::uint32_t));
+                collected_bp_upper_bound(core_bp), bounded_storage_width);
         };
 
         /// Estimate index and context memory, plus the, bounded ntHash packed copy.
@@ -1032,7 +1036,8 @@ export {
         auto split_packed_range_permits = [&ranges,
                                            target_len,
                                            lpu,
-                                           bounded_nthash_segmented_route](
+                                           bounded_nthash_segmented_route,
+                                           bounded_storage_width](
                                               std::size_t wave_lo,
                                               std::size_t wave_count,
                                               bioseq::parallelism::memory_permit& wave_permit) {
@@ -1045,7 +1050,7 @@ export {
                     pipe::validated_segment_bp_bounds(ranges[wave_lo + rel], lpu, target_len);
                 const std::uint64_t exact_bytes =
                     bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
-                        segment_hi_bp - segment_lo_bp, sizeof(std::uint32_t));
+                        segment_hi_bp - segment_lo_bp, bounded_storage_width);
                 auto permit = wave_permit.split_off(exact_bytes);
                 if (!permit) {
                     throw std::logic_error(
