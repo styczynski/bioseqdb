@@ -2,13 +2,14 @@
  * @file bench/prefilters/index.cppm
  * @brief Stand-alone rank-prefilter benchmarks registered in bioseq_benchmark.
  *
- * Dataset parsing, byte-rank materialisation, the bundled-source oracle, and
- * thresholded edit-distance truth are prepared in on_input.  The measured
- * backend-batch region contains only the complete selected
- * original/scalar/SIMD/Vulkan prefilter invocation.  Runtime correctness
- * validation runs after that region.  The Vulkan-labelled row is explicitly
- * unavailable on hosts without a hardware Vulkan device and never falls back
- * to CPU.
+ * Dataset parsing, native packed input construction, jobs, and correctness
+ * oracles are prepared in on_input. The measured backend-batch region covers
+ * the complete selected API call: CPU ports include bounded rank decoding and
+ * rank validation; Vulkan includes native packed-window preparation/validation,
+ * upload, dispatch, synchronization, and readback. The bundled-source control
+ * reads the retained ASCII strings. Historical predecoded-rank inputs exclude
+ * different work. Output correctness validation follows backend timing. A
+ * Vulkan-labelled row never falls back to CPU when hardware is unavailable.
  */
 module;
 

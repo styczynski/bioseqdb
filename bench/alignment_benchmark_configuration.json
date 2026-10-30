@@ -6,7 +6,7 @@
       "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold passed to the bundled exact SneakySnake.c source"}
     },
     "sneakysnake_scalar": {
-      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the native rank-buffer scalar port"}
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the scalar port over native packed rank sources"}
     },
     "sneakysnake_simd": {
       "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the Highway batch port"}
@@ -256,7 +256,7 @@
   },
   "bench_prefilter_kernels": {
     "tags": ["prefilter", "sneakysnake", "simd", "vulkan"],
-    "description": "Separate prefilter microbenchmark inside bioseq_benchmark. One-time shared input preparation (dataset read, byte-rank flattening, jobs) and the untimed bundled-source/scalar/edit-distance oracles are reported separately. The measured backend_batch region is the complete selected batch API call; for Vulkan it includes upload, dispatch, synchronization, and result readback. callback_total additionally includes output materialization and separately reported runtime validation, while callback_non_backend is its difference from backend_batch. No per-row pseudo end-to-end number incorrectly adds the shared input setup. These <=250 bp fixtures use one complete maze (t=y=len), avoiding the source implementation's multi-maze tail quirks. CPU/source rows sweep E=2/8/40/100; Vulkan rows sweep only the kernel's evaluated E=2/8/16/31 domain. Every available row is validated after backend timing against source decisions and exact ED truth; available Vulkan rows additionally require status-0 execution and exact scalar lower-bound/status/decision parity. Vulkan-unavailable rows are nonblocking and never CPU-fallback. Reports 151/153/154 exposed the max_edits=2 SRR-E100 Vulkan P50 moving 0.410/0.512/0.694 ms with only three samples. All rows now retain 11 measured samples under the existing exclusive serial GPU schedule and fixed seeded interleaving; correctness and within-run performance gates are unchanged.",
+    "description": "Separate prefilter microbenchmark inside bioseq_benchmark. One-time shared input preparation (dataset read, native packed sequences, retained ASCII strings, jobs) and the untimed bundled-source/scalar/edit-distance oracles are reported separately. The measured backend_batch region is the complete selected batch API call. CPU ports include bounded rank decoding and rank validation; Vulkan includes native packed-window preparation/validation, upload, dispatch, synchronization, and result readback. The bundled-source control reads the retained ASCII strings. Historical reports using predecoded rank buffers exclude different work and are not equal-work timing comparisons. callback_total additionally includes output materialization and separately reported runtime validation, while callback_non_backend is its difference from backend_batch. No per-row pseudo end-to-end number incorrectly adds the shared input setup. These <=250 bp fixtures use one complete maze (t=y=len), avoiding the source implementation's multi-maze tail quirks. CPU/source rows sweep E=2/8/40/100; Vulkan rows sweep only the kernel's evaluated E=2/8/16/31 domain. Every available row is validated after backend timing against source decisions and exact ED truth; available Vulkan rows additionally require status-0 execution and exact scalar lower-bound/status/decision parity. Vulkan-unavailable rows are nonblocking and never CPU-fallback. Reports 151/153/154 exposed the max_edits=2 SRR-E100 Vulkan P50 moving 0.410/0.512/0.694 ms with only three samples. All rows now retain 11 measured samples under the existing exclusive serial GPU schedule and fixed seeded interleaving; correctness and within-run performance gates are unchanged.",
     "fast": true,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "iteration_order": {"mode": "interleaved_seeded", "seed": 5121008},
@@ -314,7 +314,7 @@
   },
   "bench_prefilter_small_seeds": {
     "tags": ["prefilter", "gatekeeper", "sneakysnake", "vulkan", "small-seed"],
-    "description": "Blocking hardware-Vulkan comparison of GateKeeper and SneakySnake on deterministic 32/64-symbol prefixes. Each callback times a complete upload/dispatch/wait/readback batch, then requires full CPU-oracle parity, supported geometry, result-count parity, and zero false rejects. Every matched independent P50 GateKeeper cell must be more than 10% faster than SneakySnake.",
+    "description": "Blocking hardware-Vulkan comparison of GateKeeper and SneakySnake on deterministic 32/64-symbol prefixes. Each callback times the complete native packed-window preparation/validation and upload/dispatch/wait/readback batch, then requires full CPU-oracle parity, supported geometry, result-count parity, and zero false rejects. Every matched independent P50 GateKeeper cell must be more than 10% faster than SneakySnake.",
     "fast": true,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "iteration_order": {"mode": "interleaved_seeded", "seed": 5123830},

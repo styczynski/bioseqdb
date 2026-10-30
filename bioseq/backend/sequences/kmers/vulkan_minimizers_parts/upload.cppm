@@ -1326,7 +1326,8 @@ template<sequence_alphabet Alphabet>
 
 /** Runs a synchronous consumer over exactly the packed intervals requested by jobs.
  * Coalesces borrowable positive-length windows when local offsets preserve the caller's
- * power-of-two alignment. Other shapes retain per-job native borrowing/staging.
+ * power-of-two alignment and each job's native-unit transport-word phase. Other
+ * shapes retain per-job native borrowing/staging.
  * All owners and admitted metadata remain alive through the consumer's GPU fence.
  */
 template <sequence_alphabet p_alphabet, class p_function>
@@ -1382,22 +1383,60 @@ template <sequence_alphabet p_alphabet, class p_function>
         target_bounds.begin = std::min(target_bounds.begin, target_begin);
         target_bounds.end = std::max(target_bounds.end, target_end);
     }
-    // Prefer coalescing where current providers can borrow the bounding range and
-    // its subranges. This geometry-only probe does not read or upload gaps.
-    const auto is_native_resident = [](auto source, sequence_upload_interval bounds) {
+    // Every per-job upload begins at a u32 transport-word boundary. Preserve that
+    // phase for the first native unit of each job inside a coalesced upload.
+    const auto preserves_native_transport_phase = [](std::uint64_t relative_begin,
+                                                     std::uint64_t leading,
+                                                     std::uint64_t letters_per_unit,
+                                                     std::uint64_t unit_bytes) {
+        if (letters_per_unit == 0u || leading >= letters_per_unit || unit_bytes == 0u) {
+            return false;
+        }
+        constexpr std::uint64_t transport_bytes = sizeof(std::uint32_t);
+        if (unit_bytes % transport_bytes == 0u) return true;
+        // Quotient/remainder first avoids overflowing relative_begin + leading.
+        const auto unit_offset = relative_begin / letters_per_unit +
+            static_cast<std::uint64_t>(relative_begin % letters_per_unit >=
+                                       letters_per_unit - leading);
+        const auto units_per_transport_word =
+            transport_bytes / std::min(transport_bytes, unit_bytes);
+        return unit_offset % units_per_transport_word == 0u;
+    };
+    // This geometry-only probe never reads ranks or uploads gaps. The first
+    // borrowable width is also the width preferred by prepare_native_packed_window.
+    const auto has_aligned_native_windows = [jobs, query_length,
+                                             &preserves_native_transport_phase](
+        auto source, sequence_upload_interval bounds, bool query_side) {
         for (std::size_t width = sizeof(std::uint8_t); width <= sizeof(std::uint64_t); width *= 2u) {
             const auto byte_width = static_cast<std::uint8_t>(width);
-            if (all_storage_unit_byte_widths::contains_runtime(byte_width) &&
-                source.try_resident_packed(bounds.begin, bounds.end, byte_width)) {
-                return true;
+            if (!all_storage_unit_byte_widths::contains_runtime(byte_width)) continue;
+            const auto descriptor = source.try_resident_packed(bounds.begin, bounds.end, byte_width);
+            if (!descriptor) continue;
+            // The validated registry widths that are transport-word multiples
+            // preserve every job phase without an additional per-job scan.
+            if (descriptor->storage_unit_width % sizeof(std::uint32_t) == 0u) return true;
+            const auto letters_per_unit = bioseq::storage::packed_letters_per_unit(
+                descriptor->storage_unit_width, descriptor->bits_per_symbol);
+            for (const auto& job : jobs) {
+                const std::uint64_t begin = query_side
+                    ? (job.orientation == 3u ? query_length - job.query_start - job.query_length
+                                             : job.query_start)
+                    : job.target_start;
+                if (!preserves_native_transport_phase(
+                        begin - bounds.begin, descriptor->leading_symbol_offset,
+                        letters_per_unit, descriptor->storage_unit_width)) {
+                    return false;
+                }
             }
+            return true;
         }
         return false;
     };
     constexpr std::uint64_t maximum_local_extent = static_cast<std::uint64_t>(index_limit) + 1u;
     if (can_coalesce && query_bounds.end - query_bounds.begin <= maximum_local_extent &&
         target_bounds.end - target_bounds.begin <= maximum_local_extent &&
-        is_native_resident(query, query_bounds) && is_native_resident(target, target_bounds)) {
+        has_aligned_native_windows(query, query_bounds, true) &&
+        has_aligned_native_windows(target, target_bounds, false)) {
         // Both sources use one enumerator type and the same existing coalescer.
         const auto enumerate_intervals = [jobs](bool query_side, std::uint64_t source_length) {
             return [jobs, query_side, source_length](auto emit) {
@@ -1449,6 +1488,7 @@ template <sequence_alphabet p_alphabet, class p_function>
         std::vector<bioseq::prefilter::prefilter_job> local_jobs;
         bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
             local_jobs, local_jobs_permit, jobs.size());
+        bool transport_phases_preserved = true;
         for (const auto& job : jobs) {
             const bool reverse = job.orientation == 3u;
             const std::uint64_t query_begin = reverse
@@ -1458,6 +1498,19 @@ template <sequence_alphabet p_alphabet, class p_function>
                 queries, query_begin, query_begin + job.query_length, reverse);
             const auto [target_record_index, target_start] = locate_window(
                 targets, target_begin, target_begin + job.target_length, false);
+            // A provider may expose a different valid native layout for a subrange.
+            // Check the actual prepared descriptors too, using this existing job walk.
+            const auto& query_sequence = queries[query_record_index].sequence;
+            const auto& target_sequence = targets[target_record_index].sequence;
+            if (!preserves_native_transport_phase(
+                    query_begin - query_sequence.bp_offset, query_sequence.leading_symbol_offset,
+                    query_sequence.letters_per_unit, query_sequence.unit_bits / std::numeric_limits<unsigned char>::digits) ||
+                !preserves_native_transport_phase(
+                    target_begin - target_sequence.bp_offset, target_sequence.leading_symbol_offset,
+                    target_sequence.letters_per_unit, target_sequence.unit_bits / std::numeric_limits<unsigned char>::digits)) {
+                transport_phases_preserved = false;
+                break;
+            }
             auto local = job;
             local.query_record_index = query_record_index;
             local.target_record_index = target_record_index;
@@ -1465,8 +1518,11 @@ template <sequence_alphabet p_alphabet, class p_function>
             local.target_start = target_start;
             local_jobs.push_back(local);
         }
-        return std::forward<p_function>(consume)(queries, targets, rank_lut,
-            std::span<const bioseq::prefilter::prefilter_job>{local_jobs});
+        if (transport_phases_preserved) {
+            return std::forward<p_function>(consume)(queries, targets, rank_lut,
+                std::span<const bioseq::prefilter::prefilter_job>{local_jobs});
+        }
+        // Prepared metadata/owners unwind here before the existing per-job route.
     }
 
     admitted_sequence_detail::canonical_u32_window_batch<p_alphabet> owners;
