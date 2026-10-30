@@ -410,11 +410,16 @@ public:
     return windows_.size();
   }
 
+  /** Reserves owner metadata for count windows in a fresh batch through shared admission. */
+  [[gnu::noinline]] void reserve_windows(std::size_t count) {
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+        windows_, windows_metadata_permit_, count);
+  }
+
   /** Reserve descriptor/owner metadata through the existing shared admission controller. */
   [[gnu::noinline]] void reserve_native_uploads(std::size_t count, std::uint64_t symbol_count) {
     DEBUG_ASSERT(windows_.empty() && uploads_.empty(), "native window batch must be fresh");
-    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
-        windows_, windows_metadata_permit_, count);
+    reserve_windows(count);
     bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
         uploads_, uploads_metadata_permit_, count);
     symbol_count_ = symbol_count;
@@ -1526,6 +1531,11 @@ template <sequence_alphabet p_alphabet, class p_function>
     }
 
     admitted_sequence_detail::canonical_u32_window_batch<p_alphabet> owners;
+    const auto owner_count = bioseq::common::checked_mul(jobs.size(), std::size_t{2u});
+    if (!owner_count) {
+        throw vulkan_runtime_error("native prefilter owner count overflow");
+    }
+    owners.reserve_windows(*owner_count);
     std::vector<gpu_packed_sequence_upload> queries;
     std::vector<gpu_packed_sequence_upload> targets;
     std::vector<bioseq::prefilter::prefilter_job> local_jobs;
