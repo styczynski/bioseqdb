@@ -34,17 +34,25 @@ template<class Traits, bool QueryReversed>
     constexpr auto complement_mask = packed_symbol_complement_mask<Traits, QueryReversed>();
     static_assert(complement_mask.has_value());
     // Full-cardinality encodings cannot contain invalid active ranks. Seed-only
-    // callers can report an equal native word without claiming vector work.
+    // callers compare at most two normalized native words without claiming vector work.
     if constexpr (Traits::alphabet_size == (unit_type{1} << Traits::bits_per_char)) {
-        if (length != 0u && length <= Traits::letters_per_unit) {
-            const auto query_word = load_oriented_packed_symbol_window<Traits, QueryReversed>(
-                static_cast<const unit_type*>(query_units), query_physical_total,
-                query_start, length, *complement_mask);
-            const auto target_word = load_packed_symbol_window<Traits>(
-                static_cast<const unit_type*>(target_units), target_start, length);
-            if (query_word == target_word)
-                return {.equal_symbols = static_cast<std::uint64_t>(length),
-                        .vector_batches = 0u, .valid_ranks = true};
+        if (length != 0u && length <= 2u * Traits::letters_per_unit) {
+            std::size_t equal_prefix = 0u;
+            do {
+                const std::size_t symbol_count =
+                    std::min(Traits::letters_per_unit, length - equal_prefix);
+                const auto query_word = load_oriented_packed_symbol_window<Traits, QueryReversed>(
+                    static_cast<const unit_type*>(query_units), query_physical_total,
+                    query_start + equal_prefix, symbol_count, *complement_mask);
+                const auto target_word = load_packed_symbol_window<Traits>(
+                    static_cast<const unit_type*>(target_units),
+                    target_start + equal_prefix, symbol_count);
+                if (query_word != target_word) break;
+                equal_prefix += symbol_count;
+                if (equal_prefix == length)
+                    return {.equal_symbols = static_cast<std::uint64_t>(length),
+                            .vector_batches = 0u, .valid_ranks = true};
+            } while (true);
         }
     }
     const hn::ScalableTag<unit_type> tag;
