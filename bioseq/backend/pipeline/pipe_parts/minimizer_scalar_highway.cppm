@@ -757,6 +757,10 @@ export {
                     throw std::invalid_argument(
                         "resident exact_simd vector_stream requires an admitted exact representation");
                 }
+                if (lo_bp != 0u || hi_bp != seq.bp_size()) {
+                    throw std::invalid_argument(
+                        "resident exact_simd vector_stream requires the whole sequence range");
+                }
             }
             const sequence_size_t length = hi_bp - lo_bp;
             if (length > static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)())) {
@@ -769,7 +773,7 @@ export {
             const bool require_indexed_u32 =
                 exact_simd_input_storage == exact_simd_input_storage::require_indexed_u32;
             const auto native_resident =
-                require_resident || require_indexed_u32
+                require_indexed_u32
                     ? std::optional<typename bioseq::storage::lazy_sequence_view<
                           p_alphabet>::resident_packed_sequence>{}
                     : try_minimizer_resident_packed(seq, lo_bp, hi_bp);

@@ -675,8 +675,19 @@ TEST_CASE("exact SIMD pipe borrows whole native-width ranges for resident vector
     // a whole-sequence u64-to-u32 repack or a memory admission reservation.
     non_u32_range_type non_u32_resident(data);
     auto lazy_non_u32 = bioseq::storage::make_resident_lazy_sequence(non_u32_resident);
+    std::size_t non_u32_payload_allocations = 0u;
+    const bioseq::storage::sequence_payload_allocation_observer allocation_observer{
+        .context = std::addressof(non_u32_payload_allocations),
+        // Count allocations even when their permits are released before return.
+        .publish = [](void* context,
+                      const bioseq::storage::sequence_payload_allocation_event&,
+                      std::uint64_t, std::uint64_t) noexcept {
+            ++*static_cast<std::size_t*>(context);
+        },
+    };
     const auto non_u32_view =
-        bioseq::storage::make_lazy_sequence_view(lazy_non_u32);
+        bioseq::storage::make_lazy_sequence_view(lazy_non_u32)
+            .with_payload_allocation_observer(std::addressof(allocation_observer));
     const auto non_u32_access = bioseq::storage::plan_sequence_access(
         non_u32_view,
         bioseq::storage::sequence_access_requirement::contiguous_resident,
@@ -702,6 +713,7 @@ TEST_CASE("exact SIMD pipe borrows whole native-width ranges for resident vector
             exact_simd_range_route::require_resident_vector_stream,
             table);
     REQUIRE(admission.reserved_bytes() == admission_before);
+    REQUIRE(non_u32_payload_allocations == 0u);
     REQUIRE(admitted_non_u32_stats.exact_simd_available);
     REQUIRE(admitted_non_u32_stats.exact_simd.is_internally_consistent(true));
     REQUIRE(admitted_non_u32_stats.exact_simd
