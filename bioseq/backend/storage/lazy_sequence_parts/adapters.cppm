@@ -406,8 +406,8 @@ template <bool p_reverse_complement = false, class p_sequence_range>
     requires (!p_reverse_complement || lazy_sequence_detail::complementable_sequence_alphabet<
                   typename compact_sequence_range<p_sequence_range>::traits::alphabet_type>)
 [[nodiscard]] inline borrowed_rank_window_source make_borrowed_rank_source(
-    const compact_sequence_range<p_sequence_range>& owner) noexcept {
-    return make_lazy_sequence_view(owner).template borrow_rank_source<p_reverse_complement>();
+    const compact_sequence_range<p_sequence_range>& owner, bool include_resident = false) noexcept {
+    return make_lazy_sequence_view(owner).template borrow_rank_source<p_reverse_complement>(include_resident);
 }
 
 /**

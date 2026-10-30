@@ -22,16 +22,128 @@ export module bioseq.highway.sources.sneaky_snake;
 import std;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.highway.sources.simd_utils;
+import bioseq.simd.utils;
 
-export namespace bioseq::prefilter {
+export namespace bioseq::simd {
 /** Batch entry points copied into each generated Highway target. */
 namespace [[bioseq::simd]] target {
+using namespace ::bioseq::prefilter;
 
 /** Highway namespace alias for the generated target's active vector operations. */
 namespace hn = hwy::HWY_NAMESPACE;
 
 /** SIMD rank comparisons used by the shared SneakySnake walk. */
 namespace sneaky_snake_target_detail {
+
+/** Validate an acquired native interval using the same sparse-rank SIMD predicate
+ * as packed equality. Full-cardinality layouts need no content inspection.
+ */
+template<class Traits, bool Reverse, class Descriptor>
+[[nodiscard]] HWY_INLINE bool validate_native_packed(
+    const void* input, std::size_t total, std::size_t start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    if constexpr (Traits::alphabet_size != (unit_type{1} << Traits::bits_per_char)) {
+        using D = hn::Repartition<unit_type, Descriptor>;
+        const D d;
+        const std::size_t lanes = hn::Lanes(d);
+        HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words;
+        for (std::size_t offset = 0u; offset < length;) {
+            const auto remaining = length - offset;
+            const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
+                static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
+            for (std::size_t lane = 0u; lane < active; ++lane) {
+                const auto begin = offset + lane * Traits::letters_per_unit;
+                words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(input, total,
+                    start + begin, std::min(Traits::letters_per_unit, length - begin));
+            }
+            std::fill(words.begin() + active, words.begin() + lanes, unit_type{});
+            const auto live = hn::FirstN(d, active);
+            if (!hn::AllFalse(d, hn::And(live,
+                    invalid_packed_word_lanes<Traits>(d, hn::Load(d, words.data())))))
+                return false;
+            offset += std::min(remaining, active * Traits::letters_per_unit);
+        }
+    }
+    return true;
+}
+
+/** First differing word then first differing symbol; no complete-source rank copy. */
+template<class Traits, bool Reverse, class Descriptor>
+[[nodiscard]] HWY_INLINE std::size_t prefix_native_packed(
+    const void* query, const void* target, std::size_t total,
+    std::size_t query_start, std::size_t target_start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    using D = hn::Repartition<unit_type, Descriptor>;
+    const D d;
+    const std::size_t lanes = hn::Lanes(d);
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> query_words;
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> target_words;
+    for (std::size_t offset = 0u; offset < length;) {
+        const auto remaining = length - offset;
+        const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
+            static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
+        for (std::size_t lane = 0u; lane < active; ++lane) {
+            const auto begin = offset + lane * Traits::letters_per_unit;
+            const auto count = std::min(Traits::letters_per_unit, length - begin);
+            query_words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(
+                query, total, query_start + begin, count);
+            target_words[lane] = bioseq::simd::load_packed_symbol_window<Traits>(
+                static_cast<const unit_type*>(target), target_start + begin, count);
+        }
+        std::fill(query_words.begin() + active, query_words.begin() + lanes, unit_type{});
+        std::fill(target_words.begin() + active, target_words.begin() + lanes, unit_type{});
+        const auto difference = hn::Xor(hn::Load(d, query_words.data()), hn::Load(d, target_words.data()));
+        const auto mismatch = hn::And(hn::FirstN(d, active), hn::Ne(difference, hn::Zero(d)));
+        if (!hn::AllFalse(d, mismatch)) {
+            const auto lane = static_cast<std::size_t>(hn::FindFirstTrue(d, mismatch));
+            hn::Store(difference, d, query_words.data());
+            return offset + lane * Traits::letters_per_unit +
+                static_cast<std::size_t>(std::countr_zero(query_words[lane])) / Traits::bits_per_char;
+        }
+        offset += std::min(remaining, active * Traits::letters_per_unit);
+    }
+    return length;
+}
+
+/** Produce ascending logical candidate bits with the existing packed XOR reduction. */
+template<class Traits, bool Reverse, class Descriptor>
+[[nodiscard]] HWY_INLINE std::uint64_t mask_native_packed(
+    const void* query, std::size_t total, std::size_t start,
+    std::size_t length, std::uint8_t rank) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    using D = hn::Repartition<unit_type, Descriptor>;
+    const D d;
+    const std::size_t lanes = hn::Lanes(d);
+    constexpr auto low_bits = bioseq::simd::packed_symbol_low_bits<Traits>();
+    const auto repeated = hn::Set(d, static_cast<unit_type>(low_bits * rank));
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words;
+    std::uint64_t result{};
+    for (std::size_t offset = 0u; offset < length;) {
+        const auto remaining = length - offset;
+        const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
+            static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
+        for (std::size_t lane = 0u; lane < active; ++lane) {
+            const auto begin = offset + lane * Traits::letters_per_unit;
+            words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(query, total,
+                start + begin, std::min(Traits::letters_per_unit, length - begin));
+        }
+        std::fill(words.begin() + active, words.begin() + lanes, unit_type{});
+        const auto mismatch = packed_symbol_mismatch_bits<Traits>(d,
+            hn::Xor(hn::Load(d, words.data()), repeated));
+        hn::Store(hn::And(hn::Not(mismatch), hn::Set(d, low_bits)), d, words.data());
+        for (std::size_t lane = 0u; lane < active; ++lane) {
+            const auto begin = offset + lane * Traits::letters_per_unit;
+            const auto count = std::min(Traits::letters_per_unit, length - begin);
+            auto matches = static_cast<unit_type>(words[lane] & bioseq::simd::packed_symbol_mask<Traits>(count));
+            while (matches != 0u) {
+                result |= std::uint64_t{1} << (begin + std::countr_zero(matches) / Traits::bits_per_char);
+                matches &= matches - 1u;
+            }
+        }
+        offset += std::min(remaining, active * Traits::letters_per_unit);
+    }
+    return result;
+}
 
 /**
  * @brief Uses SIMD to compare matching runs and find candidate diagonals.
@@ -40,6 +152,17 @@ namespace sneaky_snake_target_detail {
  * @tparam p_descriptor Highway vectow, type used for byte comparisons.
  */
 template <class p_descriptor> struct highway_traversal final {
+  /** Bound to the already selected Highway target; no nested dynamic dispatch. */
+  template<class Traits, bool Reverse>
+  [[nodiscard]] static const prefilter_packed_operations* packed_operations() noexcept {
+    static constexpr prefilter_packed_operations operations{
+      &validate_native_packed<Traits, Reverse, p_descriptor>,
+      &sneaky_snake_detail::rank_packed_scalar<Traits, Reverse>,
+      &prefix_native_packed<Traits, Reverse, p_descriptor>,
+      &mask_native_packed<Traits, Reverse, p_descriptor>};
+    return &operations;
+  }
+
   /** Starts acquisition with the first rank and two active byte-vector loads. */
   [[nodiscard]] static std::size_t read_block_size() noexcept {
     const hn::Repartition<std::uint8_t, p_descriptor> byte_descriptor;
@@ -189,7 +312,8 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
             sneaky_snake_target_detail::highway_traversal<p_descriptor>> traversal{query};
         return sneaky_snake_detail::bounded_with(traversal, query, target_ranks,
                                                  job.max_edits, options);
-      }, sneaky_snake_target_detail::highway_traversal<p_descriptor>::read_block_size());
+      }, sneaky_snake_target_detail::highway_traversal<p_descriptor>::read_block_size(),
+      &resolve_prefilter_packed_operations<sneaky_snake_target_detail::highway_traversal<p_descriptor>>);
 }
 
 /**
@@ -209,4 +333,4 @@ sneaky_snake_simd_batch(const prefilter_batch_input &input,
 }
 
 } // namespace target
-} // namespace bioseq::prefilter
+} // namespace bioseq::simd

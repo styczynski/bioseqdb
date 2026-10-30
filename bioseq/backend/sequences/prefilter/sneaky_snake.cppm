@@ -22,6 +22,8 @@ module;
 export module bioseq.prefilter.sneaky_snake;
 
 export import bioseq.prefilter.types;
+import bioseq.simd.utils;
+import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::prefilter {
 
@@ -148,8 +150,95 @@ namespace sneaky_snake_detail {
     return run;
 }
 
+/** Scalar native primitives. They never enter a selected Highway target. */
+template<class Traits, bool Reverse>
+[[nodiscard]] inline typename Traits::storage_unit packed_word(
+    const void* units, std::size_t physical_total, std::size_t start, std::size_t count) noexcept {
+    constexpr auto complement = bioseq::simd::packed_symbol_complement_mask<Traits, Reverse>();
+    static_assert(complement.has_value());
+    return bioseq::simd::load_oriented_packed_symbol_window<Traits, Reverse>(
+        static_cast<const typename Traits::storage_unit*>(units), physical_total,
+        start, count, *complement);
+}
+
+/** Validate all acquired ranks; the caller locates any failure with read_checked. */
+template<class Traits, bool Reverse>
+[[nodiscard]] inline bool validate_packed_scalar(
+    const void* units, std::size_t total, std::size_t start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    if constexpr (Traits::alphabet_size != (unit_type{1} << Traits::bits_per_char)) {
+        for (std::size_t offset = 0u; offset < length;) {
+            const auto count = std::min(Traits::letters_per_unit, length - offset);
+            auto word = packed_word<Traits, Reverse>(units, total, start + offset, count);
+            for (std::size_t symbol = 0u; symbol < count; ++symbol) {
+                if ((word & Traits::char_mask) >= Traits::alphabet_size) return false;
+                word >>= Traits::bits_per_char;
+            }
+            offset += count;
+        }
+    }
+    return true;
+}
+
+/** Read an already validated logical rank, retaining the common orientation rule. */
+template<class Traits, bool Reverse>
+[[nodiscard]] inline std::uint8_t rank_packed_scalar(
+    const void* units, std::size_t total, std::size_t start) noexcept {
+    return static_cast<std::uint8_t>(packed_word<Traits, Reverse>(units, total, start, 1u));
+}
+
+/** Return the matching prefix, not the total number of equal symbols. */
+template<class Traits, bool Reverse>
+[[nodiscard]] inline std::size_t prefix_packed_scalar(
+    const void* query, const void* target, std::size_t total,
+    std::size_t query_start, std::size_t target_start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    for (std::size_t offset = 0u; offset < length;) {
+        const auto count = std::min(Traits::letters_per_unit, length - offset);
+        const unit_type difference = packed_word<Traits, Reverse>(query, total, query_start + offset, count)
+            ^ bioseq::simd::load_packed_symbol_window<Traits>(
+                static_cast<const unit_type*>(target), target_start + offset, count);
+        if (difference != 0u)
+            return offset + static_cast<std::size_t>(std::countr_zero(difference)) / Traits::bits_per_char;
+        offset += count;
+    }
+    return length;
+}
+
+/** Return ordered candidate bits for an already validated, at-most-64-symbol tile. */
+template<class Traits, bool Reverse>
+[[nodiscard]] inline std::uint64_t mask_packed_scalar(
+    const void* query, std::size_t total, std::size_t start,
+    std::size_t length, std::uint8_t rank) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    const unit_type repeated = bioseq::simd::packed_symbol_low_bits<Traits>() * static_cast<unit_type>(rank);
+    std::uint64_t result{};
+    for (std::size_t offset = 0u; offset < length;) {
+        const auto count = std::min(Traits::letters_per_unit, length - offset);
+        const auto word = packed_word<Traits, Reverse>(query, total, start + offset, count);
+        unit_type matches = ~bioseq::simd::packed_symbol_mismatch_bits<Traits>(
+                static_cast<unit_type>(word ^ repeated))
+            & bioseq::simd::packed_symbol_low_bits<Traits>() & bioseq::simd::packed_symbol_mask<Traits>(count);
+        while (matches != 0u) {
+            result |= std::uint64_t{1} << (offset + std::countr_zero(matches) / Traits::bits_per_char);
+            matches &= matches - 1u;
+        }
+        offset += count;
+    }
+    return result;
+}
+
 /** Scalar rank comparisons and candidate  scanning for the shared SneakySnake walk. */
 struct scalar_traversal final {
+    /** Resolve the scalar implementation independently of any Highway table. */
+    template<class Traits, bool Reverse>
+    [[nodiscard]] static const prefilter_packed_operations* packed_operations() noexcept {
+        static constexpr prefilter_packed_operations operations{
+            &validate_packed_scalar<Traits, Reverse>, &rank_packed_scalar<Traits, Reverse>,
+            &prefix_packed_scalar<Traits, Reverse>, &mask_packed_scalar<Traits, Reverse>};
+        return &operations;
+    }
+
     /** Starts bounded acquisition with the first rank and two existing word loads. */
     [[nodiscard]] static constexpr std::size_t read_block_size() noexcept {
         return 1u + 2u * sizeof(std::uint64_t);
@@ -376,7 +465,7 @@ struct window_traversal {
     /** Retains one independent candidate cache for the lifetime of this job. */
     explicit window_traversal(const prefilter_rank_window& query)
         : comparison{}, candidates{query.source, query.start, query.length,
-              query.cardinality, query.refill_size, query.job_index, false, *query.failure} {}
+              query.cardinality, query.refill_size, query.job_index, false, *query.failure, query.packed} {}
 
     /**
      * Compares the first demand block before growing subsequent matched reads.
@@ -390,10 +479,7 @@ struct window_traversal {
         const auto limit = std::min<std::size_t>(submaze_end - position, query.size() - query_index);
         if (limit == 0u || query.failure->has_value()) return 0u;
         if (target.contains(position, limit) && query.contains(query_index, limit)) {
-            const auto target_ranks = target.window(position, limit);
-            const auto query_ranks = query.window(query_index, limit);
-            return comparison.diagonal_run(query_ranks, target_ranks, 0u,
-                static_cast<std::uint32_t>(limit), 0u);
+            return compare_acquired(query, target, query_index, position, limit);
         }
         return diagonal_run_with_refill(query, target, position, query_index, limit);
     }
@@ -411,7 +497,31 @@ struct window_traversal {
         while (first <= upper) {
             const auto count = std::min<std::uint64_t>(prefilter_rank_window::chunk_size,
                 static_cast<std::uint64_t>(upper) - first + 1u);
-            const auto ranks = candidates.window(first + filter_offset, count, query);
+            if (!candidates.acquire(first + filter_offset, count, query)) return false;
+            // Validate the entire original candidate acquisition before visiting
+            // even the first matching bit or invoking a short-circuit consumer.
+            if (query.packed != nullptr) {
+                constexpr auto mask_capacity = std::numeric_limits<std::uint64_t>::digits;
+                for (std::size_t offset = 0u; offset < count;) {
+                    const auto mask_count = std::min<std::size_t>(mask_capacity, count - offset);
+                    auto matches = query.packed->mask(query.source.resident->units,
+                        query.physical_total(), query.physical_start(first + filter_offset + offset),
+                        mask_count, filter_rank);
+                    const auto excluded = static_cast<std::uint64_t>(position);
+                    if (excluded >= first + offset && excluded - first - offset < mask_count)
+                        matches &= ~(std::uint64_t{1} << (excluded - first - offset));
+                    while (matches != 0u) {
+                        const auto candidate = first + offset + std::countr_zero(matches);
+                        if (consume(static_cast<std::uint32_t>(candidate))) return true;
+                        if (query.failure->has_value()) return false;
+                        matches &= matches - 1u;
+                    }
+                    offset += mask_count;
+                }
+                first += count;
+                continue;
+            }
+            const auto ranks = candidates.window(first + filter_offset, count);
             if (query.failure->has_value()) return false;
             const auto excluded = position >= first && position - first < count
                 ? static_cast<std::uint32_t>(position - first)
@@ -429,6 +539,21 @@ struct window_traversal {
     }
 
   private:
+    /** Compare only intervals already acquired by the shared demand walk. */
+    [[nodiscard, gnu::always_inline]] inline std::uint32_t compare_acquired(
+        const prefilter_rank_window& query, const prefilter_rank_window& target,
+        std::size_t query_position, std::size_t target_position, std::size_t count) const {
+        if (query.packed != nullptr) {
+            return static_cast<std::uint32_t>(query.packed->prefix(
+                query.source.resident->units, target.source.resident->units, query.physical_total(),
+                query.physical_start(query_position), target.physical_start(target_position), count));
+        }
+        const auto target_ranks = target.window(target_position, count);
+        const auto query_ranks = query.window(query_position, count);
+        return comparison.diagonal_run(query_ranks, target_ranks, 0u,
+            static_cast<std::uint32_t>(count), 0u);
+    }
+
     /**
      * Acquires missing diagonal blocks in target-before-query order, growing only
      * after a complete match. limit is the caller's admitted nonempty run length.
@@ -442,11 +567,10 @@ struct window_traversal {
         std::size_t read_size = query.refill_size;
         while (matched < limit) {
             const auto count = std::min(read_size, limit - matched);
-            const auto target_ranks = target.window(position + matched, count);
-            const auto query_ranks = query.window(query_index + matched, count, candidates);
-            if (query.failure->has_value()) return 0u;
-            const auto run = comparison.diagonal_run(query_ranks, target_ranks, 0u,
-                static_cast<std::uint32_t>(count), 0u);
+            if (!target.acquire(position + matched, count) ||
+                !query.acquire(query_index + matched, count, candidates)) return 0u;
+            const auto run = compare_acquired(query, target, query_index + matched,
+                position + matched, count);
             matched += run;
             if (run != count) break;
             read_size = std::min(prefilter_rank_window::chunk_size, read_size * 2u);
@@ -485,7 +609,8 @@ struct window_traversal {
             sneaky_snake_detail::window_traversal<sneaky_snake_detail::scalar_traversal> traversal{query};
             return sneaky_snake_detail::bounded_with(
                 traversal, query, target, job.max_edits, options);
-        }, sneaky_snake_detail::scalar_traversal::read_block_size());
+        }, sneaky_snake_detail::scalar_traversal::read_block_size(),
+        &resolve_prefilter_packed_operations<sneaky_snake_detail::scalar_traversal>);
 }
 
 } // namespace bioseq::prefilter

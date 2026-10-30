@@ -614,8 +614,6 @@ void validate_available_backend(
         }
     }
 
-    const std::array query_sources{storage::make_borrowed_rank_source(input.query_sequence)};
-    const std::array target_sources{storage::make_borrowed_rank_source(input.target_sequence)};
     const auto query_view = storage::make_lazy_sequence_view(input.query_sequence);
     const auto target_view = storage::make_lazy_sequence_view(input.target_sequence);
     static const auto* backend_batch_region =
@@ -637,22 +635,19 @@ void validate_available_backend(
                     0,
                     length) != 0 ? 1u : 0u;
             }
-        } else if (algorithm == "sneakysnake_scalar") {
-            cpu_results =
-                bioseq::prefilter::sneaky_snake_scalar_batch(
-                    prefilter_batch_input{
-                        .queries = query_sources,
-                        .targets = target_sources,
-                        .jobs = prepared.jobs,
-                    }).value();
-        } else if (algorithm == "sneakysnake_simd") {
-            cpu_results = fixed_sneaky_snake_simd_batch(
-                prefilter_batch_input{
-                    .queries = query_sources,
-                    .targets = target_sources,
-                    .jobs = prepared.jobs,
-                },
-                {}).value();
+        } else if (algorithm == "sneakysnake_scalar" || algorithm == "sneakysnake_simd") {
+            // Binding performs resident probes: include it in both backend clocks.
+            const std::array query_sources{storage::make_borrowed_rank_source(input.query_sequence, true)};
+            const std::array target_sources{storage::make_borrowed_rank_source(input.target_sequence, true)};
+            const prefilter_batch_input batch{
+                .queries = query_sources,
+                .targets = target_sources,
+                .jobs = prepared.jobs,
+            };
+            if (algorithm == "sneakysnake_scalar")
+                cpu_results = bioseq::prefilter::sneaky_snake_scalar_batch(batch).value();
+            else
+                cpu_results = fixed_sneaky_snake_simd_batch(batch, {}).value();
         } else if (is_sneaky_vulkan_algorithm(algorithm)) {
             vulkan_results = prefilter::run_sneaky_snake_vulkan_batch(
                 query_view,

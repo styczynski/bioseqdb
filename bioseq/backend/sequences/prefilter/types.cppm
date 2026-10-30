@@ -2,12 +2,14 @@
  * @file types.cppm
  * @brief Shared CPU and Vulkan prefilter job and result layouts.
  *
- * Jobs select slices from rank-byte buffers. Results use integer fields so CPU
- * cde and Vulkan shaders can exchange the same records.
+ * Jobs select logical symbol slices from native sequence sources. Results use
+ * integer fields so CPU code and Vulkan shaders can exchange the same records.
  */
 module;
 
 #include <algorithm>
+#include <bit>
+#include <limits>
 #include <array>
 #include <cstring>
 #include <expected>
@@ -24,6 +26,7 @@ import bioseq.storage.lazy_sequence_view;
 import bioseq.storage.size;
 import bioseq.sequences;
 import bioseq.common.seqan_adapter;
+import bioseq.simd.utils;
 
 export namespace bioseq::prefilter {
 
@@ -41,7 +44,7 @@ enum class prefilter_status : std::uint32_t {
 /**
  * @brief Selects a query slice and target slice for one prefilter comparison.
  *
- * Offsets and lengths count symbols in unpacked rank-byte buffers.
+ * Offsets and lengths count logical symbols independently of physical storage.
  */
 struct prefilter_job {
     std::uint32_t query_record_index = 0u;
@@ -69,7 +72,7 @@ struct prefilter_result {
 };
 
 /**
- * @brief Borrows rank buffers and the jobs to evaluate against them.
+ * @brief Borrows checked native-rank sources and the jobs to evaluate against them.
  *
  * Each job selects its query and target independently. Result  order follows jobs.
  */
@@ -245,9 +248,49 @@ unsupported_prefilter_result() noexcept
         && prefilter_slice_in_bounds(target.symbol_count, job.target_start, job.target_length);
 }
 
+/** Narrow, target-free primitives for one native layout and logical orientation.
+ * Validation covers a complete acquired interval before either search may exit.
+ * The two searches require validated ranks; mask() returns one bit per symbol
+ * for at most numeric_limits<uint64_t>::digits symbols in ascending order.
+ */
+struct prefilter_packed_operations {
+    bool (*validate)(const void*, std::size_t, std::size_t, std::size_t) noexcept{};
+    std::uint8_t (*rank_at)(const void*, std::size_t, std::size_t) noexcept{};
+    std::size_t (*prefix)(const void*, const void*, std::size_t,
+                          std::size_t, std::size_t, std::size_t) noexcept{};
+    std::uint64_t (*mask)(const void*, std::size_t, std::size_t,
+                          std::size_t, std::uint8_t) noexcept{};
+};
+using prefilter_packed_resolver = const prefilter_packed_operations* (*)(
+    std::uint8_t, std::uint8_t, bool);
+
+/** Resolve only narrow numeric functions; the full filter never has alphabet/width axes. */
+template<class Backend>
+[[nodiscard]] inline const prefilter_packed_operations* resolve_prefilter_packed_operations(
+    std::uint8_t alphabet_code, std::uint8_t storage_width, bool reverse_complement) {
+    if (alphabet_code >= supported_biological_alphabets::alphabet_count ||
+        !all_storage_unit_byte_widths::contains_runtime(storage_width)) return nullptr;
+    const prefilter_packed_operations* result{};
+    supported_biological_alphabets::dispatch_alphabet_by_code(alphabet_code,
+        [storage_width, reverse_complement, &result]<class Alphabet>() {
+            all_storage_unit_byte_widths::dispatch(storage_width,
+                [reverse_complement, &result]<std::size_t Width>() {
+                    using unit_type = typename all_storage_unit_byte_widths::template storage_unit<Width>;
+                    using traits = typename compact_sequence_range<
+                        sequence_custom_alphabet<Alphabet, unit_type>>::traits;
+                    if (reverse_complement) {
+                        if constexpr (bioseq::simd::packed_symbol_complement_mask<traits, true>().has_value())
+                            result = Backend::template packed_operations<traits, true>();
+                    } else result = Backend::template packed_operations<traits, false>();
+                });
+        });
+    return result;
+}
+
 /**
  * One bounded native-rank window over an admitted job interval.
- * Every acquired backend span is copied before another read can evict it.
+ * Acquired backend spans are pinned before another read can evict them. A stable
+ * resident source instead retains validated packed coverage without decoding.
  * Allocation and read sizes are independent of the edit threshold/submaze size.
  */
 struct prefilter_rank_window {
@@ -264,6 +307,8 @@ struct prefilter_rank_window {
     mutable std::array<std::uint8_t, chunk_size> scratch;
     mutable std::size_t loaded_from{};
     mutable std::size_t loaded_size{};
+    const prefilter_packed_operations* packed{};
+    mutable bool materialized{};
 
     /**
      * Binds an admitted job interval without initializing unread scratch bytes.
@@ -275,11 +320,12 @@ struct prefilter_rank_window {
         storage::sequence_size_t start_value, std::size_t length_value,
         std::size_t cardinality_value, std::size_t refill_size_value,
         std::size_t job_index_value, bool target_source_value,
-        std::optional<prefilter_input_failure>& failure_value) noexcept
+        std::optional<prefilter_input_failure>& failure_value,
+        const prefilter_packed_operations* packed_value = nullptr) noexcept
         : source(source_value), start(start_value), length(length_value),
           cardinality(cardinality_value), refill_size(refill_size_value),
           job_index(job_index_value), target_source(target_source_value),
-          failure(&failure_value) {}
+          failure(&failure_value), packed(packed_value) {}
 
     /** Returns the job interval size, not its backend's complete length. */
     [[nodiscard, gnu::always_inline]] inline std::size_t size() const noexcept { return length; }
@@ -291,94 +337,135 @@ struct prefilter_rank_window {
             count <= loaded_size - (position - loaded_from);
     }
 
-    /**
-     * Acquires a bounded interval, retaining an existing prefix when it can grow.
-     * Only newly acquired ranks are validated. Reads include at most refill_size
-     * lookahead ranks, remain within this job, and are pinned before returning.
+    /** Acquire/validate exactly the old demand plus bounded lookahead, without decoding
+     * resident ranks. Cache extent denotes validated coverage; materialized identifies
+     * whether that same extent also owns bytes. No caller reads scratch otherwise.
      */
-    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
+    [[nodiscard, gnu::always_inline]] inline bool acquire(
         std::size_t position, std::size_t count) const {
-        if (failure->has_value()) return {};
+        if (failure->has_value()) return false;
         if (position > length || count > length - position || count > scratch.size()) {
             *failure = prefilter_input_failure{prefilter_input_failure_code::invalid_descriptor,
                 job_index, target_source, start + position};
-            return {};
+            return false;
         }
-        if (count == 0u) return {};
-        if (contains(position, count)) {
-            return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
-        }
+        if (count == 0u || contains(position, count)) return true;
         const bool extend_prefix = position >= loaded_from &&
             position - loaded_from <= loaded_size &&
             count <= scratch.size() - (position - loaded_from);
-        if (!extend_prefix) {
-            loaded_from = position;
-            loaded_size = 0u;
-        }
+        if (!extend_prefix) { loaded_from = position; loaded_size = 0u; }
         const auto required_size = position - loaded_from + count;
         const auto read_from = loaded_from + loaded_size;
         const auto available = std::min(scratch.size() - loaded_size, length - read_from);
         const auto read_count = std::max(required_size - loaded_size,
             std::min(refill_size, available));
-        const auto destination = std::span<std::uint8_t>{scratch}.subspan(loaded_size, read_count);
-        const auto ranks = source.read_checked(start + read_from, read_count, destination);
+        if (packed != nullptr) {
+            if (!packed->validate(source.resident->units, physical_total(),
+                                  physical_start(read_from), read_count)) {
+                // Recover the established first failing logical position with the
+                // checked reader. Do not accept inconsistent native/reader contents.
+                if (read_validated(read_from, std::span<std::uint8_t>{scratch}.first(read_count))) {
+                    *failure = prefilter_input_failure{
+                        prefilter_input_failure_code::invalid_descriptor,
+                        job_index, target_source, start + read_from};
+                }
+                return false;
+            }
+            materialized = false;
+        } else {
+            if (!read_validated(read_from, std::span<std::uint8_t>{scratch}.subspan(loaded_size, read_count))) return false;
+            materialized = true;
+        }
+        loaded_size += read_count;
+        return true;
+    }
+
+    /** Reuse equivalent validated coverage, copying only when it contains rank bytes. */
+    [[nodiscard, gnu::always_inline]] inline bool acquire(
+        std::size_t position, std::size_t count, const prefilter_rank_window& cached) const {
+        if (failure->has_value()) return false;
+        if (contains(position, count)) return true;
+        if (!cached.failure->has_value() && source.context == cached.source.context &&
+            source.read_at == cached.source.read_at && source.symbol_count == cached.source.symbol_count &&
+            source.alphabet_code == cached.source.alphabet_code && source.orientation == cached.source.orientation &&
+            start == cached.start && length == cached.length && cardinality == cached.cardinality &&
+            packed == cached.packed && cached.contains(position, count)) {
+            const auto offset = position - cached.loaded_from;
+            const auto copied_size = cached.loaded_size - offset;
+            if (cached.materialized)
+                std::memcpy(scratch.data(), cached.scratch.data() + offset, copied_size);
+            loaded_from = position;
+            loaded_size = copied_size;
+            materialized = cached.materialized;
+            return true;
+        }
+        return acquire(position, count);
+    }
+
+    /** Preserve the existing byte API, including for a native window explicitly
+     * requested as bytes. SneakySnake's packed traversal never takes this path.
+     */
+    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
+        std::size_t position, std::size_t count) const {
+        if (!acquire(position, count) || count == 0u) return {};
+        if (!materialized) {
+            if (!read_validated(loaded_from, std::span<std::uint8_t>{scratch}.first(loaded_size))) return {};
+            materialized = true;
+        }
+        return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
+    }
+
+    /** Retain the existing cache-sharing byte entry point. */
+    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
+        std::size_t position, std::size_t count, const prefilter_rank_window& cached) const {
+        if (!acquire(position, count, cached)) return {};
+        return window(position, count);
+    }
+
+    /** Read one rank only after validating its complete acquisition/lookahead. */
+    [[nodiscard, gnu::always_inline]] inline std::uint8_t operator[](std::size_t position) const {
+        if (!acquire(position, 1u)) return 0u;
+        if (packed != nullptr)
+            return packed->rank_at(source.resident->units, physical_total(), physical_start(position));
+        return scratch[position - loaded_from];
+    }
+
+    /** Physical coordinates expected by the existing oriented packed loader. */
+    [[nodiscard, gnu::always_inline]] inline std::size_t physical_start(std::size_t position) const noexcept {
+        return static_cast<std::size_t>(start) + position +
+            (source.orientation == storage::sequence_transform::identity
+                ? source.resident->leading_symbol_offset : 0u);
+    }
+    [[nodiscard, gnu::always_inline]] inline std::size_t physical_total() const noexcept {
+        return static_cast<std::size_t>(source.symbol_count) + source.resident->leading_symbol_offset;
+    }
+
+  private:
+    /** The original checked rank acquisition and first-invalid-rank reporting. */
+    [[nodiscard, gnu::always_inline]] inline bool read_validated(
+        std::size_t position, std::span<std::uint8_t> destination) const {
+        const auto count = destination.size();
+        const auto ranks = source.read_checked(start + position, count, destination);
         if (!ranks) {
             *failure = prefilter_input_failure{
                 ranks.error() == storage::rank_window_read_failure::source_read_failed
                     ? prefilter_input_failure_code::source_read_failed
                     : prefilter_input_failure_code::invalid_descriptor,
-                job_index, target_source, start + read_from};
-            return {};
+                job_index, target_source, start + position};
+            return false;
         }
         for (std::size_t offset = 0u; offset < ranks->size(); ++offset) {
             if ((*ranks)[offset] >= cardinality) {
                 *failure = prefilter_input_failure{prefilter_input_failure_code::invalid_rank,
-                    job_index, target_source, start + read_from + offset};
-                return {};
+                    job_index, target_source, start + position + offset};
+                return false;
             }
         }
-        if (ranks->data() != destination.data()) {
-            std::memcpy(destination.data(), ranks->data(), read_count);
-        }
-        loaded_size += read_count;
-        return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
+        if (ranks->data() != destination.data())
+            std::memcpy(destination.data(), ranks->data(), count);
+        return true;
     }
 
-    /**
-     * Reuses an equivalent reader's validated cache before decoding another tile.
-     * The copied ranks remain pinned while a diagonal consumer refills that reader.
-     * Unrelated source descriptors always use the normal checked acquisition path.
-     */
-    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
-        std::size_t position, std::size_t count, const prefilter_rank_window& cached) const {
-        if (failure->has_value()) return {};
-        if (contains(position, count)) {
-            return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
-        }
-        if (!cached.failure->has_value() && source.context == cached.source.context &&
-            source.read_at == cached.source.read_at &&
-            source.symbol_count == cached.source.symbol_count &&
-            source.alphabet_code == cached.source.alphabet_code &&
-            source.orientation == cached.source.orientation && start == cached.start &&
-            length == cached.length && cardinality == cached.cardinality &&
-            cached.contains(position, count)) {
-            const auto offset = position - cached.loaded_from;
-            const auto copied_size = cached.loaded_size - offset;
-            std::memcpy(scratch.data(), cached.scratch.data() + offset, copied_size);
-            loaded_from = position;
-            loaded_size = copied_size;
-            return std::span<const std::uint8_t>{scratch}.first(count);
-        }
-        return window(position, count);
-    }
-
-    /** Reads one rank using bounded lookahead; inspect failure after traversal. */
-    [[nodiscard, gnu::always_inline]] inline std::uint8_t operator[](std::size_t position) const {
-        if (failure->has_value()) return 0u;
-        if (contains(position, 1u)) return scratch[position - loaded_from];
-        const auto ranks = window(position, 1u);
-        return ranks.empty() ? 0u : ranks.front();
-    }
 };
 
 /**
@@ -388,7 +475,8 @@ struct prefilter_rank_window {
 template <class Evaluator>
 [[nodiscard]] inline auto evaluate_prefilter_job(
     const prefilter_batch_input& input, std::size_t index, Evaluator&& evaluate,
-    std::size_t refill_size = prefilter_rank_window::chunk_size)
+    std::size_t refill_size = prefilter_rank_window::chunk_size,
+    prefilter_packed_resolver resolve_packed = nullptr)
     -> std::expected<std::invoke_result_t<Evaluator, const prefilter_rank_window&,
                                          const prefilter_rank_window&, const prefilter_job&>,
                      prefilter_input_failure> {
@@ -407,13 +495,30 @@ template <class Evaluator>
         query_source.alphabet_code, [&cardinality]<class Alphabet>() {
             cardinality = seqan3::alphabet_size<Alphabet>;
         });
+    const auto& target_source = input.targets[job.target_record_index];
+    const prefilter_packed_operations* query_packed{};
+    const prefilter_packed_operations* target_packed{};
+    if (resolve_packed != nullptr && query_source.resident && target_source.resident &&
+        query_source.resident->storage_unit_width == target_source.resident->storage_unit_width &&
+        query_source.symbol_count <= std::numeric_limits<std::size_t>::max() - query_source.resident->leading_symbol_offset &&
+        target_source.symbol_count <= std::numeric_limits<std::size_t>::max() - target_source.resident->leading_symbol_offset &&
+        storage::valid_resident_packed_descriptor(*query_source.resident, query_source.symbol_count,
+            static_cast<std::uint8_t>(std::bit_width(cardinality - 1u))) &&
+        storage::valid_resident_packed_descriptor(*target_source.resident, target_source.symbol_count,
+            static_cast<std::uint8_t>(std::bit_width(cardinality - 1u)))) {
+        const auto width = query_source.resident->storage_unit_width;
+        query_packed = resolve_packed(query_source.alphabet_code, width,
+            query_source.orientation == storage::sequence_transform::reverse_complement);
+        target_packed = resolve_packed(target_source.alphabet_code, width, false);
+        if (query_packed == nullptr || target_packed == nullptr) query_packed = target_packed = nullptr;
+    }
     std::optional<prefilter_input_failure> failure;
     const auto bounded_refill_size =
         std::clamp(refill_size, std::size_t{1u}, prefilter_rank_window::chunk_size);
     const prefilter_rank_window query{query_source, job.query_start, job.query_length,
-        cardinality, bounded_refill_size, index, false, failure};
+        cardinality, bounded_refill_size, index, false, failure, query_packed};
     const prefilter_rank_window target{input.targets[job.target_record_index],
-        job.target_start, job.target_length, cardinality, bounded_refill_size, index, true, failure};
+        job.target_start, job.target_length, cardinality, bounded_refill_size, index, true, failure, target_packed};
     auto result = evaluate(query, target, job);
     if (failure) return std::unexpected(*failure);
     return result;
@@ -426,11 +531,12 @@ template <class Evaluator>
 template <class Evaluator>
 [[nodiscard]] inline prefilter_batch_result evaluate_prefilter_batch(
     const prefilter_batch_input& input, Evaluator&& evaluate,
-    std::size_t refill_size = prefilter_rank_window::chunk_size) {
+    std::size_t refill_size = prefilter_rank_window::chunk_size,
+    prefilter_packed_resolver resolve_packed = nullptr) {
     std::vector<prefilter_result> results;
     results.reserve(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        auto result = evaluate_prefilter_job(input, index, evaluate, refill_size);
+        auto result = evaluate_prefilter_job(input, index, evaluate, refill_size, resolve_packed);
         if (!result) return std::unexpected(result.error());
         results.push_back(*result);
     }

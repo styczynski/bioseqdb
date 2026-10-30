@@ -44,6 +44,35 @@ enum class rank_window_read_failure : std::uint8_t {
     source_read_failed,
 };
 
+/** @brief Bit order used by resident packed descriptors. */
+enum class packed_symbol_order : std::uint8_t {
+    least_significant_symbol_first,
+};
+
+/**
+ * Borrowed packed region and  its layout.
+ *
+ * A successful resident probe authorizes direct reads: the owner keeps immutable
+ * words alive, their logical ranks equal the rank-reader results, and valid reads
+ * cannot require a backend failure or mandatory side effect. Providers that cannot
+ * guarantee this (including evictable readers) must decline the probe. Optional
+ * instrumentation records the route actually taken; a borrow need not call read_at.
+ * Native access preserves the owner's thread/shareability restrictions.
+ * leading_symbol_offset and trailing_padding describe symbols outside the
+ * logical region in its boundary words.
+ */
+struct resident_packed_sequence {
+    void const* units{};
+    std::size_t unit_count{};
+    sequence_size_t logical_length{};
+    std::uint8_t storage_unit_width{};
+    std::uint8_t bits_per_symbol{};
+    std::uint16_t leading_symbol_offset{};
+    std::uint16_t trailing_padding{};
+    packed_symbol_order bit_order{packed_symbol_order::least_significant_symbol_first};
+};
+
+
 /**
  * Borrowed, alphabet-erased native-rank access for bounded CPU algorithms.
  * The backend owner must outlive this value. A returned span remains borrowed:
@@ -57,6 +86,8 @@ struct borrowed_rank_window_source {
     std::uint8_t alphabet_code{};
     sequence_transform orientation{sequence_transform::identity};
     bool worker_shareable{};
+    /** Optional whole-source resident borrow, bound by the typed checked facade. */
+    std::optional<resident_packed_sequence> resident{};
 
     /** Reads [from, from + count), validating ranges before invoking the backend. */
     [[nodiscard, gnu::always_inline]] inline
@@ -201,6 +232,53 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
            std::numeric_limits<unsigned char>::digits / bits_per_symbol;
 }
 
+/** Check a resident descriptor without reading content or retaining its owner. */
+[[nodiscard]] inline bool valid_resident_packed_descriptor(
+    const resident_packed_sequence& region, sequence_size_t length,
+    std::uint8_t expected_bits) noexcept {
+    if (!all_storage_unit_byte_widths::contains_runtime(region.storage_unit_width)) return false;
+    const sequence_size_t letters_per_unit = static_cast<sequence_size_t>(
+        packed_letters_per_unit(region.storage_unit_width, expected_bits));
+
+    if (letters_per_unit == 0u || region.logical_length != length ||
+        region.bits_per_symbol != expected_bits ||
+        region.bit_order != packed_symbol_order::least_significant_symbol_first) {
+        return false;
+    }
+    if (length == 0u) {
+        if (region.units != nullptr || region.unit_count != 0u ||
+            region.leading_symbol_offset != 0u || region.trailing_padding != 0u) {
+            return false;
+        }
+        return true;
+    }
+
+    const auto occupied = bioseq::common::checked_add(
+        length, static_cast<sequence_size_t>(region.leading_symbol_offset));
+    if (region.units == nullptr ||
+        reinterpret_cast<std::uintptr_t>(region.units) % region.storage_unit_width != 0u ||
+        region.unit_count > (std::numeric_limits<std::size_t>::max)() / region.storage_unit_width ||
+        region.leading_symbol_offset >= letters_per_unit || !occupied.has_value()) {
+        return false;
+    }
+
+    const sequence_size_t expected_units =
+        bioseq::common::ceil_div(*occupied, letters_per_unit);
+    const auto represented_symbols =
+        bioseq::common::checked_mul(expected_units, letters_per_unit);
+    if (expected_units >
+            static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)()) ||
+        region.unit_count != static_cast<std::size_t>(expected_units) ||
+        !represented_symbols.has_value()) {
+        return false;
+    }
+    const sequence_size_t trailing = *represented_symbols - *occupied;
+    if (region.trailing_padding != trailing) {
+        return false;
+    }
+    return true;
+}
+
 /**
  * Borrowed view of a sequence through alphabet-specific callbacks.
  *
@@ -214,28 +292,8 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     using traits = lazy_sequence_traits<p_alphabet>;
     using slice_tag = lazy_sequence_slice_tag;
 
-    /** @brief Bit order used by resident packed descriptors. */
-    enum class packed_symbol_order : std::uint8_t {
-        least_significant_symbol_first,
-    };
-
-    /**
-     * Borrowed packed region and  its layout.
-     *
-     * The source owner must keep the words alive while this descriptor is used.
-     * leading_symbol_offset and trailing_padding describe symbols outside the
-     * logical region in its boundary words.
-     */
-    struct resident_packed_sequence {
-        void const* units{};
-        std::size_t unit_count{};
-        sequence_size_t logical_length{};
-        std::uint8_t storage_unit_width{};
-        std::uint8_t bits_per_symbol{};
-        std::uint16_t leading_symbol_offset{};
-        std::uint16_t trailing_padding{};
-        packed_symbol_order bit_order{packed_symbol_order::least_significant_symbol_first};
-    };
+    using packed_symbol_order = ::bioseq::storage::packed_symbol_order;
+    using resident_packed_sequence = ::bioseq::storage::resident_packed_sequence;
 
     using resident_packed_result = std::optional<resident_packed_sequence>;
     /** Tries to borrow the packed words covering a logical subrange. */
@@ -300,8 +358,8 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     template <bool p_reverse_complement = false>
         requires (!p_reverse_complement ||
                   lazy_sequence_detail::complementable_sequence_alphabet<p_alphabet>)
-    [[nodiscard]] borrowed_rank_window_source borrow_rank_source() const noexcept {
-        return {
+    [[nodiscard]] borrowed_rank_window_source borrow_rank_source(bool include_resident = false) const noexcept {
+        borrowed_rank_window_source result{
             .context = state_,
             .read_at = ops_->read_at[p_reverse_complement ? 2u : 0u],
             .symbol_count = bp_size(),
@@ -310,6 +368,16 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                                                : sequence_transform::identity,
             .worker_shareable = worker_shareable(),
         };
+        if (include_resident && result.symbol_count != 0u) {
+            []<std::size_t... Widths>(supported_storage_unit_byte_widths<Widths...>,
+                                    const auto& visit) {
+                (visit.template operator()<Widths>(), ...);
+            }(all_storage_unit_byte_widths{}, [this, &result]<std::size_t Width>() {
+                if (!result.resident)
+                    result.resident = try_resident_packed(0u, result.symbol_count, Width);
+            });
+        }
+        return result;
     }
 
     /** @brief Returns a copy of this view with a different allocation observer. */
@@ -331,7 +399,8 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
      *
      * Checks the returned layout, pointer alignment, and boundary offsets. Invalid
      * requests or unsupported storage return nullopt. This does not inspect rank
-     * values or extend the lifetime of the backing storage
+     * values or extend the lifetime of the backing storage. Success carries the
+     * direct-read equivalence/no-backend-failure contract of resident_packed_sequence
      */
     [[nodiscard]] resident_packed_result try_resident_packed(
         sequence_size_t from, sequence_size_t to, std::uint8_t requested_width) const noexcept {
@@ -348,50 +417,9 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             return std::nullopt;
         }
 
-        const sequence_size_t length = to - from;
-        constexpr std::uint8_t k_bits_per_symbol =
-            static_cast<std::uint8_t>(traits::k_logical_bits_per_symbol);
-        const sequence_size_t letters_per_unit = static_cast<sequence_size_t>(
-            packed_letters_per_unit(requested_width, k_bits_per_symbol));
-        const resident_packed_sequence& region = *result;
-
-        if (letters_per_unit == 0u || region.logical_length != length ||
-            region.storage_unit_width != requested_width ||
-            region.bits_per_symbol != k_bits_per_symbol ||
-            region.bit_order != packed_symbol_order::least_significant_symbol_first) {
-            return std::nullopt;
-        }
-        if (length == 0u) {
-            if (region.units != nullptr || region.unit_count != 0u ||
-                region.leading_symbol_offset != 0u || region.trailing_padding != 0u) {
-                return std::nullopt;
-            }
-            return result;
-        }
-
-        const auto occupied = bioseq::common::checked_add(
-            length, static_cast<sequence_size_t>(region.leading_symbol_offset));
-        if (region.units == nullptr ||
-            reinterpret_cast<std::uintptr_t>(region.units) % requested_width != 0u ||
-            region.unit_count > (std::numeric_limits<std::size_t>::max)() / requested_width ||
-            region.leading_symbol_offset >= letters_per_unit || !occupied.has_value()) {
-            return std::nullopt;
-        }
-
-        const sequence_size_t expected_units =
-            bioseq::common::ceil_div(*occupied, letters_per_unit);
-        const auto represented_symbols =
-            bioseq::common::checked_mul(expected_units, letters_per_unit);
-        if (expected_units >
-                static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)()) ||
-            region.unit_count != static_cast<std::size_t>(expected_units) ||
-            !represented_symbols.has_value()) {
-            return std::nullopt;
-        }
-        const sequence_size_t trailing = *represented_symbols - *occupied;
-        if (region.trailing_padding != trailing) {
-            return std::nullopt;
-        }
+        if (result->storage_unit_width != requested_width ||
+            !valid_resident_packed_descriptor(*result, to - from,
+                static_cast<std::uint8_t>(traits::k_logical_bits_per_symbol))) return std::nullopt;
         return result;
     }
 

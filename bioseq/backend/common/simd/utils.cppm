@@ -13,15 +13,62 @@ module;
 #include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
 export module bioseq.simd.utils;
 
 import bioseq.common.templating;
+import bioseq.common.seqan_adapter;
 import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::simd {
+
+/** Derive a packed XOR complement only when it represents every valid rank. */
+template<class Traits, bool QueryReversed>
+[[nodiscard]] constexpr std::optional<typename Traits::storage_unit>
+packed_symbol_complement_mask() {
+    using unit_type = typename Traits::storage_unit;
+    using alphabet_type = typename Traits::alphabet_type;
+    if constexpr (!QueryReversed) {
+        return unit_type{0};
+    } else if constexpr (requires(alphabet_type symbol) { seqan3::complement(symbol); }) {
+        const auto rank_xor = seqan3::to_rank(seqan3::complement(alphabet_type{}));
+        for (std::size_t rank = 0u; rank < seqan3::alphabet_size<alphabet_type>; ++rank) {
+            if (seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, alphabet_type{})))
+                != (rank ^ rank_xor)) return std::nullopt;
+        }
+        unit_type mask{};
+        for (std::size_t offset = 0u; offset < Traits::unit_used_bits; offset += Traits::bits_per_char)
+            mask |= static_cast<unit_type>(rank_xor) << offset;
+        return mask;
+    } else {
+        return std::nullopt;
+    }
+}
+
+/** One low bit per logical symbol, derived from the actual compact layout. */
+template<class Traits>
+[[nodiscard]] constexpr typename Traits::storage_unit packed_symbol_low_bits() noexcept {
+    using unit_type = typename Traits::storage_unit;
+    unit_type result{};
+    for (std::size_t shift = 0u; shift < Traits::unit_used_bits; shift += Traits::bits_per_char)
+        result |= unit_type{1} << shift;
+    return result;
+}
+
+/** Fold each nonzero packed XOR field onto its least significant symbol bit. */
+template<class Traits>
+[[nodiscard]] constexpr typename Traits::storage_unit packed_symbol_mismatch_bits(
+    typename Traits::storage_unit difference) noexcept {
+    auto folded = difference;
+    bioseq::common::templating::for_each_index<Traits::bits_per_char - 1u>(
+        [difference, &folded]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
+            folded |= difference >> (Shift + 1u);
+        });
+    return folded & packed_symbol_low_bits<Traits>();
+}
 
 /** Return the used low bits of a compact word without a full-width shift. */
 template<class Traits>

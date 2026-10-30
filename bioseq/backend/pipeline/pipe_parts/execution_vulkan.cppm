@@ -693,14 +693,6 @@ export {
                 bioseq::instrumentation::register_static_region("prefilter");
             auto prefilter_scope = bioseq::instrumentation::region(prefilter_region);
 
-            std::array<bioseq::storage::borrowed_rank_window_source, 2> query_sources{
-                query_seq_.template borrow_rank_source<false>(), {}};
-            std::size_t query_source_count = 1u;
-            if constexpr (supported_biological_alphabets::entry_for<p_alphabet>::is_complementable) {
-                query_sources[1] = query_seq_.template borrow_rank_source<true>();
-                query_source_count = 2u;
-            }
-            const std::array target_sources{target_seq_.template borrow_rank_source<false>()};
             std::vector<prefilter::prefilter_job> jobs;
             std::vector<std::size_t> job_regions;
             const std::uint64_t max_job_coordinate = (std::numeric_limits<std::uint32_t>::max)();
@@ -756,6 +748,16 @@ export {
                     std::span<alignment_region>{regions.data(), regions.size()},
                     std::span<const anchor>{anchors.data(), anchors.size()});
             }
+
+            const bool native_cpu = parameters().prefilter_backend != ::bioseq::prefilter::prefilter_backend::vulkan;
+            std::array<bioseq::storage::borrowed_rank_window_source, 2> query_sources{
+                query_seq_.template borrow_rank_source<false>(native_cpu), {}};
+            std::size_t query_source_count = 1u;
+            if constexpr (supported_biological_alphabets::entry_for<p_alphabet>::is_complementable) {
+                query_sources[1] = query_seq_.template borrow_rank_source<true>(native_cpu);
+                query_source_count = 2u;
+            }
+            const std::array target_sources{target_seq_.template borrow_rank_source<false>(native_cpu)};
 
             const prefilter::prefilter_batch_input input{
                 .queries = std::span{query_sources}.first(query_source_count),

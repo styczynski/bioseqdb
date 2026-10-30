@@ -255,7 +255,7 @@ bioseq_add_highway_codegen(
     "sequence_ops|common|validate_packed_sequence_ranks|&::bioseq::simd::{target_namespace}::validate_packed_sequence_ranks"
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
-    "prefilter|common|sneaky_snake_simd_batch|&bioseq::prefilter::{target_namespace}::sneaky_snake_simd_batch"
+    "prefilter|common|sneaky_snake_simd_batch|&bioseq::simd::{target_namespace}::sneaky_snake_simd_batch"
     "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
   REQUIRED_SLOT_RECORDS
     "common|count_equal_rank_chunk"

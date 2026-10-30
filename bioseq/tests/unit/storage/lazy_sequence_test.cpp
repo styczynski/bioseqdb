@@ -893,6 +893,11 @@ TEST_CASE("resident descriptor validation rejects every malformed field",
     alignas(8) std::array<std::byte, 16> storage{};
     mock_lazy_state state;
     state.ranks = {0u, 1u, 2u, 3u};
+    std::uint64_t resident_word{};
+    for (std::size_t index = 0u; index < state.ranks.size(); ++index)
+        resident_word |= static_cast<std::uint64_t>(state.ranks[index])
+            << (index * facade_t::traits::k_logical_bits_per_symbol);
+    std::memcpy(storage.data(), &resident_word, sizeof(resident_word));
     facade_t::resident_packed_sequence valid{
         .units = storage.data(),
         .unit_count = 1u,

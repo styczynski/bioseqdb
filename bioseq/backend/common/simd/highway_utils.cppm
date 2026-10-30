@@ -18,29 +18,6 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** Derive a packed XOR complement only when it represents every valid rank. */
-template<class Traits, bool QueryReversed>
-[[nodiscard]] constexpr std::optional<typename Traits::storage_unit>
-packed_symbol_complement_mask() {
-    using unit_type = typename Traits::storage_unit;
-    using alphabet_type = typename Traits::alphabet_type;
-    if constexpr (!QueryReversed) {
-        return unit_type{0};
-    } else if constexpr (requires(alphabet_type symbol) { seqan3::complement(symbol); }) {
-        const auto rank_xor = seqan3::to_rank(seqan3::complement(alphabet_type{}));
-        for (std::size_t rank = 0u; rank < seqan3::alphabet_size<alphabet_type>; ++rank) {
-            if (seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, alphabet_type{})))
-                != (rank ^ rank_xor)) return std::nullopt;
-        }
-        unit_type mask{};
-        for (std::size_t offset = 0u; offset < Traits::unit_used_bits; offset += Traits::bits_per_char)
-            mask |= static_cast<unit_type>(rank_xor) << offset;
-        return mask;
-    } else {
-        return std::nullopt;
-    }
-}
-
 /** Return lanes whose low packed rank exceeds the largest valid alphabet rank. */
 template<class D>
 [[nodiscard]] HWY_INLINE hn::Mask<D> invalid_packed_rank_lanes(
@@ -48,6 +25,35 @@ template<class D>
     hn::TFromD<D> rank_mask, hn::TFromD<D> maximum_rank) noexcept {
     return hn::Gt(hn::And(shifted_words, hn::Set(descriptor, rank_mask)),
                   hn::Set(descriptor, maximum_rank));
+}
+
+/** Validate every rank in normalized words; zero-padded inactive fields are valid. */
+template<class Traits, class D>
+[[nodiscard]] HWY_INLINE hn::Mask<D> invalid_packed_word_lanes(
+    D descriptor, hn::Vec<D> words) noexcept {
+    auto invalid = hn::FirstN(descriptor, 0u);
+    if constexpr (Traits::alphabet_size != (typename Traits::storage_unit{1} << Traits::bits_per_char)) {
+        bioseq::common::templating::for_each_index<Traits::letters_per_unit>(
+            [descriptor, words, &invalid]<std::size_t Symbol>(std::integral_constant<std::size_t, Symbol>) {
+                invalid = hn::Or(invalid, invalid_packed_rank_lanes(descriptor,
+                    hn::ShiftRight<Symbol * Traits::bits_per_char>(words),
+                    static_cast<typename Traits::storage_unit>(Traits::char_mask),
+                    static_cast<typename Traits::storage_unit>(Traits::alphabet_size - 1u)));
+            });
+    }
+    return invalid;
+}
+
+/** The existing packed equality reduction, reusable by ordered rank matching. */
+template<class Traits, class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> packed_symbol_mismatch_bits(
+    D descriptor, hn::Vec<D> difference) noexcept {
+    auto folded = difference;
+    bioseq::common::templating::for_each_index<Traits::bits_per_char - 1u>(
+        [difference, &folded]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
+            folded = hn::Or(folded, hn::ShiftRight<Shift + 1u>(difference));
+        });
+    return hn::And(folded, hn::Set(descriptor, packed_symbol_low_bits<Traits>()));
 }
 
 /**
@@ -64,12 +70,6 @@ template<class Traits, bool QueryReversed, class D>
     static_assert(std::same_as<hn::TFromD<D>, unit_type>);
     HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> query_words{};
     HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> target_words{};
-    constexpr unit_type low_symbol_bits = [] {
-        unit_type mask = 0;
-        for (std::size_t offset = 0; offset < Traits::unit_used_bits; offset += Traits::bits_per_char)
-            mask |= unit_type{1} << offset;
-        return mask;
-    }();
     sequence_symbol_equality result{};
     const std::size_t lanes = hn::Lanes(descriptor);
     constexpr std::size_t reduction_lane_limit = [] {
@@ -95,18 +95,8 @@ template<class Traits, bool QueryReversed, class D>
         const auto query_packed = hn::MaskedLoad(active, descriptor, query_words.data());
         const auto target_packed = hn::MaskedLoad(active, descriptor, target_words.data());
         if constexpr (Traits::alphabet_size != (unit_type{1} << Traits::bits_per_char)) {
-            auto invalid = hn::FirstN(descriptor, 0);
-            bioseq::common::templating::for_each_index<Traits::letters_per_unit>(
-                [descriptor, query_packed, target_packed, &invalid]<std::size_t Symbol>(
-                    std::integral_constant<std::size_t, Symbol>) {
-                    constexpr auto rank_mask = static_cast<unit_type>(Traits::char_mask);
-                    constexpr auto maximum_rank = static_cast<unit_type>(Traits::alphabet_size - 1);
-                    const auto invalid_query = invalid_packed_rank_lanes(descriptor,
-                        hn::ShiftRight<Symbol * Traits::bits_per_char>(query_packed), rank_mask, maximum_rank);
-                    const auto invalid_target = invalid_packed_rank_lanes(descriptor,
-                        hn::ShiftRight<Symbol * Traits::bits_per_char>(target_packed), rank_mask, maximum_rank);
-                    invalid = hn::Or(invalid, hn::Or(invalid_query, invalid_target));
-                });
+            const auto invalid = hn::Or(invalid_packed_word_lanes<Traits>(descriptor, query_packed),
+                                       invalid_packed_word_lanes<Traits>(descriptor, target_packed));
             if (!hn::AllFalse(descriptor, hn::And(active, invalid))) {
                 result.valid_ranks = false;
                 return result;
@@ -119,11 +109,8 @@ template<class Traits, bool QueryReversed, class D>
             ++result.vector_batches;
             continue;
         }
-        auto different_symbols = different;
-        bioseq::common::templating::for_each_index<Traits::bits_per_char - 1>([different, &different_symbols]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
-            different_symbols = hn::Or(different_symbols, hn::ShiftRight<Shift + 1>(different));
-        });
-        const auto mismatches = hn::PopulationCount(hn::And(different_symbols, hn::Set(descriptor, low_symbol_bits)));
+        const auto mismatches = hn::PopulationCount(
+            packed_symbol_mismatch_bits<Traits>(descriptor, different));
         result.equal_symbols += hn::ReduceSum(descriptor, hn::IfThenElseZero(active, mismatches));
         ++result.vector_batches;
     }
