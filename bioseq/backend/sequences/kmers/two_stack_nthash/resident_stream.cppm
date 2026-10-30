@@ -472,8 +472,8 @@ struct sequence_simd_iteration_state {
                                                 &emit_arr,
                                                 &pos_arr,
                                                 &offsets_in,
-                                                &hs_arr, &strand_arr](auto stream_idx_const)
-                    [[gnu::always_inline]] {
+                                                &hs_arr, &strand_arr]
+                    [[gnu::always_inline]] (auto stream_idx_const) {
                     constexpr size_t s = decltype(stream_idx_const)::value;
                     if (!per_stream_emits[s])
                         return;
