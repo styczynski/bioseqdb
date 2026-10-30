@@ -153,7 +153,7 @@ TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device
     std::weak_ptr<device_type> device_lifetime = device;
     source.device = std::move(device);
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
@@ -300,7 +300,7 @@ TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases devic
     std::weak_ptr<device_type> device_lifetime = device;
     source.device = std::move(device);
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
@@ -335,7 +335,7 @@ TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes
     source_type source;
     source.device = std::make_shared<device_type>();
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
@@ -407,7 +407,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
         source.host_minimizers.capacity() * sizeof(sketch_type);
     source.device = std::make_shared<device_type>();
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
@@ -522,7 +522,7 @@ TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
         source.host_minimizers.capacity() * sizeof(wide_sketch_type);
     source.device = std::make_shared<device_type>();
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
@@ -605,7 +605,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
     source.device = std::make_shared<device_type>();
     std::weak_ptr<device_type> device_lifetime = source.device;
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = false;
@@ -671,7 +671,7 @@ TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
     source.device = std::make_shared<device_type>();
     const auto device_alias = source.device;
     source.dispatch_token = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token::
-        completed_collect_minimizers_roundtrip();
+        completed_collect_minimizers_roundtrip(1u);
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;

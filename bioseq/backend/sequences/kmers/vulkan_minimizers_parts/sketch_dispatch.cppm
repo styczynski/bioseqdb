@@ -56,7 +56,7 @@ export namespace bioseq::gpu::vulkan {
  * @param rank_lut Alphabet decoding table.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param capacity_bound Output capacity, or zero to estimate it.
+ * @param capacity_bound Proven capacity, or zero for automatic owned device/budget-aware allocation.
  * @param capacity_overflowed Optional output-capacity failure flag.
  * @param query_gate Optional bitmap filtering target hashes.
  * @param decline_out Optional rejection details, including failures after dispatch.
@@ -128,6 +128,49 @@ sketch_uploaded_window_result(
         decline(vulkan_sketch_decline_reason::hardware_device_unavailable);
         return std::nullopt;
     }
+    const vulkan_sketch_params sketch_params{
+        .bp_size = static_cast<std::uint32_t>(upload.bp_size),
+        .window_size = static_cast<std::uint32_t>(window_size),
+        .kmer_size = static_cast<std::uint32_t>(kmer_size),
+        .hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
+        .hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
+        .pos_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            minimizer_wire_traits<p_minimizer_type>::k_word_kind),
+        .minimizer_words32 =
+            minimizer_wire_traits<
+                p_minimizer_type>::k_words32_per_minimizer,
+        .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
+        .unit_bits = upload.unit_bits,
+        .bits_per_char = upload.bits_per_char,
+        .letters_per_unit = upload.letters_per_unit,
+        .alphabet_size = upload.alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = upload.char_mask,
+        .padding_letters = upload.padding_letters,
+    };
+
+    if (upload.bp_size == 0u) {
+        // The tile planner has no dispatch for an empty source. Reuse runtime
+        // validation/trim without allocating output or claiming a GPU receipt.
+        const auto empty = runtime.run_sketch_roundtrip(
+            {}, rank_lut, sketch_params, 0u, query_gate.words, query_gate.mask);
+        if (empty.count != 0u || empty.completed_roundtrips != 0u
+            || empty.minimizer_words.is_valid() || empty.overflow
+            || empty.execution_peak_admission_failure.has_failure()
+            || !empty.arena_trimmed_before_return) {
+            throw vulkan_runtime_error{"Vulkan empty sketch returned contradictory completion"};
+        }
+        return vulkan_sketch_result<p_minimizer_type>{
+            .device = std::make_shared<vulkan_device_minimizer_storage<p_minimizer_type>>(),
+            .dispatch_token = vulkan_sketch_dispatch_token::completed_empty_collection(),
+            .host_ownership_route = host_ownership_route,
+            .host_permit_released_to_process_footprint = host_ownership_route
+                == vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption,
+            .arena_trimmed_before_host_materialization = true,
+        };
+    }
+
     const std::uint64_t max_minimizers =
         capacity_bound == 0u
             ? estimate_vulkan_minimizer_capacity(upload.bp_size, window_size)
@@ -152,8 +195,16 @@ sketch_uploaded_window_result(
         saturating_mul(
             static_cast<std::uint64_t>(query_gate.words.size()),
             static_cast<std::uint64_t>(sizeof(std::uint32_t)));
+    const bool automatic_owned_allocation =
+        capacity_bound == 0u && borrowed_dispatch_permit == nullptr;
+    bool allocate_from_count = false;
+    // Preserve one submission when the proven output fits the device and budget.
+    // Automatic owned requests can count first when only that worst-case output
+    // exceeds the descriptor range or its full reservation is denied by the budget.
     const std::uint64_t requested_device_bytes =
         vulkan_sketch_resident_bytes<p_minimizer_type>(max_minimizers);
+    const bool count_required_by_output_range = automatic_owned_allocation
+        && requested_device_bytes > runtime.features().max_storage_buffer_range;
     const gpu_sketch_memory_plan dispatch_plan = make_gpu_sketch_memory_plan(
         upload.bp_size,
         upload.padded_byte_size,
@@ -178,7 +229,7 @@ sketch_uploaded_window_result(
             static_cast<std::uint32_t>(
                 minimizer_wire_traits<p_minimizer_type>::k_word_kind),
             minimizer_wire_traits<p_minimizer_type>::k_words32_per_minimizer,
-            max_minimizers);
+            count_required_by_output_range ? 1u : max_minimizers);
     if (!allocation_requirements.valid) {
         decline(vulkan_sketch_decline_reason::memory_plan_invalid, max_minimizers);
         return std::nullopt;
@@ -218,7 +269,7 @@ sketch_uploaded_window_result(
         return std::nullopt;
     }
 
-    const std::uint64_t dispatch_admission_bytes =
+    std::uint64_t dispatch_admission_bytes =
         vulkan_sketch_dispatch_admission_bytes(
             physical_arena_bytes,
             host_transient_headroom_bytes,
@@ -233,9 +284,62 @@ sketch_uploaded_window_result(
     std::optional<bioseq::parallelism::memory_permit> owned_dispatch_permit;
     bioseq::parallelism::memory_permit* dispatch_permit = borrowed_dispatch_permit;
     if (dispatch_permit == nullptr) {
-        owned_dispatch_permit = memory_admission_controller::instance().try_reserve(
-            dispatch_admission_bytes,
-            &admission_failure);
+        if (!count_required_by_output_range) {
+            owned_dispatch_permit = memory_admission_controller::instance().try_reserve(
+                dispatch_admission_bytes,
+                &admission_failure);
+        }
+        if (!owned_dispatch_permit && automatic_owned_allocation
+            && (count_required_by_output_range || admission_failure.reason
+                == bioseq::parallelism::memory_admission_failure_reason::budget_exhausted)) {
+            // The failed attempt owns no reservation. Reuse the same controller,
+            // scaffold and GPU algorithm; the checked count admits output later.
+            if (count_required_by_output_range) {
+                bioseq_log<logging_level::debug>(
+                    "[vulkan sketch] full-bound output exceeds descriptor range; "
+                    "counting before exact allocation: output_bytes={} maximum_range={}",
+                    requested_device_bytes, runtime.features().max_storage_buffer_range);
+            } else {
+                bioseq_log<logging_level::debug>(
+                    "[vulkan sketch] full-bound budget rejected; retrying exact allocation: {}",
+                    format_vulkan_sketch_decline(vulkan_sketch_decline{
+                        .reason = vulkan_sketch_decline_reason::memory_admission_denied,
+                        .bp_size = upload.bp_size,
+                        .padded_sequence_bytes = upload.padded_byte_size,
+                        .max_minimizers = max_minimizers,
+                        .query_gate_words = static_cast<std::uint64_t>(query_gate.words.size()),
+                        .window_size = window_size,
+                        .kmer_size = kmer_size,
+                        .admission = admission_failure,
+                    }));
+            }
+            const gpu_sketch_batch_allocation_requirements count_requirements =
+                count_required_by_output_range ? allocation_requirements
+                : runtime.sketch_batch_allocation_requirements(
+                    upload.padded_byte_size,
+                    dispatch_plan.tiles.tile_count,
+                    static_cast<std::uint32_t>(minimizer_wire_traits<p_minimizer_type>::k_word_kind),
+                    minimizer_wire_traits<p_minimizer_type>::k_words32_per_minimizer,
+                    1u);
+            if (!count_requirements.valid) {
+                decline(vulkan_sketch_decline_reason::memory_plan_invalid, max_minimizers);
+                return std::nullopt;
+            }
+            const std::uint64_t count_admission_bytes = vulkan_sketch_dispatch_admission_bytes(
+                physical_arena_bytes, host_transient_headroom_bytes, query_gate_bytes,
+                count_requirements.pessimistic_output_allocation_bytes);
+            if (count_admission_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
+                decline(vulkan_sketch_decline_reason::memory_plan_invalid, max_minimizers);
+                return std::nullopt;
+            }
+            admission_failure = {};
+            owned_dispatch_permit = memory_admission_controller::instance().try_reserve(
+                count_admission_bytes, &admission_failure);
+            if (owned_dispatch_permit) {
+                allocate_from_count = true;
+                dispatch_admission_bytes = count_admission_bytes;
+            }
+        }
         if (owned_dispatch_permit) {
             dispatch_permit = std::addressof(*owned_dispatch_permit);
         }
@@ -269,28 +373,6 @@ sketch_uploaded_window_result(
     }
 
     try {
-        const vulkan_sketch_params sketch_params{
-            .bp_size = static_cast<std::uint32_t>(upload.bp_size),
-            .window_size = static_cast<std::uint32_t>(window_size),
-            .kmer_size = static_cast<std::uint32_t>(kmer_size),
-            .hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
-            .hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
-            .pos_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
-            .minimizer_word_kind = static_cast<std::uint32_t>(
-                minimizer_wire_traits<p_minimizer_type>::k_word_kind),
-            .minimizer_words32 =
-                minimizer_wire_traits<
-                    p_minimizer_type>::k_words32_per_minimizer,
-            .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
-            .unit_bits = upload.unit_bits,
-            .bits_per_char = upload.bits_per_char,
-            .letters_per_unit = upload.letters_per_unit,
-            .alphabet_size = upload.alphabet_size,
-            .seq_word_offset = 0u,
-            .char_mask = upload.char_mask,
-            .padding_letters = upload.padding_letters,
-        };
-
         runtime_sketch_result raw;
         {
             // Free the temporary packed input before reserving the host result
@@ -326,11 +408,33 @@ sketch_uploaded_window_result(
                 sketch_params,
                 max_minimizers,
                 query_gate.words,
-                query_gate.mask);
+                query_gate.mask,
+                allocate_from_count ? vulkan_sketch_output_allocation::exact_count
+                                    : vulkan_sketch_output_allocation::proven_capacity,
+                allocate_from_count ? dispatch_permit : nullptr,
+                allocate_from_count ? bioseq::common::saturating_add(
+                    host_transient_headroom_bytes, query_gate_bytes) : 0u);
         }
         if (!raw.arena_trimmed_before_return) {
             throw vulkan_runtime_error{
                 "Vulkan minimizer roundtrip returned before arena trim"};
+        }
+        if (raw.execution_peak_admission_failure.has_failure()) {
+            const vulkan_sketch_decline exact_decline{
+                .reason = vulkan_sketch_decline_reason::memory_admission_denied,
+                .bp_size = upload.bp_size,
+                .padded_sequence_bytes = upload.padded_byte_size,
+                .max_minimizers = max_minimizers,
+                .query_gate_words = static_cast<std::uint64_t>(query_gate.words.size()),
+                .window_size = window_size,
+                .kmer_size = kmer_size,
+                .admission = raw.execution_peak_admission_failure,
+            };
+            if (decline_out != nullptr) *decline_out = exact_decline;
+            bioseq_log<logging_level::error>(
+                "[vulkan sketch] strict exact-output admission denied: {}",
+                format_vulkan_sketch_decline(exact_decline));
+            return std::nullopt;
         }
         if (raw.overflow) {
             if (capacity_overflowed != nullptr) {
@@ -349,9 +453,18 @@ sketch_uploaded_window_result(
             return std::nullopt;
         }
 
+        const bool is_empty_collection = upload.bp_size < kmer_size;
+        if (is_empty_collection
+                ? raw.count != 0u || raw.completed_roundtrips != 0u
+                    || raw.minimizer_words.is_valid()
+                : !raw.minimizer_words.is_valid()
+                    || (raw.completed_roundtrips != 1u && raw.completed_roundtrips != 2u)) {
+            throw vulkan_runtime_error{"Vulkan sketch returned contradictory completion"};
+        }
         const std::uint64_t actual_device_allocation_bytes =
             raw.minimizer_words.allocation_bytes;
-        if (actual_device_allocation_bytes > resident_allocation_bytes) {
+        if (actual_device_allocation_bytes >
+                (allocate_from_count ? dispatch_permit->bytes() : resident_allocation_bytes)) {
             throw vulkan_runtime_error{
                 "Vulkan minimizer device allocation exceeded admission"};
         }
@@ -546,14 +659,16 @@ sketch_uploaded_window_result(
             storage->permit = std::move(*dispatch_permit);
         }
         storage->count = raw.count;
-        storage->capacity = max_minimizers;
+        storage->capacity = is_empty_collection ? 0u : allocate_from_count ? raw.count : max_minimizers;
 
         return vulkan_sketch_result<p_minimizer_type>{
             .host_permit = std::move(owned_host_permit),
             .device = std::move(storage),
             .host_minimizers = std::move(host_minimizers),
-            .dispatch_token = vulkan_sketch_dispatch_token::
-                completed_collect_minimizers_roundtrip(),
+            .dispatch_token = is_empty_collection
+                ? vulkan_sketch_dispatch_token::completed_empty_collection()
+                : vulkan_sketch_dispatch_token::completed_collect_minimizers_roundtrip(
+                    raw.completed_roundtrips),
             .host_ownership_route = host_ownership_route,
             .host_permit_released_to_process_footprint =
                 host_permit_released_to_process_footprint,

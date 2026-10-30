@@ -62,17 +62,26 @@ struct generate_units_push {
 static_assert(sizeof(generate_units_push) == 48);
 static_assert(std::is_standard_layout_v<generate_units_push>);
 
+/// @brief Chooses when a singleton sketch allocates its minimizer output.
+enum class vulkan_sketch_output_allocation : std::uint8_t {
+    proven_capacity, ///< Reserve the complete semantic bound before one submission.
+    exact_count,     ///< Count first, admit the exact allocation, then emit.
+};
+
 /// @brief Minimizers from one GPU sketch, ready for seed lookup.
 /// The caller keeps the device buffer  and can copy its contents to host memory
 /// after the temporary sequence buffers are freed.
 struct runtime_sketch_result {
     buffer minimizer_words;              ///< Device minimizers owned by the caller after return.
     std::uint64_t count = 0;             ///< Exact minimizer count from the count pass.
+    std::uint64_t completed_roundtrips = 0; ///< Actual sketch submissions with completed fence waits.
     // The caller checks this before reducing the sketch memory reservation or
     // allocating host output. It confirms that temporary, arena buffers have
     // already byen freed.
     bool arena_trimmed_before_return = false; ///< Arena idle capacity was released before return.
     bool overflow = false;                   ///< Set when the exact count exceeded caller limits.
+    bioseq::parallelism::memory_admission_failure execution_peak_admission_failure{};
+        ///< Existing controller's count or exact-output reservation failure.
 };
 
 /// @brief Chooses whether a sketch batch also returns a host copy of its minimizers.

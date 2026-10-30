@@ -54,7 +54,9 @@ struct authorized_readback_receipt {
 
 } // namespace
 
-/// @brief Counts and writes one sequence's minimizers in one GPU submission.
+/// @brief Counts and writes one sequence's minimizers using admitted output storage.
+/// Proven capacity uses one submission. Exact allocation reuses the same count,
+/// scan and emit shaders with a count fence before reserving output memory.
 /// Temporary  arena storage is freed before return.
 /// @param[in] packed_sequence Packed bytes copied before submission.
 /// @param[in] rank_lut Packed-rank, translation table
@@ -62,6 +64,9 @@ struct authorized_readback_receipt {
 /// @param[in] max_minimizers Output capacity in minimizers.
 /// @param[in] query_gate_words Optional query-hash bitmap.
 /// @param[in] query_gate_mask Low-bit hash mask, or zero without a bitmap.
+/// @param[in] allocation Whether output uses a proven bound or the checked count.
+/// @param[in] peak_permit Existing count/output reservation, required for exact allocation.
+/// @param[in] retained_host_bytes Host allocations retained through both submissions.
 /// @return Exact count and owned device buffer, or overflow.
 /// @throws vulkan_runtime_error If validation or execution fails.
 runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
@@ -69,7 +74,10 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                                                     const vulkan_sketch_params& params,
                                                     std::uint64_t max_minimizers,
                                                     std::span<const std::uint32_t> query_gate_words,
-                                                    std::uint32_t query_gate_mask) {
+                                                    std::uint32_t query_gate_mask,
+                                                    vulkan_sketch_output_allocation allocation,
+                                                    bioseq::parallelism::memory_permit* peak_permit,
+                                                    std::uint64_t retained_host_bytes) {
     std::lock_guard<std::mutex> guard(mu_);
     runtime_sketch_result result;
     if (!features_.available) {
@@ -83,6 +91,14 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         throw vulkan_runtime_error("gpu sketch entered with live arena slices");
     }
     gpu_arena_trim_guard arena_trim{arena};
+    if (allocation != vulkan_sketch_output_allocation::proven_capacity
+        && allocation != vulkan_sketch_output_allocation::exact_count) {
+        throw vulkan_runtime_error("gpu sketch has invalid output allocation policy");
+    }
+    const bool allocate_from_count = allocation == vulkan_sketch_output_allocation::exact_count;
+    if (allocate_from_count && (peak_permit == nullptr || peak_permit->controller() == nullptr)) {
+        throw vulkan_runtime_error("gpu sketch exact output requires a retained memory permit");
+    }
     validate_native_sketch_contract(rank_lut, params);
     validate_native_sketch_window(packed_sequence, rank_lut, params, params.bp_size, params.seq_word_offset);
     const std::uint32_t bp = params.bp_size;
@@ -110,7 +126,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         static_cast<std::uint64_t>(query_gate_words.size()) * sizeof(std::uint32_t);
     const std::uint64_t out_bytes = std::max<std::uint64_t>(
         minimizer_device_bytes(
-            params.minimizer_word_kind, params.minimizer_words32, max_minimizers),
+            params.minimizer_word_kind, params.minimizer_words32,
+            allocate_from_count ? 0u : max_minimizers),
         4u);
     const gpu_sketch_memory_plan memory_plan =
         make_gpu_sketch_memory_plan(bp,
@@ -131,7 +148,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                         params.letters_per_unit));
     }
     const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size);
-    bool unsupported_capacity = hard_bound > max_minimizers
+    bool unsupported_capacity = (!allocate_from_count && hard_bound > max_minimizers)
         || max_minimizers > (std::numeric_limits<std::uint32_t>::max)();
     for (const std::uint64_t bytes : {
              memory_plan.sequence_bytes, memory_plan.rank_lut_bytes,
@@ -141,14 +158,37 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
              out_bytes, query_gate_bytes}) {
         unsupported_capacity = unsupported_capacity || bytes > features_.max_storage_buffer_range;
     }
-    // This route emits before its fence. Prove the full native bound fits before
-    // submission; direct callers cannot use an underestimated capacity safely.
+    // A one-submission call must prove the full native bound before writing.
+    // Count-first calls check actual output capacity after their first fence.
     if (unsupported_capacity) {
         result.overflow = true;
         if (!arena_trim.release_now())
             throw vulkan_runtime_error("gpu sketch capacity rejection left live arena slices");
         result.arena_trimmed_before_return = true;
         return result;
+    }
+    const std::uint64_t arena_bytes = bioseq::common::saturating_add(
+        memory_plan.arena_scaffold_bytes,
+        query_gate_bytes == 0u
+            ? 0u
+            : bioseq::common::saturating_add(query_gate_bytes,
+                                             std::uint64_t{k_gpu_buffer_offset_alignment}));
+    if (allocate_from_count) {
+        const std::uint64_t minimum_host_bytes = bioseq::common::saturating_add(
+            memory_plan.count_submit_host_transient_bytes, query_gate_bytes);
+        const std::uint64_t count_peak = bioseq::common::saturating_add(
+            buffer_memory_requirement_locked(arena_bytes, k_gpu_arena_usage),
+            retained_host_bytes);
+        if (retained_host_bytes < minimum_host_bytes
+            || count_peak == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw vulkan_runtime_error("gpu sketch count staging admission is invalid");
+        }
+        if (!peak_permit->grow_to(count_peak, &result.execution_peak_admission_failure)) {
+            if (!arena_trim.release_now())
+                throw vulkan_runtime_error("gpu sketch count admission left live arena slices");
+            result.arena_trimmed_before_return = true;
+            return result;
+        }
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
@@ -165,21 +205,21 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         tiles[tile_index] = sketch_tile_type{params.seq_word_offset, bp, rlo, lo, hi, 0u};
     }
     const std::uint32_t num_blocks = memory_plan.tiles.scan_block_count;
-    buffer out_words = create_device_buffer(out_bytes, k_compute_buffer_usage);
-    if (out_words.mapped == nullptr)
-        throw vulkan_runtime_error("gpu sketch non-unified memory");
-
-    const std::uint64_t arena_bytes = bioseq::common::saturating_add(
-        memory_plan.arena_scaffold_bytes,
-        query_gate_bytes == 0u
-            ? 0u
-            : bioseq::common::saturating_add(query_gate_bytes,
-                                             std::uint64_t{k_gpu_buffer_offset_alignment}));
+    buffer out_words;
+    if (!allocate_from_count) {
+        out_words = create_device_buffer(out_bytes, k_compute_buffer_usage);
+        if (out_words.mapped == nullptr)
+            throw vulkan_runtime_error("gpu sketch non-unified memory");
+    }
     if (!arena.ensure_capacity(arena_bytes, 0, 0)) {
         throw vulkan_runtime_error(
             fmt::format("gpu arena grow failed (bp={}, arena_bytes={})", bp, arena_bytes));
     }
     const gpu_arena_mark mark = arena.mark();
+    if (allocate_from_count && bioseq::common::saturating_add(
+            arena.device_buffer().allocation_bytes, retained_host_bytes) > peak_permit->bytes()) {
+        throw vulkan_runtime_error("gpu sketch count allocation exceeded admission");
+    }
 
     const gpu_arena_slice seq_s = arena.allocate_device(memory_plan.sequence_bytes, 16u);
     const gpu_arena_slice lut_s = arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
@@ -220,7 +260,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                     static_cast<std::size_t>(query_gate_bytes));
     }
 
-    if (params.minimizer_word_kind == 0u)
+    if (!allocate_from_count && params.minimizer_word_kind == 0u)
         std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
@@ -234,12 +274,17 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     reset_dispatch_descriptor_pool_locked();
 
     const gpu_arena_slice& gate_binding_s = query_gate_bytes == 0u ? counters_s : query_gate_s;
+    // Counting never writes output; bind a valid existing descriptor until the
+    // checked count has been admitted, as in the device-only batch route.
+    const VkDescriptorBufferInfo initial_output_info = allocate_from_count
+        ? VkDescriptorBufferInfo{counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size}
+        : VkDescriptorBufferInfo{out_words.buffer_handle, 0, VK_WHOLE_SIZE};
     const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
         {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
         {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
         {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
         {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
-        {out_words.buffer_handle, 0, VK_WHOLE_SIZE},
+        initial_output_info,
         {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
         {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
         {pairvals_s.buffer->buffer_handle, pairvals_s.offset, pairvals_s.size},
@@ -295,33 +340,37 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                                    &scan1,
                                    sizeof(scan1),
                                    bioseq::common::ceil_div(num_tiles, 128u));
-    record_compute_barrier(command_buffer_);
-    push.emit_mode = 1u;
-    record_compute_dispatch_locked(
-        command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    if (!allocate_from_count) {
+        record_compute_barrier(command_buffer_);
+        push.emit_mode = 1u;
+        record_compute_dispatch_locked(
+            command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    }
     record_shader_to_host(command_buffer_);
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch)");
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
-    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch)");
+    /// @brief Submits the recorded sketch work and drains it before reuse or unwind.
+    const auto submit_and_drain = [this, &submit, &result] {
+        check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch)");
 #ifdef BIOSEQ_TEST_INDEXES
-    const vulkan_submission_test_fault submission_test_fault =
-        delay_vulkan_submission_test_after_submit();
+        const vulkan_submission_test_fault submission_test_fault =
+            delay_vulkan_submission_test_after_submit();
 #endif
-    check_vk(vkWaitForFences(device_,
-                             1,
-                             &fence_,
-                             VK_TRUE,
-                             std::numeric_limits<std::uint64_t>::max()),
-             "vkWaitForFences(pc_sketch)");
-    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
-    require_immutable_metal_policy_live("sketch operation completion");
+        check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE,
+                                std::numeric_limits<std::uint64_t>::max()),
+                 "vkWaitForFences(pc_sketch)");
+        check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
+        ++result.completed_roundtrips;
+        require_immutable_metal_policy_live("sketch operation completion");
 #ifdef BIOSEQ_TEST_INDEXES
-    delay_vulkan_submission_test_after_drain(submission_test_fault);
-    deliver_vulkan_submission_test_fault_after_drain(submission_test_fault);
+        delay_vulkan_submission_test_after_drain(submission_test_fault);
+        deliver_vulkan_submission_test_fault_after_drain(submission_test_fault);
 #endif
+    };
+    submit_and_drain();
 
     std::uint32_t last_off = 0u;
     std::memcpy(&last_off, base + offsets_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
@@ -333,8 +382,57 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     if (!checked_total || total > max_minimizers) {
         result.overflow = true;
     } else {
-        result.count = total;
-        result.minimizer_words = std::move(out_words);
+        if (allocate_from_count) {
+            const std::uint64_t exact_output_bytes = std::max<std::uint64_t>(
+                minimizer_device_bytes(params.minimizer_word_kind,
+                    params.minimizer_words32, total), 4u);
+            if (exact_output_bytes > features_.max_storage_buffer_range) {
+                result.overflow = true;
+            } else {
+                const std::uint64_t output_requirement =
+                    buffer_memory_requirement_locked(exact_output_bytes, k_compute_buffer_usage);
+                const std::uint64_t exact_peak = bioseq::common::saturating_add(
+                    arena.device_buffer().allocation_bytes,
+                    bioseq::common::saturating_add(retained_host_bytes, output_requirement));
+                if (exact_peak == (std::numeric_limits<std::uint64_t>::max)()) {
+                    throw vulkan_runtime_error("gpu sketch exact output admission overflowed");
+                }
+                // Reuse target-index construction's admission seam: the count
+                // is fenced, but no output allocation or emit exists yet.
+                if (peak_permit->grow_to(exact_peak,
+                        &result.execution_peak_admission_failure)) {
+                    out_words = create_device_buffer(exact_output_bytes, k_compute_buffer_usage);
+                    if (out_words.mapped == nullptr
+                        || out_words.allocation_bytes != output_requirement) {
+                        throw vulkan_runtime_error("gpu sketch exact output differs from admission");
+                    }
+                    if (params.minimizer_word_kind == 0u)
+                        std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
+                    auto emit_sketch_infos = sketch_infos;
+                    emit_sketch_infos[4] = {out_words.buffer_handle, 0, VK_WHOLE_SIZE};
+                    // Keep the upload, query gate, counts and offsets unchanged
+                    // through the second fence. The first submission is drained.
+                    reset_dispatch_descriptor_pool_locked();
+                    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+                             "vkResetCommandBuffer(pc_sketch_emit)");
+                    check_vk(vkBeginCommandBuffer(command_buffer_, &begin),
+                             "vkBeginCommandBuffer(pc_sketch_emit)");
+                    record_host_to_shader(command_buffer_);
+                    record_compute_barrier(command_buffer_);
+                    push.emit_mode = 1u;
+                    record_compute_dispatch_locked(command_buffer_, sketch_pipe,
+                        emit_sketch_infos, &push, sizeof(push), sketch_groups);
+                    record_shader_to_host(command_buffer_);
+                    check_vk(vkEndCommandBuffer(command_buffer_),
+                             "vkEndCommandBuffer(pc_sketch_emit)");
+                    submit_and_drain();
+                }
+            }
+        }
+        if (!result.overflow && !result.execution_peak_admission_failure.has_failure()) {
+            result.count = total;
+            result.minimizer_words = std::move(out_words);
+        }
     }
     arena.rewind(mark);
     if (!arena_trim.release_now()) {

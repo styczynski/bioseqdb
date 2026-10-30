@@ -605,11 +605,11 @@ struct partial_vulkan_execution_stats {
     }
 
     [[nodiscard]] constexpr bool is_exact_sketch_token_consistent() const noexcept {
-        if (sketch_dispatches != 1) {
+        if (sketch_dispatches != 1u && sketch_dispatches != 2u) {
             return false;
         }
         partial_vulkan_execution_stats expected{};
-        expected.sketch_dispatches = 1;
+        expected.sketch_dispatches = sketch_dispatches;
         return *this == expected;
     }
 

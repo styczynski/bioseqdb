@@ -1065,15 +1065,21 @@ TEST_CASE("Vulkan sketch dispatch token requires an operation-completed roundtri
     REQUIRE_FALSE(vulkan_sketch_dispatch_token{}.is_internally_consistent());
 
     const auto completed =
-        vulkan_sketch_dispatch_token::completed_collect_minimizers_roundtrip();
+        vulkan_sketch_dispatch_token::completed_collect_minimizers_roundtrip(1u);
     REQUIRE(completed.is_internally_consistent());
+    REQUIRE(vulkan_sketch_dispatch_token::completed_collect_minimizers_roundtrip(2u)
+                .is_internally_consistent());
+    const auto empty = vulkan_sketch_dispatch_token::completed_empty_collection();
+    REQUIRE(empty.is_internally_consistent());
+    REQUIRE(empty.route == vulkan_sketch_dispatch_route::empty_collection);
+    REQUIRE(empty.completed_roundtrips == 0u);
 
     auto no_roundtrip = completed;
     no_roundtrip.completed_roundtrips = 0;
     REQUIRE_FALSE(no_roundtrip.is_internally_consistent());
 
     auto wrong_count = completed;
-    wrong_count.completed_roundtrips = 2;
+    wrong_count.completed_roundtrips = 3;
     REQUIRE_FALSE(wrong_count.is_internally_consistent());
 
     auto wrong_route = completed;
@@ -1143,7 +1149,7 @@ TEST_CASE("Vulkan sketch stats cannot promote a token across a tampered route",
         record_minimizer_sketch_execution_stats;
 
     using vulkan_token_type = bioseq::gpu::vulkan::vulkan_sketch_dispatch_token;
-    const auto token = vulkan_token_type::completed_collect_minimizers_roundtrip();
+    const auto token = vulkan_token_type::completed_collect_minimizers_roundtrip(1u);
     stats vulkan_sketch{};
     vulkan_sketch.partial_vulkan.sketch_dispatches =
         token.completed_roundtrips;
@@ -1153,6 +1159,27 @@ TEST_CASE("Vulkan sketch stats cannot promote a token across a tampered route",
         minimizer_algorithm_type::scalar, vulkan_sketch));
     REQUIRE_FALSE(minimizer_sketch_stats_matches_selected_route(
         minimizer_algorithm_type::two_stack_nthash, vulkan_sketch));
+
+    stats count_first = vulkan_sketch;
+    count_first.partial_vulkan.sketch_dispatches = 2u;
+    REQUIRE(count_first.partial_vulkan.is_exact_sketch_token_consistent());
+    REQUIRE(minimizer_sketch_stats_matches_selected_route(
+        minimizer_algorithm_type::vulkan_minimap_integer, count_first));
+    match_result_collection count_first_destination;
+    record_minimizer_sketch_execution_stats(
+        count_first_destination, count_first, minimizer_sketch_role::query);
+    REQUIRE(count_first_destination.partial_vulkan_stats.query_sketch_dispatches == 2u);
+
+    stats empty_completed = vulkan_sketch;
+    empty_completed.partial_vulkan = {};
+    empty_completed.empty_vulkan_collection = true;
+    REQUIRE(minimizer_sketch_stats_matches_selected_route(
+        minimizer_algorithm_type::vulkan_minimap_integer, empty_completed));
+    REQUIRE_FALSE(empty_completed.partial_vulkan.is_exact_sketch_token_consistent());
+    match_result_collection empty_destination;
+    record_minimizer_sketch_execution_stats(
+        empty_destination, empty_completed, minimizer_sketch_role::query);
+    REQUIRE(empty_destination.partial_vulkan_stats == ::bioseq::simd::partial_vulkan_execution_stats{});
 
     stats mixed_route = vulkan_sketch;
     mixed_route.exact_simd_available = true;
@@ -1167,7 +1194,7 @@ TEST_CASE("Vulkan sketch stats cannot promote a token across a tampered route",
         minimizer_algorithm_type::vulkan_minimap_integer, token_with_metadata));
 
     stats repeated_roundtrip = vulkan_sketch;
-    repeated_roundtrip.partial_vulkan.sketch_dispatches = 2;
+    repeated_roundtrip.partial_vulkan.sketch_dispatches = 3;
     REQUIRE_FALSE(repeated_roundtrip.partial_vulkan
                       .is_exact_sketch_token_consistent());
     REQUIRE_FALSE(minimizer_sketch_stats_matches_selected_route(

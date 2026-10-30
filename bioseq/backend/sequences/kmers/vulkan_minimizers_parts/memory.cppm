@@ -138,6 +138,7 @@ enum class vulkan_sketch_host_ownership_route : std::uint8_t {
 enum class vulkan_sketch_dispatch_route : std::uint8_t {
     none,
     collect_minimizers,
+    empty_collection,
 };
 
 /** Records completion of one minimizer collection and download. */
@@ -145,19 +146,29 @@ struct vulkan_sketch_dispatch_token {
     vulkan_sketch_dispatch_route route = vulkan_sketch_dispatch_route::none;
     std::uint64_t completed_roundtrips = 0;
 
-    /** Checks that the token records exactly  one completed minimizer collection. */
+    /** Checks one completed collection using either proven or count-first allocation. */
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
-        return route == vulkan_sketch_dispatch_route::collect_minimizers
-            && completed_roundtrips == 1;
+        return (route == vulkan_sketch_dispatch_route::collect_minimizers
+                && (completed_roundtrips == 1u || completed_roundtrips == 2u))
+            || (route == vulkan_sketch_dispatch_route::empty_collection
+                && completed_roundtrips == 0u);
     }
 
-    /** @brief Creates the token for one completed minimizer collection. */
+    /** @brief Records the actual fence-completed submissions after a successful collection. */
     [[nodiscard]] static constexpr vulkan_sketch_dispatch_token
-    completed_collect_minimizers_roundtrip() noexcept {
+    completed_collect_minimizers_roundtrip(std::uint64_t completed_submissions) noexcept {
+        if (completed_submissions != 1u && completed_submissions != 2u) return {};
         return {
             .route = vulkan_sketch_dispatch_route::collect_minimizers,
-            .completed_roundtrips = 1,
+            .completed_roundtrips = completed_submissions,
         };
+    }
+
+    /** @brief Records a verified short input with no GPU submission or output. */
+    [[nodiscard]] static constexpr vulkan_sketch_dispatch_token
+    completed_empty_collection() noexcept {
+        return {.route = vulkan_sketch_dispatch_route::empty_collection,
+                .completed_roundtrips = 0u};
     }
 
     /** @brief Compares route identity and completed-roundtrip count. */
@@ -167,7 +178,9 @@ struct vulkan_sketch_dispatch_token {
 
 static_assert(!vulkan_sketch_dispatch_token{}.is_internally_consistent());
 static_assert(vulkan_sketch_dispatch_token::
-    completed_collect_minimizers_roundtrip().is_internally_consistent());
+    completed_collect_minimizers_roundtrip(1u).is_internally_consistent());
+static_assert(vulkan_sketch_dispatch_token::
+    completed_collect_minimizers_roundtrip(2u).is_internally_consistent());
 
 /** Counts GPU work used to find matching sequence-segment pairs. */
 struct vulkan_segment_pair_execution_stats {

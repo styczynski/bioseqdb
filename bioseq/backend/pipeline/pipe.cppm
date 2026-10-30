@@ -934,6 +934,8 @@ export {
                 }
                 minimizer_sketch_execution_stats stats{};
                 stats.partial_vulkan.sketch_dispatches = token.completed_roundtrips;
+                stats.empty_vulkan_collection = token.route
+                    == bioseq::gpu::vulkan::vulkan_sketch_dispatch_route::empty_collection;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                 stats.observed_algorithm = minimizer_algorithm::vulkan_minimap_integer;
                 stats.observed_algorithm_available = true;

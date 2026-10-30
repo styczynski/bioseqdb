@@ -963,6 +963,7 @@ export {
         bounded_nthash_execution_stats bounded_nthash{};
         bool bounded_nthash_available = false;
         partial_vulkan_execution_stats partial_vulkan{};
+        bool empty_vulkan_collection = false; ///< Verified successful empty input; no GPU work.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         minimizer_algorithm observed_algorithm = minimizer_algorithm::scalar;
         bool observed_algorithm_available = false;
@@ -970,7 +971,7 @@ export {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         [[nodiscard]] bool payload_empty() const noexcept {
-            return !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
+            return !empty_vulkan_collection && !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
                    !exact_simd_available && exact_simd == two_stack_execution_stats{} &&
                    !bounded_nthash_available &&
                    bounded_nthash == bounded_nthash_execution_stats{} &&
@@ -982,7 +983,7 @@ export {
         }
 #else
         [[nodiscard]] bool empty() const noexcept {
-            return !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
+            return !empty_vulkan_collection && !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
                    !exact_simd_available && exact_simd == two_stack_execution_stats{} &&
                    !bounded_nthash_available &&
                    bounded_nthash == bounded_nthash_execution_stats{} &&
@@ -1104,6 +1105,8 @@ export {
         minimizer_sketch_execution_stats stats{};
         stats.partial_vulkan.sketch_dispatches =
             adopted.adoption.dispatch_token.completed_roundtrips;
+        stats.empty_vulkan_collection = adopted.adoption.dispatch_token.route
+            == bioseq::gpu::vulkan::vulkan_sketch_dispatch_route::empty_collection;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         stats.observed_algorithm = minimizer_algorithm::vulkan_minimap_integer;
         stats.observed_algorithm_available = true;
@@ -1123,6 +1126,14 @@ export {
             return false;
         }
 #endif
+        if (stats.empty_vulkan_collection) {
+            return selected == ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer
+                && !stats.scalar_available && stats.scalar == scalar_minimizer_execution_stats{}
+                && !stats.exact_simd_available && stats.exact_simd == two_stack_execution_stats{}
+                && !stats.bounded_nthash_available
+                && stats.bounded_nthash == bounded_nthash_execution_stats{}
+                && stats.partial_vulkan == partial_vulkan_execution_stats{};
+        }
         if (selected == ::bioseq::simd::minimizer_algorithm::scalar) {
             return stats.scalar_available && stats.scalar.is_coherent() &&
                    !stats.exact_simd_available && stats.exact_simd == two_stack_execution_stats{} &&

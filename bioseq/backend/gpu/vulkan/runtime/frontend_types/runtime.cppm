@@ -257,15 +257,23 @@ class runtime {
     /// @brief Builds ordered minimizers for one packed sequence.
     /// Returns a GPU buffer and minimizer count, or reports output  overflow.
     /// Optional query-hash bits restrict which minimizers are emitted.
-    /// Capacity must cover target_minimizer_count_upper_bound(bp_size, kmer_size)
-    /// and fit uint32 plus device descriptor limits: this route emits before
-    /// its first fence and rejects an insufficient proof as output overflow.
+    /// Proven-capacity mode must cover target_minimizer_count_upper_bound and
+    /// fit uint32/device descriptor limits before the first submission. Exact-count
+    /// mode keeps the same semantic limit, counts before output allocation, and
+    /// grows the caller's existing peak permit before emitting. retained_host_bytes
+    /// covers the packed input, tile staging and query gate through both fences.
+    /// The caller retains the permit until the output allocation is freed or
+    /// transfers its exact resident share to the returned buffer's owner.
     runtime_sketch_result run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                const vulkan_rank_lut& rank_lut,
                                                const vulkan_sketch_params& params,
                                                std::uint64_t max_minimizers,
                                                std::span<const std::uint32_t> query_gate_words = {},
-                                               std::uint32_t query_gate_mask = 0u);
+                                               std::uint32_t query_gate_mask = 0u,
+                                               vulkan_sketch_output_allocation allocation =
+                                                   vulkan_sketch_output_allocation::proven_capacity,
+                                               bioseq::parallelism::memory_permit* peak_permit = nullptr,
+                                               std::uint64_t retained_host_bytes = 0u);
 
     /// @brief Builds ordered minimizers for a batch of query sequences.
     /// `materialization` selects a host copy or device-only output. Device-only
