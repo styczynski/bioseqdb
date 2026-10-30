@@ -278,7 +278,8 @@ struct gpu_source_direct_materialization_stats {
     std::uint64_t retained_permit_bytes = 0u;
     std::uint64_t permit_reconciliations = 0u;
     std::uint64_t complete_source_traversals = 0u;
-    /// Complete mapped sweeps: structural validation and independent bulk CRC.
+    /// Complete mapped data coverages: one structural check and one bulk CRC.
+    /// Reads may interleave by tile; this is not a count of physical memory traffic.
     std::uint64_t complete_mapped_traversals = 0u;
     gpu_resident_accounting_authority authority =
         gpu_resident_accounting_authority::none;
@@ -2649,11 +2650,12 @@ adopt_gpu_built_index(
 /**
  * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
  *
- * Check the build record, then inspect every final control and position to
- * verify sorted hashes, contiguous intervals, and target bounds, then make a
- * separate bulk CRC sweep over initialized active bytes. Record both mapped
- * traversals and save the checksum for the prefix-search consumer. The existing buffers
- * remain the index used by both CPU and GPU code.
+ * Check the build record, then validate and checksum bounded control tiles,
+ * followed by bounded position tiles. This verifies sorted hashes, contiguous
+ * intervals, target bounds, and the canonical controls-then-positions CRC.
+ * Each active record is read for validation and again for CRC; record both
+ * complete mapped coverages and publish only after all checks succeed. The
+ * existing buffers remain the index used by both CPU and GPU code.
  */
 [[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
     const bioseq::gpu::vulkan::runtime& runtime,
@@ -2711,29 +2713,58 @@ adopt_gpu_built_index(
     const auto positions = std::span<const std::uint64_t>{
         static_cast<const std::uint64_t*>(resident.positions.mapped),
         resident.position_count};
+    // Bound the interval between validation and CRC reads without allocating
+    // scratch. This is an implementation tile, not a measured cache optimum
+    // or a size-dependent choice between checksum algorithms.
+    constexpr std::size_t mapped_validation_tile_bytes = 16u * 1024u;
+    constexpr std::size_t controls_per_tile =
+        mapped_validation_tile_bytes / sizeof(gpu_minimizer_slot);
+    constexpr std::size_t positions_per_tile =
+        mapped_validation_tile_bytes / sizeof(std::uint64_t);
+    static_assert(controls_per_tile != 0u && positions_per_tile != 0u);
+
+    crc64_ecma182_accumulator mapped_crc{k_gpu_source_direct_checksum_seed};
     std::uint64_t covered_positions = 0u;
     std::uint64_t previous_hash = 0u;
     bool have_previous_hash = false;
-    for (const gpu_minimizer_slot& control : controls) {
-        const std::uint64_t offset = control.pos_offset;
-        const std::uint64_t count = control.pos_count;
-        if (count == 0u || offset != covered_positions || offset > positions.size() ||
-            count > positions.size() - offset ||
-            (have_previous_hash && control.hash <= previous_hash)) {
-            return false;
+    for (std::size_t consumed = 0u; consumed < controls.size();) {
+        const auto control_tile = controls.subspan(
+            consumed, (std::min)(controls_per_tile, controls.size() - consumed));
+        for (const gpu_minimizer_slot& control : control_tile) {
+            const std::uint64_t offset = control.pos_offset;
+            const std::uint64_t count = control.pos_count;
+            if (count == 0u || offset != covered_positions || offset > positions.size() ||
+                count > positions.size() - offset ||
+                (have_previous_hash && control.hash <= previous_hash)) {
+                return false;
+            }
+            covered_positions += count;
+            previous_hash = control.hash;
+            have_previous_hash = true;
         }
-        for (std::uint64_t index = offset; index < offset + count; ++index) {
-            const std::uint64_t encoded = positions[static_cast<std::size_t>(index)];
+        mapped_crc.update(std::as_bytes(control_tile));
+        consumed += control_tile.size();
+    }
+    if (covered_positions != positions.size()) {
+        return false;
+    }
+
+    // Verified contiguous control intervals cover this complete position span;
+    // validating it flat preserves the same per-position bounds requirement.
+    // All controls precede all positions in the canonical checksum stream.
+    for (std::size_t consumed = 0u; consumed < positions.size();) {
+        const auto position_tile = positions.subspan(
+            consumed, (std::min)(positions_per_tile, positions.size() - consumed));
+        for (const std::uint64_t encoded : position_tile) {
             if ((encoded >> 1u) >= static_cast<std::uint64_t>(resident.target_len)) {
                 return false;
             }
         }
-        covered_positions += count;
-        previous_hash = control.hash;
-        have_previous_hash = true;
+        mapped_crc.update(std::as_bytes(position_tile));
+        consumed += position_tile.size();
     }
-    const std::uint64_t checksum = gpu_sorted_dense_payload_checksum(controls, positions);
-    if (covered_positions != positions.size() || checksum == 0u) {
+    const std::uint64_t checksum = mapped_crc.checksum();
+    if (checksum == 0u) {
         return false;
     }
     resident.source_stream_checksum = checksum;
