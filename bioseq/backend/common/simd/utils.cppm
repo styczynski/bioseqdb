@@ -84,6 +84,17 @@ using sequence_rank_equality_kernel = sequence_symbol_equality (*)(
     const std::uint8_t*, const std::uint8_t*, std::size_t,
     sequence_rank_validation, std::size_t);
 
+/** Scalar ABI for one resolved packed layout and compile-time query orientation.
+ * Source owners retain aligned native words. Starts and length are bounded by
+ * their validated resident descriptors; query_physical_total includes leading
+ * symbols so the reverse entry can recover the original physical window. */
+using sequence_packed_equality_kernel = sequence_symbol_equality (*)(
+    const void*, const void*, std::size_t, std::size_t, std::size_t, std::size_t);
+
+/** Resolve one target-owned packed comparator; unsupported layouts return null. */
+using sequence_packed_equality_resolver = sequence_packed_equality_kernel (*)(
+    std::uint8_t, std::uint8_t, bool);
+
 /** Bounded reader I/O capacity, independent of a target's SIMD vector width. */
 inline constexpr std::size_t sequence_rank_io_chunk_capacity = 1024u;
 

@@ -52,6 +52,8 @@ struct highway_common_kernels final {
     sneaky_snake_simd_batch_kernel sneaky_snake_simd_batch = nullptr;
     /** Target-owned bounded rank equality, exposed through scalar arguments only. */
     ::bioseq::simd::sequence_rank_equality_kernel count_equal_rank_chunk = nullptr;
+    /** Resolves direct native-word equality without crossing target-vector ABIs. */
+    ::bioseq::simd::sequence_packed_equality_resolver resolve_sequence_packed_equality = nullptr;
     /** Native rank translation/synthesis algebra selected for this CPU target. */
     ::bioseq::simd::sequence_rank_transform_kernel transform_sequence_rank_chunk = nullptr;
 };
@@ -257,6 +259,7 @@ struct highway_kernel_table final {
             || minimizers.bounded_nthash == nullptr
             || common.sneaky_snake_simd_batch == nullptr
             || common.count_equal_rank_chunk == nullptr
+            || common.resolve_sequence_packed_equality == nullptr
             || common.transform_sequence_rank_chunk == nullptr
             || chaining.chain_anchors_simd == nullptr
             || alphabet_identities.empty()

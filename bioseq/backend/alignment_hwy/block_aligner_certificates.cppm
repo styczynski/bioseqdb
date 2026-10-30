@@ -236,20 +236,8 @@ try_packed_global_gap_certificate(
 
         using packed_traits = typename compact_sequence_range<
             sequence_custom_alphabet<p_alphabet, std::uint64_t>>::traits;
-        constexpr auto complement_mask = []() -> std::optional<std::uint64_t> {
-            if constexpr (!p_is_reversed) { return std::uint64_t{0}; }
-            else {
-                const auto rank_xor = seqan3::to_rank(seqan3::complement(p_alphabet{}));
-                for (std::size_t rank = 0; rank < seqan3::alphabet_size<p_alphabet>; ++rank) {
-                    if (seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, p_alphabet{})))
-                        != (rank ^ rank_xor)) return std::nullopt;
-                }
-                std::uint64_t mask = 0;
-                for (std::size_t offset = 0; offset < packed_traits::unit_used_bits; offset += packed_traits::bits_per_char)
-                    mask |= static_cast<std::uint64_t>(rank_xor) << offset;
-                return mask;
-            }
-        }();
+        constexpr auto complement_mask =
+            packed_symbol_complement_mask<packed_traits, p_is_reversed>();
         if constexpr (!complement_mask.has_value()) { return attempt; }
         else {
             const hn::Repartition<std::uint64_t, block_aligner_simd_tag> packed_word_tag;

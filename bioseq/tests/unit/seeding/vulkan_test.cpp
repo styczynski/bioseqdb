@@ -700,9 +700,11 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     cpu_slab.reserve(64);
     const auto equality_counter =
         bioseq::simd_dispatch::highway_test_kernel_table().common.count_equal_rank_chunk;
+    const auto packed_equality =
+        bioseq::simd_dispatch::highway_test_kernel_table().common.resolve_sequence_packed_equality;
     const auto cpu_result = ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        idx, query_source.view(), target_source.view(), equality_counter,
+        idx, query_source.view(), target_source.view(), equality_counter, packed_equality,
         max_occ, kmer_size, cpu_slab);
     REQUIRE(cpu_result.has_value());
 
@@ -793,9 +795,11 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     cpu_slab.reserve(64u);
     const auto equality_counter =
         bioseq::simd_dispatch::highway_test_kernel_table().common.count_equal_rank_chunk;
+    const auto packed_equality =
+        bioseq::simd_dispatch::highway_test_kernel_table().common.resolve_sequence_packed_equality;
     const auto cpu_result = ::bioseq::simd::collect_seed_hits<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
-        idx, query_source.view(), target_source.view(), equality_counter,
+        idx, query_source.view(), target_source.view(), equality_counter, packed_equality,
         max_occ, kmer_size, cpu_slab);
     REQUIRE(cpu_result.has_value());
 

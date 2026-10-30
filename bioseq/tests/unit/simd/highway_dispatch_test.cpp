@@ -46,6 +46,7 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
     REQUIRE(table.has_all_kernels(expected));
     REQUIRE_FALSE(static_cast<bool>(table.common.sneaky_snake_simd_batch));
     REQUIRE(table.common.count_equal_rank_chunk == nullptr);
+    REQUIRE(table.common.resolve_sequence_packed_equality == nullptr);
     REQUIRE(table.common.transform_sequence_rank_chunk == nullptr);
     REQUIRE(table.chaining.chain_anchors_simd == nullptr);
 
@@ -80,6 +81,7 @@ TEST_CASE("Highway alignment tables require all six typed callables",
     REQUIRE(binding.kernels == &generated_root);
     REQUIRE(generated_root.is_complete());
     REQUIRE(generated_root.common.transform_sequence_rank_chunk != nullptr);
+    REQUIRE(generated_root.common.resolve_sequence_packed_equality != nullptr);
 
     const auto* identity = generated_root.resolve_alphabet_identity<seq::dna4>();
     REQUIRE(identity != nullptr);

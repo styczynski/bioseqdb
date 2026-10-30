@@ -528,9 +528,12 @@ export {
                 bool copies_survivors = false;
                 const auto counter = parameters().highway_kernels == nullptr ? nullptr
                     : parameters().highway_kernels->common.count_equal_rank_chunk;
+                const auto packed_equality = parameters().highway_kernels == nullptr ? nullptr
+                    : parameters().highway_kernels->common.resolve_sequence_packed_equality;
+                seed_anchor_verifier verifier(query_seq_, target_seq_,
+                    static_cast<std::size_t>(kmer_size), counter, packed_equality);
                 for (std::size_t index = 0u; index < ordered_anchors.size(); ++index) {
-                    const auto accepted = verify_seed_anchor(query_seq_, target_seq_,
-                        ordered_anchors[index], static_cast<std::size_t>(kmer_size), counter);
+                    const auto accepted = verifier(ordered_anchors[index]);
                     if (!accepted) {
                         record_cpu_seed_completion();
                         stats_dst->record_failure(accepted.error());
@@ -573,6 +576,8 @@ export {
                     target_index_ref, query_seq_, target_seq_,
                     parameters().highway_kernels == nullptr ? nullptr
                         : parameters().highway_kernels->common.count_equal_rank_chunk,
+                    parameters().highway_kernels == nullptr ? nullptr
+                        : parameters().highway_kernels->common.resolve_sequence_packed_equality,
                     parameters().max_occ, kmer_size, anchors_slab);
                 if (!collected) {
                     record_cpu_seed_completion();

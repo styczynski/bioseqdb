@@ -12,6 +12,7 @@ export module bioseq.highway.sources.sequence_ops;
 
 import std;
 import bioseq.sequences;
+import bioseq.common.seqan_adapter;
 import bioseq.common.circular_append_buffer;
 import bioseq.sequences.simd_iteration_geometry;
 import bioseq.simd.utils;
@@ -21,6 +22,49 @@ import bioseq.highway.sources.vector_stream;
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/** Call the shared packed SIMD comparator for one resolved layout/orientation. */
+template<class Traits, bool QueryReversed>
+[[nodiscard, gnu::noinline]] sequence_symbol_equality count_equal_resident_packed_symbols(
+    const void* query_units, const void* target_units,
+    std::size_t query_physical_total, std::size_t query_start,
+    std::size_t target_start, std::size_t length) {
+    using unit_type = typename Traits::storage_unit;
+    constexpr auto complement_mask = packed_symbol_complement_mask<Traits, QueryReversed>();
+    static_assert(complement_mask.has_value());
+    const hn::ScalableTag<unit_type> tag;
+    return count_equal_packed_symbols<Traits, QueryReversed>(tag,
+        static_cast<const unit_type*>(query_units), static_cast<const unit_type*>(target_units),
+        query_physical_total, query_start, target_start, length, *complement_mask);
+}
+
+/** Resolve once per source pair, using the shared alphabet and physical-width registries. */
+[[nodiscard, gnu::noinline]] sequence_packed_equality_kernel resolve_sequence_packed_equality(
+    std::uint8_t alphabet_code, std::uint8_t storage_unit_bytes, bool query_reverse_complement) {
+    if (alphabet_code >= supported_biological_alphabets::alphabet_count
+        || !all_storage_unit_byte_widths::contains_runtime(storage_unit_bytes)) return nullptr;
+    sequence_packed_equality_kernel kernel = nullptr;
+    supported_biological_alphabets::dispatch_alphabet_by_code(alphabet_code,
+        [storage_unit_bytes, query_reverse_complement, &kernel]<class Alphabet>() {
+            all_storage_unit_byte_widths::dispatch(storage_unit_bytes,
+                [query_reverse_complement, &kernel]<std::size_t Width>() {
+                    using instance = compact_sequence_stdc_instance<
+                        compact_sequence_stdc<supported_biological_alphabets>, Alphabet, Width>;
+                    using traits = typename compact_sequence_range<
+                        sequence_custom_alphabet<Alphabet, typename instance::storage_unit>>::traits;
+                    if (query_reverse_complement) {
+                        constexpr auto mask = packed_symbol_complement_mask<traits, true>();
+                        if constexpr (mask.has_value())
+                            kernel = &count_equal_resident_packed_symbols<traits, true>;
+                    } else {
+                        kernel = &count_equal_resident_packed_symbols<traits, false>;
+                    }
+                });
+        });
+    return kernel;
+}
+
+static_assert(std::same_as<decltype(&resolve_sequence_packed_equality), sequence_packed_equality_resolver>);
 
 /** Apply native codon lookup to bounded tiles; rank geometry is runtime data. */
 template<class D, sequence_rank_transform Operation>

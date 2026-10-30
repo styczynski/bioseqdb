@@ -10,12 +10,36 @@ module;
 export module bioseq.highway.sources.simd_utils;
 
 import std;
+import bioseq.common.seqan_adapter;
 import bioseq.common.templating;
 import bioseq.simd.utils;
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/** Derive a packed XOR complement only when it represents every valid rank. */
+template<class Traits, bool QueryReversed>
+[[nodiscard]] constexpr std::optional<typename Traits::storage_unit>
+packed_symbol_complement_mask() {
+    using unit_type = typename Traits::storage_unit;
+    using alphabet_type = typename Traits::alphabet_type;
+    if constexpr (!QueryReversed) {
+        return unit_type{0};
+    } else if constexpr (requires(alphabet_type symbol) { seqan3::complement(symbol); }) {
+        const auto rank_xor = seqan3::to_rank(seqan3::complement(alphabet_type{}));
+        for (std::size_t rank = 0u; rank < seqan3::alphabet_size<alphabet_type>; ++rank) {
+            if (seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, alphabet_type{})))
+                != (rank ^ rank_xor)) return std::nullopt;
+        }
+        unit_type mask{};
+        for (std::size_t offset = 0u; offset < Traits::unit_used_bits; offset += Traits::bits_per_char)
+            mask |= static_cast<unit_type>(rank_xor) << offset;
+        return mask;
+    } else {
+        return std::nullopt;
+    }
+}
 
 /**
  * Compare native packed windows with trait-derived masks and SIMD population counts.
@@ -39,10 +63,17 @@ template<class Traits, bool QueryReversed, class D>
     }();
     sequence_symbol_equality result{};
     const std::size_t lanes = hn::Lanes(descriptor);
+    constexpr std::size_t reduction_lane_limit = [] {
+        constexpr auto maximum_words = std::numeric_limits<unit_type>::max() / Traits::letters_per_unit;
+        if constexpr (maximum_words < hn::MaxLanes(D{}))
+            return static_cast<std::size_t>(maximum_words);
+        else return hn::MaxLanes(D{});
+    }();
+    const std::size_t words_per_batch = std::min(lanes, reduction_lane_limit);
     const std::size_t word_count = length / Traits::letters_per_unit
         + static_cast<std::size_t>(length % Traits::letters_per_unit != 0);
-    for (std::size_t first_word = 0; first_word < word_count; first_word += lanes) {
-        const std::size_t active_lanes = std::min(lanes, word_count - first_word);
+    for (std::size_t first_word = 0; first_word < word_count; first_word += words_per_batch) {
+        const std::size_t active_lanes = std::min(words_per_batch, word_count - first_word);
         for (std::size_t lane = 0; lane < active_lanes; ++lane) {
             const std::size_t symbol_offset = (first_word + lane) * Traits::letters_per_unit;
             const std::size_t symbol_count = std::min(Traits::letters_per_unit, length - symbol_offset);
