@@ -25,8 +25,8 @@ template <std::size_t p_count, class p_function_type>
 [[gnu::always_inline]] HWY_INLINE
 constexpr void for_each_index(p_function_type&& function)
 {
-    [&function]<std::size_t... p_indices>(std::index_sequence<p_indices...>)
-        [[gnu::always_inline]]
+    [&function]<std::size_t... p_indices> [[gnu::always_inline]]
+        (std::index_sequence<p_indices...>)
     {
         (function(std::integral_constant<std::size_t, p_indices>{}), ...);
     }(std::make_index_sequence<p_count>{});
