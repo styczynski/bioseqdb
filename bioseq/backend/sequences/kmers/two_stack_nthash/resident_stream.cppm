@@ -460,28 +460,27 @@ struct sequence_simd_iteration_state {
                 HWY_ALIGN std::array<
                     std::array<storage_unit, max_lanes_per_stream>,
                     p_stream_count> emit_arr;
+                for_each_index<p_stream_count>(
+                    [&window_pos, &d, &pos_arr, &window_hs, &hs_arr, &window_strand, &strand_arr, &real_emit, &emit_arr](
+                        auto stream_idx_const) [[gnu::always_inline]] {
+                        constexpr size_t s = decltype(stream_idx_const)::value;
+                        hn::Store(window_pos[s], d, pos_arr[s].data());
+                        hn::Store(window_hs[s], d, hs_arr[s].data());
+                        hn::Store(window_strand[s], d, strand_arr[s].data());
+                        hn::Store(hn::VecFromMask(d, real_emit[s]), d, emit_arr[s].data());
+                    });
+
                 const size_t lc = lanes_per_stream;
                 for_each_index<p_stream_count>([this,
                                                 &per_stream_emits,
                                                 &lc,
-                                                &d,
-                                                &window_pos,
-                                                &window_hs,
-                                                &window_strand,
-                                                &real_emit,
                                                 &emit_arr,
                                                 &pos_arr,
                                                 &offsets_in,
-                                                &hs_arr, &strand_arr]
-                    [[gnu::always_inline]] (auto stream_idx_const) {
+                                                &hs_arr, &strand_arr](auto stream_idx_const) {
                     constexpr size_t s = decltype(stream_idx_const)::value;
                     if (!per_stream_emits[s])
                         return;
-                    // Only emitting streams consume these existing scratch arrays.
-                    hn::Store(window_pos[s], d, pos_arr[s].data());
-                    hn::Store(window_hs[s], d, hs_arr[s].data());
-                    hn::Store(window_strand[s], d, strand_arr[s].data());
-                    hn::Store(hn::VecFromMask(d, real_emit[s]), d, emit_arr[s].data());
                     for (size_t lane = 0; lane < lc; ++lane) {
                         if (!emit_arr[s][lane])
                             continue;
