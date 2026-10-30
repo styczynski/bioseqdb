@@ -40,6 +40,12 @@ namespace sneaky_snake_target_detail {
  * @tparam p_descriptor Highway vectow, type used for byte comparisons.
  */
 template <class p_descriptor> struct highway_traversal final {
+  /** Starts acquisition with the first rank and two active byte-vector loads. */
+  [[nodiscard]] static std::size_t read_block_size() noexcept {
+    const hn::Repartition<std::uint8_t, p_descriptor> byte_descriptor;
+    return 1u + 2u * hn::Lanes(byte_descriptor);
+  }
+
   /**
    * @brief Counts matching ranks from the given query and target positions.
    * @param query Query ranks.
@@ -175,15 +181,15 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
                             const prefilter_batch_input &input,
                             sneaky_snake_options options = {}) {
   static_cast<void>(descriptor);
-  sneaky_snake_detail::window_traversal<
-      sneaky_snake_target_detail::highway_traversal<p_descriptor>> traversal{};
   return evaluate_prefilter_batch(
-      input, [&traversal, options](const prefilter_rank_window& query,
+      input, [options](const prefilter_rank_window& query,
                                    const prefilter_rank_window& target_ranks,
                                    const prefilter_job& job) {
+        sneaky_snake_detail::window_traversal<
+            sneaky_snake_target_detail::highway_traversal<p_descriptor>> traversal{query};
         return sneaky_snake_detail::bounded_with(traversal, query, target_ranks,
                                                  job.max_edits, options);
-      });
+      }, sneaky_snake_target_detail::highway_traversal<p_descriptor>::read_block_size());
 }
 
 /**

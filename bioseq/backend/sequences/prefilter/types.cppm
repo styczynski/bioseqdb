@@ -256,6 +256,8 @@ struct prefilter_rank_window {
     storage::sequence_size_t start{};
     std::size_t length{};
     std::size_t cardinality{};
+    /** Minimum acquisition size; callers clamp it to the fixed scratch capacity. */
+    std::size_t refill_size{chunk_size};
     std::size_t job_index{};
     bool target_source{};
     std::optional<prefilter_input_failure>* failure{};
@@ -266,7 +268,17 @@ struct prefilter_rank_window {
     /** Returns the job interval size, not its backend's complete length. */
     [[nodiscard]] std::size_t size() const noexcept { return length; }
 
-    /** Acquires a bounded window and validates native ranks before exposing it. */
+    /** Reports whether the complete interval is already pinned and validated. */
+    [[nodiscard]] bool contains(std::size_t position, std::size_t count) const noexcept {
+        return position >= loaded_from && position - loaded_from <= loaded_size &&
+            count <= loaded_size - (position - loaded_from);
+    }
+
+    /**
+     * Acquires a bounded interval, retaining an existing prefix when it can grow.
+     * Only newly acquired ranks are validated. Reads include at most refill_size
+     * lookahead ranks, remain within this job, and are pinned before returning.
+     */
     [[nodiscard]] std::span<const std::uint8_t> window(
         std::size_t position, std::size_t count) const {
         if (failure->has_value()) return {};
@@ -275,49 +287,91 @@ struct prefilter_rank_window {
                 job_index, target_source, start + position};
             return {};
         }
-        if (position >= loaded_from && position - loaded_from <= loaded_size &&
-            count <= loaded_size - (position - loaded_from)) {
+        if (count == 0u) return {};
+        if (contains(position, count)) {
             return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
         }
-        const auto ranks = source.read_checked(start + position, count, scratch);
+        const bool extend_prefix = position >= loaded_from &&
+            position - loaded_from <= loaded_size &&
+            count <= scratch.size() - (position - loaded_from);
+        if (!extend_prefix) {
+            loaded_from = position;
+            loaded_size = 0u;
+        }
+        const auto required_size = position - loaded_from + count;
+        const auto read_from = loaded_from + loaded_size;
+        const auto available = std::min(scratch.size() - loaded_size, length - read_from);
+        const auto read_count = std::max(required_size - loaded_size,
+            std::min(refill_size, available));
+        const auto destination = std::span<std::uint8_t>{scratch}.subspan(loaded_size, read_count);
+        const auto ranks = source.read_checked(start + read_from, read_count, destination);
         if (!ranks) {
             *failure = prefilter_input_failure{
                 ranks.error() == storage::rank_window_read_failure::source_read_failed
                     ? prefilter_input_failure_code::source_read_failed
                     : prefilter_input_failure_code::invalid_descriptor,
-                job_index, target_source, start + position};
+                job_index, target_source, start + read_from};
             return {};
         }
         for (std::size_t offset = 0u; offset < ranks->size(); ++offset) {
             if ((*ranks)[offset] >= cardinality) {
                 *failure = prefilter_input_failure{prefilter_input_failure_code::invalid_rank,
-                    job_index, target_source, start + position + offset};
+                    job_index, target_source, start + read_from + offset};
                 return {};
             }
         }
-        if (ranks->data() != scratch.data() && count != 0u) {
-            std::memcpy(scratch.data(), ranks->data(), count);
+        if (ranks->data() != destination.data()) {
+            std::memcpy(destination.data(), ranks->data(), read_count);
         }
-        loaded_from = position;
-        loaded_size = count;
-        return std::span<const std::uint8_t>{scratch}.first(count);
+        loaded_size += read_count;
+        return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
     }
 
-    /** Reads one rank through the same checked bounded window. Inspect failure after traversal. */
+    /**
+     * Reuses an equivalent reader's validated cache before decoding another tile.
+     * The copied ranks remain pinned while a diagonal consumer refills that reader.
+     * Unrelated source descriptors always use the normal checked acquisition path.
+     */
+    [[nodiscard]] std::span<const std::uint8_t> window(
+        std::size_t position, std::size_t count, const prefilter_rank_window& cached) const {
+        if (failure->has_value()) return {};
+        if (contains(position, count)) {
+            return std::span<const std::uint8_t>{scratch}.subspan(position - loaded_from, count);
+        }
+        if (!cached.failure->has_value() && source.context == cached.source.context &&
+            source.read_at == cached.source.read_at &&
+            source.symbol_count == cached.source.symbol_count &&
+            source.alphabet_code == cached.source.alphabet_code &&
+            source.orientation == cached.source.orientation && start == cached.start &&
+            length == cached.length && cardinality == cached.cardinality &&
+            cached.contains(position, count)) {
+            const auto offset = position - cached.loaded_from;
+            const auto copied_size = cached.loaded_size - offset;
+            std::memcpy(scratch.data(), cached.scratch.data() + offset, copied_size);
+            loaded_from = position;
+            loaded_size = copied_size;
+            return std::span<const std::uint8_t>{scratch}.first(count);
+        }
+        return window(position, count);
+    }
+
+    /** Reads one rank using bounded lookahead; inspect failure after traversal. */
     [[nodiscard]] std::uint8_t operator[](std::size_t position) const {
         if (failure->has_value()) return 0u;
-        if (position >= loaded_from && position - loaded_from < loaded_size) {
-            return scratch[position - loaded_from];
-        }
-        const auto ranks = window(position, std::min(chunk_size, length - position));
+        if (contains(position, 1u)) return scratch[position - loaded_from];
+        const auto ranks = window(position, 1u);
         return ranks.empty() ? 0u : ranks.front();
     }
 };
 
-/** Validates one descriptor pair and invokes an alphabet-erased bounded algorithm. */
+/**
+ * Validates a descriptor pair and invokes an alphabet-erased bounded algorithm.
+ * refill_size controls bounded cache lookahead; it is clamped to the fixed scratch.
+ */
 template <class Evaluator>
 [[nodiscard]] inline auto evaluate_prefilter_job(
-    const prefilter_batch_input& input, std::size_t index, Evaluator&& evaluate)
+    const prefilter_batch_input& input, std::size_t index, Evaluator&& evaluate,
+    std::size_t refill_size = prefilter_rank_window::chunk_size)
     -> std::expected<std::invoke_result_t<Evaluator, const prefilter_rank_window&,
                                          const prefilter_rank_window&, const prefilter_job&>,
                      prefilter_input_failure> {
@@ -338,24 +392,30 @@ template <class Evaluator>
         });
     std::optional<prefilter_input_failure> failure;
     const prefilter_rank_window query{.source = query_source, .start = job.query_start,
-        .length = job.query_length, .cardinality = cardinality, .job_index = index,
+        .length = job.query_length, .cardinality = cardinality,
+        .refill_size = std::clamp(refill_size, std::size_t{1u}, prefilter_rank_window::chunk_size),
+        .job_index = index,
         .target_source = false, .failure = &failure};
     const prefilter_rank_window target{.source = input.targets[job.target_record_index],
         .start = job.target_start, .length = job.target_length, .cardinality = cardinality,
-        .job_index = index, .target_source = true, .failure = &failure};
+        .refill_size = query.refill_size, .job_index = index, .target_source = true, .failure = &failure};
     auto result = evaluate(query, target, job);
     if (failure) return std::unexpected(*failure);
     return result;
 }
 
-/** Evaluates checked source descriptors in job order without expanding full inputs. */
+/**
+ * Evaluates descriptors in job order without expanding full inputs.
+ * Every job gets fresh caches; refill_size controls the bounded acquisition policy.
+ */
 template <class Evaluator>
 [[nodiscard]] inline prefilter_batch_result evaluate_prefilter_batch(
-    const prefilter_batch_input& input, Evaluator&& evaluate) {
+    const prefilter_batch_input& input, Evaluator&& evaluate,
+    std::size_t refill_size = prefilter_rank_window::chunk_size) {
     std::vector<prefilter_result> results;
     results.reserve(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        auto result = evaluate_prefilter_job(input, index, evaluate);
+        auto result = evaluate_prefilter_job(input, index, evaluate, refill_size);
         if (!result) return std::unexpected(result.error());
         results.push_back(*result);
     }

@@ -150,6 +150,11 @@ namespace sneaky_snake_detail {
 
 /** Scalar rank comparisons and candidate  scanning for the shared SneakySnake walk. */
 struct scalar_traversal final {
+    /** Starts bounded acquisition with the first rank and two existing word loads. */
+    [[nodiscard]] static constexpr std::size_t read_block_size() noexcept {
+        return 1u + 2u * sizeof(std::uint64_t);
+    }
+
     [[nodiscard]] std::uint32_t diagonal_run(
         std::span<const std::uint8_t> query,
         std::span<const std::uint8_t> target,
@@ -366,16 +371,27 @@ template <class p_traversal_type, class p_sequence_type>
 template <class Comparison>
 struct window_traversal {
     Comparison comparison;
+    prefilter_rank_window candidates;
 
-    /** Finds a diagonal match across any number of bounded source windows. */
+    /** Retains one independent candidate cache for the lifetime of this job. */
+    explicit window_traversal(const prefilter_rank_window& query)
+        : comparison{}, candidates{.source = query.source, .start = query.start, .length = query.length,
+              .cardinality = query.cardinality, .refill_size = query.refill_size,
+              .job_index = query.job_index, .target_source = false, .failure = query.failure} {}
+
+    /**
+     * Compares the first demand block before growing subsequent matched reads.
+     * Growth stops at fixed scratch capacity and never changes diagonal boundaries.
+     */
     [[nodiscard]] std::uint32_t diagonal_run(
         const prefilter_rank_window& query, const prefilter_rank_window& target,
         std::uint32_t position, std::uint32_t submaze_end,
         std::uint32_t query_index) const {
         const auto limit = std::min<std::size_t>(submaze_end - position, query.size() - query_index);
         std::size_t matched = 0u;
+        std::size_t read_size = query.refill_size;
         while (matched < limit) {
-            const auto count = std::min(prefilter_rank_window::chunk_size, limit - matched);
+            const auto count = std::min(read_size, limit - matched);
             const auto target_ranks = target.window(position + matched, count);
             const auto query_ranks = query.window(query_index + matched, count);
             if (query.failure->has_value()) return 0u;
@@ -383,24 +399,25 @@ struct window_traversal {
                 static_cast<std::uint32_t>(count), 0u);
             matched += run;
             if (run != count) break;
+            read_size = std::min(prefilter_rank_window::chunk_size, read_size * 2u);
         }
         return static_cast<std::uint32_t>(matched);
     }
 
-    /** Uses the selected comparison strategy to scan candidates in bounded tiles. */
+    /**
+     * Scans candidates through one retained cache, reusing validated query ranks.
+     * Candidate scratch is independent of query refills performed by consume.
+     */
     template <class Consumer>
     [[nodiscard]] bool visit_candidate_starts(
         const prefilter_rank_window& query, std::uint32_t filter_offset,
         std::uint8_t filter_rank, std::uint32_t position,
         std::uint32_t lower, std::uint32_t upper, Consumer&& consume) const {
-        prefilter_rank_window candidates{.source = query.source, .start = query.start,
-            .length = query.length, .cardinality = query.cardinality,
-            .job_index = query.job_index, .target_source = false, .failure = query.failure};
         std::uint64_t first = lower;
         while (first <= upper) {
             const auto count = std::min<std::uint64_t>(prefilter_rank_window::chunk_size,
                 static_cast<std::uint64_t>(upper) - first + 1u);
-            const auto ranks = candidates.window(first + filter_offset, count);
+            const auto ranks = candidates.window(first + filter_offset, count, query);
             if (query.failure->has_value()) return false;
             const auto excluded = position >= first && position - first < count
                 ? static_cast<std::uint32_t>(position - first)
@@ -445,10 +462,10 @@ struct window_traversal {
     return evaluate_prefilter_batch(input,
         [options](const prefilter_rank_window& query, const prefilter_rank_window& target,
                   const prefilter_job& job) {
-            sneaky_snake_detail::window_traversal<sneaky_snake_detail::scalar_traversal> traversal{};
+            sneaky_snake_detail::window_traversal<sneaky_snake_detail::scalar_traversal> traversal{query};
             return sneaky_snake_detail::bounded_with(
                 traversal, query, target, job.max_edits, options);
-        });
+        }, sneaky_snake_detail::scalar_traversal::read_block_size());
 }
 
 } // namespace bioseq::prefilter
