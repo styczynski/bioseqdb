@@ -434,7 +434,9 @@ process_chronological_candidate_block(
     // Each tie tile assigns every active validity column and stores every
     // consumed matrix cell; the no-tie path never reads this scratch.
     HWY_ALIGN std::array<std::uint64_t, event_capacity> event_valid;
-    HWY_ALIGN std::array<vector_type, max_lanes> event_valid_columns;
+    // Aggregate initialization keeps Vec construction in this target-owned function,
+    // avoiding an implicitly generated, untargeted std::array constructor.
+    HWY_ALIGN std::array<vector_type, max_lanes> event_valid_columns{};
     std::uint64_t first_window_tie_events = 0;
     std::uint64_t expiry_tie_events = 0;
     const vector_type v_max_raw = hn::Set(d, max_raw);
