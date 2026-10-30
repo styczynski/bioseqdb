@@ -193,7 +193,44 @@ template<class Traits, bool Reverse>
     const void* query, const void* target, std::size_t total,
     std::size_t query_start, std::size_t target_start, std::size_t length) noexcept {
     using unit_type = typename Traits::storage_unit;
-    for (std::size_t offset = 0u; offset < length;) {
+    constexpr auto group_units = sizeof(std::uint64_t) / sizeof(unit_type);
+    std::size_t offset = 0u;
+    if constexpr (!Reverse && std::endian::native == std::endian::little && group_units > 1u) {
+        if (length == 0u) return 0u;
+        const auto first_count = std::min(Traits::letters_per_unit, length);
+        const unit_type first_difference = packed_word<Traits, false>(query, total, query_start, first_count)
+            ^ bioseq::simd::load_packed_symbol_window<Traits>(
+                static_cast<const unit_type*>(target), target_start, first_count);
+        if (first_difference != 0u)
+            return static_cast<std::size_t>(std::countr_zero(first_difference)) / Traits::bits_per_char;
+        if (length == first_count) return length;
+        offset = first_count;
+        constexpr auto group_symbols = group_units * Traits::letters_per_unit;
+        if (length >= group_symbols) {
+            // Re-read the tiny successful probe inside full groups instead of losing a group to its prefix.
+            offset = 0u;
+            const auto query_phase = (query_start + offset) % Traits::letters_per_unit;
+            const auto target_phase = (target_start + offset) % Traits::letters_per_unit;
+            const auto* query_units = static_cast<const unit_type*>(query)
+                + (query_start + offset) / Traits::letters_per_unit;
+            const auto* target_units = static_cast<const unit_type*>(target)
+                + (target_start + offset) / Traits::letters_per_unit;
+            do {
+                const auto difference = bioseq::simd::load_packed_forward_machine_word<Traits>(query_units, query_phase)
+                    ^ bioseq::simd::load_packed_forward_machine_word<Traits>(target_units, target_phase);
+                if (difference != 0u) {
+                    const auto bit = static_cast<std::size_t>(std::countr_zero(difference));
+                    return offset + (bit / Traits::unit_width) * Traits::letters_per_unit
+                        + (bit % Traits::unit_width) / Traits::bits_per_char;
+                }
+                offset += group_symbols;
+                query_units += group_units;
+                target_units += group_units;
+            } while (length - offset >= group_symbols);
+        }
+    }
+    // Native machine words, reverse, other endian orders, and tails retain the existing loader.
+    while (offset < length) {
         const auto count = std::min(Traits::letters_per_unit, length - offset);
         const unit_type difference = packed_word<Traits, Reverse>(query, total, query_start + offset, count)
             ^ bioseq::simd::load_packed_symbol_window<Traits>(

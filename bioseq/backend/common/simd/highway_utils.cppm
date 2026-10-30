@@ -18,6 +18,48 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
+/** Load a bounded logical window into normalized native-word lanes.
+ * count is at most Lanes(descriptor) * Traits::letters_per_unit. The source
+ * owner admits that complete interval; physical_total is used only in reverse.
+ * Full forward tiles borrow directly; partial/reverse tiles stage only their
+ * intersecting native units. complement_mask is required for reverse reads.
+ */
+template<class Traits, bool Reverse, class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> load_packed_symbol_vector(
+    D descriptor, const typename Traits::storage_unit* units,
+    std::size_t physical_total, std::size_t start, std::size_t count,
+    typename Traits::storage_unit complement_mask = 0) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    static_assert(std::same_as<hn::TFromD<D>, unit_type>);
+    if (count == 0u) return hn::Zero(descriptor);
+    const auto lanes = hn::Lanes(descriptor);
+    if constexpr (!Reverse) {
+        if (count / Traits::letters_per_unit == lanes) {
+            const auto unit_index = start / Traits::letters_per_unit;
+            const auto bit_offset = (start % Traits::letters_per_unit) * Traits::bits_per_char;
+            const auto used = hn::Set(descriptor, static_cast<unit_type>(Traits::used_storage_mask));
+            const auto first = hn::And(hn::LoadU(descriptor, units + unit_index), used);
+            if (bit_offset == 0u) return first;
+            const auto next = hn::And(hn::LoadU(descriptor, units + unit_index + 1u), used);
+            return hn::And(hn::Or(
+                hn::ShiftRightSame(first, static_cast<int>(bit_offset)),
+                hn::ShiftLeftSame(next, static_cast<int>(Traits::unit_used_bits - bit_offset))), used);
+        }
+    }
+    // No staging initialization is required on the direct full-tile branch.
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words;
+    const auto active = count / Traits::letters_per_unit
+        + static_cast<std::size_t>(count % Traits::letters_per_unit != 0u);
+    for (std::size_t lane = 0u; lane < active; ++lane) {
+        const auto offset = lane * Traits::letters_per_unit;
+        words[lane] = load_oriented_packed_symbol_window<Traits, Reverse>(
+            units, physical_total, start + offset,
+            std::min(Traits::letters_per_unit, count - offset), complement_mask);
+    }
+    std::fill(words.begin() + active, words.begin() + lanes, unit_type{});
+    return hn::Load(descriptor, words.data());
+}
+
 /** Return lanes whose low packed rank exceeds the largest valid alphabet rank. */
 template<class D>
 [[nodiscard]] HWY_INLINE hn::Mask<D> invalid_packed_rank_lanes(
@@ -68,8 +110,6 @@ template<class Traits, bool QueryReversed, class D>
     std::size_t length, typename Traits::storage_unit complement_mask = 0) {
     using unit_type = typename Traits::storage_unit;
     static_assert(std::same_as<hn::TFromD<D>, unit_type>);
-    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> query_words{};
-    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> target_words{};
     sequence_symbol_equality result{};
     const std::size_t lanes = hn::Lanes(descriptor);
     constexpr std::size_t reduction_lane_limit = [] {
@@ -83,17 +123,16 @@ template<class Traits, bool QueryReversed, class D>
         + static_cast<std::size_t>(length % Traits::letters_per_unit != 0);
     for (std::size_t first_word = 0; first_word < word_count; first_word += words_per_batch) {
         const std::size_t active_lanes = std::min(words_per_batch, word_count - first_word);
-        for (std::size_t lane = 0; lane < active_lanes; ++lane) {
-            const std::size_t symbol_offset = (first_word + lane) * Traits::letters_per_unit;
-            const std::size_t symbol_count = std::min(Traits::letters_per_unit, length - symbol_offset);
-            query_words[lane] = load_oriented_packed_symbol_window<Traits, QueryReversed>(
-                query_units, query_total, query_start + symbol_offset, symbol_count, complement_mask);
-            target_words[lane] = load_packed_symbol_window<Traits>(target_units,
-                target_start + symbol_offset, symbol_count);
-        }
+        const auto symbol_offset = first_word * Traits::letters_per_unit;
+        const auto remaining = length - symbol_offset;
+        // Preserve the reduction cap and its original stride, including on wide targets.
+        const auto count = remaining / Traits::letters_per_unit >= active_lanes
+            ? active_lanes * Traits::letters_per_unit : remaining;
         const auto active = hn::FirstN(descriptor, active_lanes);
-        const auto query_packed = hn::MaskedLoad(active, descriptor, query_words.data());
-        const auto target_packed = hn::MaskedLoad(active, descriptor, target_words.data());
+        const auto query_packed = load_packed_symbol_vector<Traits, QueryReversed>(
+            descriptor, query_units, query_total, query_start + symbol_offset, count, complement_mask);
+        const auto target_packed = load_packed_symbol_vector<Traits, false>(
+            descriptor, target_units, 0u, target_start + symbol_offset, count);
         if constexpr (Traits::alphabet_size != (unit_type{1} << Traits::bits_per_char)) {
             const auto invalid = hn::Or(invalid_packed_word_lanes<Traits>(descriptor, query_packed),
                                        invalid_packed_word_lanes<Traits>(descriptor, target_packed));

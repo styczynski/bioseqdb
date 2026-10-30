@@ -46,22 +46,18 @@ template<class Traits, bool Reverse, class Descriptor>
         using D = hn::Repartition<unit_type, Descriptor>;
         const D d;
         const std::size_t lanes = hn::Lanes(d);
-        HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words;
+        constexpr auto complement = bioseq::simd::packed_symbol_complement_mask<Traits, Reverse>();
+        static_assert(complement.has_value());
         for (std::size_t offset = 0u; offset < length;) {
             const auto remaining = length - offset;
-            const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
-                static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
-            for (std::size_t lane = 0u; lane < active; ++lane) {
-                const auto begin = offset + lane * Traits::letters_per_unit;
-                words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(input, total,
-                    start + begin, std::min(Traits::letters_per_unit, length - begin));
-            }
-            std::fill(words.begin() + active, words.begin() + lanes, unit_type{});
-            const auto live = hn::FirstN(d, active);
-            if (!hn::AllFalse(d, hn::And(live,
-                    invalid_packed_word_lanes<Traits>(d, hn::Load(d, words.data())))))
+            const auto count = remaining / Traits::letters_per_unit >= lanes
+                ? lanes * Traits::letters_per_unit : remaining;
+            const auto packed = load_packed_symbol_vector<Traits, Reverse>(
+                d, static_cast<const unit_type*>(input), total, start + offset, count, *complement);
+            // Inactive normalized fields are zero, a valid rank for every alphabet.
+            if (!hn::AllFalse(d, invalid_packed_word_lanes<Traits>(d, packed)))
                 return false;
-            offset += std::min(remaining, active * Traits::letters_per_unit);
+            offset += count;
         }
     }
     return true;
@@ -76,31 +72,39 @@ template<class Traits, bool Reverse, class Descriptor>
     using D = hn::Repartition<unit_type, Descriptor>;
     const D d;
     const std::size_t lanes = hn::Lanes(d);
-    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> query_words;
-    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> target_words;
+    if (length == 0u) return 0u;
+    // Acquisition has already validated the full interval. Reject a short
+    // mismatch before preparing a vector tile, in either logical orientation.
+    const auto first_count = std::min(Traits::letters_per_unit, length);
+    const unit_type first_difference = sneaky_snake_detail::packed_word<Traits, Reverse>(
+        query, total, query_start, first_count)
+        ^ bioseq::simd::load_packed_symbol_window<Traits>(
+            static_cast<const unit_type*>(target), target_start, first_count);
+    if (first_difference != 0u)
+        return static_cast<std::size_t>(std::countr_zero(first_difference)) / Traits::bits_per_char;
+    if (length <= first_count) return length;
+    constexpr auto complement = bioseq::simd::packed_symbol_complement_mask<Traits, Reverse>();
+    static_assert(complement.has_value());
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> difference_words;
+    // Re-read the proved first word to retain full tiles for lengths just above
+    // a vector boundary; consuming it here would turn that tile into a tail.
     for (std::size_t offset = 0u; offset < length;) {
         const auto remaining = length - offset;
-        const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
-            static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
-        for (std::size_t lane = 0u; lane < active; ++lane) {
-            const auto begin = offset + lane * Traits::letters_per_unit;
-            const auto count = std::min(Traits::letters_per_unit, length - begin);
-            query_words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(
-                query, total, query_start + begin, count);
-            target_words[lane] = bioseq::simd::load_packed_symbol_window<Traits>(
-                static_cast<const unit_type*>(target), target_start + begin, count);
-        }
-        std::fill(query_words.begin() + active, query_words.begin() + lanes, unit_type{});
-        std::fill(target_words.begin() + active, target_words.begin() + lanes, unit_type{});
-        const auto difference = hn::Xor(hn::Load(d, query_words.data()), hn::Load(d, target_words.data()));
-        const auto mismatch = hn::And(hn::FirstN(d, active), hn::Ne(difference, hn::Zero(d)));
+        const auto count = remaining / Traits::letters_per_unit >= lanes
+            ? lanes * Traits::letters_per_unit : remaining;
+        const auto query_packed = load_packed_symbol_vector<Traits, Reverse>(
+            d, static_cast<const unit_type*>(query), total, query_start + offset, count, *complement);
+        const auto target_packed = load_packed_symbol_vector<Traits, false>(
+            d, static_cast<const unit_type*>(target), 0u, target_start + offset, count);
+        const auto difference = hn::Xor(query_packed, target_packed);
+        const auto mismatch = hn::Ne(difference, hn::Zero(d));
         if (!hn::AllFalse(d, mismatch)) {
             const auto lane = static_cast<std::size_t>(hn::FindFirstTrue(d, mismatch));
-            hn::Store(difference, d, query_words.data());
+            hn::Store(difference, d, difference_words.data());
             return offset + lane * Traits::letters_per_unit +
-                static_cast<std::size_t>(std::countr_zero(query_words[lane])) / Traits::bits_per_char;
+                static_cast<std::size_t>(std::countr_zero(difference_words[lane])) / Traits::bits_per_char;
         }
-        offset += std::min(remaining, active * Traits::letters_per_unit);
+        offset += count;
     }
     return length;
 }
@@ -114,33 +118,32 @@ template<class Traits, bool Reverse, class Descriptor>
     using D = hn::Repartition<unit_type, Descriptor>;
     const D d;
     const std::size_t lanes = hn::Lanes(d);
+    constexpr auto complement = bioseq::simd::packed_symbol_complement_mask<Traits, Reverse>();
+    static_assert(complement.has_value());
     constexpr auto low_bits = bioseq::simd::packed_symbol_low_bits<Traits>();
     const auto repeated = hn::Set(d, static_cast<unit_type>(low_bits * rank));
     HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words;
     std::uint64_t result{};
     for (std::size_t offset = 0u; offset < length;) {
         const auto remaining = length - offset;
-        const auto active = std::min(lanes, remaining / Traits::letters_per_unit +
-            static_cast<std::size_t>(remaining % Traits::letters_per_unit != 0u));
-        for (std::size_t lane = 0u; lane < active; ++lane) {
-            const auto begin = offset + lane * Traits::letters_per_unit;
-            words[lane] = sneaky_snake_detail::packed_word<Traits, Reverse>(query, total,
-                start + begin, std::min(Traits::letters_per_unit, length - begin));
-        }
-        std::fill(words.begin() + active, words.begin() + lanes, unit_type{});
-        const auto mismatch = packed_symbol_mismatch_bits<Traits>(d,
-            hn::Xor(hn::Load(d, words.data()), repeated));
+        const auto count = remaining / Traits::letters_per_unit >= lanes
+            ? lanes * Traits::letters_per_unit : remaining;
+        const auto active = count / Traits::letters_per_unit
+            + static_cast<std::size_t>(count % Traits::letters_per_unit != 0u);
+        const auto packed = load_packed_symbol_vector<Traits, Reverse>(
+            d, static_cast<const unit_type*>(query), total, start + offset, count, *complement);
+        const auto mismatch = packed_symbol_mismatch_bits<Traits>(d, hn::Xor(packed, repeated));
         hn::Store(hn::And(hn::Not(mismatch), hn::Set(d, low_bits)), d, words.data());
         for (std::size_t lane = 0u; lane < active; ++lane) {
             const auto begin = offset + lane * Traits::letters_per_unit;
-            const auto count = std::min(Traits::letters_per_unit, length - begin);
-            auto matches = static_cast<unit_type>(words[lane] & bioseq::simd::packed_symbol_mask<Traits>(count));
+            const auto live_symbols = std::min(Traits::letters_per_unit, length - begin);
+            auto matches = static_cast<unit_type>(words[lane] & bioseq::simd::packed_symbol_mask<Traits>(live_symbols));
             while (matches != 0u) {
                 result |= std::uint64_t{1} << (begin + std::countr_zero(matches) / Traits::bits_per_char);
                 matches &= matches - 1u;
             }
         }
-        offset += std::min(remaining, active * Traits::letters_per_unit);
+        offset += count;
     }
     return result;
 }

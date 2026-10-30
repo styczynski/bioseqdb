@@ -10,6 +10,7 @@ module;
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
 #include <limits>
@@ -91,6 +92,37 @@ template<class Traits>
             << (Traits::unit_used_bits - bit_offset);
     }
     return packed & packed_symbol_mask<Traits>(length);
+}
+
+/** Load one forward machine-word group while preserving each native unit's padding.
+ * The caller admits a complete group of logical symbols on a little-endian host.
+ * A nonzero phase therefore has one additional native unit available; both memcpy
+ * spans stay inside that admitted interval's physical units. No wider typed alias
+ * or new packed representation is created.
+ */
+template<class Traits>
+[[nodiscard]] inline std::uint64_t load_packed_forward_machine_word(
+    const typename Traits::storage_unit* units, std::size_t phase) noexcept {
+    constexpr auto machine_bits = std::numeric_limits<std::uint64_t>::digits;
+    static_assert(Traits::unit_width <= machine_bits);
+    static_assert(machine_bits % Traits::unit_width == 0u);
+    constexpr auto lane_ones = [] {
+        std::uint64_t result{};
+        for (std::size_t shift = 0u; shift < machine_bits; shift += Traits::unit_width)
+            result |= std::uint64_t{1} << shift;
+        return result;
+    }();
+    constexpr auto used = lane_ones * static_cast<std::uint64_t>(Traits::used_storage_mask);
+    std::uint64_t first;
+    std::memcpy(&first, units, sizeof(first));
+    if (phase == 0u) return first & used;
+    std::uint64_t following;
+    std::memcpy(&following, units + 1u, sizeof(following));
+    const auto shift = phase * Traits::bits_per_char;
+    const auto low = lane_ones * static_cast<std::uint64_t>(
+        bioseq::simd::packed_symbol_mask<Traits>(Traits::letters_per_unit - phase));
+    return ((first >> shift) & low)
+        | ((following << (Traits::unit_used_bits - shift)) & (used ^ low));
 }
 
 /** Reverse symbol groups using a derived bit permutation where geometry permits it. */
