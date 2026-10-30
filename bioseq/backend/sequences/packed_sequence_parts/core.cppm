@@ -701,6 +701,21 @@ struct supported_storage_unit_byte_widths {
     static constexpr bool contains =
         ((p_byte_width == p_byte_widths) || ...);
 
+    /** Select the standard unsigned storage type for one admitted byte width. */
+    template<std::size_t Width>
+    requires contains<Width>
+    [[nodiscard]] static consteval auto storage_type_identity() {
+        if constexpr (Width == sizeof(std::uint64_t)) return std::type_identity<std::uint64_t>{};
+        else if constexpr (Width == sizeof(std::uint32_t)) return std::type_identity<std::uint32_t>{};
+        else if constexpr (Width == sizeof(std::uint16_t)) return std::type_identity<std::uint16_t>{};
+        else return std::type_identity<std::uint8_t>{};
+    }
+
+    /** Standard-width word type used by codecs and target-owned numeric kernels. */
+    template<std::size_t Width>
+    requires contains<Width>
+    using storage_unit = typename decltype(storage_type_identity<Width>())::type;
+
     /** @brief Tests whether a runtime byte width belongs to the set. */
     [[nodiscard]] static constexpr bool contains_runtime(
         std::uint8_t byte_width) noexcept

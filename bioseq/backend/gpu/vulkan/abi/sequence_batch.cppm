@@ -176,12 +176,19 @@ enum class gpu_packed_sequence_error : std::uint8_t {
 /** Copies one validated native packed window directly into an aligned mapped arena.
  * The returned descriptor addresses the arena in u32 words; only transport tail
  * padding is zeroed. Source bytes and storage-unit packing are preserved.
+ * The explicit validator performs full validation unless the caller has already
+ * validated the same immutable upload; such callers supply the geometry check.
  */
+template<class Validator>
+requires requires(Validator validate, const gpu_packed_sequence_upload& upload) {
+    { validate(upload) } noexcept -> std::same_as<bool>;
+}
 [[nodiscard]] inline std::expected<gpu_sequence_view_wire, gpu_packed_sequence_error>
 place_packed_sequence_upload(const gpu_packed_sequence_upload& upload,
                               std::size_t byte_offset,
-                              std::span<std::byte> destination) noexcept {
-    if (!packed_sequence_upload_is_valid(upload))
+                              std::span<std::byte> destination,
+                              Validator validate) noexcept {
+    if (!validate(upload))
         return std::unexpected{gpu_packed_sequence_error::invalid_geometry};
     if (byte_offset % sizeof(std::uint32_t) != 0u || byte_offset > destination.size() ||
         upload.sequence.padded_byte_count > destination.size() - byte_offset)

@@ -13,6 +13,7 @@ export module bioseq.highway.sources.sequence_ops;
 import std;
 import bioseq.sequences;
 import bioseq.common.seqan_adapter;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.circular_append_buffer;
 import bioseq.sequences.simd_iteration_geometry;
 import bioseq.simd.utils;
@@ -32,6 +33,20 @@ template<class Traits, bool QueryReversed>
     using unit_type = typename Traits::storage_unit;
     constexpr auto complement_mask = packed_symbol_complement_mask<Traits, QueryReversed>();
     static_assert(complement_mask.has_value());
+    // Full-cardinality encodings cannot contain invalid active ranks. Seed-only
+    // callers can report an equal native word without claiming vector work.
+    if constexpr (Traits::alphabet_size == (unit_type{1} << Traits::bits_per_char)) {
+        if (length != 0u && length <= Traits::letters_per_unit) {
+            const auto query_word = load_oriented_packed_symbol_window<Traits, QueryReversed>(
+                static_cast<const unit_type*>(query_units), query_physical_total,
+                query_start, length, *complement_mask);
+            const auto target_word = load_packed_symbol_window<Traits>(
+                static_cast<const unit_type*>(target_units), target_start, length);
+            if (query_word == target_word)
+                return {.equal_symbols = static_cast<std::uint64_t>(length),
+                        .vector_batches = 0u, .valid_ranks = true};
+        }
+    }
     const hn::ScalableTag<unit_type> tag;
     return count_equal_packed_symbols<Traits, QueryReversed>(tag,
         static_cast<const unit_type*>(query_units), static_cast<const unit_type*>(target_units),
@@ -65,6 +80,90 @@ template<class Traits, bool QueryReversed>
 }
 
 static_assert(std::same_as<decltype(&resolve_sequence_packed_equality), sequence_packed_equality_resolver>);
+
+/** Validate logical rank fields in bounded native-word batches without a decoded copy.
+ * Geometry and required_units have already been checked by the scalar ABI entry.
+ * Byte sources are copied into owned aligned words before any typed SIMD load.
+ */
+template<class D>
+[[nodiscard]] HWY_INLINE bool validate_packed_sequence_ranks_for(
+    D descriptor, std::span<const std::byte> bytes, std::size_t rank_bits,
+    std::size_t alphabet_size, std::size_t leading_symbols,
+    std::size_t symbol_count, std::size_t required_units) noexcept {
+    using unit_type = hn::TFromD<D>;
+    static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big,
+                  "packed byte validation requires a uniform native byte order");
+    constexpr auto unit_bits = std::numeric_limits<unit_type>::digits;
+    const std::size_t symbols_per_unit = unit_bits / rank_bits;
+    const auto rank_mask = *bioseq::common::checked_low_bits_mask<unit_type>(rank_bits);
+    const auto maximum_rank = static_cast<unit_type>(alphabet_size - 1u);
+    const std::size_t final_symbols = (leading_symbols + symbol_count % symbols_per_unit) % symbols_per_unit;
+    const std::size_t lanes = hn::Lanes(descriptor);
+    HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> words{};
+    for (std::size_t first_unit = 0u; first_unit < required_units;) {
+        const std::size_t active_units = std::min(lanes, required_units - first_unit);
+        std::memcpy(words.data(), bytes.data() + first_unit * sizeof(unit_type),
+                    active_units * sizeof(unit_type));
+        if constexpr (std::endian::native == std::endian::big) {
+            for (std::size_t lane = 0u; lane < active_units; ++lane)
+                words[lane] = std::byteswap(words[lane]);
+        }
+        if (first_unit == 0u && leading_symbols != 0u)
+            words[0] &= ~*bioseq::common::checked_low_bits_mask<unit_type>(leading_symbols * rank_bits);
+        if (first_unit + active_units == required_units && final_symbols != 0u)
+            words[active_units - 1u] &= *bioseq::common::checked_low_bits_mask<unit_type>(final_symbols * rank_bits);
+        const auto active = hn::FirstN(descriptor, active_units);
+        auto packed = hn::MaskedLoad(active, descriptor, words.data());
+        auto invalid = hn::FirstN(descriptor, 0u);
+        for (std::size_t symbol = 0u; symbol < symbols_per_unit; ++symbol) {
+            invalid = hn::Or(invalid,
+                invalid_packed_rank_lanes(descriptor, packed, rank_mask, maximum_rank));
+            if (symbol + 1u < symbols_per_unit)
+                packed = hn::ShiftRightSame(packed, static_cast<int>(rank_bits));
+        }
+        if (!hn::AllFalse(descriptor, hn::And(active, invalid))) return false;
+        first_unit += active_units;
+    }
+    return true;
+}
+
+/** Check public packed byte geometry, then validate every active rank once.
+ * Select only the existing physical-width axis; cardinality and rank width stay
+ * runtime values so nonminimal encodings share the same target-owned body.
+ */
+[[nodiscard]] bool validate_packed_sequence_ranks(
+    std::span<const std::byte> bytes, std::size_t unit_bytes, std::size_t rank_bits,
+    std::size_t alphabet_size, std::size_t leading_symbols,
+    std::size_t symbol_count) noexcept {
+    constexpr auto byte_bits = std::numeric_limits<unsigned char>::digits;
+    if (unit_bytes > std::numeric_limits<std::uint8_t>::max()
+        || !all_storage_unit_byte_widths::contains_runtime(static_cast<std::uint8_t>(unit_bytes))
+        || rank_bits == 0u || rank_bits > byte_bits || alphabet_size == 0u
+        || alphabet_size > (std::size_t{1u} << rank_bits)
+        || bytes.size() % unit_bytes != 0u) return false;
+    const std::size_t symbols_per_unit = unit_bytes * byte_bits / rank_bits;
+    if (leading_symbols >= symbols_per_unit) return false;
+    const std::size_t unit_count = bytes.size() / unit_bytes;
+    const std::size_t whole_units = symbol_count / symbols_per_unit;
+    const std::size_t partial_symbols = leading_symbols + symbol_count % symbols_per_unit;
+    const std::size_t extra_units = partial_symbols / symbols_per_unit
+        + static_cast<std::size_t>(partial_symbols % symbols_per_unit != 0u);
+    if (whole_units > unit_count || extra_units > unit_count - whole_units) return false;
+    if (symbol_count == 0u || alphabet_size == (std::size_t{1u} << rank_bits)) return true;
+    const std::size_t required_units = whole_units + extra_units;
+    bool valid = false;
+    all_storage_unit_byte_widths::dispatch(static_cast<std::uint8_t>(unit_bytes),
+        [bytes, rank_bits, alphabet_size, leading_symbols, symbol_count, required_units, &valid]
+        <std::size_t Width>() {
+            using unit_type = all_storage_unit_byte_widths::storage_unit<Width>;
+            const hn::ScalableTag<unit_type> descriptor;
+            valid = validate_packed_sequence_ranks_for(descriptor, bytes, rank_bits,
+                alphabet_size, leading_symbols, symbol_count, required_units);
+        });
+    return valid;
+}
+
+static_assert(std::same_as<decltype(&validate_packed_sequence_ranks), sequence_packed_rank_validation_kernel>);
 
 /** Apply native codon lookup to bounded tiles; rank geometry is runtime data. */
 template<class D, sequence_rank_transform Operation>

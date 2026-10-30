@@ -656,12 +656,12 @@ void validate_available_backend(
             vulkan_results = prefilter::run_sneaky_snake_vulkan_batch(
                 query_view,
                 target_view,
-                prepared.jobs);
+                prepared.jobs, ::bioseq::simd_dispatch::highway_test_kernel_table().common.validate_packed_sequence_ranks);
         } else if (is_gatekeeper_algorithm(algorithm)) {
             vulkan_results = prefilter::run_gatekeeper_vulkan_batch(
                 query_view,
                 target_view,
-                prepared.jobs);
+                prepared.jobs, ::bioseq::simd_dispatch::highway_test_kernel_table().common.validate_packed_sequence_ranks);
         } else {
             throw std::invalid_argument(
                 "unknown prefilter benchmark algorithm: "

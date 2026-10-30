@@ -785,12 +785,16 @@ export {
                 break;
             }
             case backend_type::vulkan: {
+                if (parameters().highway_kernels == nullptr
+                    || parameters().highway_kernels->common.validate_packed_sequence_ranks == nullptr)
+                    throw std::logic_error{"selected Highway table has no packed-rank validator"};
+                const auto validate_ranks = parameters().highway_kernels->common.validate_packed_sequence_ranks;
                 if (algorithm == algorithm_type::gatekeeper) {
                     batch_results =
-                        prefilter::run_gatekeeper_vulkan_batch(query_seq_, target_seq_, jobs);
+                        prefilter::run_gatekeeper_vulkan_batch(query_seq_, target_seq_, jobs, validate_ranks);
                 } else {
                     batch_results =
-                        prefilter::run_sneaky_snake_vulkan_batch(query_seq_, target_seq_, jobs);
+                        prefilter::run_sneaky_snake_vulkan_batch(query_seq_, target_seq_, jobs, validate_ranks);
                 }
                 break;
             }

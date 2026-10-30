@@ -592,7 +592,7 @@ TEST_CASE(
         const auto packed_target = packed_ranks(fixture.target_ranks);
         const auto gpu = vp::run_sneaky_snake_vulkan_batch(
             bioseq::storage::make_lazy_sequence_view(packed_query),
-            bioseq::storage::make_lazy_sequence_view(packed_target), fixture.jobs);
+            bioseq::storage::make_lazy_sequence_view(packed_target), fixture.jobs, ::bioseq::simd_dispatch::highway_test_kernel_table().common.validate_packed_sequence_ranks);
 
         // Reuse the command shape with new target bytes. Supported equal-length
         // pairs become exact matches, so changed results confirm that replay reads
@@ -617,7 +617,7 @@ TEST_CASE(
         const auto packed_replay = packed_ranks(replay_targets);
         const auto replayed = vp::run_sneaky_snake_vulkan_batch(
             bioseq::storage::make_lazy_sequence_view(packed_query),
-            bioseq::storage::make_lazy_sequence_view(packed_replay), fixture.jobs);
+            bioseq::storage::make_lazy_sequence_view(packed_replay), fixture.jobs, ::bioseq::simd_dispatch::highway_test_kernel_table().common.validate_packed_sequence_ranks);
         REQUIRE(gpu.size() == scalar.size());
         REQUIRE(replayed.size() == gpu.size());
         bool observed_changed_result = false;

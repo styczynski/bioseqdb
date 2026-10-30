@@ -41,6 +41,15 @@ packed_symbol_complement_mask() {
     }
 }
 
+/** Return lanes whose low packed rank exceeds the largest valid alphabet rank. */
+template<class D>
+[[nodiscard]] HWY_INLINE hn::Mask<D> invalid_packed_rank_lanes(
+    D descriptor, hn::Vec<D> shifted_words,
+    hn::TFromD<D> rank_mask, hn::TFromD<D> maximum_rank) noexcept {
+    return hn::Gt(hn::And(shifted_words, hn::Set(descriptor, rank_mask)),
+                  hn::Set(descriptor, maximum_rank));
+}
+
 /**
  * Compare native packed windows with trait-derived masks and SIMD population counts.
  * Reverse readers supply a verified rank-XOR complement mask; forward readers use zero.
@@ -77,16 +86,8 @@ template<class Traits, bool QueryReversed, class D>
         for (std::size_t lane = 0; lane < active_lanes; ++lane) {
             const std::size_t symbol_offset = (first_word + lane) * Traits::letters_per_unit;
             const std::size_t symbol_count = std::min(Traits::letters_per_unit, length - symbol_offset);
-            if constexpr (QueryReversed) {
-                const std::size_t source_start = query_total - query_start - symbol_offset - symbol_count;
-                const auto forward = load_packed_symbol_window<Traits>(query_units, source_start, symbol_count);
-                query_words[lane] = (reverse_packed_symbol_groups<Traits>(forward)
-                    >> ((Traits::letters_per_unit - symbol_count) * Traits::bits_per_char))
-                    ^ (complement_mask & packed_symbol_mask<Traits>(symbol_count));
-            } else {
-                query_words[lane] = load_packed_symbol_window<Traits>(query_units,
-                    query_start + symbol_offset, symbol_count);
-            }
+            query_words[lane] = load_oriented_packed_symbol_window<Traits, QueryReversed>(
+                query_units, query_total, query_start + symbol_offset, symbol_count, complement_mask);
             target_words[lane] = load_packed_symbol_window<Traits>(target_units,
                 target_start + symbol_offset, symbol_count);
         }
@@ -98,11 +99,13 @@ template<class Traits, bool QueryReversed, class D>
             bioseq::common::templating::for_each_index<Traits::letters_per_unit>(
                 [descriptor, query_packed, target_packed, &invalid]<std::size_t Symbol>(
                     std::integral_constant<std::size_t, Symbol>) {
-                    const auto rank_mask = hn::Set(descriptor, static_cast<unit_type>(Traits::char_mask));
-                    const auto maximum_rank = hn::Set(descriptor, static_cast<unit_type>(Traits::alphabet_size - 1));
-                    const auto query_rank = hn::And(hn::ShiftRight<Symbol * Traits::bits_per_char>(query_packed), rank_mask);
-                    const auto target_rank = hn::And(hn::ShiftRight<Symbol * Traits::bits_per_char>(target_packed), rank_mask);
-                    invalid = hn::Or(invalid, hn::Or(hn::Gt(query_rank, maximum_rank), hn::Gt(target_rank, maximum_rank)));
+                    constexpr auto rank_mask = static_cast<unit_type>(Traits::char_mask);
+                    constexpr auto maximum_rank = static_cast<unit_type>(Traits::alphabet_size - 1);
+                    const auto invalid_query = invalid_packed_rank_lanes(descriptor,
+                        hn::ShiftRight<Symbol * Traits::bits_per_char>(query_packed), rank_mask, maximum_rank);
+                    const auto invalid_target = invalid_packed_rank_lanes(descriptor,
+                        hn::ShiftRight<Symbol * Traits::bits_per_char>(target_packed), rank_mask, maximum_rank);
+                    invalid = hn::Or(invalid, hn::Or(invalid_query, invalid_target));
                 });
             if (!hn::AllFalse(descriptor, hn::And(active, invalid))) {
                 result.valid_ranks = false;

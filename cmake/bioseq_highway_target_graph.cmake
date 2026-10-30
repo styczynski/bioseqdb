@@ -252,6 +252,7 @@ bioseq_add_highway_codegen(
     "simd_utils|common|count_equal_rank_chunk|&::bioseq::simd::{target_namespace}::count_equal_rank_chunk"
     "sequence_ops|common|transform_sequence_rank_chunk|&::bioseq::simd::{target_namespace}::transform_sequence_rank_chunk"
     "sequence_ops|common|resolve_sequence_packed_equality|&::bioseq::simd::{target_namespace}::resolve_sequence_packed_equality"
+    "sequence_ops|common|validate_packed_sequence_ranks|&::bioseq::simd::{target_namespace}::validate_packed_sequence_ranks"
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
     "prefilter|common|sneaky_snake_simd_batch|&bioseq::prefilter::{target_namespace}::sneaky_snake_simd_batch"
@@ -260,6 +261,7 @@ bioseq_add_highway_codegen(
     "common|count_equal_rank_chunk"
     "common|transform_sequence_rank_chunk"
     "common|resolve_sequence_packed_equality"
+    "common|validate_packed_sequence_ranks"
     ${BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
     "common|sneaky_snake_simd_batch"

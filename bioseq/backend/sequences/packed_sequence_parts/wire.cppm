@@ -433,10 +433,7 @@ struct compact_sequence_stdc_instance {
     [[nodiscard]] static consteval auto storage_type_identity() {
         if constexpr (bioseq::cigar_operation_alphabet<p_alphabet>)
             return std::type_identity<bioseq::cigar_run_value<p_alphabet>>{};
-        else if constexpr (p_storage_unit_byte_width == 8) return std::type_identity<std::uint64_t>{};
-        else if constexpr (p_storage_unit_byte_width == 4) return std::type_identity<std::uint32_t>{};
-        else if constexpr (p_storage_unit_byte_width == 2) return std::type_identity<std::uint16_t>{};
-        else return std::type_identity<std::uint8_t>{};
+        else return all_storage_unit_byte_widths::template storage_type_identity<p_storage_unit_byte_width>();
     }
     using storage_unit = typename decltype(storage_type_identity())::type;
     static constexpr bool is_bit_packed = !bioseq::cigar_operation_alphabet<p_alphabet>;

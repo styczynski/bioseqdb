@@ -56,6 +56,8 @@ struct highway_common_kernels final {
     ::bioseq::simd::sequence_packed_equality_resolver resolve_sequence_packed_equality = nullptr;
     /** Native rank translation/synthesis algebra selected for this CPU target. */
     ::bioseq::simd::sequence_rank_transform_kernel transform_sequence_rank_chunk = nullptr;
+    /** Validate borrowed native packed bytes with runtime geometry, without expanding ranks. */
+    ::bioseq::simd::sequence_packed_rank_validation_kernel validate_packed_sequence_ranks = nullptr;
 };
 
 static_assert(std::is_standard_layout_v<highway_common_kernels>);
@@ -261,6 +263,7 @@ struct highway_kernel_table final {
             || common.count_equal_rank_chunk == nullptr
             || common.resolve_sequence_packed_equality == nullptr
             || common.transform_sequence_rank_chunk == nullptr
+            || common.validate_packed_sequence_ranks == nullptr
             || chaining.chain_anchors_simd == nullptr
             || alphabet_identities.empty()
             || alphabet_identities.size() != alignment_by_alphabet.size()) {

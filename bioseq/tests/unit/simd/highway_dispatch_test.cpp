@@ -48,6 +48,7 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
     REQUIRE(table.common.count_equal_rank_chunk == nullptr);
     REQUIRE(table.common.resolve_sequence_packed_equality == nullptr);
     REQUIRE(table.common.transform_sequence_rank_chunk == nullptr);
+    REQUIRE(table.common.validate_packed_sequence_ranks == nullptr);
     REQUIRE(table.chaining.chain_anchors_simd == nullptr);
 
     for (std::size_t index = 0; index < simd_dispatch::highway_kernel_count; ++index) {
@@ -81,6 +82,7 @@ TEST_CASE("Highway alignment tables require all six typed callables",
     REQUIRE(binding.kernels == &generated_root);
     REQUIRE(generated_root.is_complete());
     REQUIRE(generated_root.common.transform_sequence_rank_chunk != nullptr);
+    REQUIRE(generated_root.common.validate_packed_sequence_ranks != nullptr);
     REQUIRE(generated_root.common.resolve_sequence_packed_equality != nullptr);
 
     const auto* identity = generated_root.resolve_alphabet_identity<seq::dna4>();
@@ -129,6 +131,11 @@ TEST_CASE("Highway alignment tables require all six typed callables",
     REQUIRE_FALSE(synthetic_root.is_complete());
     synthetic_root.common.transform_sequence_rank_chunk =
         generated_root.common.transform_sequence_rank_chunk;
+    REQUIRE(synthetic_root.is_complete());
+    synthetic_root.common.validate_packed_sequence_ranks = nullptr;
+    REQUIRE_FALSE(synthetic_root.is_complete());
+    synthetic_root.common.validate_packed_sequence_ranks =
+        generated_root.common.validate_packed_sequence_ranks;
     REQUIRE(synthetic_root.is_complete());
 
     entries.front().typed_table_complete = false;

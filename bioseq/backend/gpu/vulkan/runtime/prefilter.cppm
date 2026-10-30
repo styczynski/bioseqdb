@@ -19,6 +19,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
+import bioseq.simd.utils;
 
 namespace bioseq::gpu::vulkan {
 
@@ -28,7 +29,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
     std::span<const gpu_packed_sequence_upload> queries,
     std::span<const gpu_packed_sequence_upload> targets,
     const vulkan_rank_lut& rank_lut,
-    std::span<const bioseq::prefilter::prefilter_job> jobs) {
+    std::span<const bioseq::prefilter::prefilter_job> jobs,
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
     std::lock_guard<std::mutex> guard(mu_);
     constexpr std::uint32_t k_sneaky_snake_parallel_threshold = 16u;
     bool use_parallel_teams = false;
@@ -53,7 +55,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
                                                   queries,
                                                   targets,
                                                   rank_lut,
-                                                  jobs);
+                                                  jobs, validate_ranks);
     if (!jobs.empty()) {
         sneaky_snake_dispatch_count_.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -65,12 +67,13 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_ba
     std::span<const gpu_packed_sequence_upload> queries,
     std::span<const gpu_packed_sequence_upload> targets,
     const vulkan_rank_lut& rank_lut,
-    std::span<const bioseq::prefilter::prefilter_job> jobs) {
+    std::span<const bioseq::prefilter::prefilter_job> jobs,
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
     std::lock_guard<std::mutex> guard(mu_);
     const gatekeeper_rank_batch_route route = resolve_gatekeeper_rank_batch_route(jobs);
     std::vector<bioseq::prefilter::prefilter_result> results =
         run_rank_prefilter_batch_roundtrip_locked(
-            route.kind, 0u, route.replay_index, queries, targets, rank_lut, jobs);
+            route.kind, 0u, route.replay_index, queries, targets, rank_lut, jobs, validate_ranks);
     if (!jobs.empty()) {
         gatekeeper_dispatch_count_.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -87,7 +90,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     std::span<const gpu_packed_sequence_upload> queries,
     std::span<const gpu_packed_sequence_upload> targets,
     const vulkan_rank_lut& rank_lut,
-    std::span<const bioseq::prefilter::prefilter_job> jobs) {
+    std::span<const bioseq::prefilter::prefilter_job> jobs,
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
     const bool sneaky = kind == shader_kind::sneaky_snake_rank_batch;
     const bool gatekeeper = is_gatekeeper_rank_batch_kind(kind);
     const std::optional<std::size_t> expected_replay_index =
@@ -104,7 +108,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     if (jobs.empty()) {
         return {};
     }
-    validate_prefilter_inputs(algorithm, queries, targets, rank_lut, jobs);
+    validate_prefilter_inputs(algorithm, queries, targets, rank_lut, jobs, validate_ranks);
     if (features_.max_workgroup_count_x == 0u) {
         throw vulkan_runtime_error(
             fmt::format("{} device reports zero max workgroup count", algorithm));
@@ -193,7 +197,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
             for (std::size_t index = 0u; index < uploads.size(); ++index) {
                 if (!place_packed_sequence_upload(uploads[index],
                         static_cast<std::size_t>(records[index].seq_word_offset * sizeof(std::uint32_t)),
-                        destination))
+                        destination, packed_sequence_upload_geometry_is_valid))
                     throw vulkan_runtime_error("prefilter packed arena placement failed");
             }
         };

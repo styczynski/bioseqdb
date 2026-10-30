@@ -22,6 +22,7 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 import std;
+import bioseq.simd.utils;
 import bioseq.alignment.utils;
 
 export namespace bioseq::gpu::vulkan {
@@ -367,7 +368,8 @@ class runtime {
     run_sneaky_snake_rank_batch_roundtrip(std::span<const gpu_packed_sequence_upload> queries,
                                           std::span<const gpu_packed_sequence_upload> targets,
         const vulkan_rank_lut& rank_lut,
-                                          std::span<const bioseq::prefilter::prefilter_job> jobs);
+                                          std::span<const bioseq::prefilter::prefilter_job> jobs,
+        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
 
     /// @brief Runs GateKeeper to filter pairs before alignment.
     /// A mask-based rejection needs confirmation from the bounded-distance  check.
@@ -376,7 +378,8 @@ class runtime {
     run_gatekeeper_rank_batch_roundtrip(std::span<const gpu_packed_sequence_upload> queries,
                                         std::span<const gpu_packed_sequence_upload> targets,
         const vulkan_rank_lut& rank_lut,
-                                        std::span<const bioseq::prefilter::prefilter_job> jobs);
+                                        std::span<const bioseq::prefilter::prefilter_job> jobs,
+        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
 
     /// @brief Aligns native packed sequence windows on the GPU and returns packed CIGAR strings.
     /// Large batches run in waves to limit traceback memory.
@@ -884,7 +887,8 @@ class runtime {
         std::span<const gpu_packed_sequence_upload> queries,
         std::span<const gpu_packed_sequence_upload> targets,
         const vulkan_rank_lut& rank_lut,
-        std::span<const bioseq::prefilter::prefilter_job> jobs);
+        std::span<const bioseq::prefilter::prefilter_job> jobs,
+        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
     /// @brief Returns the memory charge for metadata held by both pipeline caches.
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked() const noexcept;
     /// @brief Reserves memory before either pipeline cache grows.

@@ -185,7 +185,7 @@ gpu_verified_seed_buffer runtime::verify_seed_anchors_locked(
     const auto copy_windows = [&packed, &records, &packed_offset, &record_offset](auto windows) {
         for (const auto& upload : windows) {
             const auto placed = place_packed_sequence_upload(upload, packed_offset,
-                std::span{static_cast<std::byte*>(packed.mapped), static_cast<std::size_t>(packed.bytes)});
+                std::span{static_cast<std::byte*>(packed.mapped), static_cast<std::size_t>(packed.bytes)}, packed_sequence_upload_is_valid);
             if (!placed) throw vulkan_runtime_error("native seed packed placement failed");
             std::memcpy(static_cast<std::byte*>(records.mapped) + record_offset, &*placed, sizeof(*placed));
             packed_offset += upload.sequence.padded_byte_count;

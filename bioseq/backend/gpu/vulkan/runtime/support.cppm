@@ -31,6 +31,7 @@ import bioseq.sequences;
 import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
+import bioseq.simd.utils;
 
 namespace bioseq::gpu::vulkan {
 
@@ -795,22 +796,27 @@ void validate_prefilter_inputs(const char* algorithm,
                                std::span<const gpu_packed_sequence_upload> queries,
                                std::span<const gpu_packed_sequence_upload> targets,
                                const vulkan_rank_lut& rank_lut,
-                               std::span<const bioseq::prefilter::prefilter_job> jobs) {
+                               std::span<const bioseq::prefilter::prefilter_job> jobs,
+                               bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
     constexpr auto limit = std::numeric_limits<std::uint32_t>::max();
-    if (jobs.size() > limit || queries.size() > limit || targets.size() > limit ||
+    if (validate_ranks == nullptr || jobs.size() > limit || queries.size() > limit || targets.size() > limit ||
         rank_lut.alphabet_size == 0u || rank_lut.alphabet_size > vulkan_rank_lut::rank_capacity) {
         throw vulkan_runtime_error(fmt::format("{} invalid record counts or alphabet", algorithm));
     }
-    const auto validate_records = [algorithm, &rank_lut](auto records) {
+    const auto validate_records = [algorithm, &rank_lut, validate_ranks](auto records) {
         for (const auto& upload : records) {
             const auto& sequence = upload.sequence;
-            // Placement checks every declared rank once before any dispatch,
-            // including uploads that no job references. Admission checks shape
-            // and identity here without repeating the linear rank scan.
+            // Validate every supplied logical span once, including unreferenced
+            // uploads. Placement then checks geometry without rescanning ranks.
             if (!packed_sequence_upload_geometry_is_valid(upload) ||
                 sequence.alphabet_code != rank_lut.alphabet_code ||
                 sequence.alphabet_size != rank_lut.alphabet_size ||
-                sequence.seed_policy_id != rank_lut.seed_policy_id) {
+                sequence.seed_policy_id != rank_lut.seed_policy_id
+                || sequence.bp_count > std::numeric_limits<std::size_t>::max()
+                || !validate_ranks(upload.bytes,
+                    sequence.unit_bits / std::numeric_limits<unsigned char>::digits,
+                    sequence.bits_per_char, sequence.alphabet_size,
+                    sequence.leading_symbol_offset, static_cast<std::size_t>(sequence.bp_count))) {
                 throw vulkan_runtime_error(fmt::format("{} invalid native packed sequence", algorithm));
             }
         }

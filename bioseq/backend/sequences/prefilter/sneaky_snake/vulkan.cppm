@@ -16,6 +16,7 @@ export module bioseq.prefilter.sneaky_snake.vulkan;
 export import bioseq.prefilter.types;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;
+import bioseq.simd.utils;
 import bioseq.storage.lazy_sequence;
 import bioseq.sequences.kmers.vulkan_minimizers;
 
@@ -35,6 +36,7 @@ export namespace bioseq::prefilter {
  * @param query_ranks Query symbols encoded as rank bytes.
  * @param target_ranks Target symbols using the same encoding.
  * @param jobs Slice offsets, lengths, and edit thresholds.
+ * @param validate_ranks Caller-selected CPU kernel checking all uploaded native ranks.
  * @return One result per job in input order
  * @throws bioseq::gpu::vulkan::vulkan_runtime_error If a hardware device is, unavailable
  * or runtime execution fails.
@@ -44,14 +46,15 @@ template <sequence_alphabet p_alphabet>
 run_sneaky_snake_vulkan_batch(
     bioseq::storage::lazy_sequence_view<p_alphabet> query,
     bioseq::storage::lazy_sequence_view<p_alphabet> target,
-    std::span<const prefilter_job> jobs)
+    std::span<const prefilter_job> jobs,
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks)
 {
     auto& vulkan_runtime = bioseq::gpu::vulkan::runtime::instance();
     bioseq::gpu::vulkan::require_hardware_device(vulkan_runtime, "Vulkan sneaky_snake prefilter");
     return bioseq::gpu::vulkan::with_prefilter_packed_windows(query, target, jobs,
-        [&vulkan_runtime](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
+        [&vulkan_runtime, validate_ranks](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
             return vulkan_runtime.run_sneaky_snake_rank_batch_roundtrip(
-                queries, targets, rank_lut, local_jobs);
+                queries, targets, rank_lut, local_jobs, validate_ranks);
         });
 }
 

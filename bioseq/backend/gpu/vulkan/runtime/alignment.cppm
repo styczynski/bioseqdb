@@ -292,9 +292,9 @@ runtime::run_alignment_extension_roundtrip(const gpu_packed_sequence_upload& que
         actual_bytes = bioseq::common::saturating_add(actual_bytes, bytes);
     if (actual_bytes != admitted_bytes) throw vulkan_runtime_error("alignment extension allocation exceeded admission");
     const auto query_descriptor = place_packed_sequence_upload(query_symbols, 0,
-        std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)});
+        std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)}, packed_sequence_upload_is_valid);
     const auto target_descriptor = place_packed_sequence_upload(target_symbols, 0,
-        std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)});
+        std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)}, packed_sequence_upload_is_valid);
     if (!query_descriptor || !target_descriptor) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
     const std::array descriptors{*query_descriptor, *target_descriptor};
     std::memcpy(descriptors_buf.mapped, descriptors.data(), sizeof(descriptors));
@@ -438,9 +438,9 @@ std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_err
         if (!query_upload) return std::unexpected(query_upload.error());
         if (!target_upload) return std::unexpected(target_upload.error());
         const auto query_descriptor = place_packed_sequence_upload(*query_upload, query_cursor,
-            std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)});
+            std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)}, packed_sequence_upload_is_valid);
         const auto target_descriptor = place_packed_sequence_upload(*target_upload, target_cursor,
-            std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)});
+            std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)}, packed_sequence_upload_is_valid);
         if (!query_descriptor || !target_descriptor) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         const std::array descriptors{*query_descriptor, *target_descriptor};
         std::memcpy(static_cast<std::byte*>(descriptors_buf.mapped) + job_index * sizeof(descriptors), descriptors.data(), sizeof(descriptors));

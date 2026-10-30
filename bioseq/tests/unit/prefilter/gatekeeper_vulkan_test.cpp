@@ -16,6 +16,7 @@ import bioseq.sequences;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.common.seqan_adapter;
+import bioseq.highway.test_support;
 
 using namespace bioseq::prefilter;
 
@@ -62,7 +63,7 @@ template <class Value, class Error>
     const compact_sequence_range<seq::aa27> query{query_letters};
     const compact_sequence_range<seq::aa27> target{target_letters};
     return run_gatekeeper_vulkan_batch(bioseq::storage::make_lazy_sequence_view(query),
-                                       bioseq::storage::make_lazy_sequence_view(target), jobs);
+                                       bioseq::storage::make_lazy_sequence_view(target), jobs, ::bioseq::simd_dispatch::highway_test_kernel_table().common.validate_packed_sequence_ranks);
 }
 
 /**

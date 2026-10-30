@@ -69,6 +69,35 @@ template<class Traits>
     }
 }
 
+/** Load one bounded native word in the requested logical orientation.
+ * The resident owner validates coordinates and 0 < length <= letters_per_unit.
+ * Reverse readers provide a
+ * verified XOR complement mask and the physical total including leading slots.
+ */
+template<class Traits, bool QueryReversed>
+[[nodiscard]] inline typename Traits::storage_unit load_oriented_packed_symbol_window(
+    const typename Traits::storage_unit* units, std::size_t physical_total,
+    std::size_t logical_start, std::size_t length,
+    typename Traits::storage_unit complement_mask = 0) noexcept {
+    if constexpr (QueryReversed) {
+        const auto forward = load_packed_symbol_window<Traits>(
+            units, physical_total - logical_start - length, length);
+        return (reverse_packed_symbol_groups<Traits>(forward)
+            >> ((Traits::letters_per_unit - length) * Traits::bits_per_char))
+            ^ (complement_mask & packed_symbol_mask<Traits>(length));
+    } else {
+        return load_packed_symbol_window<Traits>(units, logical_start, length);
+    }
+}
+
+/** Validate borrowed native packed bytes with runtime geometry and no retained state.
+ * Arbitrary byte alignment and nonminimal rank widths are supported. False means
+ * malformed geometry or an active rank outside the supplied alphabet cardinality.
+ */
+using sequence_packed_rank_validation_kernel = bool (*)(
+    std::span<const std::byte>, std::size_t, std::size_t,
+    std::size_t, std::size_t, std::size_t) noexcept;
+
 /** Whether a bounded equality scan must reject ranks outside a supplied alphabet. */
 enum class sequence_rank_validation : std::uint8_t { none, upper_bound };
 
