@@ -59,7 +59,8 @@ struct borrowed_rank_window_source {
     bool worker_shareable{};
 
     /** Reads [from, from + count), validating ranges before invoking the backend. */
-    [[nodiscard]] std::expected<std::span<const std::uint8_t>, rank_window_read_failure>
+    [[nodiscard, gnu::always_inline]] inline
+    std::expected<std::span<const std::uint8_t>, rank_window_read_failure>
     read_checked(sequence_size_t from, std::size_t count,
                  std::span<std::uint8_t> scratch) const {
         if (read_at == nullptr) {

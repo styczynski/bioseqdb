@@ -383,7 +383,7 @@ struct window_traversal {
      * Growth stops at fixed scratch capacity and never changes diagonal boundaries.
      * A complete diagonal already pinned in both caches needs only one comparison.
      */
-    [[nodiscard]] std::uint32_t diagonal_run(
+    [[nodiscard, gnu::always_inline]] inline std::uint32_t diagonal_run(
         const prefilter_rank_window& query, const prefilter_rank_window& target,
         std::uint32_t position, std::uint32_t submaze_end,
         std::uint32_t query_index) const {
@@ -395,20 +395,7 @@ struct window_traversal {
             return comparison.diagonal_run(query_ranks, target_ranks, 0u,
                 static_cast<std::uint32_t>(limit), 0u);
         }
-        std::size_t matched = 0u;
-        std::size_t read_size = query.refill_size;
-        while (matched < limit) {
-            const auto count = std::min(read_size, limit - matched);
-            const auto target_ranks = target.window(position + matched, count);
-            const auto query_ranks = query.window(query_index + matched, count);
-            if (query.failure->has_value()) return 0u;
-            const auto run = comparison.diagonal_run(query_ranks, target_ranks, 0u,
-                static_cast<std::uint32_t>(count), 0u);
-            matched += run;
-            if (run != count) break;
-            read_size = std::min(prefilter_rank_window::chunk_size, read_size * 2u);
-        }
-        return static_cast<std::uint32_t>(matched);
+        return diagonal_run_with_refill(query, target, position, query_index, limit);
     }
 
     /**
@@ -439,6 +426,32 @@ struct window_traversal {
             first += count;
         }
         return false;
+    }
+
+  private:
+    /**
+     * Acquires missing diagonal blocks in target-before-query order, growing only
+     * after a complete match. limit is the caller's admitted nonempty run length.
+     * Keep refill/error handling out of the inline cache path: the linked body
+     * otherwise gives even complete-cache comparisons a large call frame.
+     */
+    [[nodiscard, gnu::noinline]] std::uint32_t diagonal_run_with_refill(
+        const prefilter_rank_window& query, const prefilter_rank_window& target,
+        std::uint32_t position, std::uint32_t query_index, std::size_t limit) const {
+        std::size_t matched = 0u;
+        std::size_t read_size = query.refill_size;
+        while (matched < limit) {
+            const auto count = std::min(read_size, limit - matched);
+            const auto target_ranks = target.window(position + matched, count);
+            const auto query_ranks = query.window(query_index + matched, count);
+            if (query.failure->has_value()) return 0u;
+            const auto run = comparison.diagonal_run(query_ranks, target_ranks, 0u,
+                static_cast<std::uint32_t>(count), 0u);
+            matched += run;
+            if (run != count) break;
+            read_size = std::min(prefilter_rank_window::chunk_size, read_size * 2u);
+        }
+        return static_cast<std::uint32_t>(matched);
     }
 };
 
