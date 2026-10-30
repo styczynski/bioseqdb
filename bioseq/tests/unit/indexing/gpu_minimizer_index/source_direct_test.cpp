@@ -173,7 +173,7 @@ TEST_CASE("vulkan source-direct fill consumes each source position once",
             std::span{positions});
     REQUIRE(fill_stats.source_checksum == fill_stats.mapped_checksum);
     REQUIRE(fill_stats.complete_source_traversals == 1u);
-    REQUIRE(fill_stats.complete_mapped_traversals == 1u);
+    REQUIRE(fill_stats.complete_mapped_traversals == 2u);
     REQUIRE(std::all_of(source.begin(), source.end(),
         [](const single_read_minimizer& minimizer) {
             return minimizer.reads == 1u;

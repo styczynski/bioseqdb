@@ -22,6 +22,7 @@ import bioseq.pipeline.minimap_port;         // collect_seed_hits
 import bioseq.chaining.core;                 // anchor / arena_slab / make_arena_slab
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.gpu_minimizer_index;
+import bioseq.indexing.storage;
 import bioseq.seeding.vulkan;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
@@ -436,20 +437,16 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     std::vector<std::uint64_t> positions{encode_position_strand(3u, 0u),
                                          encode_position_strand(5u, 1u),
                                          encode_position_strand(8u, 0u)};
-    std::uint64_t checksum = idx_ns::k_gpu_source_direct_checksum_seed;
+    const std::uint64_t checksum = idx_ns::gpu_sorted_dense_payload_checksum(controls, positions);
+    // Independent field serialization pins the canonical byte stream and CRC concatenation.
+    idx_ns::crc64_ecma182_accumulator serialized_crc{idx_ns::k_gpu_source_direct_checksum_seed};
     for (const auto& control : controls) {
-        checksum = idx_ns::gpu_source_direct_checksum_word(
-            checksum, control.hash);
-        checksum = idx_ns::gpu_source_direct_checksum_word(
-            checksum, control.pos_offset);
-        for (std::uint64_t i = control.pos_offset;
-             i < control.pos_offset + control.pos_count; ++i) {
-            checksum = idx_ns::gpu_source_direct_checksum_word(
-                checksum, positions[static_cast<std::size_t>(i)]);
-        }
-        checksum = idx_ns::gpu_source_direct_checksum_word(
-            checksum, control.pos_count);
+        serialized_crc.update_little_endian(control.hash);
+        serialized_crc.update_little_endian(control.pos_offset);
+        serialized_crc.update_little_endian(control.pos_count);
     }
+    for (const auto encoded : positions) serialized_crc.update_little_endian(encoded);
+    REQUIRE(serialized_crc.checksum() == checksum);
     const auto validation = seed::validate_mapped_sorted_dense_payload(
         controls, positions, 100u, checksum);
     REQUIRE(validation.canonical_order_checked);
@@ -580,6 +577,47 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     mutated_controls[1].pos_offset = 1u;
     REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
         mutated_controls, positions, 100u, checksum).is_valid);
+
+    // Structurally valid payload mutations must still fail the saved CRC.
+    auto changed_hash = controls;
+    ++changed_hash.front().hash;
+    REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
+        changed_hash, positions, 100u, checksum).is_valid);
+    auto changed_strand = positions;
+    changed_strand.back() ^= 1u;
+    REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
+        controls, changed_strand, 100u, checksum).is_valid);
+
+    // A matching recomputed CRC never authorizes malformed structure.
+    const auto rejects_structure = [&positions](const auto& candidate_controls) {
+        return !seed::validate_mapped_sorted_dense_payload(candidate_controls, positions, 100u,
+            idx_ns::gpu_sorted_dense_payload_checksum(candidate_controls, positions)).is_valid;
+    };
+    auto duplicate_hash = controls;
+    duplicate_hash.back().hash = duplicate_hash.front().hash;
+    REQUIRE(rejects_structure(duplicate_hash));
+    auto zero_count = controls;
+    zero_count.front().pos_count = 0u;
+    REQUIRE(rejects_structure(zero_count));
+    auto uncovered_tail = controls;
+    uncovered_tail.pop_back();
+    REQUIRE(rejects_structure(uncovered_tail));
+    auto oversized_count = controls;
+    ++oversized_count.back().pos_count;
+    REQUIRE(rejects_structure(oversized_count));
+    auto out_of_bounds_position = positions;
+    out_of_bounds_position.back() = encode_position_strand(100u, 0u);
+    REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(controls, out_of_bounds_position, 100u,
+        idx_ns::gpu_sorted_dense_payload_checksum(controls, out_of_bounds_position)).is_valid);
+
+    // Only active spans participate; capacity tails are not payload bytes.
+    auto extended_controls = controls;
+    extended_controls.push_back({.hash = ~std::uint64_t{0}, .pos_offset = 0u, .pos_count = 0u});
+    auto extended_positions = positions;
+    extended_positions.push_back(~std::uint64_t{0});
+    REQUIRE(idx_ns::gpu_sorted_dense_payload_checksum(
+        std::span<const idx_ns::gpu_minimizer_slot>{extended_controls}.first(controls.size()),
+        std::span<const std::uint64_t>{extended_positions}.first(positions.size())) == checksum);
 
     // Recheck the mapped target before building the prefix. A change after
     // counting must fail before any prefix is returned.

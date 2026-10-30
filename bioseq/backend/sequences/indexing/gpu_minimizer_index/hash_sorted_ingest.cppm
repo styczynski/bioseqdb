@@ -40,6 +40,7 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.storage;
 import bioseq.indexing.type;
+import bioseq.instrumentation;
 import bioseq.parallelism.memory_admission;
 import bioseq.pipeline.runtime_contract;
 import bioseq.sequences.kmers.highway_minimizer_contract;
@@ -277,6 +278,7 @@ struct gpu_source_direct_materialization_stats {
     std::uint64_t retained_permit_bytes = 0u;
     std::uint64_t permit_reconciliations = 0u;
     std::uint64_t complete_source_traversals = 0u;
+    /// Complete mapped sweeps: structural validation and independent bulk CRC.
     std::uint64_t complete_mapped_traversals = 0u;
     gpu_resident_accounting_authority authority =
         gpu_resident_accounting_authority::none;
@@ -593,16 +595,24 @@ direct_fill_gpu_minimizer_index_sorted_dense(
     };
 }
 
-/// Fold one source or mapped word into the traversal checksum.
-[[nodiscard]] inline std::uint64_t gpu_source_direct_checksum_word(
-        std::uint64_t checksum,
-        std::uint64_t word) noexcept {
-    return splitmix64(checksum ^ splitmix64(word));
-}
-
-/// Initial value shared by source and mapped-data checksums.
+/// Initial state shared by source and mapped control-stream CRCs.
 inline constexpr std::uint64_t k_gpu_source_direct_checksum_seed =
     0x534f555243454450ULL;
+
+/**
+ * Checksum initialized active controls followed by encoded positions in wire order.
+ * Callers validate shape, order and coordinate bounds separately. The pinned
+ * little-endian 16-byte control has no padding; allocation tails are excluded.
+ * CRC-64/ECMA-182 is an integrity checksum, not a cryptographic authentication.
+ */
+[[nodiscard]] inline std::uint64_t gpu_sorted_dense_payload_checksum(
+    std::span<const gpu_minimizer_slot> controls,
+    std::span<const std::uint64_t> positions) noexcept {
+    crc64_ecma182_accumulator crc{k_gpu_source_direct_checksum_seed};
+    crc.update(std::as_bytes(controls));
+    crc.update(std::as_bytes(positions));
+    return crc.checksum();
+}
 
 /// Copy a hash-sorted source, into final controls and position intervals.
 ///
@@ -629,7 +639,8 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
         throw gpu_index_direct_fill_invariant{};
     }
 
-    std::uint64_t source_checksum = k_gpu_source_direct_checksum_seed;
+    crc64_ecma182_accumulator source_control_crc{k_gpu_source_direct_checksum_seed};
+    crc64_ecma182_accumulator source_position_crc;
     std::size_t source_offset = 0u;
     std::size_t control_index = 0u;
     std::uint64_t previous_hash = 0u;
@@ -640,10 +651,6 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             throw gpu_index_direct_fill_invariant{};
         }
         const std::size_t group_begin = source_offset;
-        source_checksum = gpu_source_direct_checksum_word(
-            source_checksum, hash);
-        source_checksum = gpu_source_direct_checksum_word(
-            source_checksum, group_begin);
         while (source_offset < source.size()
             && source[source_offset].kmer() == hash) {
             const std::uint64_t encoded =
@@ -653,8 +660,8 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
                 throw gpu_index_direct_fill_invariant{};
             }
             positions[source_offset] = encoded;
-            source_checksum = gpu_source_direct_checksum_word(
-                source_checksum, encoded);
+            source_position_crc.update(std::as_bytes(
+                std::span{std::addressof(encoded), std::size_t{1}}));
             ++source_offset;
         }
         const std::uint64_t count = source_offset - group_begin;
@@ -664,13 +671,14 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             || count > (std::numeric_limits<std::uint32_t>::max)()) {
             throw gpu_index_direct_fill_invariant{};
         }
-        controls[control_index] = gpu_minimizer_slot{
+        const gpu_minimizer_slot control{
             .hash = hash,
             .pos_offset = static_cast<std::uint32_t>(group_begin),
             .pos_count = static_cast<std::uint32_t>(count),
         };
-        source_checksum = gpu_source_direct_checksum_word(
-            source_checksum, count);
+        source_control_crc.update(std::as_bytes(
+            std::span{std::addressof(control), std::size_t{1}}));
+        controls[control_index] = control;
         previous_hash = hash;
         have_previous_hash = true;
         ++control_index;
@@ -680,7 +688,8 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
         throw gpu_index_direct_fill_invariant{};
     }
 
-    std::uint64_t mapped_checksum = k_gpu_source_direct_checksum_seed;
+    const std::uint64_t source_checksum = crc64_ecma182_concatenate(
+        source_control_crc.checksum(), source_position_crc.checksum(), positions.size_bytes());
     std::uint64_t covered_positions = 0u;
     previous_hash = 0u;
     have_previous_hash = false;
@@ -693,10 +702,6 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             || (have_previous_hash && control.hash <= previous_hash)) {
             throw gpu_index_direct_fill_invariant{};
         }
-        mapped_checksum = gpu_source_direct_checksum_word(
-            mapped_checksum, control.hash);
-        mapped_checksum = gpu_source_direct_checksum_word(
-            mapped_checksum, offset);
         for (std::uint64_t position_index = offset;
              position_index < offset + count; ++position_index) {
             const std::uint64_t encoded =
@@ -705,15 +710,12 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
                 >= static_cast<std::uint64_t>(target_len)) {
                 throw gpu_index_direct_fill_invariant{};
             }
-            mapped_checksum = gpu_source_direct_checksum_word(
-                mapped_checksum, encoded);
         }
-        mapped_checksum = gpu_source_direct_checksum_word(
-            mapped_checksum, count);
         covered_positions += count;
         previous_hash = control.hash;
         have_previous_hash = true;
     }
+    const std::uint64_t mapped_checksum = gpu_sorted_dense_payload_checksum(controls, positions);
     if (covered_positions != positions.size()
         || source_checksum != mapped_checksum) {
         throw gpu_index_direct_fill_invariant{};
@@ -723,7 +725,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
         .source_checksum = source_checksum,
         .mapped_checksum = mapped_checksum,
         .complete_source_traversals = 1u,
-        .complete_mapped_traversals = 1u,
+        .complete_mapped_traversals = 2u,
     };
 }
 
@@ -1484,7 +1486,6 @@ materialize_sorted_dense_from_segmented_spill_replay(
                         throw gpu_index_direct_fill_invariant{};
                     }
 
-                    std::uint64_t checksum = k_gpu_source_direct_checksum_seed;
                     std::uint64_t covered_positions = 0u;
                     for (std::size_t index = 0u; index < controls.size(); ++index) {
                         const gpu_minimizer_slot& control = controls[index];
@@ -1499,9 +1500,6 @@ materialize_sorted_dense_from_segmented_spill_replay(
                             (index != 0u && controls[index - 1u].hash >= control.hash)) {
                             throw gpu_index_direct_fill_invariant{};
                         }
-                        checksum = gpu_source_direct_checksum_word(checksum, control.hash);
-                        checksum = gpu_source_direct_checksum_word(
-                            checksum, control.pos_offset);
                         for (std::uint64_t position_index = control.pos_offset;
                              position_index < interval_end;
                              ++position_index) {
@@ -1513,18 +1511,17 @@ materialize_sorted_dense_from_segmented_spill_replay(
                                      encoded)) {
                                 throw gpu_index_direct_fill_invariant{};
                             }
-                            checksum = gpu_source_direct_checksum_word(checksum, encoded);
                         }
-                        checksum = gpu_source_direct_checksum_word(checksum, expected_count);
                         covered_positions += expected_count;
                     }
+                    const std::uint64_t checksum = gpu_sorted_dense_payload_checksum(controls, positions);
                     if (covered_positions != positions.size() || checksum == 0u) {
                         throw gpu_index_direct_fill_invariant{};
                     }
                     stats.source_checksum = checksum;
                     stats.mapped_checksum = checksum;
                     stats.complete_source_traversals = 2u;
-                    stats.complete_mapped_traversals = 1u;
+                    stats.complete_mapped_traversals = 2u;
                     return {
                         .actual_allocation_bytes = actual,
                         .fully_touched_bytes = actual,
@@ -2213,7 +2210,6 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                     }
 
                     mapped_fragment_gpu_detail::membership_digest mapped_digest{};
-                    std::uint64_t checksum = k_gpu_source_direct_checksum_seed;
                     covered_positions = 0u;
                     for (std::size_t index = 0u; index < compact_controls.size(); ++index) {
                         gpu_minimizer_slot& control = compact_controls[index];
@@ -2229,8 +2225,6 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                              compact_controls[index - 1u].hash >= control.hash)) {
                             throw gpu_index_direct_fill_invariant{};
                         }
-                        checksum = gpu_source_direct_checksum_word(checksum, control.hash);
-                        checksum = gpu_source_direct_checksum_word(checksum, control.pos_offset);
                         for (std::uint64_t offset = control.pos_offset;
                              offset < control.pos_offset + expected_count;
                              ++offset) {
@@ -2241,11 +2235,10 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                                 throw gpu_index_direct_fill_invariant{};
                             }
                             mapped_digest.add(control.hash, encoded);
-                            checksum = gpu_source_direct_checksum_word(checksum, encoded);
                         }
-                        checksum = gpu_source_direct_checksum_word(checksum, expected_count);
                         covered_positions += expected_count;
                     }
+                    const std::uint64_t checksum = gpu_sorted_dense_payload_checksum(compact_controls, positions);
                     if (covered_positions != position_count ||
                         !(posting_state.source_digest == mapped_digest) || checksum == 0u) {
                         throw gpu_index_direct_fill_invariant{};
@@ -2275,7 +2268,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                     stats.source_checksum = checksum;
                     stats.mapped_checksum = checksum;
                     stats.complete_source_traversals = 2u;
-                    stats.complete_mapped_traversals = 1u;
+                    stats.complete_mapped_traversals = 2u;
                     return {
                         .actual_allocation_bytes = actual,
                         .fully_touched_bytes = actual,
@@ -2656,14 +2649,19 @@ adopt_gpu_built_index(
 /**
  * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
  *
- * Check the build record, then read each final control and posxtion once to
- * verify sorted hashes, contiguous intervals, and, target bounds. Save the
- * resulting checksum for the prefix-search consumer. The existing buffers
+ * Check the build record, then inspect every final control and position to
+ * verify sorted hashes, contiguous intervals, and target bounds, then make a
+ * separate bulk CRC sweep over initialized active bytes. Record both mapped
+ * traversals and save the checksum for the prefix-search consumer. The existing buffers
  * remain the index used by both CPU and GPU code.
  */
 [[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
     const bioseq::gpu::vulkan::runtime& runtime,
     gpu_resident_minimizer_index& resident, bool strict_prefix = true) noexcept {
+    static const auto* authentication_region_description =
+        bioseq::instrumentation::register_static_region("gpu_index_authenticate");
+    auto authentication_region_scope =
+        bioseq::instrumentation::region(authentication_region_description);
     const auto& key = resident.key;
     if (!runtime.is_usable() || !resident.slots.is_valid() ||
         !resident.positions.is_valid() || resident.slots.owner != &runtime ||
@@ -2713,7 +2711,6 @@ adopt_gpu_built_index(
     const auto positions = std::span<const std::uint64_t>{
         static_cast<const std::uint64_t*>(resident.positions.mapped),
         resident.position_count};
-    std::uint64_t checksum = k_gpu_source_direct_checksum_seed;
     std::uint64_t covered_positions = 0u;
     std::uint64_t previous_hash = 0u;
     bool have_previous_hash = false;
@@ -2725,27 +2722,24 @@ adopt_gpu_built_index(
             (have_previous_hash && control.hash <= previous_hash)) {
             return false;
         }
-        checksum = gpu_source_direct_checksum_word(checksum, control.hash);
-        checksum = gpu_source_direct_checksum_word(checksum, offset);
         for (std::uint64_t index = offset; index < offset + count; ++index) {
             const std::uint64_t encoded = positions[static_cast<std::size_t>(index)];
             if ((encoded >> 1u) >= static_cast<std::uint64_t>(resident.target_len)) {
                 return false;
             }
-            checksum = gpu_source_direct_checksum_word(checksum, encoded);
         }
-        checksum = gpu_source_direct_checksum_word(checksum, count);
         covered_positions += count;
         previous_hash = control.hash;
         have_previous_hash = true;
     }
+    const std::uint64_t checksum = gpu_sorted_dense_payload_checksum(controls, positions);
     if (covered_positions != positions.size() || checksum == 0u) {
         return false;
     }
     resident.source_stream_checksum = checksum;
     resident.mapped_stream_checksum = checksum;
     resident.complete_source_traversals = 1u;
-    resident.complete_mapped_traversals = 1u;
+    resident.complete_mapped_traversals = 2u;
     return true;
 }
 

@@ -401,6 +401,12 @@ template <class p_target_owner>
 [[nodiscard]] vulkan_seed_target_execution
 make_mpf_target_execution(const p_target_owner& owner) {
     const bool has_spill = owner.transient_target_spill_receipt.has_value();
+    const std::uint64_t mapped_sweeps = owner.resident_materialization_stats.has_value()
+        ? owner.resident_materialization_stats->complete_mapped_traversals : 0u;
+    if (owner.persisted && mapped_sweeps != (owner.canonical_empty ? 0u : 2u)) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "MPF persisted target has no complete mapped validation and CRC proof");
+    }
     vulkan_seed_target_execution proof{
         .completion = owner.persisted
             ? vulkan_seed_target_completion_kind::mpf_persisted
@@ -422,10 +428,8 @@ make_mpf_target_execution(const p_target_owner& owner) {
                       owner.resident_materialization_stats
                               ->actual_position_allocation_bytes != 0u)
             : 0u,
-        .resident_ingestions = owner.persisted &&
-                owner.resident_materialization_stats.has_value()
-            ? owner.resident_materialization_stats->complete_mapped_traversals
-            : 0u,
+        // One successful ingestion has two physical mapped validation sweeps.
+        .resident_ingestions = owner.persisted && !owner.canonical_empty ? 1u : 0u,
         .canonical_empty = owner.canonical_empty,
         .query_empty_bypass = !owner.persisted && !has_spill,
         .producer_receipt_present = has_spill,

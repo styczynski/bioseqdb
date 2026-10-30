@@ -86,9 +86,8 @@ struct mapped_sorted_dense_prefix_view {
 
 /// Results of checking the complete mapped index payload.
 struct mapped_sorted_dense_payload_validation {
-    /** Rolling checksum over control and position payload words. */
-    std::uint64_t checksum =
-        bioseq::indexing::k_gpu_source_direct_checksum_seed;
+    /** CRC over initialized active controls followed by encoded positions. */
+    std::uint64_t checksum = 0u;
     /** Positions covered by validated control runs. */
     std::uint64_t covered_position_count = 0u;
     /** Whether the payload-validation pass was requested. */
@@ -133,24 +132,16 @@ validate_mapped_sorted_dense_payload(
             || (have_previous_hash && control.hash <= previous_hash)) {
             return validation;
         }
-        validation.checksum = bioseq::indexing::gpu_source_direct_checksum_word(
-            validation.checksum, control.hash);
-        validation.checksum = bioseq::indexing::gpu_source_direct_checksum_word(
-            validation.checksum, offset);
         for (std::uint64_t i = offset; i < offset + count; ++i) {
             const std::uint64_t encoded =
                 positions[static_cast<std::size_t>(i)];
             if ((encoded >> 1u) >= target_len) return validation;
-            validation.checksum =
-                bioseq::indexing::gpu_source_direct_checksum_word(
-                    validation.checksum, encoded);
         }
-        validation.checksum = bioseq::indexing::gpu_source_direct_checksum_word(
-            validation.checksum, count);
         validation.covered_position_count += count;
         previous_hash = control.hash;
         have_previous_hash = true;
     }
+    validation.checksum = bioseq::indexing::gpu_sorted_dense_payload_checksum(controls, positions);
     validation.is_valid =
         validation.covered_position_count == positions.size()
         && validation.checksum == expected_checksum;
@@ -251,7 +242,7 @@ validated_mapped_sorted_dense_prefix_view(
             != resident->mapped_stream_checksum
         || (resident->complete_source_traversals != 1u &&
             resident->complete_source_traversals != 2u)
-        || resident->complete_mapped_traversals != 1u) {
+        || resident->complete_mapped_traversals != 2u) {
         throw mapped_prefix_invalid_error{};
     }
     const std::uint64_t control_bytes = saturating_mul(

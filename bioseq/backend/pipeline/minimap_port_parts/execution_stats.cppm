@@ -141,6 +141,7 @@ struct partial_vulkan_execution_stats {
     std::uint64_t gpu_index_source_direct_source_released_bytes = 0;
     std::uint64_t gpu_index_source_direct_checksum_matches = 0;
     std::uint64_t gpu_index_source_direct_source_traversals = 0;
+    /// Complete mapped sweeps: structural validation plus bulk CRC for each materialization.
     std::uint64_t gpu_index_source_direct_mapped_traversals = 0;
     std::uint64_t gpu_index_source_direct_reflected_authorities = 0;
     std::uint64_t gpu_index_source_direct_retained_authorities = 0;

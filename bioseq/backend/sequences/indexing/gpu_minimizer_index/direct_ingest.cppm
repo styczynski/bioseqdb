@@ -542,6 +542,7 @@ struct gpu_resident_minimizer_index {
     std::uint64_t source_stream_checksum = 0u;
     std::uint64_t mapped_stream_checksum = 0u;
     std::uint64_t complete_source_traversals = 0u;
+    /// Complete mapped sweeps: structural validation and independent bulk CRC.
     std::uint64_t complete_mapped_traversals = 0u;
 };
 static_assert(std::is_standard_layout_v<gpu_resident_minimizer_index>);

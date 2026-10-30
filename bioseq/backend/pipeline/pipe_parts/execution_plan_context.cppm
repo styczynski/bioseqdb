@@ -707,7 +707,7 @@ export {
                    materialization.source_checksum != 0u &&
                    materialization.source_checksum == materialization.mapped_checksum &&
                    materialization.complete_source_traversals == 1u &&
-                   materialization.complete_mapped_traversals == 1u;
+                   materialization.complete_mapped_traversals == 2u;
         }
 
         void log_terminal(std::string_view status, std::string_view reason) noexcept {

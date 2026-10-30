@@ -1875,7 +1875,7 @@ is_source_direct_gpu_index_materialization_consistent(
         && stats.gpu_index_source_direct_source_released_bytes != 0u
         && stats.gpu_index_source_direct_checksum_matches == 1u
         && stats.gpu_index_source_direct_source_traversals == 1u
-        && stats.gpu_index_source_direct_mapped_traversals == 1u
+        && stats.gpu_index_source_direct_mapped_traversals == 2u
         && (reflected_authority != retained_authority)
         && stats.gpu_index_source_direct_cache_preinsertions == 1u
         && (seeded_pipeline || zero_query_seed)
@@ -1925,7 +1925,7 @@ static_assert([] {
         stats.gpu_index_source_direct_source_released_bytes = 512u;
         stats.gpu_index_source_direct_checksum_matches = 1u;
         stats.gpu_index_source_direct_source_traversals = 1u;
-        stats.gpu_index_source_direct_mapped_traversals = 1u;
+        stats.gpu_index_source_direct_mapped_traversals = 2u;
         stats.gpu_index_source_direct_reflected_authorities = 1u;
         stats.gpu_index_source_direct_cache_preinsertions = 1u;
         stats.gpu_index_source_direct_expected_seed_consumers = 1u;

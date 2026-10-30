@@ -954,7 +954,7 @@ using resident_authority_type = bioseq::indexing::
                 ? 4'096u : 0u,
         .permit_reconciliations = 1u,
         .complete_source_traversals = 1u,
-        .complete_mapped_traversals = 1u,
+        .complete_mapped_traversals = 2u,
         .authority = authority,
     };
     state.source_authority =

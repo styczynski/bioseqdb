@@ -652,7 +652,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
     REQUIRE(direct.gpu_index_source_direct_source_releases == 1u);
     REQUIRE(direct.gpu_index_source_direct_checksum_matches == 1u);
     REQUIRE(direct.gpu_index_source_direct_source_traversals == 1u);
-    REQUIRE(direct.gpu_index_source_direct_mapped_traversals == 1u);
+    REQUIRE(direct.gpu_index_source_direct_mapped_traversals == 2u);
     REQUIRE(direct.gpu_index_source_direct_cache_preinsertions == 1u);
     REQUIRE(direct.gpu_index_source_direct_required_misses == 0u);
     REQUIRE(direct.gpu_index_source_direct_fallback_attempts == 0u);

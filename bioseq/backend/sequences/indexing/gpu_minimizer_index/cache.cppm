@@ -330,7 +330,7 @@ public:
             || resident->source_stream_checksum
                 != resident->mapped_stream_checksum
             || resident->complete_source_traversals != 1u
-            || resident->complete_mapped_traversals != 1u
+            || resident->complete_mapped_traversals != 2u
             || !gpu_exact_resident_authority_valid(
                 resident->accounting_authority,
                 resident->materialization,
@@ -423,7 +423,7 @@ public:
             required_position_bytes > resident->positions.allocation_bytes ||
             resident->source_stream_checksum == 0u ||
             resident->source_stream_checksum != resident->mapped_stream_checksum ||
-            !source_traversals_valid || resident->complete_mapped_traversals != 1u ||
+            !source_traversals_valid || resident->complete_mapped_traversals != 2u ||
             !gpu_exact_resident_authority_valid(resident->accounting_authority,
                                                 resident->materialization,
                                                 static_cast<bool>(resident->permit),
