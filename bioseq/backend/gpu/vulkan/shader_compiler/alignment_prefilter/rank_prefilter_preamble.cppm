@@ -120,32 +120,88 @@ bool prefilter_job_is_in_bounds(prefilter_job job) {
         && uint64_t(job.target_length) <= target.bp_count - uint64_t(job.target_start)
         && (job.orientation == 0u || (job.orientation == 3u && canonical_reverse_complement != 0u));
 }
+// Retain a packed word across adjacent chunks without expanding source storage.
+struct native_packed_word_cache {
+    uint64_t word_index;
+    uint word;
+};
+uint cached_native_packed_word(uint64_t word_index, inout native_packed_word_cache cache) {
+    if (word_index != cache.word_index) {
+        cache.word_index = word_index;
+        cache.word = packed_words[uint(word_index)];
+    }
+    return cache.word;
+}
+// Read one to four active rank fields wholly inside one native storage unit.
+// The caller bounds first_slot/count; inactive slots and spare unit bits are masked.
+uint native_packed_chunk_bits(
+    gpu_sequence_view sequence,
+    native_packed_cursor cursor,
+    uint first_slot,
+    uint count,
+    inout native_packed_word_cache cache)
+{
+    uint bit_offset = first_slot * sequence.bits_per_char;
+    uint bit_count = count * sequence.bits_per_char;
+    uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
+    uint64_t word_index = byte_index >> 2u;
+    uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
+    uint bits = cached_native_packed_word(word_index, cache) >> word_shift;
+    if (word_shift + bit_count > 32u)
+        bits |= cached_native_packed_word(word_index + uint64_t(1), cache) << (32u - word_shift);
+    return bits & (0xffffffffu >> (32u - bit_count));
+}
+// Normalize only a bounded register chunk when rank widths or orientation differ.
+uint native_packed_chunk_rank_bytes(
+    uint packed,
+    gpu_sequence_view sequence,
+    uint count,
+    bool reverse_complement)
+{
+    uint ranks = 0u;
+    for (uint lane = 0u; lane < count; ++lane) {
+        uint source_lane = reverse_complement ? count - 1u - lane : lane;
+        uint rank = (packed >> (source_lane * sequence.bits_per_char)) & sequence.char_mask;
+        if (reverse_complement) rank = rank_to_rc_code[rank];
+        ranks |= rank << (lane * 8u);
+    }
+    return ranks;
+}
+// Advance by at most the active slots left in this unit; callers skip the final advance.
+void advance_native_packed_cursor(
+    gpu_sequence_view sequence,
+    inout native_packed_cursor cursor,
+    uint count,
+    bool reverse)
+{
+    if (reverse) {
+        if (count <= cursor.slot) {
+            cursor.slot -= count;
+        } else {
+            cursor.unit_byte_index -= uint64_t(sequence.unit_bits / 8u);
+            cursor.slot = sequence.letters_per_unit - 1u;
+        }
+    } else {
+        cursor.slot += count;
+        if (cursor.slot == sequence.letters_per_unit) {
+            cursor.slot = 0u;
+            cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
+        }
+    }
+}
 // Four logical ranks remain in registers. Reuse each loaded packed word across
 // slots, including non-power-of-two letters/unit and cross-word symbols.
 // Caller has already proved [position, position + 4) is inside this descriptor.
 uint native_packed_rank_quad(gpu_sequence_view sequence, uint64_t position) {
     native_packed_cursor cursor = native_packed_begin(sequence, position);
     uint initial_bit = cursor.slot * sequence.bits_per_char;
-    uint64_t cached_word_index =
+    uint64_t word_index =
         (cursor.unit_byte_index + uint64_t(initial_bit >> 3u)) >> 2u;
-    uint cached_word = packed_words[uint(cached_word_index)];
+    native_packed_word_cache cache = native_packed_word_cache(word_index, packed_words[uint(word_index)]);
     uint expanded_ranks = 0u;
     for (uint lane = 0u; lane < 4u; ++lane) {
-        uint bit_offset = cursor.slot * sequence.bits_per_char;
-        uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
-        uint64_t word_index = byte_index >> 2u;
-        if (word_index != cached_word_index) {
-            cached_word_index = word_index;
-            cached_word = packed_words[uint(word_index)];
-        }
-        uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
-        uint rank = cached_word >> word_shift;
-        if (word_shift + sequence.bits_per_char > 32u) {
-            cached_word_index = word_index + uint64_t(1);
-            cached_word = packed_words[uint(cached_word_index)];
-            rank |= cached_word << (32u - word_shift);
-        }
-        expanded_ranks |= (rank & sequence.char_mask) << (lane * 8u);
+        uint rank = native_packed_chunk_bits(sequence, cursor, cursor.slot, 1u, cache);
+        expanded_ranks |= rank << (lane * 8u);
         if (lane + 1u < 4u) {
             ++cursor.slot;
             if (cursor.slot == sequence.letters_per_unit) {
