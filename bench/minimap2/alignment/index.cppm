@@ -1779,11 +1779,12 @@ is_source_direct_gpu_index_materialization_consistent(
                 && stats.seed_anchor_digest_lane1 == 0u
             : stats.seed_anchor_digest_lane0 != 0u
                 && stats.seed_anchor_digest_lane1 != 0u);
-    const bool positive_seed_slab =
+    // Candidate admission bounds verified output; an empty verified result still dispatched.
+    const bool dispatched_seed_slab =
         stats.gpu_index_source_direct_mapped_prefix_lookups != 0u
         && stats.gpu_index_source_direct_seed_slab_requested_bytes != 0u
-        && stats.gpu_index_source_direct_seed_slab_requested_bytes
-            == stats.gpu_index_source_direct_seed_slab_actual_bytes
+        && stats.gpu_index_source_direct_seed_slab_actual_bytes
+            <= stats.gpu_index_source_direct_seed_slab_requested_bytes
         && stats.gpu_index_source_direct_seed_slab_actual_bytes
             == stats.gpu_index_source_direct_seed_slab_retained_bytes
         && stats.gpu_index_source_direct_seed_slab_permit_releases == 1u
@@ -1792,14 +1793,15 @@ is_source_direct_gpu_index_materialization_consistent(
             == stats.gpu_index_source_direct_seed_actual_vulkan_bytes
         && stats.gpu_index_source_direct_seed_planned_vulkan_bytes
             <= max_u64
-                - stats.gpu_index_source_direct_seed_slab_actual_bytes
+                - stats.gpu_index_source_direct_seed_slab_requested_bytes
         && stats.gpu_index_source_direct_seed_reserved_bytes
             >= stats.gpu_index_source_direct_seed_planned_vulkan_bytes
-                + stats.gpu_index_source_direct_seed_slab_actual_bytes
+                + stats.gpu_index_source_direct_seed_slab_requested_bytes
         && stats.gpu_index_source_direct_seed_roundtrips
             == stats.gpu_index_source_direct_required_lookups
         && stats.gpu_index_source_direct_zero_anchor_bypasses == 0u
-        && stats.seed_canonical_anchor_count != 0u
+        && (stats.seed_canonical_anchor_count == 0u)
+            == (stats.gpu_index_source_direct_seed_slab_actual_bytes == 0u)
         && stats.seed_lookup_dispatches
             == stats.gpu_index_source_direct_seed_roundtrips
         && stats.seed_open_addressed_lookup_dispatches == 0u
@@ -1864,7 +1866,7 @@ is_source_direct_gpu_index_materialization_consistent(
         stats.gpu_index_source_direct_pipeline_completions == 1u
         && exact_required_cache_use
         && exact_anchor_stats
-        && (positive_seed_slab || zero_anchor_seed);
+        && (dispatched_seed_slab || zero_anchor_seed);
 
     return exact_direct_allocation
         && exact_sorted_dense_shape
@@ -1971,6 +1973,45 @@ static_assert([] {
     retained.gpu_index_reflected_footprint_bytes = 0u;
     if (!is_source_direct_gpu_index_materialization_consistent(retained)) {
         return false;
+    }
+
+    for (const std::uint64_t verified_bytes : std::array<std::uint64_t, 2u>{512u, 0u}) {
+        auto verified = reflected;
+        verified.gpu_index_source_direct_seed_slab_actual_bytes = verified_bytes;
+        verified.gpu_index_source_direct_seed_slab_retained_bytes = verified_bytes;
+        verified.seed_canonical_anchor_count = verified_bytes == 0u ? 0u : 1u;
+        if (!is_source_direct_gpu_index_materialization_consistent(verified)) {
+            return false;
+        }
+        auto rejected = verified;
+        rejected.gpu_index_source_direct_seed_slab_actual_bytes = 1'025u;
+        rejected.gpu_index_source_direct_seed_slab_retained_bytes = 1'025u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        ++rejected.gpu_index_source_direct_seed_slab_retained_bytes;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.gpu_index_source_direct_seed_slab_permit_releases = 0u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.gpu_index_source_direct_seed_slab_permit_releases = 2u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.gpu_index_source_direct_zero_anchor_bypasses = 1u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.seed_lookup_dispatches = 0u;
+        rejected.seed_sorted_dense_lookup_dispatches = 0u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.gpu_index_source_direct_seed_fence_completions = 0u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.gpu_index_source_direct_seed_reserved_bytes = 3'071u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
+        rejected = verified;
+        rejected.seed_canonical_anchor_count = verified_bytes == 0u ? 1u : 0u;
+        if (is_source_direct_gpu_index_materialization_consistent(rejected)) return false;
     }
 
     auto zero_anchor = reflected;

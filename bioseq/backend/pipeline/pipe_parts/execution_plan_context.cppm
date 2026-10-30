@@ -663,21 +663,24 @@ export {
                     bioseq::indexing::gpu_resident_accounting_authority::retained_exact_permit &&
                 materialization.retained_permit_bytes == materialization.actual_allocation_bytes &&
                 materialization.reflected_footprint_bytes == 0u;
+            // Native verification may reject candidates, including every candidate.
+            // A dispatched lookup still owns and releases its permit after shrinking it to zero.
+            const bool seed_dispatched = seed_dispatches != 0u;
             const bool slab_exact =
-                slab_capacity_before == 0u && slab_requested_bytes == slab_actual_bytes &&
+                slab_capacity_before == 0u && slab_actual_bytes <= slab_requested_bytes &&
                 slab_actual_bytes == slab_retained_permit_bytes &&
-                (slab_actual_bytes == 0u ? slab_permit_releases == 0u : slab_permit_releases == 1u);
+                (seed_dispatched ? slab_requested_bytes != 0u && slab_permit_releases == 1u
+                                 : slab_requested_bytes == 0u && slab_permit_releases == 0u);
             const bool zero_query = zero_query_bypasses == 1u;
             const bool seed_memory_exact =
-                zero_query ? seed_reserved_bytes == 0u && seed_planned_vulkan_bytes == 0u &&
-                                 seed_actual_vulkan_bytes == 0u
-                : slab_actual_bytes == 0u
-                    ? seed_reserved_bytes == 0u && seed_planned_vulkan_bytes == 0u &&
-                          seed_actual_vulkan_bytes == 0u
-                    : seed_reserved_bytes != 0u && seed_planned_vulkan_bytes != 0u &&
-                          seed_planned_vulkan_bytes == seed_actual_vulkan_bytes;
-            const bool zero_anchor =
-                !zero_query && seed_roundtrips != 0u && zero_anchor_bypasses == seed_roundtrips;
+                seed_dispatched
+                    ? seed_planned_vulkan_bytes != 0u &&
+                          seed_planned_vulkan_bytes == seed_actual_vulkan_bytes &&
+                          seed_planned_vulkan_bytes <=
+                              (std::numeric_limits<std::uint64_t>::max)() - slab_requested_bytes &&
+                          seed_reserved_bytes >= seed_planned_vulkan_bytes + slab_requested_bytes
+                    : seed_reserved_bytes == 0u && seed_planned_vulkan_bytes == 0u &&
+                          seed_actual_vulkan_bytes == 0u;
             const bool lookup_exact =
                 zero_query ? cache_required_hits == cache_required_lookups &&
                                  cache_required_lookups == completed_seed_consumers &&
@@ -691,11 +694,10 @@ export {
                 (zero_query ? slab_actual_bytes == 0u && slab_requested_bytes == 0u &&
                                   zero_anchor_bypasses == 0u && seed_dispatches == 0u &&
                                   seed_fence_completions == 0u
-                 : slab_actual_bytes == 0u
-                     ? zero_anchor_bypasses == seed_roundtrips && seed_dispatches == 0u &&
-                           seed_fence_completions == 0u
-                     : zero_anchor_bypasses == 0u && seed_dispatches == seed_roundtrips &&
-                           seed_fence_completions == seed_roundtrips);
+                 : seed_dispatched
+                     ? zero_anchor_bypasses == 0u && seed_dispatches == seed_roundtrips &&
+                           seed_fence_completions == seed_roundtrips
+                     : zero_anchor_bypasses == seed_roundtrips && seed_fence_completions == 0u);
             return exact_materialization && source_releases == 1u &&
                    source_released_bytes == source_capacity_bytes &&
                    source_released_after_publication && cache_preinsertions == 1u && lookup_exact &&
@@ -810,7 +812,7 @@ export {
                                  mapped_prefix_passes == 2u * cache_required_lookups,
                                  mapped_prefix_bypass),
                     stage_status(slab_admission_started,
-                                 slab_requested_bytes == slab_actual_bytes &&
+                                 slab_actual_bytes <= slab_requested_bytes &&
                                      slab_actual_bytes == slab_retained_permit_bytes,
                                  explicit_pipeline_bypass || zero_anchor_bypass),
                     stage_status(seed_dispatch_started,

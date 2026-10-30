@@ -358,6 +358,51 @@ TEST_CASE("source-direct operation emits an exact two-receipt transaction",
         REQUIRE(state.terminal_success_invariants());
     }
 
+    SECTION("native verification reconciles admitted candidates to exact output ownership") {
+        for (const std::uint64_t verified_bytes : std::array<std::uint64_t, 2u>{512u, 0u}) {
+            CAPTURE(verified_bytes);
+            auto state = resident_pipeline_test_support::full_resident_state(
+                resident_authority_type::retained_exact_permit);
+            state.slab_actual_bytes = verified_bytes;
+            state.slab_retained_permit_bytes = verified_bytes;
+            REQUIRE(state.slab_requested_bytes == 1'024u);
+            REQUIRE(state.slab_permit_releases == 1u);
+            REQUIRE(state.seed_dispatches == 1u);
+            REQUIRE(state.seed_fence_completions == 1u);
+            REQUIRE(state.zero_anchor_bypasses == 0u);
+            REQUIRE(state.terminal_success_invariants());
+            state.log_terminal("success", "focused_verified_output_reconciliation");
+            REQUIRE(state.terminal_success);
+            REQUIRE(state.terminal_receipts == 1u);
+
+            auto rejected = state;
+            rejected.slab_actual_bytes = 1'025u;
+            rejected.slab_retained_permit_bytes = 1'025u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            ++rejected.slab_retained_permit_bytes;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.slab_permit_releases = 0u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.slab_permit_releases = 2u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.zero_anchor_bypasses = 1u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.seed_dispatches = 0u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.seed_fence_completions = 0u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+            rejected = state;
+            rejected.seed_reserved_bytes = 3'071u;
+            REQUIRE_FALSE(rejected.terminal_success_invariants());
+        }
+    }
+
     SECTION("zero anchors still complete two mapped-prefix passes") {
         auto state = resident_pipeline_test_support::full_resident_state(
             resident_authority_type::retained_exact_permit);
