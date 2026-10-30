@@ -767,8 +767,30 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         fixed_alignment_kernels<seq::dna5>().try_block_certified_gap(
             false, dna5_query_view, dna5_target_view,
             0u, dna5_text.size(), 0u, dna5_text.size(), dna5_plan);
-    CHECK(dna5_attempt.decision
-          == block_packed_certificate_decision::not_eligible);
+    // Resident DNA5 uses the generic native packed certificate path. N is a
+    // biological rank here; the matrix's separate padding rank is not an input.
+    REQUIRE(dna5_plan.is_contract_supported);
+    REQUIRE(dna5_plan.is_generated_matrix_supported);
+    REQUIRE(dna5_attempt.decision
+            == block_packed_certificate_decision::certified);
+    CHECK(dna5_attempt.certificate.is_certified);
+    CHECK(dna5_attempt.certificate.symbols == dna5_text.size());
+    CHECK(dna5_attempt.certificate.edit_distance == 0u);
+    CHECK(dna5_attempt.certificate.score
+          == static_cast<std::int32_t>(dna5_text.size() * 2u));
+    CHECK(dna5_attempt.certificate.vector_batches > 0u);
+
+    const reference_run dna5_optimized = run_block_mode<false, true, dna5_u64>(
+        dna5_text, dna5_text, dna5_scoring, params);
+    const reference_run dna5_forced_dp = run_block_mode<false, false, dna5_u64>(
+        dna5_text, dna5_text, dna5_scoring, params);
+    check_align_result_identical(dna5_optimized.result, dna5_forced_dp.result);
+    CHECK(dna5_optimized.result.score == dna5_attempt.certificate.score);
+    CHECK(dna5_optimized.stats.simd_diagonal_certificate_calls == 1u);
+    CHECK(dna5_forced_dp.stats.simd_diagonal_certificate_calls == 0u);
+    CHECK(dna5_forced_dp.stats.simd_dp_cells > 0u);
+    CHECK(dna5_optimized.stats.is_internally_consistent());
+    CHECK(dna5_forced_dp.stats.is_internally_consistent());
 
     std::array<std::int32_t, scoring_matrix<dna4_u64>::k_entry_count> dense_entries{};
     std::ranges::copy(scoring.score_entries(), dense_entries.begin());

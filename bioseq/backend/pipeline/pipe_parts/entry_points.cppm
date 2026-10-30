@@ -535,6 +535,8 @@ export {
         if (!is_gpu_target_index_build) {
             target_index.build_consuming(std::move(target_minimizers), target_len);
         } else {
+            // The empty host index still supplies the GPU cache key's target extent.
+            target_index.target_len = target_len;
             std::vector<p_minimizer>{}.swap(target_minimizers);
         }
         static const auto* _with_index_desc =
