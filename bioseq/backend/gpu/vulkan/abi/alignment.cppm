@@ -594,8 +594,8 @@ struct gpu_alignment_cigar_job_wire {
     std::uint32_t flags = 0;                   ///< `k_gpu_alignment_cigar_job_flags` bits for packed input and target orientation.
     std::uint32_t cigar_offset = 0;            ///< Output CIGAR array offset in operations.
     std::uint32_t cigar_capacity = 0;          ///< Maximum CIGAR operations writable for this job.
-    std::uint32_t traceback_tile_offset = 0;   ///< Offset in the traceback buffer, in 32-bit words.
-    std::uint32_t traceback_tile_count = 0;    ///< Number of 32-bit traceback words reserved for this job.
+    std::uint32_t traceback_tile_offset = 0;   ///< Zero on submission; the wave planner assigns the device-local word offset.
+    std::uint32_t traceback_tile_count = 0;    ///< Zero requests automatic screening/retry; otherwise the exact required word count.
     std::uint32_t query_packed_byte_count = 0; ///< Packed query bytes available to the shader.
     std::uint32_t target_packed_byte_count = 0;    ///< Packed target bytes available to the shader.
     std::uint32_t query_leading_symbol_offset = 0; ///< Symbols skipped in first query unit.

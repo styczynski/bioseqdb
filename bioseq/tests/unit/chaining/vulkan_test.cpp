@@ -1020,7 +1020,7 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
             .flags = 0,
             .cigar_offset = 3,
             .cigar_capacity = 3,
-            .traceback_tile_offset = 30,
+            .traceback_tile_offset = 0,
             .traceback_tile_count = 30,
         },
     };
@@ -1041,6 +1041,22 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
         .reserved = 0,
     };
 
+    // Admission remains strict for partial positive reservations and aggregate
+    // input offsets. Only zero or the exact per-job requirement is admitted.
+    const auto before_invalid = runtime.alignment_extension_dispatch_count();
+    for (const bool invalid_offset : {false, true}) {
+        auto malformed_jobs = jobs;
+        if (invalid_offset) malformed_jobs[1].traceback_tile_offset = 30u;
+        else --malformed_jobs[0].traceback_tile_count;
+        const auto rejected = runtime.run_alignment_simple_cigar_roundtrip(
+            packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
+            packed_alignment_fixture<seq::dna4>{target_symbols}.upload(),
+            malformed_jobs, params, fixture_matrix<seq::dna4>(params), 6u);
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error() == alignment_contract_error::coordinates);
+        CHECK(runtime.alignment_extension_dispatch_count() == before_invalid);
+    }
+
     const auto attempted =
         runtime.run_alignment_simple_cigar_roundtrip(
             packed_alignment_fixture<seq::dna4>{query_symbols}.upload(),
@@ -1049,6 +1065,8 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
             params,
             fixture_matrix<seq::dna4>(params),
             /*packed_cigar_capacity=*/6u);
+    INFO("GPU alignment admission error enum (-1=none): "
+         << (attempted.has_value() ? -1 : static_cast<int>(attempted.error())));
     REQUIRE(attempted.has_value());
     const auto& result = *attempted;
 
@@ -1225,6 +1243,8 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
             params,
             fixture_matrix<seq::dna4>(params),
             /*packed_cigar_capacity=*/6u);
+    INFO("GPU alignment admission error enum (-1=none): "
+         << (attempted.has_value() ? -1 : static_cast<int>(attempted.error())));
     REQUIRE(attempted.has_value());
     const auto& result = *attempted;
 
@@ -1329,6 +1349,8 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
             params,
             fixture_matrix<seq::dna4>(params),
             /*packed_cigar_capacity=*/256u);
+    INFO("GPU alignment admission error enum (-1=none): "
+         << (attempted.has_value() ? -1 : static_cast<int>(attempted.error())));
     REQUIRE(attempted.has_value());
     const auto& result = *attempted;
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();

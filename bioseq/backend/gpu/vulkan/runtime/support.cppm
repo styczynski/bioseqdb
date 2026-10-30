@@ -1071,7 +1071,8 @@ void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_jo
             static_cast<std::uint64_t>(job.cigar_offset) + job.cigar_capacity;
         if (required_traceback == 0u ||
             required_traceback > (std::numeric_limits<std::uint32_t>::max)() ||
-            job.traceback_tile_offset != 0u || job.traceback_tile_count != required_traceback ||
+            job.traceback_tile_offset != 0u ||
+            (job.traceback_tile_count != 0u && job.traceback_tile_count != required_traceback) ||
             traceback_end > std::numeric_limits<std::uint32_t>::max() ||
             job.cigar_offset != prior_cigar_end || cigar_end > packed_cigar_capacity ||
             job.query_global_start > (std::numeric_limits<std::uint32_t>::max)() - job.query_len ||
