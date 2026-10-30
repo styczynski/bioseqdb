@@ -125,15 +125,15 @@ struct soa_anchors {
         return query_spans;
     }
     /// @brief Return read-only rference coordinates stored in 32-bit words.
-    [[nodiscard]] const std::uint32_t* ref_data() const noexcept {
+    [[nodiscard, gnu::always_inline]] inline const std::uint32_t* ref_data() const noexcept {
         return ref_positions;
     }
     /// @brief Return read-only query coordinates.
-    [[nodiscard]] const std::uint32_t* query_data() const noexcept {
+    [[nodiscard, gnu::always_inline]] inline const std::uint32_t* query_data() const noexcept {
         return query_positions;
     }
     /// @brief Return read-only query seed spans.
-    [[nodiscard]] const std::uint32_t* span_data() const noexcept {
+    [[nodiscard, gnu::always_inline]] inline const std::uint32_t* span_data() const noexcept {
         return query_spans;
     }
 };
