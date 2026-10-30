@@ -261,15 +261,32 @@ struct prefilter_rank_window {
     std::size_t job_index{};
     bool target_source{};
     std::optional<prefilter_input_failure>* failure{};
-    mutable std::array<std::uint8_t, chunk_size> scratch{};
+    mutable std::array<std::uint8_t, chunk_size> scratch;
     mutable std::size_t loaded_from{};
     mutable std::size_t loaded_size{};
 
+    /**
+     * Binds an admitted job interval without initializing unread scratch bytes.
+     * The caller supplies a refill size in [1, chunk_size] and retains the shared
+     * failure until traversal ends. Empty cache counters guard every scratch read.
+     */
+    [[gnu::always_inline]] inline prefilter_rank_window(
+        const storage::borrowed_rank_window_source& source_value,
+        storage::sequence_size_t start_value, std::size_t length_value,
+        std::size_t cardinality_value, std::size_t refill_size_value,
+        std::size_t job_index_value, bool target_source_value,
+        std::optional<prefilter_input_failure>& failure_value) noexcept
+        : source(source_value), start(start_value), length(length_value),
+          cardinality(cardinality_value), refill_size(refill_size_value),
+          job_index(job_index_value), target_source(target_source_value),
+          failure(&failure_value) {}
+
     /** Returns the job interval size, not its backend's complete length. */
-    [[nodiscard]] std::size_t size() const noexcept { return length; }
+    [[nodiscard, gnu::always_inline]] inline std::size_t size() const noexcept { return length; }
 
     /** Reports whether the complete interval is already pinned and validated. */
-    [[nodiscard]] bool contains(std::size_t position, std::size_t count) const noexcept {
+    [[nodiscard, gnu::always_inline]] inline bool contains(
+        std::size_t position, std::size_t count) const noexcept {
         return position >= loaded_from && position - loaded_from <= loaded_size &&
             count <= loaded_size - (position - loaded_from);
     }
@@ -279,7 +296,7 @@ struct prefilter_rank_window {
      * Only newly acquired ranks are validated. Reads include at most refill_size
      * lookahead ranks, remain within this job, and are pinned before returning.
      */
-    [[nodiscard]] std::span<const std::uint8_t> window(
+    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
         std::size_t position, std::size_t count) const {
         if (failure->has_value()) return {};
         if (position > length || count > length - position || count > scratch.size()) {
@@ -332,7 +349,7 @@ struct prefilter_rank_window {
      * The copied ranks remain pinned while a diagonal consumer refills that reader.
      * Unrelated source descriptors always use the normal checked acquisition path.
      */
-    [[nodiscard]] std::span<const std::uint8_t> window(
+    [[nodiscard, gnu::always_inline]] inline std::span<const std::uint8_t> window(
         std::size_t position, std::size_t count, const prefilter_rank_window& cached) const {
         if (failure->has_value()) return {};
         if (contains(position, count)) {
@@ -356,7 +373,7 @@ struct prefilter_rank_window {
     }
 
     /** Reads one rank using bounded lookahead; inspect failure after traversal. */
-    [[nodiscard]] std::uint8_t operator[](std::size_t position) const {
+    [[nodiscard, gnu::always_inline]] inline std::uint8_t operator[](std::size_t position) const {
         if (failure->has_value()) return 0u;
         if (contains(position, 1u)) return scratch[position - loaded_from];
         const auto ranks = window(position, 1u);
@@ -391,14 +408,12 @@ template <class Evaluator>
             cardinality = seqan3::alphabet_size<Alphabet>;
         });
     std::optional<prefilter_input_failure> failure;
-    const prefilter_rank_window query{.source = query_source, .start = job.query_start,
-        .length = job.query_length, .cardinality = cardinality,
-        .refill_size = std::clamp(refill_size, std::size_t{1u}, prefilter_rank_window::chunk_size),
-        .job_index = index,
-        .target_source = false, .failure = &failure};
-    const prefilter_rank_window target{.source = input.targets[job.target_record_index],
-        .start = job.target_start, .length = job.target_length, .cardinality = cardinality,
-        .refill_size = query.refill_size, .job_index = index, .target_source = true, .failure = &failure};
+    const auto bounded_refill_size =
+        std::clamp(refill_size, std::size_t{1u}, prefilter_rank_window::chunk_size);
+    const prefilter_rank_window query{query_source, job.query_start, job.query_length,
+        cardinality, bounded_refill_size, index, false, failure};
+    const prefilter_rank_window target{input.targets[job.target_record_index],
+        job.target_start, job.target_length, cardinality, bounded_refill_size, index, true, failure};
     auto result = evaluate(query, target, job);
     if (failure) return std::unexpected(*failure);
     return result;

@@ -155,7 +155,7 @@ struct scalar_traversal final {
         return 1u + 2u * sizeof(std::uint64_t);
     }
 
-    [[nodiscard]] std::uint32_t diagonal_run(
+    [[nodiscard, gnu::always_inline]] inline std::uint32_t diagonal_run(
         std::span<const std::uint8_t> query,
         std::span<const std::uint8_t> target,
         std::uint32_t position,
@@ -255,7 +255,7 @@ template <class p_traversal_type, class p_sequence_type>
         position,
         lower,
         upper,
-        [&traversal, &query, &target, &position, &submaze_end, &best](
+        [&traversal, &query, &target, &position, &submaze_end, &best] [[gnu::always_inline]] (
             const std::uint32_t candidate) {
             return improve_diagonal_candidate_with(
                 traversal,
@@ -375,19 +375,26 @@ struct window_traversal {
 
     /** Retains one independent candidate cache for the lifetime of this job. */
     explicit window_traversal(const prefilter_rank_window& query)
-        : comparison{}, candidates{.source = query.source, .start = query.start, .length = query.length,
-              .cardinality = query.cardinality, .refill_size = query.refill_size,
-              .job_index = query.job_index, .target_source = false, .failure = query.failure} {}
+        : comparison{}, candidates{query.source, query.start, query.length,
+              query.cardinality, query.refill_size, query.job_index, false, *query.failure} {}
 
     /**
      * Compares the first demand block before growing subsequent matched reads.
      * Growth stops at fixed scratch capacity and never changes diagonal boundaries.
+     * A complete diagonal already pinned in both caches needs only one comparison.
      */
     [[nodiscard]] std::uint32_t diagonal_run(
         const prefilter_rank_window& query, const prefilter_rank_window& target,
         std::uint32_t position, std::uint32_t submaze_end,
         std::uint32_t query_index) const {
         const auto limit = std::min<std::size_t>(submaze_end - position, query.size() - query_index);
+        if (limit == 0u || query.failure->has_value()) return 0u;
+        if (target.contains(position, limit) && query.contains(query_index, limit)) {
+            const auto target_ranks = target.window(position, limit);
+            const auto query_ranks = query.window(query_index, limit);
+            return comparison.diagonal_run(query_ranks, target_ranks, 0u,
+                static_cast<std::uint32_t>(limit), 0u);
+        }
         std::size_t matched = 0u;
         std::size_t read_size = query.refill_size;
         while (matched < limit) {
