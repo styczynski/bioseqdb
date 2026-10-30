@@ -45,7 +45,7 @@ enum class ksw_aligner_mode {
 
 /** Return the per-lane maximum under unsigned-byte ordering. */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
-[[maybe_unused]] [[always_inline]] inline p_vector_type maximum_unsigned_bytes(
+[[maybe_unused]] [[gnu::always_inline]] inline p_vector_type maximum_unsigned_bytes(
     const p_simd_tag& simd_tag,
     p_vector_type left,
     p_vector_type right) noexcept {
@@ -55,7 +55,7 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 
 /** Return the per-lane minimum under unsigned-byte ordering. */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
-[[maybe_unused]] [[always_inline]] inline p_vector_type minimum_unsigned_bytes(
+[[maybe_unused]] [[gnu::always_inline]] inline p_vector_type minimum_unsigned_bytes(
     const p_simd_tag& simd_tag,
     p_vector_type left,
     p_vector_type right) noexcept {
@@ -65,7 +65,7 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 
 /** Return a zero vector with its first lane set to a scalar value. */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
-[[always_inline]] inline p_vector_type set_lane_zero(
+[[gnu::always_inline]] inline p_vector_type set_lane_zero(
     const p_simd_tag& simd_tag,
     hn::TFromD<p_simd_tag> value) noexcept {
     return hn::IfThenElse(
@@ -80,7 +80,7 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
  * the shift.
  */
 template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
-[[always_inline]] inline p_vector_type shift_left_insert(
+[[gnu::always_inline]] inline p_vector_type shift_left_insert(
     const p_simd_tag& simd_tag,
     p_vector_type vector,
     p_vector_type& inserted_lane) noexcept {
@@ -441,7 +441,7 @@ template <
     sequence_alphabet p_alphabet,
     class p_simd_tag,
     class p_state_type>
-[[always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
+[[gnu::always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
     p_simd_tag simd_tag, int state_offset,
     p_state_type& HWY_RESTRICT state,
     const uint8_t* HWY_RESTRICT query_reversed_aligned,
@@ -511,7 +511,7 @@ template <
 
 /** Choose each cell's best score from diagonal and gap candidates. */
 template <ksw_aligner_mode p_mode, class p_simd_tag>
-[[always_inline]] inline void reduce_ksw_dp_maximum(
+[[gnu::always_inline]] inline void reduce_ksw_dp_maximum(
     p_simd_tag simd_tag, ksw_dp_cell<p_simd_tag>& cell,
     hn::Vec<p_simd_tag> maximum_plausible_scores,
     hn::Vec<p_simd_tag> match_scores) noexcept
@@ -538,7 +538,7 @@ template <
     ksw_aligner_mode p_mode,
     class p_simd_tag,
     class p_state_type>
-[[always_inline]] inline void store_ksw_dp_cell(
+[[gnu::always_inline]] inline void store_ksw_dp_cell(
     p_simd_tag simd_tag, int state_offset,
     ksw_dp_cell<p_simd_tag>& cell,
     p_state_type& HWY_RESTRICT state,
