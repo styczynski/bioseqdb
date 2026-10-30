@@ -804,7 +804,10 @@ void validate_prefilter_inputs(const char* algorithm,
     const auto validate_records = [algorithm, &rank_lut](auto records) {
         for (const auto& upload : records) {
             const auto& sequence = upload.sequence;
-            if (!packed_sequence_upload_is_valid(upload) ||
+            // Placement checks every declared rank once before any dispatch,
+            // including uploads that no job references. Admission checks shape
+            // and identity here without repeating the linear rank scan.
+            if (!packed_sequence_upload_geometry_is_valid(upload) ||
                 sequence.alphabet_code != rank_lut.alphabet_code ||
                 sequence.alphabet_size != rank_lut.alphabet_size ||
                 sequence.seed_policy_id != rank_lut.seed_policy_id) {
@@ -816,6 +819,8 @@ void validate_prefilter_inputs(const char* algorithm,
     validate_records(targets);
     for (const auto& job : jobs) {
         if (job.query_record_index >= queries.size() || job.target_record_index >= targets.size() ||
+            (job.query_length != 0u && job.query_length - 1u > limit - job.query_start) ||
+            (job.target_length != 0u && job.target_length - 1u > limit - job.target_start) ||
             !bioseq::prefilter::prefilter_slice_in_bounds(queries[job.query_record_index].sequence.bp_count,
                                                          job.query_start, job.query_length) ||
             !bioseq::prefilter::prefilter_slice_in_bounds(targets[job.target_record_index].sequence.bp_count,

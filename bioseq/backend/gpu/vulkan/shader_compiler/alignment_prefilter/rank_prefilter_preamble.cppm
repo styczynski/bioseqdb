@@ -29,12 +29,44 @@ struct gpu_sequence_view {
     uint seed_policy_id;
 };
 uint packed_sequence_byte(uint64_t byte_index, bool query);
-uint native_packed_rank(gpu_sequence_view sequence, uint position, bool query) {
-    uint64_t slot = uint64_t(sequence.leading_symbol_offset) + uint64_t(position);
-    uint64_t unit_index = slot / uint64_t(sequence.letters_per_unit);
-    uint bit_offset = uint(slot % uint64_t(sequence.letters_per_unit)) * sequence.bits_per_char;
-    uint64_t byte_index = sequence.seq_word_offset * uint64_t(4)
-        + unit_index * uint64_t(sequence.unit_bits / 8u) + uint64_t(bit_offset / 8u);
+// Native storage cursor: divide once, then advance through slots and unit padding.
+// Quotient/remainder precede the leading offset so UINT32_MAX positions cannot
+// wrap. Large logical origins and packed byte bases retain their 64-bit range.
+struct native_packed_cursor {
+    uint64_t unit_byte_index;
+    uint slot;
+};
+native_packed_cursor native_packed_begin(gpu_sequence_view sequence, uint64_t position) {
+    uint64_t unit_index;
+    uint slot;
+    bool binary_geometry = (sequence.letters_per_unit & (sequence.letters_per_unit - 1u)) == 0u;
+    if (position <= uint64_t(0xffffffffu)) {
+        uint local_position = uint(position);
+        uint local_unit_index = binary_geometry
+            ? local_position >> uint(findLSB(sequence.letters_per_unit))
+            : local_position / sequence.letters_per_unit;
+        unit_index = uint64_t(local_unit_index);
+        slot = local_position - local_unit_index * sequence.letters_per_unit;
+    } else {
+        unit_index = binary_geometry
+            ? position >> uint(findLSB(sequence.letters_per_unit))
+            : position / uint64_t(sequence.letters_per_unit);
+        slot = uint(position - unit_index * uint64_t(sequence.letters_per_unit));
+    }
+    slot += sequence.leading_symbol_offset;
+    if (slot >= sequence.letters_per_unit) {
+        ++unit_index;
+        slot -= sequence.letters_per_unit;
+    }
+    return native_packed_cursor(
+        sequence.seq_word_offset * uint64_t(4)
+            + unit_index * uint64_t(sequence.unit_bits / 8u),
+        slot);
+}
+uint native_packed_rank(gpu_sequence_view sequence, uint64_t position, bool query) {
+    native_packed_cursor cursor = native_packed_begin(sequence, position);
+    uint bit_offset = cursor.slot * sequence.bits_per_char;
+    uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset / 8u);
     uint within_byte = bit_offset & 7u;
     uint rank = packed_sequence_byte(byte_index, query) >> within_byte;
     if (within_byte + sequence.bits_per_char > 8u)
@@ -88,10 +120,46 @@ bool prefilter_job_is_in_bounds(prefilter_job job) {
         && uint64_t(job.target_length) <= target.bp_count - uint64_t(job.target_start)
         && (job.orientation == 0u || (job.orientation == 3u && canonical_reverse_complement != 0u));
 }
+// Four logical ranks remain in registers. Reuse each loaded packed word across
+// slots, including non-power-of-two letters/unit and cross-word symbols.
+// Caller has already proved [position, position + 4) is inside this descriptor.
+uint native_packed_rank_quad(gpu_sequence_view sequence, uint64_t position) {
+    native_packed_cursor cursor = native_packed_begin(sequence, position);
+    uint initial_bit = cursor.slot * sequence.bits_per_char;
+    uint64_t cached_word_index =
+        (cursor.unit_byte_index + uint64_t(initial_bit >> 3u)) >> 2u;
+    uint cached_word = packed_words[uint(cached_word_index)];
+    uint expanded_ranks = 0u;
+    for (uint lane = 0u; lane < 4u; ++lane) {
+        uint bit_offset = cursor.slot * sequence.bits_per_char;
+        uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
+        uint64_t word_index = byte_index >> 2u;
+        if (word_index != cached_word_index) {
+            cached_word_index = word_index;
+            cached_word = packed_words[uint(word_index)];
+        }
+        uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
+        uint rank = cached_word >> word_shift;
+        if (word_shift + sequence.bits_per_char > 32u) {
+            cached_word_index = word_index + uint64_t(1);
+            cached_word = packed_words[uint(cached_word_index)];
+            rank |= cached_word << (32u - word_shift);
+        }
+        expanded_ranks |= (rank & sequence.char_mask) << (lane * 8u);
+        if (lane + 1u < 4u) {
+            ++cursor.slot;
+            if (cursor.slot == sequence.letters_per_unit) {
+                cursor.slot = 0u;
+                cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
+            }
+        }
+    }
+    return expanded_ranks;
+}
 uint query_rank_unchecked(prefilter_job job, uint rank_index) {
     gpu_sequence_view sequence = query_records[job.query_record_index];
     if (job.orientation == 3u) {
-        uint rank = native_packed_rank(sequence, uint(sequence.bp_count) - 1u - rank_index, true);
+        uint rank = native_packed_rank(sequence, sequence.bp_count - uint64_t(1) - uint64_t(rank_index), true);
         return rank_to_rc_code[rank];
     }
     return native_packed_rank(sequence, rank_index, true);
@@ -102,16 +170,19 @@ uint target_rank_unchecked(prefilter_job job, uint rank_index) {
 uint query_rank(prefilter_job job, uint rank_index) { return query_rank_unchecked(job, rank_index); }
 uint target_rank(prefilter_job job, uint rank_index) { return target_rank_unchecked(job, rank_index); }
 uint query_rank_quad_unchecked(prefilter_job job, uint rank_index) {
-    return query_rank_unchecked(job, rank_index)
-        | (query_rank_unchecked(job, rank_index + 1u) << 8u)
-        | (query_rank_unchecked(job, rank_index + 2u) << 16u)
-        | (query_rank_unchecked(job, rank_index + 3u) << 24u);
+    gpu_sequence_view sequence = query_records[job.query_record_index];
+    if (job.orientation == 3u) {
+        uint forward = native_packed_rank_quad(sequence,
+            sequence.bp_count - uint64_t(rank_index) - uint64_t(4));
+        return rank_to_rc_code[(forward >> 24u) & 255u]
+            | (rank_to_rc_code[(forward >> 16u) & 255u] << 8u)
+            | (rank_to_rc_code[(forward >> 8u) & 255u] << 16u)
+            | (rank_to_rc_code[forward & 255u] << 24u);
+    }
+    return native_packed_rank_quad(sequence, uint64_t(rank_index));
 }
 uint target_rank_quad_unchecked(prefilter_job job, uint rank_index) {
-    return target_rank_unchecked(job, rank_index)
-        | (target_rank_unchecked(job, rank_index + 1u) << 8u)
-        | (target_rank_unchecked(job, rank_index + 2u) << 16u)
-        | (target_rank_unchecked(job, rank_index + 3u) << 24u);
+    return native_packed_rank_quad(target_records[job.target_record_index], uint64_t(rank_index));
 }
 uint query_rank_quad(prefilter_job job, uint rank_index) { return query_rank_quad_unchecked(job, rank_index); }
 uint target_rank_quad(prefilter_job job, uint rank_index) { return target_rank_quad_unchecked(job, rank_index); }

@@ -121,8 +121,8 @@ struct gpu_native_sequence_provider {
     std::uint64_t symbol_count{};
 };
 
-/** Checks packed geometry and every logical rank without expanding input storage. */
-[[nodiscard]] inline bool packed_sequence_upload_is_valid(const gpu_packed_sequence_upload& upload) noexcept {
+/** Checks packed geometry and byte extent without reading symbol ranks. */
+[[nodiscard]] inline bool packed_sequence_upload_geometry_is_valid(const gpu_packed_sequence_upload& upload) noexcept {
     const auto& sequence = upload.sequence;
     // Reject fractional-byte and unsupported widths before any division or rank read.
     if (!std::has_single_bit(sequence.unit_bits) ||
@@ -146,6 +146,14 @@ struct gpu_native_sequence_provider {
     const auto slots = sequence.unit_count * sequence.letters_per_unit;
     if (sequence.padding_letters > slots || sequence.leading_symbol_offset > slots - sequence.padding_letters ||
         sequence.bp_count > slots - sequence.padding_letters - sequence.leading_symbol_offset) return false;
+    return true;
+}
+
+/** Checks packed geometry and every logical rank without expanding input storage. */
+[[nodiscard]] inline bool packed_sequence_upload_is_valid(const gpu_packed_sequence_upload& upload) noexcept {
+    if (!packed_sequence_upload_geometry_is_valid(upload)) return false;
+    const auto& sequence = upload.sequence;
+    const auto unit_bytes = sequence.unit_bits / std::numeric_limits<unsigned char>::digits;
     // Every encoding is valid for a full-cardinality alphabet, including DNA4.
     if (sequence.alphabet_size == sequence.char_mask + 1u) return true;
     for (std::uint64_t position = 0u; position < sequence.bp_count; ++position) {
