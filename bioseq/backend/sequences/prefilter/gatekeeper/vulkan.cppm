@@ -55,7 +55,9 @@ run_gatekeeper_vulkan_batch(
         [&vulkan_runtime, validate_ranks](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
             return vulkan_runtime.run_gatekeeper_rank_batch_roundtrip(
                 queries, targets, rank_lut, local_jobs, validate_ranks);
-        });
+        },
+        // Fixed GateKeeper readers consume four byte ranks per uint32 word.
+        sizeof(std::uint32_t) / sizeof(std::uint8_t));
 }
 
 } // namespace bioseq::prefilter

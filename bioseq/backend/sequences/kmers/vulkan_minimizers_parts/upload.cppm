@@ -1324,18 +1324,151 @@ template<sequence_alphabet Alphabet>
     });
 }
 
-/** Runs a synchronous consumer over only the packed intervals requested by prefilter jobs.
- * Owners retain admitted staging until the consumer's GPU fence has completed.
+/** Runs a synchronous consumer over exactly the packed intervals requested by jobs.
+ * Coalesces borrowable positive-length windows when local offsets preserve the caller's
+ * power-of-two alignment. Other shapes retain per-job native borrowing/staging.
+ * All owners and admitted metadata remain alive through the consumer's GPU fence.
  */
 template <sequence_alphabet p_alphabet, class p_function>
 [[nodiscard]] decltype(auto) with_prefilter_packed_windows(
     bioseq::storage::lazy_sequence_view<p_alphabet> query,
     bioseq::storage::lazy_sequence_view<p_alphabet> target,
     std::span<const bioseq::prefilter::prefilter_job> jobs,
-    p_function&& consume) {
+    p_function&& consume,
+    std::uint32_t local_start_alignment = 1u) {
     using instance = admitted_sequence_detail::borrowed_u32_instance<p_alphabet>;
     using range_type = compact_sequence_range<instance>;
     const auto rank_lut = make_vulkan_rank_lut<range_type>();
+    constexpr auto index_limit = std::numeric_limits<std::uint32_t>::max();
+    if (jobs.size() > index_limit || local_start_alignment == 0u ||
+        (local_start_alignment & (local_start_alignment - 1u)) != 0u) {
+        throw vulkan_runtime_error("invalid native prefilter batch geometry");
+    }
+    const std::uint64_t query_length = query.bp_size();
+    const std::uint64_t target_length = target.bp_size();
+    sequence_upload_interval query_bounds{query_length, 0u};
+    sequence_upload_interval target_bounds{target_length, 0u};
+    const std::uint64_t alignment_mask = local_start_alignment - 1u;
+    std::uint64_t query_phase = 0u;
+    std::uint64_t target_phase = 0u;
+    bool first_job = true;
+    bool can_coalesce = jobs.size() > 1u;
+    for (const auto& job : jobs) {
+        const bool reverse = job.orientation == 3u;
+        if (job.target_record_index != 0u || job.query_record_index != (reverse ? 1u : 0u) ||
+            (job.orientation != 0u && !reverse) ||
+            (reverse && rank_lut.canonical_reverse_complement == 0u) ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(query_length, job.query_start, job.query_length) ||
+            !bioseq::prefilter::prefilter_slice_in_bounds(target_length, job.target_start, job.target_length)) {
+            throw vulkan_runtime_error("invalid native prefilter job");
+        }
+        const std::uint64_t query_begin = reverse
+            ? query_length - job.query_start - job.query_length : job.query_start;
+        const std::uint64_t query_end = query_begin + job.query_length;
+        const std::uint64_t target_begin = job.target_start;
+        const std::uint64_t target_end = target_begin + job.target_length;
+        if (first_job) {
+            query_phase = query_begin & alignment_mask;
+            target_phase = target_begin & alignment_mask;
+            first_job = false;
+        }
+        can_coalesce = can_coalesce && job.query_length != 0u && job.target_length != 0u &&
+            (query_begin & alignment_mask) == query_phase &&
+            (query_end & alignment_mask) == query_phase &&
+            (target_begin & alignment_mask) == target_phase &&
+            (target_end & alignment_mask) == target_phase;
+        query_bounds.begin = std::min(query_bounds.begin, query_begin);
+        query_bounds.end = std::max(query_bounds.end, query_end);
+        target_bounds.begin = std::min(target_bounds.begin, target_begin);
+        target_bounds.end = std::max(target_bounds.end, target_end);
+    }
+    // Prefer coalescing where current providers can borrow the bounding range and
+    // its subranges. This geometry-only probe does not read or upload gaps.
+    const auto is_native_resident = [](auto source, sequence_upload_interval bounds) {
+        for (std::size_t width = sizeof(std::uint8_t); width <= sizeof(std::uint64_t); width *= 2u) {
+            const auto byte_width = static_cast<std::uint8_t>(width);
+            if (all_storage_unit_byte_widths::contains_runtime(byte_width) &&
+                source.try_resident_packed(bounds.begin, bounds.end, byte_width)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    constexpr std::uint64_t maximum_local_extent = static_cast<std::uint64_t>(index_limit) + 1u;
+    if (can_coalesce && query_bounds.end - query_bounds.begin <= maximum_local_extent &&
+        target_bounds.end - target_bounds.begin <= maximum_local_extent &&
+        is_native_resident(query, query_bounds) && is_native_resident(target, target_bounds)) {
+        // Both sources use one enumerator type and the same existing coalescer.
+        const auto enumerate_intervals = [jobs](bool query_side, std::uint64_t source_length) {
+            return [jobs, query_side, source_length](auto emit) {
+                for (const auto& job : jobs) {
+                    const std::uint64_t length = query_side ? job.query_length : job.target_length;
+                    const std::uint64_t begin = query_side
+                        ? (job.orientation == 3u ? source_length - job.query_start - length
+                                                 : job.query_start)
+                        : job.target_start;
+                    emit(sequence_upload_interval{begin, begin + length});
+                }
+            };
+        };
+        auto query_windows = prepare_native_seed_windows(
+            query, enumerate_intervals(true, query_length));
+        auto target_windows = prepare_native_seed_windows(
+            target, enumerate_intervals(false, target_length));
+        const auto queries = query_windows.view().windows;
+        const auto targets = target_windows.view().windows;
+        // The existing coalescer returns sorted, disjoint windows. Return the record
+        // index and oriented local start without expanding or inspecting any ranks.
+        const auto locate_window = [](std::span<const gpu_packed_sequence_upload> windows,
+                                      std::uint64_t begin, std::uint64_t end, bool reverse) {
+            auto found = std::upper_bound(windows.begin(), windows.end(), begin,
+                [](std::uint64_t position, const gpu_packed_sequence_upload& upload) {
+                    return position < upload.sequence.bp_offset;
+                });
+            if (found == windows.begin()) {
+                throw vulkan_runtime_error("native prefilter coverage is missing");
+            }
+            --found;
+            const auto& sequence = found->sequence;
+            if (begin < sequence.bp_offset || end < begin ||
+                end - sequence.bp_offset > sequence.bp_count) {
+                throw vulkan_runtime_error("native prefilter coverage is incomplete");
+            }
+            const std::uint64_t local_start = reverse
+                ? sequence.bp_count - (end - sequence.bp_offset) : begin - sequence.bp_offset;
+            const auto record_index = static_cast<std::size_t>(found - windows.begin());
+            constexpr auto local_limit = std::numeric_limits<std::uint32_t>::max();
+            if (record_index > local_limit || local_start > local_limit ||
+                (end != begin && end - begin - 1u > local_limit - local_start)) {
+                throw vulkan_runtime_error("native prefilter local coordinates overflowed");
+            }
+            return std::pair{static_cast<std::uint32_t>(record_index),
+                             static_cast<std::uint32_t>(local_start)};
+        };
+        bioseq::parallelism::memory_permit local_jobs_permit;
+        std::vector<bioseq::prefilter::prefilter_job> local_jobs;
+        bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+            local_jobs, local_jobs_permit, jobs.size());
+        for (const auto& job : jobs) {
+            const bool reverse = job.orientation == 3u;
+            const std::uint64_t query_begin = reverse
+                ? query_length - job.query_start - job.query_length : job.query_start;
+            const std::uint64_t target_begin = job.target_start;
+            const auto [query_record_index, query_start] = locate_window(
+                queries, query_begin, query_begin + job.query_length, reverse);
+            const auto [target_record_index, target_start] = locate_window(
+                targets, target_begin, target_begin + job.target_length, false);
+            auto local = job;
+            local.query_record_index = query_record_index;
+            local.target_record_index = target_record_index;
+            local.query_start = query_start;
+            local.target_start = target_start;
+            local_jobs.push_back(local);
+        }
+        return std::forward<p_function>(consume)(queries, targets, rank_lut,
+            std::span<const bioseq::prefilter::prefilter_job>{local_jobs});
+    }
+
     admitted_sequence_detail::canonical_u32_window_batch<p_alphabet> owners;
     std::vector<gpu_packed_sequence_upload> queries;
     std::vector<gpu_packed_sequence_upload> targets;
@@ -1351,12 +1484,6 @@ template <sequence_alphabet p_alphabet, class p_function>
     };
     for (const auto& job : jobs) {
         const bool reverse = job.orientation == 3u;
-        if (job.target_record_index != 0u || job.query_record_index != (reverse ? 1u : 0u) ||
-            (job.orientation != 0u && !reverse) || (reverse && rank_lut.canonical_reverse_complement == 0u) ||
-            !bioseq::prefilter::prefilter_slice_in_bounds(query.bp_size(), job.query_start, job.query_length) ||
-            !bioseq::prefilter::prefilter_slice_in_bounds(target.bp_size(), job.target_start, job.target_length)) {
-            throw vulkan_runtime_error("invalid native prefilter job");
-        }
         const std::size_t query_begin = reverse
             ? query.bp_size() - job.query_start - job.query_length : job.query_start;
         append_window(query, query_begin, job.query_length, queries);
