@@ -157,13 +157,6 @@ struct sequence_simd_iteration_state {
     using alphabet_type = typename p_sequence_traits::alphabet_type;
     using hash_alphabet = std::conditional_t<seqan3::nucleotide_alphabet<alphabet_type>, seq::dna4, alphabet_type>;
     using hash_traits = typename hasher_base<hash_alphabet, storage_unit>::traits;
-    static constexpr std::size_t lane_bits = std::numeric_limits<storage_unit>::digits;
-    static constexpr bool packs_ring_metadata = k_has_static_kmer
-        && lane_bits >= 2u && hash_traits::bits_per_char > 0u
-        && p_static_kmer_size <= (lane_bits - 2u) / hash_traits::bits_per_char;
-    static constexpr std::size_t separate_ring_metadata_capacity =
-        packs_ring_metadata ? 0u : k_buffer_capacity;
-    static constexpr storage_unit ring_valid_flag = storage_unit{1} << (lane_bits - 1u);
     static constexpr bool has_unseedable_rank = [] {
         if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
             for (const auto rank : k_nt4_lut<alphabet_type>)
@@ -191,8 +184,8 @@ struct sequence_simd_iteration_state {
     mask_stream_type last_emit_valid;
     std::array<vector_stream_type, k_buffer_capacity> ring_buf_elem;
     std::array<vector_stream_type, k_buffer_capacity> ring_buf_hash_strand;
-    std::array<vector_stream_type, separate_ring_metadata_capacity> ring_buf_strand;
-    std::array<mask_stream_type, separate_ring_metadata_capacity> ring_buf_valid;
+    std::array<vector_stream_type, k_buffer_capacity> ring_buf_strand;
+    std::array<mask_stream_type, k_buffer_capacity> ring_buf_valid;
     std::size_t pos_wrap_delta;
     size_t step;
     size_t ring_idx;
@@ -219,59 +212,6 @@ struct sequence_simd_iteration_state {
     // Borrowed output collector.
     p_collector_type& collector;
     two_stack_continuation_status failure{two_stack_continuation_status::ok};
-
-    /** Encode one ring payload; unproven layouts retain the separate metadata arrays. */
-    [[nodiscard]] HWY_INLINE vector_stream_type make_ring_metadata(
-        simd_tag_type d, const vector_stream_type& code,
-        const vector_stream_type& strand, const mask_stream_type& valid) const {
-        if constexpr (packs_ring_metadata) {
-            return bit_or(bit_or(code, shift_left<lane_bits - 2u>(strand)),
-                if_then_else(valid, hn::Set(d, ring_valid_flag), v_zero));
-        } else {
-            return code;
-        }
-    }
-
-    /** Return a slot's explicit validity without interpreting any code as a sentinel. */
-    [[nodiscard]] HWY_INLINE mask_stream_type ring_entry_valid(
-        simd_tag_type d, std::size_t slot) const {
-        if constexpr (packs_ring_metadata) {
-            return not_equal(bit_and(ring_buf_hash_strand[slot],
-                hn::Set(d, ring_valid_flag)), v_zero);
-        } else {
-            return ring_buf_valid[slot];
-        }
-    }
-
-    /** Return every canonical code bit, excluding packed flags before scrambling. */
-    [[nodiscard]] HWY_INLINE vector_stream_type ring_entry_code(std::size_t slot) const {
-        if constexpr (packs_ring_metadata) {
-            return bit_and(ring_buf_hash_strand[slot], v_kmer_mask);
-        } else {
-            return ring_buf_hash_strand[slot];
-        }
-    }
-
-    /** Return the selected strand as the same zero-or-one native lane value. */
-    [[nodiscard]] HWY_INLINE vector_stream_type ring_entry_strand(std::size_t slot) const {
-        if constexpr (packs_ring_metadata) {
-            return bit_and(shift_right<lane_bits - 2u>(ring_buf_hash_strand[slot]), v_one);
-        } else {
-            return ring_buf_strand[slot];
-        }
-    }
-
-    /** Retain live slot validity at position wrap without changing its code or strand. */
-    HWY_INLINE void retain_ring_entry_valid(
-        simd_tag_type d, std::size_t slot, const mask_stream_type& keep) {
-        if constexpr (packs_ring_metadata) {
-            ring_buf_hash_strand[slot] = bit_and_not(
-                if_then_else(keep, v_zero, hn::Set(d, ring_valid_flag)),
-                ring_buf_hash_strand[slot]);
-        } else {
-            ring_buf_valid[slot] = keep;
-        }
-    }
 
     /**
      * Advances every active lane by one base and updates its k-mer and window
@@ -377,11 +317,9 @@ struct sequence_simd_iteration_state {
         const auto packed_element = elem_valid;
 
         ring_buf_elem[ring_idx]        = packed_element;
-        ring_buf_hash_strand[ring_idx] = make_ring_metadata(d, lex, strand_value, valid_mask);
-        if constexpr (!packs_ring_metadata) {
-            ring_buf_strand[ring_idx] = strand_value;
-            ring_buf_valid[ring_idx] = valid_mask;
-        }
+        ring_buf_hash_strand[ring_idx] = lex;
+        ring_buf_strand[ring_idx] = strand_value;
+        ring_buf_valid[ring_idx] = valid_mask;
 
         // Extend the prefix minimum with the new, candidate
         const mask_stream_type prefix_better = bit_and(valid_mask,
@@ -402,33 +340,27 @@ struct sequence_simd_iteration_state {
             // suffix already computed to its right. Fixed windows unroll this loop.
             if constexpr (k_has_static_window) {
                 for_each_index<p_static_window_size - 1>(
-                    [this, d](auto idx_const) [[gnu::always_inline]] {
+                    [this](auto idx_const) [[gnu::always_inline]] {
                         constexpr size_t i = p_static_window_size - 1 - decltype(idx_const)::value;
                         const auto current_slot = ring_buf_elem[i];
                         const auto previous_slot = ring_buf_elem[i - 1];
-                        const auto current_valid = ring_entry_valid(d, i);
-                        const auto previous_valid = ring_entry_valid(d, i - 1u);
-                        const auto current_better = bit_and(current_valid,
-                            bit_or(bit_and_not(previous_valid, current_valid),
+                        const auto current_better = bit_and(ring_buf_valid[i],
+                            bit_or(bit_and_not(ring_buf_valid[i - 1], ring_buf_valid[i]),
                                 less(current_slot, previous_slot)));
                         ring_buf_elem[i - 1] =
                             if_then_else(current_better, current_slot, previous_slot);
                         ring_buf_hash_strand[i - 1] = if_then_else(
                             current_better, ring_buf_hash_strand[i], ring_buf_hash_strand[i - 1]);
-                        if constexpr (!packs_ring_metadata) {
-                            ring_buf_strand[i - 1] = if_then_else(
-                                current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
-                            ring_buf_valid[i - 1] = bit_or(previous_valid, current_valid);
-                        }
+                        ring_buf_strand[i - 1] = if_then_else(
+                            current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
+                        ring_buf_valid[i - 1] = bit_or(ring_buf_valid[i - 1], ring_buf_valid[i]);
                     });
             } else {
                 for (size_t i = w - 1; i > 0; --i) {
                     const auto current_slot   = ring_buf_elem[i];
                     const auto previous_slot  = ring_buf_elem[i - 1];
-                    const auto current_valid = ring_entry_valid(d, i);
-                    const auto previous_valid = ring_entry_valid(d, i - 1u);
-                    const auto current_better = bit_and(current_valid,
-                        bit_or(bit_and_not(previous_valid, current_valid),
+                    const auto current_better = bit_and(ring_buf_valid[i],
+                        bit_or(bit_and_not(ring_buf_valid[i - 1], ring_buf_valid[i]),
                             less(current_slot, previous_slot)));
                     ring_buf_elem[i - 1] =
                         if_then_else(current_better, current_slot, previous_slot);
@@ -436,11 +368,9 @@ struct sequence_simd_iteration_state {
                         if_then_else(current_better,
                             ring_buf_hash_strand[i],
                             ring_buf_hash_strand[i - 1]);
-                    if constexpr (!packs_ring_metadata) {
-                        ring_buf_strand[i - 1] = if_then_else(
-                            current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
-                        ring_buf_valid[i - 1] = bit_or(previous_valid, current_valid);
-                    }
+                    ring_buf_strand[i - 1] = if_then_else(
+                        current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
+                    ring_buf_valid[i - 1] = bit_or(ring_buf_valid[i - 1], ring_buf_valid[i]);
                 }
             }
             prefix_min  = packed_element;
@@ -452,16 +382,15 @@ struct sequence_simd_iteration_state {
 
         // The current window joins the new prefix and the saved suffix.
         const vector_stream_type  suffix_min  = ring_buf_elem[ring_idx];
-        const vector_stream_type  suffix_kmer = ring_entry_code(ring_idx);
-        const auto suffix_valid = ring_entry_valid(d, ring_idx);
+        const vector_stream_type  suffix_kmer = ring_buf_hash_strand[ring_idx];
         const mask_stream_type prefix_wins = bit_and(prefix_valid,
-            bit_or(bit_and_not(suffix_valid, prefix_valid), less(prefix_min, suffix_min)));
+            bit_or(bit_and_not(ring_buf_valid[ring_idx], prefix_valid), less(prefix_min, suffix_min)));
         const vector_stream_type  window_min  =
             if_then_else(prefix_wins, prefix_min, suffix_min);
         const vector_stream_type  window_hs   =
             if_then_else(prefix_wins, prefix_kmer, suffix_kmer);
-        const auto window_strand = if_then_else(prefix_wins, prefix_strand, ring_entry_strand(ring_idx));
-        const auto window_valid = bit_or(prefix_valid, suffix_valid);
+        const auto window_strand = if_then_else(prefix_wins, prefix_strand, ring_buf_strand[ring_idx]);
+        const auto window_valid = bit_or(prefix_valid, ring_buf_valid[ring_idx]);
         auto window_pos = bit_and(window_min, v_pos_mask);
 
         // Rebase local positions before the packed position field wraps.
@@ -472,12 +401,11 @@ struct sequence_simd_iteration_state {
             last_emit_pos = if_then_else(
                 last_emit_valid, subtract(last_emit_pos, v_wrap), last_emit_pos);
             window_pos = subtract(window_pos, v_wrap);
-            const auto wrap_one = [this, d](auto idx_const) [[gnu::always_inline]] {
+            const auto wrap_one = [this](auto idx_const) [[gnu::always_inline]] {
                 constexpr size_t i = decltype(idx_const)::value;
-                const auto keep = bit_and(ring_entry_valid(d, i),
+                ring_buf_valid[i] = bit_and(ring_buf_valid[i],
                     greater_equal(bit_and(ring_buf_elem[i], v_pos_mask), v_wrap));
-                retain_ring_entry_valid(d, i, keep);
-                ring_buf_elem[i] = if_then_else(keep,
+                ring_buf_elem[i] = if_then_else(ring_buf_valid[i],
                     subtract(ring_buf_elem[i], v_wrap),
                     ring_buf_elem[i]);
             };
@@ -485,10 +413,9 @@ struct sequence_simd_iteration_state {
                 for_each_index<p_static_window_size>(wrap_one);
             } else {
                 for (size_t i = 0; i < w; ++i) {
-                    const auto keep = bit_and(ring_entry_valid(d, i),
+                    ring_buf_valid[i] = bit_and(ring_buf_valid[i],
                         greater_equal(bit_and(ring_buf_elem[i], v_pos_mask), v_wrap));
-                    retain_ring_entry_valid(d, i, keep);
-                    ring_buf_elem[i] = if_then_else(keep,
+                    ring_buf_elem[i] = if_then_else(ring_buf_valid[i],
                         subtract(ring_buf_elem[i], v_wrap),
                         ring_buf_elem[i]);
                 }
@@ -757,8 +684,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
                 buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
         .ring_buf_strand            = two_stack_internal::
             make_undefined_vector_stream_array<
-                state_type::separate_ring_metadata_capacity,
-                simd_tag_type, storage_unit, p_stream_count>(d),
+                buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
         .ring_buf_valid             = {},
         .pos_wrap_delta             = static_cast<storage_unit>(0),
         .step                       = 0,
@@ -786,10 +712,8 @@ collect_minimizers_two_stack_nthash_simd_impl(
         for (size_t i = 0; i < w; ++i) {
             state.ring_buf_elem[i]        = initial_elem;
             state.ring_buf_hash_strand[i] = initial_hs;
-            if constexpr (!state_type::packs_ring_metadata) {
-                state.ring_buf_strand[i] = initial_hs;
-                state.ring_buf_valid[i] = mask_stream_type::splat_false(d);
-            }
+            state.ring_buf_strand[i] = initial_hs;
+            state.ring_buf_valid[i] = mask_stream_type::splat_false(d);
         }
     }
 
