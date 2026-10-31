@@ -197,6 +197,12 @@ template<class Traits, bool Reverse>
     std::size_t offset = 0u;
     if constexpr (!Reverse && std::endian::native == std::endian::little && group_units > 1u) {
         if (length == 0u) return 0u;
+        if constexpr (Traits::letters_per_unit > 1u) {
+            if (rank_packed_scalar<Traits, false>(query, total, query_start)
+                != rank_packed_scalar<Traits, false>(target, 0u, target_start))
+                return 0u;
+            if (length == 1u) return 1u;
+        }
         const auto first_count = std::min(Traits::letters_per_unit, length);
         const unit_type first_difference = packed_word<Traits, false>(query, total, query_start, first_count)
             ^ bioseq::simd::load_packed_symbol_window<Traits>(

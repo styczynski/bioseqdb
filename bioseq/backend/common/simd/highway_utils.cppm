@@ -103,7 +103,7 @@ template<class Traits, class D>
  * Reverse readers supply a verified rank-XOR complement mask; forward readers use zero.
  */
 template<class Traits, bool QueryReversed, class D>
-[[nodiscard]] HWY_INLINE sequence_symbol_equality count_equal_packed_symbols(
+[[nodiscard, gnu::noinline]] inline sequence_symbol_equality count_equal_packed_symbols(
     D descriptor, const typename Traits::storage_unit* query_units,
     const typename Traits::storage_unit* target_units,
     std::size_t query_total, std::size_t query_start, std::size_t target_start,

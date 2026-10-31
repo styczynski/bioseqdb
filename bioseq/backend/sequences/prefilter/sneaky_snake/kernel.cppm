@@ -63,26 +63,18 @@ template<class Traits, bool Reverse, class Descriptor>
     return true;
 }
 
-/** First differing word then first differing symbol; no complete-source rank copy. */
+/** Continue an acquired prefix comparison after the first native word matched.
+ * Keep vector scratch behind this boundary; the interval retains its original
+ * starts and length so the existing loop can restart at offset zero.
+ */
 template<class Traits, bool Reverse, class Descriptor>
-[[nodiscard]] HWY_INLINE std::size_t prefix_native_packed(
+[[nodiscard, gnu::noinline]] inline std::size_t prefix_native_packed_vector_continuation(
     const void* query, const void* target, std::size_t total,
     std::size_t query_start, std::size_t target_start, std::size_t length) noexcept {
     using unit_type = typename Traits::storage_unit;
     using D = hn::Repartition<unit_type, Descriptor>;
     const D d;
     const std::size_t lanes = hn::Lanes(d);
-    if (length == 0u) return 0u;
-    // Acquisition has already validated the full interval. Reject a short
-    // mismatch before preparing a vector tile, in either logical orientation.
-    const auto first_count = std::min(Traits::letters_per_unit, length);
-    const unit_type first_difference = sneaky_snake_detail::packed_word<Traits, Reverse>(
-        query, total, query_start, first_count)
-        ^ bioseq::simd::load_packed_symbol_window<Traits>(
-            static_cast<const unit_type*>(target), target_start, first_count);
-    if (first_difference != 0u)
-        return static_cast<std::size_t>(std::countr_zero(first_difference)) / Traits::bits_per_char;
-    if (length <= first_count) return length;
     constexpr auto complement = bioseq::simd::packed_symbol_complement_mask<Traits, Reverse>();
     static_assert(complement.has_value());
     HWY_ALIGN std::array<unit_type, hn::MaxLanes(D{})> difference_words;
@@ -107,6 +99,27 @@ template<class Traits, bool Reverse, class Descriptor>
         offset += count;
     }
     return length;
+}
+
+/** First differing word then first differing symbol; no complete-source rank copy. */
+template<class Traits, bool Reverse, class Descriptor>
+[[nodiscard]] HWY_INLINE std::size_t prefix_native_packed(
+    const void* query, const void* target, std::size_t total,
+    std::size_t query_start, std::size_t target_start, std::size_t length) noexcept {
+    using unit_type = typename Traits::storage_unit;
+    if (length == 0u) return 0u;
+    // Acquisition has already validated the full interval. Reject a short
+    // mismatch before preparing a vector tile, in either logical orientation.
+    const auto first_count = std::min(Traits::letters_per_unit, length);
+    const unit_type first_difference = sneaky_snake_detail::packed_word<Traits, Reverse>(
+        query, total, query_start, first_count)
+        ^ bioseq::simd::load_packed_symbol_window<Traits>(
+            static_cast<const unit_type*>(target), target_start, first_count);
+    if (first_difference != 0u)
+        return static_cast<std::size_t>(std::countr_zero(first_difference)) / Traits::bits_per_char;
+    if (length <= first_count) return length;
+    return prefix_native_packed_vector_continuation<Traits, Reverse, Descriptor>(
+        query, target, total, query_start, target_start, length);
 }
 
 /** Produce ascending logical candidate bits with the existing packed XOR reduction. */
