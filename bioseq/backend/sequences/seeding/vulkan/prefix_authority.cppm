@@ -237,12 +237,7 @@ validated_mapped_sorted_dense_prefix_view(
             || resident->key.gate_digest_lo != 0u || resident->key.gate_digest_hi != 0u
             || resident->key.gate_canonical_words))
         || resident->key.device_uuid != vulkan_runtime.features().device_uuid
-        || resident->source_stream_checksum == 0u
-        || resident->source_stream_checksum
-            != resident->mapped_stream_checksum
-        || (resident->complete_source_traversals != 1u &&
-            resident->complete_source_traversals != 2u)
-        || resident->complete_mapped_traversals != 2u) {
+        || !resident->has_completed_mapped_payload_validation()) {
         throw mapped_prefix_invalid_error{};
     }
     const std::uint64_t control_bytes = saturating_mul(
@@ -268,9 +263,10 @@ validated_mapped_sorted_dense_prefix_view(
             actual_allocation_sum)) {
         throw mapped_prefix_invalid_error{};
     }
-    // The resident, index was checked against its source checksum when built
-    // and  stays read-only during lookup. Reuse that result so each query avoids
-    // rescanning all target positions. Borrowed spans still use the full check.
+    // Source-copy owners retain independent source-versus-mapped validation;
+    // adopted GPU owners retain checked build receipts and a completed mapped
+    // structural pass. Both stay read-only during lookup. Reuse their completed
+    // proof; borrowed spans still require the full payload/checksum check.
     if (resident->target_len == 0u) {
         throw mapped_prefix_invalid_error{};
     }

@@ -195,9 +195,9 @@ struct two_stack_execution_stats {
     std::uint64_t scalable_storage_fallback_calls = 0;
     std::uint64_t scalable_storage_fallback_input_symbols = 0;
     std::uint64_t scalable_storage_fallback_minimizers_emitted = 0;
-    // These counters record calls that scan a complete DNA4/u32 sequence
-    // through the vector-stream collector. Continuation calls use their
-    // own counters, allowing the checker to detect mixed execution paths.
+    // Resident counters record complete native sequence traversals. A nonempty
+    // traversal can emit no records after ambiguity or palindrome exclusion.
+    // Continuation counters remain separate to reject mixed execution paths.
     std::uint64_t resident_vector_stream_kernel_calls = 0;
     std::uint64_t resident_vector_stream_single_calls = 0;
     std::uint64_t resident_vector_stream_dual_calls = 0;
@@ -384,7 +384,9 @@ struct two_stack_execution_stats {
                 && resident_vector_stream_nonempty_work_calls
                     <= resident_vector_stream_kernel_calls
                 && (resident_vector_stream_nonempty_work_calls == 0
-                    || resident_vector_stream_minimizers_emitted > 0)
+                    || resident_vector_stream_input_bp > 0)
+                && (resident_vector_stream_minimizers_emitted == 0
+                    || resident_vector_stream_nonempty_work_calls > 0)
                 && resident_vector_stream_input_bp == bp_consumed
                 && resident_vector_stream_minimizers_emitted
                     == minimizers_emitted

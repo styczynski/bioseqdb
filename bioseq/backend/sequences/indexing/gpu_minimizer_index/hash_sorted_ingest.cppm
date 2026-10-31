@@ -2650,12 +2650,12 @@ adopt_gpu_built_index(
 /**
  * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
  *
- * Check the build record, then validate and checksum bounded control tiles,
- * followed by bounded position tiles. This verifies sorted hashes, contiguous
- * intervals, target bounds, and the canonical controls-then-positions CRC.
- * Each active record is read for validation and again for CRC; record both
- * complete mapped coverages and publish only after all checks succeed. The
- * existing buffers remain the index used by both CPU and GPU code.
+ * Check the build record, then validate sorted hashes, contiguous intervals,
+ * complete coverage and every position's target bound in one mapped pass.
+ * This producer has no independent source payload or expected source checksum;
+ * its checksum and source-traversal fields stay zero. Publish the completed
+ * mapped pass only after all checks succeed. The completed build's existing
+ * buffers remain read-only and are used by both CPU and GPU code.
  */
 [[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
     const bioseq::gpu::vulkan::runtime& runtime,
@@ -2688,11 +2688,7 @@ adopt_gpu_built_index(
             key.gate_word_count != 0u || key.gate_mask != 0u || key.gate_digest_lo != 0u ||
             key.gate_digest_hi != 0u || key.gate_canonical_words)) ||
         key.device_uuid != runtime.features().device_uuid ||
-        resident.ownership.count_emit_parity_verified != 1u ||
-        resident.ownership.counted_minimizer_count != resident.position_count ||
-        resident.ownership.verified_emit_count != resident.position_count ||
-        resident.ownership.resident_transfers != 1u ||
-        resident.ownership.adoption_successes != 1u ||
+        !resident.has_gpu_build_adoption_receipt() ||
         resident.source_stream_checksum != 0u || resident.mapped_stream_checksum != 0u ||
         resident.complete_source_traversals != 0u ||
         resident.complete_mapped_traversals != 0u) {
@@ -2713,64 +2709,33 @@ adopt_gpu_built_index(
     const auto positions = std::span<const std::uint64_t>{
         static_cast<const std::uint64_t*>(resident.positions.mapped),
         resident.position_count};
-    // Bound the interval between validation and CRC reads without allocating
-    // scratch. This is an implementation tile, not a measured cache optimum
-    // or a size-dependent choice between checksum algorithms.
-    constexpr std::size_t mapped_validation_tile_bytes = 16u * 1024u;
-    constexpr std::size_t controls_per_tile =
-        mapped_validation_tile_bytes / sizeof(gpu_minimizer_slot);
-    constexpr std::size_t positions_per_tile =
-        mapped_validation_tile_bytes / sizeof(std::uint64_t);
-    static_assert(controls_per_tile != 0u && positions_per_tile != 0u);
-
-    crc64_ecma182_accumulator mapped_crc{k_gpu_source_direct_checksum_seed};
     std::uint64_t covered_positions = 0u;
     std::uint64_t previous_hash = 0u;
     bool have_previous_hash = false;
-    for (std::size_t consumed = 0u; consumed < controls.size();) {
-        const auto control_tile = controls.subspan(
-            consumed, (std::min)(controls_per_tile, controls.size() - consumed));
-        for (const gpu_minimizer_slot& control : control_tile) {
-            const std::uint64_t offset = control.pos_offset;
-            const std::uint64_t count = control.pos_count;
-            if (count == 0u || offset != covered_positions || offset > positions.size() ||
-                count > positions.size() - offset ||
-                (have_previous_hash && control.hash <= previous_hash)) {
-                return false;
-            }
-            covered_positions += count;
-            previous_hash = control.hash;
-            have_previous_hash = true;
+    for (const gpu_minimizer_slot& control : controls) {
+        const std::uint64_t offset = control.pos_offset;
+        const std::uint64_t count = control.pos_count;
+        if (count == 0u || offset != covered_positions || offset > positions.size() ||
+            count > positions.size() - offset ||
+            (have_previous_hash && control.hash <= previous_hash)) {
+            return false;
         }
-        mapped_crc.update(std::as_bytes(control_tile));
-        consumed += control_tile.size();
+        covered_positions += count;
+        previous_hash = control.hash;
+        have_previous_hash = true;
     }
     if (covered_positions != positions.size()) {
         return false;
     }
 
-    // Verified contiguous control intervals cover this complete position span;
-    // validating it flat preserves the same per-position bounds requirement.
-    // All controls precede all positions in the canonical checksum stream.
-    for (std::size_t consumed = 0u; consumed < positions.size();) {
-        const auto position_tile = positions.subspan(
-            consumed, (std::min)(positions_per_tile, positions.size() - consumed));
-        for (const std::uint64_t encoded : position_tile) {
-            if ((encoded >> 1u) >= static_cast<std::uint64_t>(resident.target_len)) {
-                return false;
-            }
+    // Contiguous control intervals cover the complete position span. Preserve
+    // the existing per-position bounds check without introducing an order rule.
+    for (const std::uint64_t encoded : positions) {
+        if ((encoded >> 1u) >= resident.target_len) {
+            return false;
         }
-        mapped_crc.update(std::as_bytes(position_tile));
-        consumed += position_tile.size();
     }
-    const std::uint64_t checksum = mapped_crc.checksum();
-    if (checksum == 0u) {
-        return false;
-    }
-    resident.source_stream_checksum = checksum;
-    resident.mapped_stream_checksum = checksum;
-    resident.complete_source_traversals = 1u;
-    resident.complete_mapped_traversals = 2u;
+    resident.complete_mapped_traversals = 1u;
     return true;
 }
 

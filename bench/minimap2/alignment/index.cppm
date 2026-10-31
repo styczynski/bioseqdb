@@ -2418,6 +2418,8 @@ static_assert([] {
         && stats.resident_vector_stream_nonempty_work_calls
             == stats.resident_vector_stream_kernel_calls
         && stats.resident_vector_stream_input_bp == stats.bp_consumed
+        // This populated benchmark requires output; generic resident receipts need not.
+        && stats.resident_vector_stream_minimizers_emitted > 0u
         && stats.resident_vector_stream_minimizers_emitted
             == stats.minimizers_emitted
         && stats.generic_u64_kernel_calls == 0

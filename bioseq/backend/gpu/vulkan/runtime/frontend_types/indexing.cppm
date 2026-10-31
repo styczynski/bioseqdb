@@ -228,6 +228,9 @@ struct gpu_index_build_stats {
     std::uint64_t materialization_host_visible = 0;
     std::uint64_t materialization_host_coherent = 0;
     std::uint64_t materialization_process_footprint_reflected = 0;
+
+    /// Compare every receipt field without observing object padding.
+    [[nodiscard]] constexpr bool operator==(const gpu_index_build_stats&) const noexcept = default;
 };
 
 /// @brief Own the finished GPU target index and its, memory reservation.

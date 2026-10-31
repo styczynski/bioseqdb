@@ -479,10 +479,16 @@ template<sequence_alphabet Alphabet, class Minimizer>
         return bioseq::gpu::vulkan::prepare_native_seed_windows(source,
             std::span<const bioseq::gpu::vulkan::sequence_upload_interval>{});
     std::optional<mapped_sorted_dense_prefix_view> mapped;
-    if (resident->representation == bioseq::indexing::gpu_index_representation::source_direct_sorted_dense
-        && resident->source_stream_checksum != 0u)
+    if (resident->has_completed_mapped_payload_validation()) {
         mapped = validated_mapped_sorted_dense_prefix_view(runtime, resident, false);
-    else if (host_index == nullptr)
+    } else if (resident->source_stream_checksum != 0u || resident->mapped_stream_checksum != 0u ||
+               resident->complete_source_traversals != 0u || resident->complete_mapped_traversals != 0u ||
+               resident->ownership != bioseq::gpu::vulkan::gpu_index_build_stats{}) {
+        // Ordinary uploaded indexes may use their host owner below. An
+        // incomplete/corrupt carried receipt must not take that fallback.
+        throw mapped_prefix_invalid_error{};
+    }
+    if (!mapped && host_index == nullptr)
         throw bioseq::gpu::vulkan::vulkan_runtime_error("native target coverage has no posting authority");
     return bioseq::gpu::vulkan::prepare_native_seed_windows(source,
         [minimizers, resident, max_occ, kmer_size, host_index, mapped](auto emit) mutable {
