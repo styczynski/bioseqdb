@@ -2748,7 +2748,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
         "timestamp": { "type": "integer", "description": "Unix seconds since epoch at run start." },
         "created":   { "type": "string", "description": "ISO 8601 UTC string built from the same instant as timestamp (e.g. 2026-05-07T12:34:56Z)." },
         "fast":      { "type": "boolean", "description": "true when the run was launched with --fast (only fast benchmarks executed)." },
-        "history_eligible": { "type": "boolean", "description": "true only when the completed capture has no blocking within-run violation, no blocking regression, no configuration/raw/regression-evaluation error, and its persisted report passed self-schema validation; false reports are retained but skipped as future regression baselines." }
+        "history_eligible": { "type": "boolean", "description": "true only when the completed capture was not run with runtime --debug, has no blocking within-run violation, no blocking regression, no configuration/raw/regression-evaluation error, and its persisted report passed self-schema validation; false reports are retained but skipped as future regression baselines." }
       }
     },
     "param_value": {
@@ -14104,8 +14104,11 @@ struct benchmark_filter_metadata {
         [](const regression_entry& regression) {
             return regression.blocking;
         });
+    // Runtime debug tracing perturbs measurements; retain its report without
+    // allowing it to become a historical performance baseline.
     const bool evaluation_history_eligible =
-        !blocking_rule_violation
+        !cli.debug
+        && !blocking_rule_violation
         && !blocking_regression
         && !diagnostics_had_errors
         && !regression_eval_had_errors;
