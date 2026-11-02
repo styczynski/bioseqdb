@@ -735,10 +735,12 @@ TEST_CASE("post-seed owned lifetime releases only after the final seed user",
         index.positions.capacity() * sizeof(std::uint64_t);
     REQUIRE(position_capacity_bytes != 0u);
 
+    transient_target_index_release_authorization release_authority{};
+    release_authority.index = &index;
     post_seed_owned_lifetime lifetime{
         /*seed_users=*/2u,
         /*owned_gpu_cache=*/nullptr,
-        transient_target_index_release_authorization{.index = &index}};
+        release_authority};
     const auto first = lifetime.complete_seed_user();
     REQUIRE(first.cpu_index_releases == 0u);
     REQUIRE_FALSE(index.table_empty());

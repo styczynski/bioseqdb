@@ -18,7 +18,7 @@ import bioseq.common.context;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.pipeline.minimap_port;         // collect_seed_hits
+import bioseq.pipeline.pipe;                 // collect_seed_hits
 import bioseq.chaining.core;                 // anchor / arena_slab / make_arena_slab
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.gpu_minimizer_index;

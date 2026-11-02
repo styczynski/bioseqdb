@@ -18,7 +18,9 @@ import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
+import bioseq.simd.utils;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -55,6 +57,285 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import :execution_plan_context;
+
+export namespace bioseq::simd {
+
+// Genuine public-wrapper/private-member cycle; declare the exported collector
+// before its friendship so this is not a hidden-friend/export redeclaration.
+template<class Minimizer, minimizer_lookup_index Index, sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<void, alignment_contract_error> collect_seed_hits(
+    std::span<const Minimizer>, const Index&,
+    bioseq::storage::lazy_sequence_view<Alphabet>,
+    bioseq::storage::lazy_sequence_view<Alphabet>,
+    sequence_rank_equality_kernel, sequence_packed_equality_resolver,
+    std::int32_t, std::int32_t, ::bioseq::chaining::arena_slab<anchor>&);
+
+/**
+ * Verify native seed candidates using one set of borrowed readers per lookup.
+ * Resident matching-width sources use the shared packed SIMD comparator; other
+ * sources retain checked bounded reads and owned per-orientation query scratch.
+ * Only private same-call exact origin can elide equality; all public inputs verify.
+ */
+template<sequence_alphabet Alphabet>
+struct seed_anchor_verifier {
+    using view_type = bioseq::storage::lazy_sequence_view<Alphabet>;
+    using packed_region = typename view_type::resident_packed_sequence;
+    static constexpr std::size_t maximum_span =
+        std::numeric_limits<decltype(anchor::query_span)>::max();
+    static constexpr std::size_t orientation_count =
+        bioseq::storage::lazy_sequence_detail::complementable_sequence_alphabet<Alphabet> ? 2u : 1u;
+    std::array<bioseq::storage::borrowed_rank_window_source, orientation_count> query_sources;
+    const bioseq::storage::borrowed_rank_window_source target_source;
+    std::array<std::array<std::uint8_t, maximum_span>, orientation_count> query_scratch;
+    std::array<std::optional<sequence_size_t>, orientation_count> cached_query_positions{};
+    std::array<sequence_packed_equality_kernel, orientation_count> packed_counters{};
+    packed_region query_packed{};
+    packed_region target_packed{};
+    std::size_t query_physical_total{};
+    const std::size_t span;
+    const sequence_rank_equality_kernel counter;
+
+    /** Bind source readers and any stable native-word comparator once per collection. */
+    seed_anchor_verifier(const view_type& query, const view_type& target,
+                         std::size_t seed_span, sequence_rank_equality_kernel equality,
+                         sequence_packed_equality_resolver packed_equality)
+        : target_source(target.template borrow_rank_source<false>()),
+          span(seed_span), counter(equality) {
+        query_sources[0] = query.template borrow_rank_source<false>();
+        if constexpr (orientation_count > 1u)
+            query_sources[1] = query.template borrow_rank_source<true>();
+        if (packed_equality == nullptr || query_sources[0].symbol_count == 0u
+            || target_source.symbol_count == 0u) return;
+        const auto try_width = [this, &query, &target, packed_equality]<std::size_t Width>() {
+            if (packed_counters[0] != nullptr) return;
+            const auto query_region = query.try_resident_packed(0u, query_sources[0].symbol_count, Width);
+            if (!query_region) return;
+            const auto target_region = target.try_resident_packed(0u, target_source.symbol_count, Width);
+            if (!target_region) return;
+            if (query_sources[0].symbol_count > std::numeric_limits<std::size_t>::max()
+                    - query_region->leading_symbol_offset
+                || target_source.symbol_count > std::numeric_limits<std::size_t>::max()
+                    - target_region->leading_symbol_offset) return;
+            constexpr auto alphabet_code = supported_biological_alphabets::template index_of<Alphabet>();
+            const auto forward = packed_equality(alphabet_code, Width, false);
+            if (forward == nullptr) return;
+            query_packed = *query_region;
+            target_packed = *target_region;
+            query_physical_total = static_cast<std::size_t>(query_sources[0].symbol_count)
+                + query_packed.leading_symbol_offset;
+            packed_counters[0] = forward;
+            if constexpr (orientation_count > 1u)
+                packed_counters[1] = packed_equality(alphabet_code, Width, true);
+        };
+        []<std::size_t... Widths>(supported_storage_unit_byte_widths<Widths...>, const auto& visitor) {
+            (visitor.template operator()<Widths>(), ...);
+        }(all_storage_unit_byte_widths{}, try_width);
+    }
+
+    /** Check geometry first; public inputs also verify every active native rank. */
+    [[nodiscard]] std::expected<bool, alignment_contract_error> operator()(const anchor& candidate) {
+        if (candidate.is_reverse > 1u || (candidate.is_reverse != 0u && orientation_count == 1u))
+            return std::unexpected(alignment_contract_error::orientation);
+        if (counter == nullptr || span == 0u || span > maximum_span
+            || candidate.query_span != span || candidate.query_position >= query_sources[0].symbol_count
+            || candidate.ref_position >= target_source.symbol_count
+            || span > candidate.query_position + 1u || span > candidate.ref_position + 1u)
+            return std::unexpected(alignment_contract_error::coordinates);
+        if (same_call_exact_keys_) return true;
+        const std::size_t orientation = static_cast<std::size_t>(candidate.is_reverse);
+        const auto query_start = candidate.query_position + 1u - span;
+        const auto target_start = candidate.ref_position + 1u - span;
+        sequence_symbol_equality compared;
+        if (const auto packed_counter = packed_counters[orientation]; packed_counter != nullptr) {
+            const auto physical_query_start = static_cast<std::size_t>(query_start)
+                + (orientation == 0u ? query_packed.leading_symbol_offset : 0u);
+            compared = packed_counter(query_packed.units, target_packed.units, query_physical_total,
+                physical_query_start, static_cast<std::size_t>(target_start) + target_packed.leading_symbol_offset,
+                span);
+        } else {
+            auto& query_chunk = query_scratch[orientation];
+            auto& cached_position = cached_query_positions[orientation];
+            if (!cached_position || *cached_position != candidate.query_position) {
+                const auto query_ranks = query_sources[orientation].read_checked(query_start, span, query_chunk);
+                if (!query_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+                if (query_ranks->data() != query_chunk.data())
+                    std::copy(query_ranks->begin(), query_ranks->end(), query_chunk.begin());
+                cached_position = candidate.query_position;
+            }
+            std::array<std::uint8_t, maximum_span> target_scratch;
+            const auto target_ranks = target_source.read_checked(target_start, span, target_scratch);
+            if (!target_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+            compared = counter(query_chunk.data(), target_ranks->data(), span,
+                sequence_rank_validation::upper_bound, seqan3::alphabet_size<Alphabet>);
+        }
+        if (!compared.valid_ranks) return std::unexpected(alignment_contract_error::trace_accounting);
+        return compared.equal_symbols == span;
+    }
+
+  private:
+    bool same_call_exact_keys_ = false;
+
+    template<sequence_alphabet OtherAlphabet>
+    friend struct ::bioseq::simd::pipe::seed_hit_stage;
+    // Genuine wrapper/member cycle: public collection always supplies no origin;
+    // only the existing owned seed stage can pass its active lifetime.
+    template<class Minimizer, minimizer_lookup_index Index, sequence_alphabet OtherAlphabet>
+    friend std::expected<void, alignment_contract_error> collect_seed_hits(
+        std::span<const Minimizer>, const Index&,
+        bioseq::storage::lazy_sequence_view<OtherAlphabet>,
+        bioseq::storage::lazy_sequence_view<OtherAlphabet>,
+        sequence_rank_equality_kernel, sequence_packed_equality_resolver,
+        std::int32_t, std::int32_t, ::bioseq::chaining::arena_slab<anchor>&);
+
+    /** Collect once using the existing occurrence, geometry, verification and sorting order. */
+    template <class p_minimizer, minimizer_lookup_index p_index>
+    [[nodiscard]] static std::expected<void, alignment_contract_error> collect(std::span<const p_minimizer> query_minimizers,
+                           const p_index& target_index,
+                           bioseq::storage::lazy_sequence_view<Alphabet> query,
+                           bioseq::storage::lazy_sequence_view<Alphabet> target,
+                           sequence_rank_equality_kernel counter,
+                           sequence_packed_equality_resolver packed_equality,
+                           std::int32_t max_occ,
+                           std::int32_t kmer_size,
+                           ::bioseq::chaining::arena_slab<anchor>& anchors_out,
+                           const pipe::post_seed_owned_lifetime* lifetime) {
+        static const auto* _seed_hits_desc =
+            bioseq::instrumentation::register_static_region("collect_seed_hits");
+        auto _seed_hits_scope = bioseq::instrumentation::region(_seed_hits_desc);
+        anchors_out.resize(0u);
+        if (max_occ < 0 || kmer_size <= 0
+            || static_cast<std::uint64_t>(kmer_size) > std::numeric_limits<decltype(anchor::query_span)>::max())
+            return std::unexpected(alignment_contract_error::coordinates);
+        const auto query_len = query.bp_size();
+        seed_anchor_verifier<Alphabet> verifier(query, target, static_cast<std::size_t>(kmer_size),
+                                               counter, packed_equality);
+        if constexpr (bioseq::minimizers::generated_minimizer_physical_record<p_minimizer>
+            && std::same_as<std::remove_cvref_t<p_index>,
+                            bioseq::indexing::minimizer_hashmap_fragment_index>) {
+            if (lifetime != nullptr
+                && lifetime->remaining_seed_users.load(std::memory_order_acquire) != 0u) {
+                const auto& origin = lifetime->owned_cpu_index;
+                verifier.same_call_exact_keys_ = origin.exact_query_owner_
+                    && origin.exact_index_ == &target_index && origin.index == &target_index
+                    && origin.is_valid()
+                    && origin.exact_query_data_ == query_minimizers.data()
+                    && origin.exact_query_count_ == query_minimizers.size()
+                    && origin.exact_seed_span_ == static_cast<std::size_t>(kmer_size)
+                    && origin.exact_record_id_
+                        == bioseq::minimizers::minimizer_physical_record_detail::record_id<p_minimizer>()
+                    && origin.same_exact_source(origin.exact_query_source_, query.borrow_rank_source(true))
+                    && origin.same_exact_source(origin.exact_target_source_, target.borrow_rank_source(true));
+            }
+        }
+        const auto verify = std::ref(verifier);
+        // Reserve an initial capacity for direct callers. An already-large slab
+        // keeps its allocation, and push_back can grow it if more hits are found.
+        anchors_out.reserve(query_minimizers.size() * 2);
+
+        // Time the whole  lookup loop to keep per-minimizer profiler overhead low.
+        {
+            static const auto* _idx_lookup_desc =
+                bioseq::instrumentation::register_static_region("target_index_lookup");
+            auto _idx_lookup_scope = bioseq::instrumentation::region(_idx_lookup_desc);
+            // Every seed in this call uses the configured k-mer span.
+            const std::uint32_t query_span_value = static_cast<std::uint32_t>(kmer_size);
+            for (const auto& query_minimizer : query_minimizers) {
+                const minimizer_lookup_spans target_hits =
+                    lookup_minimizer_spans(target_index, query_minimizer.kmer());
+                const std::uint64_t global_occurrence_count = target_hits.global_occurrence_count();
+                if (global_occurrence_count == 0 ||
+                    global_occurrence_count > static_cast<std::uint64_t>(max_occ)) {
+                    continue;
+                }
+                if (!target_hits.positions_complete() || !target_hits.well_formed()) {
+                    throw bioseq::indexing::persisted_minimizer_lookup_error(
+                        "persisted minimizer positions unavailable or inconsistent "
+                        "after global occurrence pruning");
+                }
+
+                // Keep the encoded position and strand in 64 bits. A position at or
+                // above 2^31 needs an extra bit once the stranq is packed with it.
+                const std::uint64_t query_pos_encoded = query_minimizer.pos_strand_encoded();
+                // The query strand is shared by every target hit for this minimizer.
+                const std::uint32_t query_strand_bit = static_cast<std::uint32_t>(query_pos_encoded & 1ULL);
+                const sequence_size_t forward_query_pos =
+                    static_cast<sequence_size_t>(query_pos_encoded >> 1);
+                // Compute both  strand coordinates once for all hits of this minimizer.
+                if (forward_query_pos >= query_len || query_span_value > forward_query_pos + 1u) {
+                    anchors_out.resize(0u);
+                    return std::unexpected(alignment_contract_error::coordinates);
+                }
+                const sequence_size_t reverse_query_pos =
+                    query_len - (forward_query_pos + 1u - query_span_value) - 1u;
+
+                const auto contiguous32 = target_hits.contiguous_positions32();
+                const auto contiguous64 = target_hits.contiguous_positions();
+                if (!contiguous32.empty()) {
+                    const auto appended = append_seed_hits_from_position_span(contiguous32,
+                                                        query_strand_bit,
+                                                        forward_query_pos,
+                                                        reverse_query_pos,
+                                                        query_span_value,
+                                                        anchors_out, verify);
+                    if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
+                } else if (!contiguous64.empty()) {
+                    const auto appended = append_seed_hits_from_position_span(contiguous64,
+                                                        query_strand_bit,
+                                                        forward_query_pos,
+                                                        reverse_query_pos,
+                                                        query_span_value,
+                                                        anchors_out, verify);
+                    if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
+                } else {
+                    for (const minimizer_position_span& target_span :
+                         target_hits.segmented_positions()) {
+                        const auto appended = append_seed_hits_from_position_span(target_span.positions,
+                                                            query_strand_bit,
+                                                            forward_query_pos,
+                                                            reverse_query_pos,
+                                                            query_span_value,
+                                                            anchors_out, verify);
+                        if (!appended) { anchors_out.resize(0u); return std::unexpected(appended.error()); }
+                    }
+                }
+            }
+        } // end target_index_lookup scope
+
+        // Use the shared anchor sorter so every seeder gives chaining the same
+        // order. It groups strand/reference positions first, then resolves ties
+        // by the query key and full query position.
+        sort_seed_hits(anchors_out);
+
+        bioseq_log_lazy<logging_level::debug>([&anchors_out, &query_minimizers,
+            same_call_exact_keys = verifier.same_call_exact_keys_] {
+            bioseq_log_progress<logging_level::debug>(
+                "[minimap_port] Collected {} seed anchors from {} query minimizers"
+                " | footprint={}MB avail={}MB same_call_exact_keys={}",
+                anchors_out.size(),
+                query_minimizers.size(),
+                bioseq::common::memory::process_footprint_bytes() >> 20,
+                bioseq::common::memory::system_available_bytes() >> 20,
+                same_call_exact_keys);
+        });
+        return {};
+    }
+};
+
+/** Public and supplied-record collection always verifies the actual source symbols. */
+template<class p_minimizer, minimizer_lookup_index p_index, sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<void, alignment_contract_error> collect_seed_hits(
+    std::span<const p_minimizer> query_minimizers, const p_index& target_index,
+    bioseq::storage::lazy_sequence_view<Alphabet> query,
+    bioseq::storage::lazy_sequence_view<Alphabet> target,
+    sequence_rank_equality_kernel counter, sequence_packed_equality_resolver packed_equality,
+    std::int32_t max_occ, std::int32_t kmer_size,
+    ::bioseq::chaining::arena_slab<anchor>& anchors_out) {
+    return seed_anchor_verifier<Alphabet>::template collect<p_minimizer>(
+        query_minimizers, target_index, query, target, counter, packed_equality,
+        max_occ, kmer_size, anchors_out, nullptr);
+}
+
+} // namespace bioseq::simd
 
 export {
 
@@ -572,13 +853,13 @@ export {
                     static_cast<std::size_t>(query_len),
                     static_cast<std::size_t>(target_index_ref.target_length()),
                     kmer_size));
-                const auto collected = collect_seed_hits<p_minimizer>(sketch_span,
+                const auto collected = seed_anchor_verifier<p_alphabet>::template collect<p_minimizer>(sketch_span,
                     target_index_ref, query_seq_, target_seq_,
                     parameters().highway_kernels == nullptr ? nullptr
                         : parameters().highway_kernels->common.count_equal_rank_chunk,
                     parameters().highway_kernels == nullptr ? nullptr
                         : parameters().highway_kernels->common.resolve_sequence_packed_equality,
-                    parameters().max_occ, kmer_size, anchors_slab);
+                    parameters().max_occ, kmer_size, anchors_slab, post_seed_lifetime);
                 if (!collected) {
                     record_cpu_seed_completion();
                     stats_dst->record_failure(collected.error());

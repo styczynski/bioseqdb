@@ -460,12 +460,11 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
     REQUIRE(admitted.index.lookup(7u).size() == 1u);
     REQUIRE(admitted.index.lookup(9u).size() == 1u);
 
-    authority_type authority{
-        .index = &admitted.index,
-        .permit = &*admitted.index_permit,
-        .expected_permit_bytes = receipt.retained_index_permit_bytes,
-        .require_exact_permit_bytes = true,
-    };
+    authority_type authority{};
+    authority.index = &admitted.index;
+    authority.permit = &*admitted.index_permit;
+    authority.expected_permit_bytes = receipt.retained_index_permit_bytes;
+    authority.require_exact_permit_bytes = true;
     REQUIRE(authority.is_valid());
     authority_type mismatched_authority = authority;
     ++mismatched_authority.expected_permit_bytes;
