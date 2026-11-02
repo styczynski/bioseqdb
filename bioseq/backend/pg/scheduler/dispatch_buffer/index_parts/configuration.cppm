@@ -33,6 +33,7 @@ module bioseq.postgres.scheduler.dispatch_buffer:configuration;
 import bioseq.postgres.scheduler.dispatch_buffer;
 
 import bioseq.common.logging;
+import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
 import bioseq.indexing.type;
@@ -398,6 +399,8 @@ void tuple_dispatch_buffer::configure_params(
     Relation executor_relation,
     Snapshot executor_snapshot,
     MemoryContext executor_query_context) {
+    bioseq::settings::index::sequence_read::validate_requirement(read_requirement,
+                                                               read_sequence_index);
     require_registered_mvcc_snapshot_(executor_snapshot);
     if (executor_query_context == nullptr || !MemoryContextIsValid(executor_query_context)) {
         ereport(ERROR,
@@ -421,11 +424,8 @@ void tuple_dispatch_buffer::configure_params(
         ::bioseq::simd::pipe::use_generic_raw_optional_scalar_minimizer_route(
             execution_plan->frozen_parameters, read_requirement);
     read_sequence_index_active =
-        generic_raw_optional_scalar ? false
-        : read_requirement == bioseq::indexing::index_read_requirement::require_absent ? false
-        : read_requirement == bioseq::indexing::index_read_requirement::require_compatible_persisted
-            ? true
-            : read_sequence_index;
+        read_sequence_index && !generic_raw_optional_scalar &&
+        read_requirement != bioseq::indexing::index_read_requirement::require_absent;
     if (mmsearch_state.per_row_evaluated) {
         require_evaluated_mmsearch_index_policy_();
     }

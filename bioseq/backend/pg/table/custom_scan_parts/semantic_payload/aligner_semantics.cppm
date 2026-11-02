@@ -33,6 +33,7 @@ export module bioseq.postgres.table:custom_scan_semantic_payload_aligner_semanti
 
 import bioseq.indexing.type;
 import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 
 import :custom_scan_aligner_options_codec_contracts;
@@ -394,6 +395,8 @@ export {
         ReleaseTupleDesc(tupdesc);
         /* Release the temporary detoasted copy, if one was allocated. */
         free_detoasted_header();
+        bioseq::settings::index::sequence_read::validate_requirement(
+            index_read_requirement, bioseq::settings::index::sequence_read::enabled);
         return index_read_requirement_present;
     }
 

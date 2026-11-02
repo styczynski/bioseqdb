@@ -6,6 +6,7 @@ module;
 
 extern "C" {
 #include "postgres.h"
+#include "utils/errcodes.h"
 }
 
 #include <limits>
@@ -802,9 +803,9 @@ struct settings final {
 
             /** @brief Reads stored per-sequence indexes when they are available.
              *
-             * @remark Configuration: Controls whether the pipeline executor can read indexes. If the option is disabled, then pipeline will always recompute all seeds from scratch. There's also per-search option passed via aligner_options: index_read_requirement codes 1 and 2 override this setting.
-             * @remark Value `true`: Normally allow reading BioseqDB indices.
-             * @remark Value `false`: Force pipeline to always recompute all seeds from scratch.
+             * @remark Configuration: Controls whether search execution can read stored sequence-index payloads. The per-search require_absent policy disables reads even when this setting is enabled. A require_compatible_persisted request conflicts with a disabled setting and raises an error before execution.
+             * @remark Value `true`: Allow eligible stored-index reads under the per-search policy.
+             * @remark Value `false`: Disable stored-index payload reads; allow and require_absent searches recompute, while require_compatible_persisted searches are rejected.
              *
              * ```sql
              * -- Inspect the current value without changing the session.
@@ -824,6 +825,20 @@ struct settings final {
                 .plan_cache = bioseq::sql::plan_cache_policy::reset,
             })]]
             static inline bool enabled = true;
+
+            /** Reject a required persisted search when its index reads are disabled. */
+            static void validate_requirement(
+                const bioseq::indexing::index_read_requirement requirement,
+                const bool reads_enabled) {
+                if (!reads_enabled &&
+                    requirement == bioseq::indexing::index_read_requirement::require_compatible_persisted) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("a persisted index cannot be required while sequence index reads are disabled"),
+                             errdetail("aligner_options.index_read_requirement=2 conflicts with bioseq.index.sequence_read.enabled=off"),
+                             errhint("Enable bioseq.index.sequence_read.enabled or choose an index-read policy that permits recomputation.")));
+                }
+            }
         };
 
         /** Saving indexes in the background. */

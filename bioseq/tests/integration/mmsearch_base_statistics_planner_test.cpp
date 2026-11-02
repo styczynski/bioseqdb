@@ -502,6 +502,7 @@ TEST_CASE("alignment execution id is fresh and errors do not publish",
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
 
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
     require_no_current_compatible_persisted_index(
         ctx, index_requirement_sql(k_hoe, 2));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id);
@@ -510,6 +511,7 @@ TEST_CASE("alignment execution id is fresh and errors do not publish",
         "last_alignment_persisted_gpu_operation_stats()::text;")
         == first_evidence);
 
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     (void)query_rows(ctx, index_requirement_sql(k_hoe, 1));
     REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0) == first_id + 1);
     REQUIRE(query_scalar_int(ctx,
@@ -1285,6 +1287,7 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
     auto ctx = fresh_context({k_batch_join_target});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     seed_batch_join_target(ctx);
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
     load_batch_join_queries(ctx, 2);
     const std::string sql = batch_join_sql(2, "q.id, t.pk");
 

@@ -906,7 +906,7 @@ TEST_CASE("require_compatible_persisted errors when target chunks are missing",
                 .pk = 1,
                 .sequences = {hoe_seed_rows().front().sequences.front()}},
         });
-    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
     REQUIRE(index_table_row_count(
         ctx, "minimizers_per_fragment", k_missing_index) == 0);
     require_no_current_compatible_persisted_index(
