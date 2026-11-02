@@ -8,6 +8,7 @@ module;
 #include <bit>
 #include <type_traits>
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -49,26 +50,33 @@ packed_symbol_complement_mask() {
     }
 }
 
-/** One low bit per logical symbol, derived from the actual compact layout. */
-template<class Traits>
-[[nodiscard]] constexpr typename Traits::storage_unit packed_symbol_low_bits() noexcept {
-    using unit_type = typename Traits::storage_unit;
-    unit_type result{};
-    for (std::size_t shift = 0u; shift < Traits::unit_used_bits; shift += Traits::bits_per_char)
-        result |= unit_type{1} << shift;
+/** One low bit per logical symbol in complete native units of Word. */
+template<class Traits, std::unsigned_integral Word = typename Traits::storage_unit>
+    requires (std::numeric_limits<Word>::digits % Traits::unit_width == 0u)
+[[nodiscard]] constexpr Word packed_symbol_low_bits() noexcept {
+    Word result{};
+    for (std::size_t unit_offset = 0u; unit_offset < std::numeric_limits<Word>::digits;
+         unit_offset += Traits::unit_width) {
+        for (std::size_t shift = 0u; shift < Traits::unit_used_bits; shift += Traits::bits_per_char)
+            result |= Word{1} << (unit_offset + shift);
+    }
     return result;
 }
 
-/** Fold each nonzero packed XOR field onto its least significant symbol bit. */
-template<class Traits>
-[[nodiscard]] constexpr typename Traits::storage_unit packed_symbol_mismatch_bits(
-    typename Traits::storage_unit difference) noexcept {
+/** Fold each nonzero packed XOR field onto its low bit, preserving native padding.
+ * Word defaults to the original native unit; explicit wider words contain only
+ * complete native units and do not change the sequence's packing geometry.
+ */
+template<class Traits, std::unsigned_integral Word = typename Traits::storage_unit>
+    requires (std::numeric_limits<Word>::digits % Traits::unit_width == 0u)
+[[nodiscard]] constexpr Word packed_symbol_mismatch_bits(
+    std::type_identity_t<Word> difference) noexcept {
     auto folded = difference;
     bioseq::common::templating::for_each_index<Traits::bits_per_char - 1u>(
         [difference, &folded]<std::size_t Shift>(std::integral_constant<std::size_t, Shift>) {
             folded |= difference >> (Shift + 1u);
         });
-    return folded & packed_symbol_low_bits<Traits>();
+    return folded & packed_symbol_low_bits<Traits, Word>();
 }
 
 /** Return the used low bits of a compact word without a full-width shift. */

@@ -256,7 +256,34 @@ template<class Traits, bool Reverse>
     using unit_type = typename Traits::storage_unit;
     const unit_type repeated = bioseq::simd::packed_symbol_low_bits<Traits>() * static_cast<unit_type>(rank);
     std::uint64_t result{};
-    for (std::size_t offset = 0u; offset < length;) {
+    std::size_t offset = 0u;
+    constexpr auto group_units = sizeof(std::uint64_t) / sizeof(unit_type);
+    if constexpr (!Reverse && std::endian::native == std::endian::little && group_units > 1u) {
+        constexpr auto group_symbols = group_units * Traits::letters_per_unit;
+        constexpr auto group_low_bits = bioseq::simd::packed_symbol_low_bits<Traits, std::uint64_t>();
+        const auto group_repeated = group_low_bits * static_cast<std::uint64_t>(rank);
+        if (length >= group_symbols) {
+            const auto phase = start % Traits::letters_per_unit;
+            const auto* units = static_cast<const unit_type*>(query) + start / Traits::letters_per_unit;
+            do {
+                const auto word = bioseq::simd::load_packed_forward_machine_word<Traits>(units, phase);
+                auto matches = ~bioseq::simd::packed_symbol_mismatch_bits<Traits, std::uint64_t>(
+                    word ^ group_repeated) & group_low_bits;
+                while (matches != 0u) {
+                    const auto bit = static_cast<std::size_t>(std::countr_zero(matches));
+                    const auto symbol = (bit / Traits::unit_width) * Traits::letters_per_unit
+                        + (bit % Traits::unit_width) / Traits::bits_per_char;
+                    result |= std::uint64_t{1} << (offset + symbol);
+                    matches &= matches - 1u;
+                }
+                offset += group_symbols;
+                units += group_units;
+            } while (length - offset >= group_symbols);
+        }
+    }
+    // Short tails, reverse, native machine words and other endian orders retain
+    // the bounded native loader. Only complete admitted groups use memcpy above.
+    for (; offset < length;) {
         const auto count = std::min(Traits::letters_per_unit, length - offset);
         const auto word = packed_word<Traits, Reverse>(query, total, start + offset, count);
         unit_type matches = ~bioseq::simd::packed_symbol_mismatch_bits<Traits>(

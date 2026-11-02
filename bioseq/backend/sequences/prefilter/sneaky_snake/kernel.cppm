@@ -20,6 +20,8 @@ module;
 export module bioseq.highway.sources.sneaky_snake;
 
 import std;
+import bioseq.common.templating;
+import bioseq.common.checked_arithmetic;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.highway.sources.simd_utils;
 import bioseq.simd.utils;
@@ -146,7 +148,64 @@ template<class Traits, bool Reverse, class Descriptor>
         const auto packed = load_packed_symbol_vector<Traits, Reverse>(
             d, static_cast<const unit_type*>(query), total, start + offset, count, *complement);
         const auto mismatch = packed_symbol_mismatch_bits<Traits>(d, hn::Xor(packed, repeated));
-        hn::Store(hn::And(hn::Not(mismatch), hn::Set(d, low_bits)), d, words.data());
+        const auto matching_fields = hn::And(hn::Not(mismatch), hn::Set(d, low_bits));
+#if HWY_HAVE_INTEGER64 && HWY_TARGET != HWY_SCALAR
+        // Highway only declares BitShuffle for these targets. Smaller descriptors
+        // and other endian orders keep the existing native-word extraction below.
+        if constexpr (std::endian::native == std::endian::little
+            && hn::MaxLanes(D{}) * sizeof(unit_type) >= sizeof(std::uint64_t)) {
+            using group_descriptor = hn::Repartition<std::uint64_t, D>;
+            const group_descriptor groups;
+            constexpr auto symbols_per_group = (sizeof(std::uint64_t) / sizeof(unit_type))
+                * Traits::letters_per_unit;
+            constexpr auto bits_per_gather = sizeof(std::uint64_t);
+            constexpr auto gather_count = (symbols_per_group + bits_per_gather - 1u) / bits_per_gather;
+            if (count >= symbols_per_group
+                && lanes * sizeof(unit_type) == hn::Lanes(groups) * sizeof(std::uint64_t)) {
+                const hn::Repartition<std::uint8_t, group_descriptor> indices_descriptor;
+                const auto grouped_fields = hn::BitCast(groups, matching_fields);
+                auto dense_groups = hn::Zero(groups);
+                bioseq::common::templating::for_each_index<gather_count>(
+                    [groups, indices_descriptor, grouped_fields, &dense_groups]<std::size_t Gather>(
+                        std::integral_constant<std::size_t, Gather>) {
+                        constexpr auto first_symbol = Gather * bits_per_gather;
+                        constexpr auto selected_count = symbols_per_group - first_symbol < bits_per_gather
+                            ? symbols_per_group - first_symbol : bits_per_gather;
+                        constexpr auto indices_word = [] {
+                            std::uint64_t indices{};
+                            for (std::size_t byte = 0u; byte < selected_count; ++byte) {
+                                const auto symbol = first_symbol + byte;
+                                const auto bit = (symbol / Traits::letters_per_unit) * Traits::unit_width
+                                    + (symbol % Traits::letters_per_unit) * Traits::bits_per_char;
+                                indices |= static_cast<std::uint64_t>(bit)
+                                    << (byte * std::numeric_limits<std::uint8_t>::digits);
+                            }
+                            return indices;
+                        }();
+                        const auto selected = hn::And(hn::BitShuffle(grouped_fields,
+                            hn::BitCast(indices_descriptor, hn::Set(groups, indices_word))),
+                            hn::Set(groups, *bioseq::common::checked_low_bits_mask<std::uint64_t>(selected_count)));
+                        dense_groups = hn::Or(dense_groups, hn::ShiftLeft<first_symbol>(selected));
+                    });
+                HWY_ALIGN std::array<std::uint64_t, hn::MaxLanes(group_descriptor{})> dense_words;
+                hn::Store(dense_groups, groups, dense_words.data());
+                const auto active_groups = count / symbols_per_group
+                    + static_cast<std::size_t>(count % symbols_per_group != 0u);
+                for (std::size_t group = 0u; group < active_groups; ++group) {
+                    const auto first = group * symbols_per_group;
+                    const auto live_symbols = std::min(symbols_per_group, count - first);
+                    // Zero-filled inactive fields may match rank zero; admit only
+                    // the original logical interval, never padding or a shift by 64.
+                    result |= (dense_words[group]
+                        & *bioseq::common::checked_low_bits_mask<std::uint64_t>(live_symbols))
+                        << (offset + first);
+                }
+                offset += count;
+                continue;
+            }
+        }
+#endif
+        hn::Store(matching_fields, d, words.data());
         for (std::size_t lane = 0u; lane < active; ++lane) {
             const auto begin = offset + lane * Traits::letters_per_unit;
             const auto live_symbols = std::min(Traits::letters_per_unit, length - begin);
