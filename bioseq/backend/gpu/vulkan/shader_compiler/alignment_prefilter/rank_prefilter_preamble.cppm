@@ -75,6 +75,64 @@ uint native_packed_rank(gpu_sequence_view sequence, uint64_t position, bool quer
 }
 )GLSL";
 
+/** Shared native cursor/chunk reads for shaders with one immutable packed-word arena. */
+inline constexpr std::string_view k_native_packed_cursor_reader = R"GLSL(
+uint native_packed_arena_word(uint64_t word_index);
+// Retain a packed word across adjacent chunks without expanding source storage.
+struct native_packed_word_cache {
+    uint64_t word_index;
+    uint word;
+};
+uint cached_native_packed_word(uint64_t word_index, inout native_packed_word_cache cache) {
+    if (word_index != cache.word_index) {
+        cache.word_index = word_index;
+        cache.word = native_packed_arena_word(word_index);
+    }
+    return cache.word;
+}
+// Read one to four active rank fields wholly inside one native storage unit.
+// The caller bounds first_slot/count; inactive slots and spare unit bits are masked.
+uint native_packed_chunk_bits(
+    gpu_sequence_view sequence,
+    native_packed_cursor cursor,
+    uint first_slot,
+    uint count,
+    inout native_packed_word_cache cache)
+{
+    uint bit_offset = first_slot * sequence.bits_per_char;
+    uint bit_count = count * sequence.bits_per_char;
+    uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
+    uint64_t word_index = byte_index >> 2u;
+    uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
+    uint bits = cached_native_packed_word(word_index, cache) >> word_shift;
+    if (word_shift + bit_count > 32u)
+        bits |= cached_native_packed_word(word_index + uint64_t(1), cache) << (32u - word_shift);
+    return bits & (0xffffffffu >> (32u - bit_count));
+}
+// Advance by at most the active slots left in this unit; callers skip the final advance.
+void advance_native_packed_cursor(
+    gpu_sequence_view sequence,
+    inout native_packed_cursor cursor,
+    uint count,
+    bool reverse)
+{
+    if (reverse) {
+        if (count <= cursor.slot) {
+            cursor.slot -= count;
+        } else {
+            cursor.unit_byte_index -= uint64_t(sequence.unit_bits / 8u);
+            cursor.slot = sequence.letters_per_unit - 1u;
+        }
+    } else {
+        cursor.slot += count;
+        if (cursor.slot == sequence.letters_per_unit) {
+            cursor.slot = 0u;
+            cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
+        }
+    }
+}
+)GLSL";
+
 /** Shared packed input, checked jobs and register-only rank quads for prefilters. */
 inline constexpr std::string_view k_rank_prefilter_preamble = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
@@ -109,6 +167,9 @@ layout(push_constant) uniform push_constants {
 uint packed_sequence_byte(uint64_t byte_index, bool query) {
     return (packed_words[uint(byte_index >> 2u)] >> ((uint(byte_index) & 3u) * 8u)) & 255u;
 }
+uint native_packed_arena_word(uint64_t word_index) {
+    return packed_words[uint(word_index)];
+}
 bool prefilter_job_is_in_bounds(prefilter_job job) {
     if (job.query_record_index >= pc.query_record_count || job.target_record_index >= pc.target_record_count)
         return false;
@@ -119,37 +180,6 @@ bool prefilter_job_is_in_bounds(prefilter_job job) {
         && uint64_t(job.target_start) <= target.bp_count
         && uint64_t(job.target_length) <= target.bp_count - uint64_t(job.target_start)
         && (job.orientation == 0u || (job.orientation == 3u && canonical_reverse_complement != 0u));
-}
-// Retain a packed word across adjacent chunks without expanding source storage.
-struct native_packed_word_cache {
-    uint64_t word_index;
-    uint word;
-};
-uint cached_native_packed_word(uint64_t word_index, inout native_packed_word_cache cache) {
-    if (word_index != cache.word_index) {
-        cache.word_index = word_index;
-        cache.word = packed_words[uint(word_index)];
-    }
-    return cache.word;
-}
-// Read one to four active rank fields wholly inside one native storage unit.
-// The caller bounds first_slot/count; inactive slots and spare unit bits are masked.
-uint native_packed_chunk_bits(
-    gpu_sequence_view sequence,
-    native_packed_cursor cursor,
-    uint first_slot,
-    uint count,
-    inout native_packed_word_cache cache)
-{
-    uint bit_offset = first_slot * sequence.bits_per_char;
-    uint bit_count = count * sequence.bits_per_char;
-    uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
-    uint64_t word_index = byte_index >> 2u;
-    uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
-    uint bits = cached_native_packed_word(word_index, cache) >> word_shift;
-    if (word_shift + bit_count > 32u)
-        bits |= cached_native_packed_word(word_index + uint64_t(1), cache) << (32u - word_shift);
-    return bits & (0xffffffffu >> (32u - bit_count));
 }
 // Normalize only a bounded register chunk when rank widths or orientation differ.
 uint native_packed_chunk_rank_bytes(
@@ -166,28 +196,6 @@ uint native_packed_chunk_rank_bytes(
         ranks |= rank << (lane * 8u);
     }
     return ranks;
-}
-// Advance by at most the active slots left in this unit; callers skip the final advance.
-void advance_native_packed_cursor(
-    gpu_sequence_view sequence,
-    inout native_packed_cursor cursor,
-    uint count,
-    bool reverse)
-{
-    if (reverse) {
-        if (count <= cursor.slot) {
-            cursor.slot -= count;
-        } else {
-            cursor.unit_byte_index -= uint64_t(sequence.unit_bits / 8u);
-            cursor.slot = sequence.letters_per_unit - 1u;
-        }
-    } else {
-        cursor.slot += count;
-        if (cursor.slot == sequence.letters_per_unit) {
-            cursor.slot = 0u;
-            cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
-        }
-    }
 }
 // Four logical ranks remain in registers. Reuse each loaded packed word across
 // slots, including non-power-of-two letters/unit and cross-word symbols.

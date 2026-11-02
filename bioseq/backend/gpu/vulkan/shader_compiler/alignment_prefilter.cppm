@@ -70,8 +70,10 @@ bool alignment_numeric_contract(uint query_length, uint target_length,
  */
 [[nodiscard]] std::string rank_prefilter_body(std::string_view algorithm_body) {
     std::string body;
-    body.reserve(k_rank_prefilter_preamble.size() + algorithm_body.size());
+    body.reserve(k_native_packed_sequence_reader.size() + k_native_packed_cursor_reader.size()
+        + k_rank_prefilter_preamble.size() + algorithm_body.size());
     body += k_native_packed_sequence_reader;
+    body += k_native_packed_cursor_reader;
     body += k_rank_prefilter_preamble;
     body += algorithm_body;
     return body;
@@ -84,8 +86,10 @@ bool alignment_numeric_contract(uint query_length, uint target_length,
 [[nodiscard]] std::string specialised_gatekeeper_body(std::uint32_t length,
                                                       std::uint32_t max_edits) {
     std::string body;
-    body.reserve(k_rank_prefilter_preamble.size() + k_gatekeeper_rank_batch_body.size() + 96u);
+    body.reserve(k_native_packed_sequence_reader.size() + k_native_packed_cursor_reader.size()
+        + k_rank_prefilter_preamble.size() + k_gatekeeper_rank_batch_body.size() + 96u);
     body += k_native_packed_sequence_reader;
+    body += k_native_packed_cursor_reader;
     body += k_rank_prefilter_preamble;
     body += fmt::format("#define gatekeeper_specialized_length {}\n"
                         "#define gatekeeper_specialized_edits {}\n",

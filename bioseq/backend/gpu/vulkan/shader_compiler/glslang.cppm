@@ -48,7 +48,8 @@ namespace {
         return std::string{k_seed_native_coverage_body};
     case shader_kind::seed_verify_count:
     case shader_kind::seed_verify_emit:
-        return std::string{k_native_packed_sequence_reader} + std::string{k_seed_verify_body};
+        return std::string{k_native_packed_sequence_reader} + std::string{k_native_packed_cursor_reader}
+            + std::string{k_seed_verify_body};
     case shader_kind::seed_count:
     case shader_kind::seed_emit:
         return std::string{k_seed_count_emit_body};

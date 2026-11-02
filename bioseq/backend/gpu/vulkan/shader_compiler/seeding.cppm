@@ -62,6 +62,9 @@ layout(push_constant) uniform verify_push {
 uint packed_sequence_byte(uint64_t byte_index, bool query) {
     return (native_words[uint(byte_index >> 2u)] >> ((uint(byte_index) & 3u) * 8u)) & 255u;
 }
+uint native_packed_arena_word(uint64_t word_index) {
+    return native_words[uint(word_index)];
+}
 uint find_native_window(uint64_t end, uint span, uint begin, uint count) {
     if (end == ~uint64_t(0) || end + uint64_t(1) < uint64_t(span)) return 0xffffffffu;
     uint64_t start = end + uint64_t(1) - uint64_t(span);
@@ -96,15 +99,25 @@ bool matches_native_seed(gpu_anchor_wire anchor) {
     gpu_sequence_view target = native_records[target_record];
     uint target_start = uint(target_end - target.bp_offset) + 1u - pc.kmer_size;
     uint query_start = uint(query_end - query.bp_offset) + 1u - pc.kmer_size;
+    bool reverse = anchor.is_reverse != 0u;
+    native_packed_cursor query_cursor = native_packed_begin(query,
+        reverse ? query_end - query.bp_offset : uint64_t(query_start));
+    native_packed_cursor target_cursor = native_packed_begin(target, uint64_t(target_start));
+    native_packed_word_cache query_cache = native_packed_word_cache(~uint64_t(0), 0u);
+    native_packed_word_cache target_cache = native_packed_word_cache(~uint64_t(0), 0u);
     for (uint offset = 0u; offset < pc.kmer_size; ++offset) {
-        uint query_offset = anchor.is_reverse != 0u ? pc.kmer_size - 1u - offset : offset;
-        uint query_rank = native_packed_rank(query, query_start + query_offset, true);
-        uint target_rank = native_packed_rank(target, target_start + offset, false);
+        uint query_rank = native_packed_chunk_bits(query, query_cursor, query_cursor.slot, 1u, query_cache);
+        uint target_rank = native_packed_chunk_bits(target, target_cursor, target_cursor.slot, 1u, target_cache);
         if (query_rank >= rank_count || target_rank >= rank_count) {
             atomicOr(counters[0], 1u); return false;
         }
-        if (anchor.is_reverse != 0u) query_rank = rank_to_rc_code[query_rank];
+        if (reverse) query_rank = rank_to_rc_code[query_rank];
         if (query_rank != target_rank) return false;
+        // Skip the final advance: no forward-past-end or reverse-before-begin cursor.
+        if (offset + 1u < pc.kmer_size) {
+            advance_native_packed_cursor(query, query_cursor, 1u, reverse);
+            advance_native_packed_cursor(target, target_cursor, 1u, false);
+        }
     }
     return true;
 }
