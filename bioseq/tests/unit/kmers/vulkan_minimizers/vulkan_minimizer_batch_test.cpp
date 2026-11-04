@@ -267,7 +267,11 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
                 (device_only && !expects_overflow));
             if (!expects_overflow) {
                 REQUIRE(bounded_result.count == 0u);
-                REQUIRE(bounded_result.minimizer_words.bytes == sizeof(std::uint32_t));
+                // Device-only allocates after counting; host readback reserves
+                // the supplied one-record capacity before the submission.
+                REQUIRE(bounded_result.minimizer_words.bytes
+                    == (device_only ? sizeof(std::uint32_t)
+                        : bounded_params.minimizer_words32 * sizeof(std::uint32_t)));
             }
             REQUIRE(bounded_result.dispatch_stats.count_dispatches() == expected_count_submissions);
             REQUIRE(bounded_result.dispatch_stats.prefix_scan_sequences() == expected_count_submissions);

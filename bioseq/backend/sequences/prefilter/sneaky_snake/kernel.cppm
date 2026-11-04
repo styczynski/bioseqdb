@@ -227,6 +227,11 @@ template<class Traits, bool Reverse, class Descriptor>
  * @tparam p_descriptor Highway vectow, type used for byte comparisons.
  */
 template <class p_descriptor> struct highway_traversal final {
+  [[nodiscard]] static HWY_INLINE std::uint8_t rank_at(
+      std::span<const std::uint8_t> ranks, std::size_t position) noexcept {
+    return ranks[position];
+  }
+
   /** Bound to the already selected Highway target; no nested dynamic dispatch. */
   template<class Traits, bool Reverse>
   [[nodiscard]] static const prefilter_packed_operations* packed_operations() noexcept {
@@ -383,10 +388,9 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
       input, [options](const prefilter_rank_window& query,
                                    const prefilter_rank_window& target_ranks,
                                    const prefilter_job& job) {
-        sneaky_snake_detail::window_traversal<
-            sneaky_snake_target_detail::highway_traversal<p_descriptor>> traversal{query};
-        return sneaky_snake_detail::bounded_with(traversal, query, target_ranks,
-                                                 job.max_edits, options);
+        return sneaky_snake_detail::bounded_windows_with<
+            sneaky_snake_target_detail::highway_traversal<p_descriptor>>(
+                query, target_ranks, job.max_edits, options);
       }, sneaky_snake_target_detail::highway_traversal<p_descriptor>::read_block_size(),
       &resolve_prefilter_packed_operations<sneaky_snake_target_detail::highway_traversal<p_descriptor>>);
 }

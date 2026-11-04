@@ -3,9 +3,6 @@
 build_auto_scripts/
 build_auto_scripts
 .codex
-DOCS/ 
-DOCS/**
-DOCS/**/*
 
 .DS_Store
 *.dylib

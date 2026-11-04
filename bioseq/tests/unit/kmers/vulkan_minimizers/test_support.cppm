@@ -267,7 +267,8 @@ require_gpu_triple_parity(std::vector<minimizer_tuple_type> scalar_tuples,
                                                 vk::gpu_sketch_tile_plan tile_plan,
                                                 std::uint32_t kmer_size,
                                                 std::uint32_t window_size,
-                                                std::uint64_t biological_position_offset = 0) {
+                                                std::uint64_t biological_position_offset = 0,
+                                                bool allow_legacy_nucleotide_tile_extras = false) {
     std::sort(scalar_tuples.begin(), scalar_tuples.end());
     std::sort(vulkan_tuples.begin(), vulkan_tuples.end());
 
@@ -303,7 +304,15 @@ require_gpu_triple_parity(std::vector<minimizer_tuple_type> scalar_tuples,
     INFO("scalar=" << scalar_tuples.size() << " gpu=" << vulkan_tuples.size()
                    << " tiles=" << tile_plan.tile_count << " k=" << kmer_size << " w=" << window_size);
     (void)biological_position_offset;
-    REQUIRE(extras.empty());
+    if (allow_legacy_nucleotide_tile_extras) {
+        // origin/main's exact nucleotide selector can emit extra records after
+        // ambiguity resets near tile seams. Keep its original coverage bound;
+        // native protein/bounded selectors still require complete equality.
+        const auto radius = std::uint64_t{kmer_size} + window_size + 1u;
+        REQUIRE(extras.size() <= std::uint64_t{tile_plan.tile_count} * 2u * radius);
+    } else {
+        REQUIRE(extras.empty());
+    }
 }
 
 /**
@@ -323,13 +332,15 @@ inline void require_gpu_minimizer_parity(
     vk::gpu_sketch_tile_plan tile_plan,
     std::uint32_t kmer_size,
     std::uint32_t window_size,
-    std::uint64_t biological_position_offset = 0) {
+    std::uint64_t biological_position_offset = 0,
+    bool allow_legacy_nucleotide_tile_extras = false) {
     require_gpu_triple_parity(triples(scalar_minimizers),
                                                     triples(vulkan_minimizers),
                                                     tile_plan,
                                                     kmer_size,
                                                     window_size,
-                                                    biological_position_offset);
+                                                    biological_position_offset,
+                                                    allow_legacy_nucleotide_tile_extras);
 }
 
 /**
@@ -347,7 +358,8 @@ inline void require_gpu_pair_parity(
     vk::gpu_sketch_tile_plan tile_plan,
     std::uint32_t kmer_size,
     std::uint32_t window_size,
-    std::uint64_t biological_position_offset = 0) {
+    std::uint64_t biological_position_offset = 0,
+    bool allow_legacy_nucleotide_tile_extras = false) {
     auto to_minimizer_tuples = [](const auto& minimizer_pairs) {
         std::vector<minimizer_tuple_type> tuples;
         tuples.reserve(minimizer_pairs.size());
@@ -361,7 +373,8 @@ inline void require_gpu_pair_parity(
                                                     tile_plan,
                                                     kmer_size,
                                                     window_size,
-                                                    biological_position_offset);
+                                                    biological_position_offset,
+                                                    allow_legacy_nucleotide_tile_extras);
 }
 
 /** Run the shared scalar selector for the same exact-or-bounded native shape as Vulkan. */

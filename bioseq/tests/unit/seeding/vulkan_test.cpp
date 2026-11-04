@@ -19,6 +19,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.pipeline.pipe;                 // collect_seed_hits
+import bioseq.pipeline.minimap_port;         // canonical_seed_batch
 import bioseq.chaining.core;                 // anchor / arena_slab / make_arena_slab
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.gpu_minimizer_index;
@@ -311,9 +312,9 @@ TEST_CASE("vulkan seeding: MPF readback authenticates before canonical publicati
     constexpr std::uint64_t query_length = 64u;
     constexpr std::uint32_t query_span = 15u;
     const std::vector<vk::seed_anchor_wire> valid_wires{
-        {.ref_position = 101u, .query_position = 14u, .is_reverse = 0u,
+        {.ref_position = 114u, .query_position = 14u, .is_reverse = 0u,
          .query_span = 15u, .flags = 0u, .segment_id = 0u},
-        {.ref_position = 105u, .query_position = 40u, .is_reverse = 1u,
+        {.ref_position = 118u, .query_position = 40u, .is_reverse = 1u,
          .query_span = 15u, .flags = 0u, .segment_id = 0u},
     };
 
@@ -335,10 +336,10 @@ TEST_CASE("vulkan seeding: MPF readback authenticates before canonical publicati
     REQUIRE(batch.jobs.front().offset == 0u);
     REQUIRE(batch.jobs.front().count == valid_wires.size());
     const auto expected_anchors = std::vector{
-        std::tuple{std::uint64_t{101u}, std::uint64_t{14u},
+        std::tuple{std::uint64_t{114u}, std::uint64_t{14u},
                    std::uint32_t{0u}, std::uint8_t{15u},
                    std::uint8_t{0u}, std::uint16_t{0u}},
-        std::tuple{std::uint64_t{105u}, std::uint64_t{40u},
+        std::tuple{std::uint64_t{118u}, std::uint64_t{40u},
                    std::uint32_t{1u}, std::uint8_t{15u},
                    std::uint8_t{0u}, std::uint16_t{0u}},
     };

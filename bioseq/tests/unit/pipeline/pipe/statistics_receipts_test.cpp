@@ -70,6 +70,10 @@ TEST_CASE("explicitly bound pipeline description owns exact Highway kernels by s
     params.chaining_algorithm = chaining_algorithm::simd_minimap2;
     params.prefilter_enabled = true;
     params.prefilter_backend = bioseq::prefilter::prefilter_backend::simd;
+    params.compute_edit_distance = true;
+    params.exact_edit_filter_enabled = true;
+    params.exact_edit_filter_exclusive_upper_bound = 9;
+    params.prefilter_max_edits = 8;
     params.base_alignment_algorithm = base_alignment_algorithm::ksw2_batched;
     params.do_cigar = true;
     REQUIRE(params.highway_kernels == nullptr);
@@ -566,12 +570,12 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         job.binding_window_count = 2u;
         job.direct_count_dispatches = 2u;
         job.direct_emit_dispatches = 2u;
-        REQUIRE(job.is_internally_consistent(0x2000u));
+        REQUIRE(job.is_internally_consistent(windowed->operation().operation_identity));
         --job.direct_count_dispatches;
-        REQUIRE_FALSE(job.is_internally_consistent(0x2000u));
+        REQUIRE_FALSE(job.is_internally_consistent(windowed->operation().operation_identity));
         ++job.direct_count_dispatches;
         --job.direct_emit_dispatches;
-        REQUIRE_FALSE(job.is_internally_consistent(0x2000u));
+        REQUIRE_FALSE(job.is_internally_consistent(windowed->operation().operation_identity));
         ++job.direct_emit_dispatches;
         REQUIRE(windowed->seal());
     }

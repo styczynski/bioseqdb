@@ -578,8 +578,9 @@ TEST_CASE("runtime k selects hash capacity without becoming a template axis",
                 int, hash_position_probe, detail::hash_bits_step,
                 detail::seq_len_log2_step_per_hash, detail::baa_step
             >::template run<>(params, query, target, position_bits, hash_bits, alignment);
-            REQUIRE(hash_bits == (kmer_size == 11 ? 32u : 64u));
-            const auto expected_position_bits = kmer_size == 21 ? 63u
+            // K21's 42 rank bits fit the registered compact 43-bit hash field.
+            REQUIRE(hash_bits == (kmer_size == 11 ? 32u : 43u));
+            const auto expected_position_bits = kmer_size == 21 ? 20u
                 : sequence_size <= (std::size_t{1u} << 15u) ? 15u : 28u;
             REQUIRE(position_bits == expected_position_bits);
             REQUIRE(alignment == base_alignment_algorithm_type::block_aligner);

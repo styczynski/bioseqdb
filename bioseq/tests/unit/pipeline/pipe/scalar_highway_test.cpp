@@ -367,7 +367,9 @@ TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using range_type = compact_sequence_range<sequence_type>;
-    using output_type = minimizer_representation<31u, 32u>;
+    constexpr auto layout = bioseq::minimizers::select_minimizer_physical_layout<
+        seq::dna4, std::uint64_t>(minimizer_algorithm::simd_minimap2_reference, 32'769u, 15u, 10u);
+    using output_type = minimizer_representation<layout.record_position_log2, layout.hash_bits>;
     using collector_type = basic_sketch_collector<output_type>;
     using pipe::minimizer_kernel_kind;
 
@@ -405,12 +407,16 @@ TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation
         REQUIRE(reference == scalar);
     }
 
-    SECTION("exact SIMD preserves raw K15 record identity") {
+    SECTION("indexed exact SIMD preserves raw K15 record identity") {
         collector_type two_stack_collector;
+        // Indexed chronological selection has scalar parity. The resident
+        // window selector has separate goldens and can choose different seeds.
         const auto two_stack_stats =
-            pipe::minimizer_dispatch<minimizer_kernel_kind::exact_simd, output_type>(
-                two_stack_collector, view, 10u, 15u, table);
-        REQUIRE(two_stack_stats.is_internally_consistent(true));
+            pipe::minimizer_dispatch_range<output_type>(
+                two_stack_collector, view, 0u, view.bp_size(), 10u, 15u,
+                minimizer_sketch_backend::exact_simd,
+                pipe::exact_simd_range_route::require_continuation, table);
+        REQUIRE(two_stack_stats.exact_simd.is_internally_consistent(true));
         collector_type two_stack_scalar_collector;
         (void)pipe::minimizer_dispatch<minimizer_kernel_kind::scalar, output_type>(
             two_stack_scalar_collector, view, 10u, 15u, table);
@@ -587,7 +593,7 @@ TEST_CASE("reference SIMD uses the registered native DNA4 and DNA5 routes",
     check_reference_minimizer_topology_case<seq::dna5, std::uint64_t>();
 }
 
-TEST_CASE("source-owned two-stack topology closes DNA4/DNA5 by four widths",
+TEST_CASE("indexed two-stack topology closes DNA4/DNA5 by four widths",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     check_two_stack_minimizer_topology_case<seq::dna4, std::uint8_t>();
     check_two_stack_minimizer_topology_case<seq::dna4, std::uint16_t>();

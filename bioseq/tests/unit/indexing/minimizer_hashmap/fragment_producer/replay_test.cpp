@@ -438,8 +438,10 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
         nullptr,
         options.algorithm_identity,
         options.window_size,
-        options.kmer_size);
+        options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>());
     const auto fragment_plan = plan_minimizer_generation(fragment_producer, options);
+    INFO("generation error=" << (fragment_plan ? -1 : static_cast<int>(fragment_plan.error())));
     REQUIRE(fragment_plan.has_value());
     REQUIRE(fragment_plan->position_segment_count == 2);
     REQUIRE(fragment_producer.peak_buffered_core_bp() <= span);

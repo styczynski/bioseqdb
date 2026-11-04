@@ -220,7 +220,11 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         dna4_size, dna4_code,
         minimum - 1u));
     const auto check_registered_alphabet = [&params, minimum]<class Alphabet>() {
-        REQUIRE(fixed_vulkan_target_host_adoption_route_selected<source_direct_minimizer_fixture>(
+        constexpr auto layout = bioseq::minimizers::select_minimizer_physical_layout<Alphabet, std::uint32_t>(
+            minimizer_algorithm::vulkan_minimap_integer, minimum, 15u, 10u);
+        using record = bioseq::minimizers::minimizer_representation<
+            layout.record_position_log2, layout.hash_bits>;
+        REQUIRE(fixed_vulkan_target_host_adoption_route_selected<record>(
             false, params,
             static_cast<std::uint32_t>(seqan3::alphabet_size<Alphabet>),
             static_cast<std::uint32_t>(supported_biological_alphabets::index_of<Alphabet>()),
@@ -767,7 +771,6 @@ TEST_CASE("real N-rich dna5 Vulkan target adopts either exact authority and buil
         && result->host_permit.has_value()
         && result->host_permit->bytes() == host_capacity_bytes;
     REQUIRE(footprint_authority != retained_permit_authority);
-    bool observed_n_only_seed = false;
     for (const sketch_type& minimizer : result->host_minimizers) {
         const std::size_t last_position =
             static_cast<std::size_t>(minimizer.last_pos());
@@ -775,11 +778,11 @@ TEST_CASE("real N-rich dna5 Vulkan target adopts either exact authority and buil
         const std::size_t first_position =
             last_position + 1u - kmer_size;
         REQUIRE(last_position < letters.size());
-        observed_n_only_seed = observed_n_only_seed || std::ranges::all_of(
+        // The exact nucleotide policy resets at N, as it does on origin/main.
+        REQUIRE(std::ranges::none_of(
             std::span{letters}.subspan(first_position, kmer_size),
-            [ambiguous](const seq::dna5 letter) { return letter == ambiguous; });
+            [ambiguous](const seq::dna5 letter) { return letter == ambiguous; }));
     }
-    REQUIRE(observed_n_only_seed);
     const sketch_type* const original_data = result->host_minimizers.data();
     std::weak_ptr<vk::vulkan_device_minimizer_storage<sketch_type>> device_lifetime =
         result->device;

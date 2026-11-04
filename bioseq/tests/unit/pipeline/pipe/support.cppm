@@ -571,13 +571,17 @@ void check_two_stack_minimizer_topology_case() {
     const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
 
     collector_type selected_collector;
-    const auto stats = pipe::minimizer_dispatch<
-        minimizer_kernel_kind::exact_simd, minimap_sketch_data>(
+    const auto range_stats = pipe::minimizer_dispatch_range<minimap_sketch_data>(
             selected_collector,
             view,
+            0u,
+            view.bp_size(),
             11u,
             15u,
+            minimizer_sketch_backend::exact_simd,
+            pipe::exact_simd_range_route::require_continuation,
             fixed_highway_kernels());
+    const auto& stats = range_stats.exact_simd;
     REQUIRE(stats.is_internally_consistent(false));
 
     const auto& selected = selected_collector.extract_sketches_data();

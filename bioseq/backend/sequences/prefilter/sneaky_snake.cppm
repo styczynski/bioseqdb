@@ -300,6 +300,11 @@ template<class Traits, bool Reverse>
 
 /** Scalar rank comparisons and candidate  scanning for the shared SneakySnake walk. */
 struct scalar_traversal final {
+    [[nodiscard]] static constexpr std::uint8_t rank_at(
+        std::span<const std::uint8_t> ranks, std::size_t position) noexcept {
+        return ranks[position];
+    }
+
     /** Resolve the scalar implementation independently of any Highway table. */
     template<class Traits, bool Reverse>
     [[nodiscard]] static const prefilter_packed_operations* packed_operations() noexcept {
@@ -397,8 +402,8 @@ template <class p_traversal_type, class p_sequence_type>
     // A longer match must agree at the position just beyond the current best
     // run. Use that rank to skip candidate diagonals that cannot improve it
     const std::uint32_t filter_offset = best;
-    const std::uint8_t filter_rank =
-        target[static_cast<std::size_t>(position) + filter_offset];
+    const std::uint8_t filter_rank = traversal.rank_at(
+        target, static_cast<std::size_t>(position) + filter_offset);
     const std::uint32_t left = std::min(max_edits, position);
     const std::uint32_t right = std::min(
         max_edits,
@@ -527,7 +532,7 @@ template <class p_traversal_type, class p_sequence_type>
  * The target window is owned scratch before any query read; candidate scans use
  * separate scratch so invoking the diagonal consumer cannot invalidate them.
  */
-template <class Comparison>
+template <class Comparison, bool IntrinsicRanks = false>
 struct window_traversal {
     Comparison comparison;
     prefilter_rank_window candidates;
@@ -536,6 +541,19 @@ struct window_traversal {
     explicit window_traversal(const prefilter_rank_window& query)
         : comparison{}, candidates{query.source, query.start, query.length,
               query.cardinality, query.refill_size, query.job_index, false, *query.failure, query.packed} {}
+
+    /** Full-cardinality packed fields cannot contain an invalid rank. The batch
+     * admission already checked the resident geometry and every job interval.
+     */
+    [[nodiscard, gnu::always_inline]] static inline std::uint8_t rank_at(
+        const prefilter_rank_window& sequence, std::size_t position) {
+        if constexpr (IntrinsicRanks) {
+            return sequence.packed->rank_at(sequence.source.resident->units,
+                sequence.physical_total(), sequence.physical_start(position));
+        } else {
+            return sequence[position];
+        }
+    }
 
     /**
      * Compares the first demand block before growing subsequent matched reads.
@@ -547,7 +565,11 @@ struct window_traversal {
         std::uint32_t position, std::uint32_t submaze_end,
         std::uint32_t query_index) const {
         const auto limit = std::min<std::size_t>(submaze_end - position, query.size() - query_index);
-        if (limit == 0u || query.failure->has_value()) return 0u;
+        if (limit == 0u) return 0u;
+        if constexpr (IntrinsicRanks) {
+            return compare_acquired(query, target, query_index, position, limit);
+        }
+        if (query.failure->has_value()) return 0u;
         if (target.contains(position, limit) && query.contains(query_index, limit)) {
             return compare_acquired(query, target, query_index, position, limit);
         }
@@ -567,10 +589,12 @@ struct window_traversal {
         while (first <= upper) {
             const auto count = std::min<std::uint64_t>(prefilter_rank_window::chunk_size,
                 static_cast<std::uint64_t>(upper) - first + 1u);
-            if (!candidates.acquire(first + filter_offset, count, query)) return false;
+            if constexpr (!IntrinsicRanks) {
+                if (!candidates.acquire(first + filter_offset, count, query)) return false;
+            }
             // Validate the entire original candidate acquisition before visiting
             // even the first matching bit or invoking a short-circuit consumer.
-            if (query.packed != nullptr) {
+            if (IntrinsicRanks || query.packed != nullptr) {
                 constexpr auto mask_capacity = std::numeric_limits<std::uint64_t>::digits;
                 for (std::size_t offset = 0u; offset < count;) {
                     const auto mask_count = std::min<std::size_t>(mask_capacity, count - offset);
@@ -583,7 +607,9 @@ struct window_traversal {
                     while (matches != 0u) {
                         const auto candidate = first + offset + std::countr_zero(matches);
                         if (consume(static_cast<std::uint32_t>(candidate))) return true;
-                        if (query.failure->has_value()) return false;
+                        if constexpr (!IntrinsicRanks) {
+                            if (query.failure->has_value()) return false;
+                        }
                         matches &= matches - 1u;
                     }
                     offset += mask_count;
@@ -613,7 +639,7 @@ struct window_traversal {
     [[nodiscard, gnu::always_inline]] inline std::uint32_t compare_acquired(
         const prefilter_rank_window& query, const prefilter_rank_window& target,
         std::size_t query_position, std::size_t target_position, std::size_t count) const {
-        if (query.packed != nullptr) {
+        if (IntrinsicRanks || query.packed != nullptr) {
             return static_cast<std::uint32_t>(query.packed->prefix(
                 query.source.resident->units, target.source.resident->units, query.physical_total(),
                 query.physical_start(query_position), target.physical_start(target_position), count));
@@ -649,6 +675,25 @@ struct window_traversal {
     }
 };
 
+/** Select the rank-domain proof once per job, retaining the same bounded walk.
+ * Sparse alphabets and nonresident sources preserve demand validation and error
+ * ordering. No native ranks are copied or expanded for the full-domain route.
+ */
+template<class Comparison>
+[[nodiscard]] inline prefilter_result bounded_windows_with(
+    const prefilter_rank_window& query, const prefilter_rank_window& target,
+    std::uint32_t max_edits, sneaky_snake_options options) {
+    const auto run = [&]<bool IntrinsicRanks>() {
+        window_traversal<Comparison, IntrinsicRanks> traversal{query};
+        return bounded_with(traversal, query, target, max_edits, options);
+    };
+    if (query.packed != nullptr && target.packed != nullptr
+        && query.cardinality == target.cardinality && std::has_single_bit(query.cardinality)) {
+        return run.template operator()<true>();
+    }
+    return run.template operator()<false>();
+}
+
 } // namespace sneaky_snake_detail
 
 /// Filters one rank pair on CPU. Lengths exceeding uint32_t are kept without evaluation.
@@ -676,9 +721,8 @@ struct window_traversal {
     return evaluate_prefilter_batch(input,
         [options](const prefilter_rank_window& query, const prefilter_rank_window& target,
                   const prefilter_job& job) {
-            sneaky_snake_detail::window_traversal<sneaky_snake_detail::scalar_traversal> traversal{query};
-            return sneaky_snake_detail::bounded_with(
-                traversal, query, target, job.max_edits, options);
+            return sneaky_snake_detail::bounded_windows_with<sneaky_snake_detail::scalar_traversal>(
+                query, target, job.max_edits, options);
         }, sneaky_snake_detail::scalar_traversal::read_block_size(),
         &resolve_prefilter_packed_operations<sneaky_snake_detail::scalar_traversal>);
 }

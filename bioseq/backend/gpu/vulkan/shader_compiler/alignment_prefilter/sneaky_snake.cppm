@@ -28,8 +28,33 @@ shared uint sh_lower_bound[k_team_count];
 shared uint sh_active[k_team_count];
 shared uint sh_lane_best[compile_time_workgroup_size_x];
 shared uint sh_any_active;
+shared uint sh_xor_complement[k_team_count];
 
+// Prove the supplied rank policy once per active reverse-query job/team.
+// Forward, unequal-length and unsupported jobs need no complement lookup.
+uint native_xor_complement_mask() {
+    if (compile_time_native_rank_bits == 0u
+        || (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) != 0u
+        || canonical_reverse_complement == 0u
+        || rank_count != (1u << compile_time_native_rank_bits)) return 0xffffffffu;
+    uint mask = rank_to_rc_code[0];
+    if (mask >= rank_count) return 0xffffffffu;
+    for (uint rank = 1u; rank < (1u << compile_time_native_rank_bits); ++rank)
+        if (rank_to_rc_code[rank] != (rank ^ mask)) return 0xffffffffu;
+    return mask;
+}
+uint reverse_native_packed_fields(uint bits, uint count) {
+    uint reversed = bitfieldReverse(bits);
+    if (compile_time_native_rank_bits >= 2u)
+        reversed = ((reversed & 0xaaaaaaaau) >> 1u) | ((reversed & 0x55555555u) << 1u);
+    if (compile_time_native_rank_bits >= 4u)
+        reversed = ((reversed & 0xccccccccu) >> 2u) | ((reversed & 0x33333333u) << 2u);
+    if (compile_time_native_rank_bits >= 8u)
+        reversed = ((reversed & 0xf0f0f0f0u) >> 4u) | ((reversed & 0x0f0f0f0fu) << 4u);
+    return reversed >> (32u - count * compile_time_native_rank_bits);
+}
 uint matching_run(
+    uint xor_complement,
     prefilter_job job,
     uint position,
     uint submaze_end,
@@ -41,8 +66,23 @@ uint matching_run(
     if (run_limit == 0u) return 0u;
     gpu_sequence_view query_sequence = query_records[job.query_record_index];
     gpu_sequence_view target_sequence = target_records[job.target_record_index];
+    // A bit width dividing every native byte has no inter-unit padding.
+    // View those same bytes as transport words to make geometry compile-time.
+    if (compile_time_native_rank_bits != 0u
+        && (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) == 0u) {
+        const uint slots = 32u / max(1u, compile_time_native_rank_bits);
+        query_sequence.seq_word_offset += uint64_t(query_sequence.leading_symbol_offset / slots);
+        query_sequence.leading_symbol_offset %= slots;
+        query_sequence.letters_per_unit = slots;
+        query_sequence.unit_bits = 32u;
+        target_sequence.seq_word_offset += uint64_t(target_sequence.leading_symbol_offset / slots);
+        target_sequence.leading_symbol_offset %= slots;
+        target_sequence.letters_per_unit = slots;
+        target_sequence.unit_bits = 32u;
+    }
     bool reverse_query = job.orientation == 3u;
-    bool compare_packed_bits = !reverse_query
+    bool packed_reverse = reverse_query && xor_complement != 0xffffffffu;
+    bool compare_packed_bits = (!reverse_query || packed_reverse)
         && native_packed_rank_bits(query_sequence) == native_packed_rank_bits(target_sequence);
     // Native units are at most 64 bits; halve their slot count only when
     // a complete unit exceeds the existing 32-bit chunk reader's result.
@@ -50,22 +90,37 @@ uint matching_run(
     uint packed_chunk_limit = query_sequence.letters_per_unit
         >> uint(query_sequence.unit_bits > 32u);
     uint chunk_limit = compare_packed_bits ? packed_chunk_limit : 4u;
+    bool continuous_packed_bits = compare_packed_bits
+        && compile_time_native_rank_bits != 0u
+        && (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) == 0u;
     uint64_t query_start = uint64_t(job.query_start) + uint64_t(query_cursor);
     if (reverse_query) query_start = query_sequence.bp_count - uint64_t(1) - query_start;
     native_packed_cursor query = native_packed_begin(query_sequence, query_start);
     native_packed_cursor target = native_packed_begin(target_sequence,
         uint64_t(job.target_start) + uint64_t(position));
-    native_packed_word_cache query_cache = native_packed_word_cache(~uint64_t(0), 0u);
-    native_packed_word_cache target_cache = native_packed_word_cache(~uint64_t(0), 0u);
+    // A word index is below 2^30 under maxStorageBufferRange, so this sentinel
+    // cannot alias an admitted packed word.
+    native_packed_word_cache query_cache = native_packed_word_cache(0xffffffffu, 0u);
+    native_packed_word_cache target_cache = native_packed_word_cache(0xffffffffu, 0u);
     uint run = 0u;
     while (run < run_limit) {
         uint query_slots = reverse_query ? query.slot + 1u
             : query_sequence.letters_per_unit - query.slot;
-        uint count = min(min(run_limit - run, chunk_limit),
-            min(query_slots, target_sequence.letters_per_unit - target.slot));
+        uint count = min(run_limit - run, chunk_limit);
+        if (!continuous_packed_bits)
+            count = min(count, min(query_slots, target_sequence.letters_per_unit - target.slot));
+        native_packed_cursor query_chunk = query;
         uint query_first_slot = reverse_query ? query.slot + 1u - count : query.slot;
+        if (reverse_query && count > query.slot + 1u) {
+            query_chunk.unit_byte_index -= query_sequence.unit_bits / 8u;
+            query_first_slot += query_sequence.letters_per_unit;
+        }
         uint query_bits = native_packed_chunk_bits(
-            query_sequence, query, query_first_slot, count, query_cache);
+            query_sequence, query_chunk, query_first_slot, count, query_cache);
+        if (packed_reverse) {
+            uint repeated_complement = xor_complement * (0xffffffffu / native_packed_rank_mask(query_sequence));
+            query_bits = reverse_native_packed_fields(query_bits ^ repeated_complement, count);
+        }
         uint target_bits = native_packed_chunk_bits(
             target_sequence, target, target.slot, count, target_cache);
         uint rank_bits = native_packed_rank_bits(query_sequence);
@@ -129,6 +184,7 @@ void solve_job_scalar(uint job_index) {
         return;
     }
 
+    uint xor_complement = job.orientation == 3u ? native_xor_complement_mask() : 0xffffffffu;
     uint lower_bound = 0u;
     uint submaze_begin = 0u;
     while (submaze_begin < job.query_length) {
@@ -139,8 +195,7 @@ void solve_job_scalar(uint job_index) {
 
         while (position < submaze_end && escape_round < uint(compile_time_maximum_span)) {
             uint remaining_in_submaze = submaze_end - position;
-            uint best_run = matching_run(
-                job, position, submaze_end, position);
+            uint best_run = matching_run(xor_complement, job, position, submaze_end, position);
             uint max_shift = min(job.max_edits, job.query_length);
             for (uint shift = 1u;
                  shift <= max_shift && best_run < remaining_in_submaze;
@@ -148,8 +203,7 @@ void solve_job_scalar(uint job_index) {
                 if (shift <= position) {
                     best_run = max(
                         best_run,
-                        matching_run(
-                            job,
+                        matching_run(xor_complement, job,
                             position,
                             submaze_end,
                             position - shift));
@@ -158,8 +212,7 @@ void solve_job_scalar(uint job_index) {
                 if (shift < job.query_length - position) {
                     best_run = max(
                         best_run,
-                        matching_run(
-                            job,
+                        matching_run(xor_complement, job,
                             position,
                             submaze_end,
                             position + shift));
@@ -233,6 +286,8 @@ void main() {
                 } else if (job.query_length == 0u) {
                     write_result(job_index, 0u, k_status_ok, true);
                 } else {
+                    sh_xor_complement[team] = job.orientation == 3u
+                        ? native_xor_complement_mask() : 0xffffffffu;
                     sh_job[team] = job;
                     sh_position[team] = 0u;
                     sh_submaze_end[team] = min(
@@ -258,6 +313,11 @@ void main() {
             uint local_best = 0u;
             if (sh_active[team] != 0u) {
                 prefilter_job job = sh_job[team];
+                // Keep this compile-time fact visible across shared memory:
+                // padded rank widths cannot use the packed XOR/reverse path.
+                uint xor_complement = compile_time_native_rank_bits != 0u
+                    && (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) == 0u
+                    ? sh_xor_complement[team] : 0xffffffffu;
                 uint position = sh_position[team];
                 uint submaze_end = sh_submaze_end[team];
                 uint diagonal_count = 2u * job.max_edits + 1u;
@@ -286,8 +346,7 @@ void main() {
                     if (valid) {
                         local_best = max(
                             local_best,
-                            matching_run(
-                                job,
+                            matching_run(xor_complement, job,
                                 position,
                                 submaze_end,
                                 query_cursor));

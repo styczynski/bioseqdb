@@ -1,0 +1,3 @@
+[submodule "DOCS"]
+	path = DOCS
+	url = https://github.com/styczynski/bioseqdb-docs.git

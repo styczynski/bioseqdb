@@ -126,7 +126,8 @@ TEST_CASE("vulkan source-direct preflight uses exact allocation requirements",
 
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     bioseq::parallelism::memory_permit no_permit{};
-    const auto ineligible =
+    // Full-width hashes are now eligible; an empty source still has no shape.
+    const auto empty_source =
         idx_ns::materialize_sorted_dense_from_presorted_minimizers(
             runtime,
             std::span<const bioseq::minimizers::
@@ -135,10 +136,10 @@ TEST_CASE("vulkan source-direct preflight uses exact allocation requirements",
             idx_ns::gpu_source_direct_preflight{},
             idx_ns::gpu_minimizer_index_cache_key{},
             no_permit);
-    REQUIRE_FALSE(ineligible.has_value());
-    REQUIRE(ineligible.error().error
+    REQUIRE_FALSE(empty_source.has_value());
+    REQUIRE(empty_source.error().error
             == idx_ns::gpu_source_direct_materialization_error::
-                representation_ineligible);
+                invalid_shape);
 }
 
 TEST_CASE("vulkan source-direct fill consumes each source position once",

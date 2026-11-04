@@ -447,6 +447,9 @@ void runtime::init() {
     features_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
     features_.min_storage_buffer_offset_alignment = props.limits.minStorageBufferOffsetAlignment;
     features_.max_shared_memory_bytes = props.limits.maxComputeSharedMemorySize;
+    // Native alignment/prefilter shaders use uint32 physical byte cursors after
+    // admission against this limit; logical sequence coordinates stay uint64.
+    static_assert(std::numeric_limits<decltype(props.limits.maxStorageBufferRange)>::digits <= 32);
     features_.max_storage_buffer_range = props.limits.maxStorageBufferRange;
     features_.max_stage_storage_buffers = props.limits.maxPerStageDescriptorStorageBuffers;
     features_.max_descriptor_storage_buffers = props.limits.maxDescriptorSetStorageBuffers;

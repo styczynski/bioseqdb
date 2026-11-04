@@ -626,8 +626,11 @@ void require_partial_source_read(const composite_source_state& source,
 template <class p_sequence_view, class p_index>
 [[nodiscard]] std::vector<std::pair<std::size_t, std::uint64_t>>
 run_scalar(p_sequence_view& seq, p_index begin, p_index end, std::size_t w, std::size_t k) {
-    sketch_collector collector;
-    collect_minimizers_view<minimap_int_hasher, minimap_sketch_data>(
+    // Runtime fixtures include K21: preserve all 42 DNA rank bits instead of
+    // passing that exact hash to the legacy 32-bit minimap record.
+    using oracle_record = minimizer_representation<28u, 64u>;
+    basic_sketch_collector<oracle_record> collector;
+    collect_minimizers_view<minimap_int_hasher, oracle_record>(
         collector, seq, begin, end, w, k);
     auto pairs = collector.extract_pairs();
     std::sort(pairs.begin(), pairs.end());
@@ -1282,9 +1285,10 @@ TEST_CASE("Vulkan staging dispatches a sliced composite source range only",
     auto selected_owner = bioseq::storage::make_resident_lazy_sequence(selected_range);
     const auto selected_view =
         bioseq::storage::make_lazy_sequence_view(selected_owner);
+    // This shape uses Vulkan's exact minimap scheme, not bounded ntHash.
     const auto native_cpu = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        minimizer_sketch_backend::bounded_nthash_simd);
+        minimizer_sketch_backend::scalar);
 
     reset_source_observation(fixture.source);
     sketch_collector gpu_collector;

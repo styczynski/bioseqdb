@@ -993,3 +993,75 @@ TEST_CASE("Manual native registry four-width prefilter adapters",
     CHECK(checked_jobs == profiles * 59u + leading_offsets + reverse_profiles);
 }
 // END_TEMPORARY_NATIVE_REGISTRY_PREFILTER_PROBE
+
+TEST_CASE("Packed SneakySnake obeys complement policies across transport boundaries",
+          "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]") {
+    namespace gv = bioseq::gpu::vulkan;
+    namespace bs = bioseq::storage;
+    if (!is_vulkan_sneaky_snake_supported()) SKIP("hardware Vulkan device unavailable");
+    auto& runtime = gv::runtime::instance();
+    const auto validator = ::bioseq::simd_dispatch::highway_test_kernel_table()
+        .common.validate_packed_sequence_ranks;
+    const auto exercise = [&]<class Word>() {
+        using range_type = compact_sequence_range<sequence_custom_alphabet<seq::dna4, Word>>;
+        constexpr std::size_t extent = 4096u;
+        constexpr std::array<std::uint32_t, 14> lengths{
+            1u, 2u, 3u, 7u, 8u, 15u, 16u, 17u, 31u, 32u, 33u, 63u, 64u, 65u};
+        // The last permutation is deliberately not an XOR mapping. The shader
+        // must use the supplied policy, including its general lookup fallback.
+        constexpr std::array<std::array<std::uint32_t, 4>, 4> policies{{
+            {{0u, 1u, 2u, 3u}}, {{1u, 0u, 3u, 2u}},
+            {{3u, 2u, 1u, 0u}}, {{0u, 1u, 3u, 2u}}}};
+        std::vector<seq::dna4> query_letters(extent);
+        for (std::size_t i = 0; i < extent; ++i)
+            seqan3::assign_rank_to((13u * i + i / 7u) % 4u, query_letters[i]);
+        const range_type query{query_letters};
+        for (const auto policy : policies) {
+            std::vector<std::uint8_t> oriented(extent), target_ranks(extent, 0u);
+            for (std::size_t i = 0; i < extent; ++i)
+                oriented[i] = policy[seqan3::to_rank(query_letters[extent - 1u - i])];
+            for (const auto max_edits : {0u, 16u}) {
+                std::vector<prefilter_job> jobs;
+                std::vector<prefilter_result> expected;
+                for (std::size_t i = 0; i < lengths.size(); ++i) {
+                    const auto qstart = static_cast<std::uint32_t>(3u + 97u * i);
+                    const auto tstart = static_cast<std::uint32_t>(5u + 97u * i);
+                    const auto length = lengths[i];
+                    std::copy_n(oriented.begin() + qstart, length, target_ranks.begin() + tstart);
+                    if (i % 2u != 0u)
+                        target_ranks[tstart + length / 2u] =
+                            (target_ranks[tstart + length / 2u] + 1u) % 4u;
+                    jobs.push_back({.query_record_index = 1u, .target_record_index = 0u,
+                        .query_start = qstart, .target_start = tstart,
+                        .query_length = length, .target_length = length,
+                        .max_edits = max_edits, .orientation = 3u});
+                    expected.push_back(sneaky_snake_scalar(
+                        std::span{oriented}.subspan(qstart, length),
+                        std::span{target_ranks}.subspan(tstart, length), max_edits));
+                }
+                std::vector<seq::dna4> target_letters(extent);
+                for (std::size_t i = 0; i < extent; ++i)
+                    seqan3::assign_rank_to(target_ranks[i], target_letters[i]);
+                const range_type target{target_letters};
+                const auto actual = gv::with_prefilter_packed_windows(
+                    bs::make_lazy_sequence_view(query), bs::make_lazy_sequence_view(target), jobs,
+                    [&](auto queries, auto targets, const auto& original_lut, auto local_jobs) {
+                        auto lut = original_lut;
+                        for (std::size_t rank = 0; rank < policy.size(); ++rank)
+                            lut.rank_to_rc_code[rank] = policy[rank];
+                        return runtime.run_sneaky_snake_rank_batch_roundtrip(
+                            queries, targets, lut, local_jobs, validator, range_type::traits::bits_per_char);
+                    });
+                REQUIRE(actual.size() == expected.size());
+                for (std::size_t i = 0; i < actual.size(); ++i) {
+                    CAPTURE(sizeof(Word), policy, max_edits, lengths[i]);
+                    REQUIRE(same_result(actual[i], expected[i]));
+                }
+            }
+        }
+    };
+    [&]<std::size_t... Widths>(supported_storage_unit_byte_widths<Widths...>) {
+        (exercise.template operator()<
+            typename all_storage_unit_byte_widths::template storage_unit<Widths>>(), ...);
+    }(all_storage_unit_byte_widths{});
+}

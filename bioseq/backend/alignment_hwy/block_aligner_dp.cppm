@@ -189,7 +189,7 @@ public:
     [[nodiscard]] uint8_t byte_at(size_t index) const { return data_[index]; }
 
     /// Pointer for SIMD loads at the requested padded-buffer index.
-    [[nodiscard]] const uint8_t* data_at(size_t index) const {
+    [[nodiscard]] HWY_INLINE const uint8_t* data_at(size_t index) const {
         return data_.data() + index;
     }
 
@@ -323,7 +323,7 @@ public:
     }
 
     /** Append one primary and secondary packed trace word. */
-    void append_trace_words(
+    HWY_INLINE void append_trace_words(
             trace_type primary_word,
             trace_type secondary_word) {
         // The constructor has checked capacity for the whole alignment.
@@ -606,6 +606,24 @@ HWY_INLINE hn::Vec<D> add_block_reachable(D descriptor, hn::Vec<D> scores, hn::V
     return hn::IfThenElseZero(hn::Gt(scores, hn::Zero(descriptor)), hn::Add(scores, adjustment));
 }
 
+/**
+ * Apply a nonpositive gap transition while keeping the unreachable sentinel zero.
+ * Admission keeps every reachable result positive and below INT16_MAX. Unsigned
+ * saturated subtraction is therefore exact for reachable scores, and maps zero
+ * to zero without a compare/add/mask dependency chain in each DP update.
+ * Keep signed, reachability-masked addition for substitutions and rebasing:
+ * those adjustments can be positive and must not revive an unreachable cell.
+ */
+template<class D>
+HWY_INLINE hn::Vec<D> subtract_block_penalty(
+        D descriptor, hn::Vec<D> scores, hn::Vec<D> negative_penalty) {
+    const hn::RebindToUnsigned<D> unsigned_descriptor;
+    const auto penalty = hn::Sub(hn::Zero(unsigned_descriptor),
+        hn::BitCast(unsigned_descriptor, negative_penalty));
+    return hn::BitCast(descriptor, hn::SaturatedSub(
+        hn::BitCast(unsigned_descriptor, scores), penalty));
+}
+
 /// Find the best row-gap score reaching each lane:
 /// result[i] = max_{k=0..i} (input[k] + gap * (i-k)).
 /// The shifts work within 128-bit groups. With sixteen lanes, carry the best
@@ -619,20 +637,20 @@ HWY_INLINE hn::Vec<p_simd_tag> scan_block_prefix(
 {
     const size_t lane_count = hn::Lanes(simd_tag);
     auto one_lane_scores = shift_lanes_left_zero<1>(simd_tag, input_scores);
-    one_lane_scores = add_block_reachable(simd_tag, one_lane_scores, gap_costs);
+    one_lane_scores = subtract_block_penalty(simd_tag, one_lane_scores, gap_costs);
     one_lane_scores = hn::Max(input_scores, one_lane_scores);
 
     const auto two_lane_gap_costs = hn::ShiftLeft<1>(gap_costs);
     auto two_lane_scores =
         shift_lanes_left_zero<2>(simd_tag, one_lane_scores);
-    two_lane_scores = add_block_reachable(simd_tag,
+    two_lane_scores = subtract_block_penalty(simd_tag,
         two_lane_scores, two_lane_gap_costs);
     two_lane_scores = hn::Max(one_lane_scores, two_lane_scores);
 
     const auto four_lane_gap_costs = hn::ShiftLeft<2>(gap_costs);
     auto four_lane_scores =
         shift_lanes_left_zero<4>(simd_tag, two_lane_scores);
-    four_lane_scores = add_block_reachable(simd_tag,
+    four_lane_scores = subtract_block_penalty(simd_tag,
         four_lane_scores, four_lane_gap_costs);
     four_lane_scores = hn::Max(two_lane_scores, four_lane_scores);
 
@@ -695,16 +713,20 @@ HWY_INLINE void record_block_trace(
     HWY_DASSERT_M(lane_count <= 16, "Trace bitmask overflow: lane_count > 16 not supported");
 
     // Turn eah lane's predecessor decision into a bit for the packed trace.
+    const auto row_open_mask = hn::Eq(row_gap_scores, opened_row_gap_scores);
     const auto diagonal_equals_column_mask = hn::Eq(diagonal_scores, column_gap_scores);
-    const auto diagonal_equals_row_mask = hn::Eq(diagonal_scores, row_gap_scores);
+    // The row prefix also contains the pending opening at this cell. With
+    // zero gap-open cost it ties H without consuming a symbol; it is not a
+    // predecessor. Prefer the diagonal/column path on that tie. Positive
+    // gap-open costs already make this pending opening strictly worse than H.
+    const auto diagonal_equals_row_mask = hn::AndNot(
+        row_open_mask, hn::Eq(diagonal_scores, row_gap_scores));
     const uint32_t diagonal_column_bits = static_cast<uint32_t>(hn::BitsFromMask(simd_tag, diagonal_equals_column_mask));
     const uint32_t diagonal_row_bits = static_cast<uint32_t>(hn::BitsFromMask(simd_tag, diagonal_equals_row_mask));
     const block_trace::trace_type primary_trace_word =
         interleave_low_trace_bits(diagonal_column_bits, diagonal_row_bits);
 
-    auto current_row_trace = hn::VecFromMask(
-        simd_tag,
-        hn::Eq(row_gap_scores, opened_row_gap_scores));
+    auto current_row_trace = hn::VecFromMask(simd_tag, row_open_mask);
     auto shifted_row_trace = shift_lanes_left_with_predecessor(
         simd_tag, current_row_trace, previous_row_trace);
     const auto column_open_mask = hn::Eq(column_gap_scores, opened_column_gap_scores);
@@ -816,12 +838,12 @@ HWY_INLINE auto place_alignment_block(
             }
 
             // Open or extend a gap from the previous column.
-            auto opened_column_gap_scores = add_block_reachable(simd_tag, previous_diagonal_scores, gap_open_scores);
-            auto column_gap_scores = hn::Max(add_block_reachable(simd_tag, previous_column_gap_scores, gap_extension_scores), opened_column_gap_scores);
+            auto opened_column_gap_scores = subtract_block_penalty(simd_tag, previous_diagonal_scores, gap_open_scores);
+            auto column_gap_scores = hn::Max(subtract_block_penalty(simd_tag, previous_column_gap_scores, gap_extension_scores), opened_column_gap_scores);
             diagonal_scores = hn::Max(diagonal_scores, column_gap_scores);
 
             // Propagate row-gap scores across the SIMD lanes.
-            auto opened_row_gap_scores = add_block_reachable(simd_tag,
+            auto opened_row_gap_scores = subtract_block_penalty(simd_tag,
                 diagonal_scores, gap_open_adjustment);
             row_gap_scores = scan_block_prefix(
                 simd_tag,
@@ -830,7 +852,7 @@ HWY_INLINE auto place_alignment_block(
                 prefix_scan_offsets);
 
             // Also allow a row gap to continue from the preceding vector.
-            row_gap_scores = hn::Max(row_gap_scores, add_block_reachable(simd_tag,
+            row_gap_scores = hn::Max(row_gap_scores, subtract_block_penalty(simd_tag,
                 broadcast_last_lane(simd_tag, previous_row_gap_scores), accumulated_gap_extension));
             diagonal_scores = hn::Max(diagonal_scores, row_gap_scores);
             previous_row_gap_scores = row_gap_scores;
@@ -1049,57 +1071,80 @@ std::expected<void, alignment_contract_error> align_block_core(
     int16_t right_border_maximum = k_block_score_minimum;
     int16_t down_border_maximum = k_block_score_minimum;
 
+    const std::int64_t magnitude = std::max(-std::int64_t{score_matrix.summary().minimum},
+        std::int64_t{score_matrix.summary().maximum});
+    // Every reachable score follows a monotone path from the origin. Include
+    // both padded block extents and two extra transitions for pending gap opens.
+    // If even this whole-path bound fits the initial bias, no block can overflow
+    // or reach the zero sentinel: repeated frontier admission is unnecessary.
+    // This uses scoring/geometry, so the same proof covers every alphabet.
+    const std::int64_t maximum_path_steps = static_cast<std::int64_t>(query.length())
+        + static_cast<std::int64_t>(reference.length())
+        + 2 * static_cast<std::int64_t>(maximum_block_size) + 2;
+    const std::int64_t maximum_transition = std::max(magnitude, -std::int64_t{negative_gap_open});
+    constexpr auto initial_score_headroom = std::min<std::int64_t>(
+        k_block_score_bias - 1, std::numeric_limits<int16_t>::max() - 1 - k_block_score_bias);
+    const bool needs_score_rebasing = maximum_path_steps * maximum_transition > initial_score_headroom;
+
+    // Growth, shrinking and checkpoint restoration change scores and live
+    // extents, never these allocations. Borrow once per core attempt: an
+    // out-of-line data() call per vector spills the live SIMD extrema on NEON.
+    const auto* const frontier_diagonal_column = scratch.diagonal_column.data();
+    const auto* const frontier_gap_column = scratch.gap_column.data();
+    const auto* const frontier_diagonal_row = scratch.diagonal_row.data();
+    const auto* const frontier_gap_row = scratch.gap_row.data();
+
     for (;;) {
-        const size_t live_extent = direction == block_direction::grow
-            ? previous_block_size : block_size;
-        const std::int64_t magnitude = std::max(-std::int64_t{score_matrix.summary().minimum},
-            std::int64_t{score_matrix.summary().maximum});
-        const std::int64_t transition_bound = 2 * static_cast<std::int64_t>(block_size)
-            * (magnitude - negative_gap_open - negative_gap_extension);
-        std::int32_t frontier_minimum = std::numeric_limits<std::int32_t>::max();
-        std::int32_t frontier_maximum = std::numeric_limits<std::int32_t>::min();
-        const auto include_frontier = [&frontier_minimum, &frontier_maximum](std::int32_t value) {
-            if (value <= k_block_score_minimum) return;
-            frontier_minimum = std::min(frontier_minimum, value);
-            frontier_maximum = std::max(frontier_maximum, value);
-        };
-        auto minimum_frontier = hn::Set(simd_tag, std::numeric_limits<int16_t>::max());
-        auto maximum_frontier = hn::Zero(simd_tag);
-        const auto include_vector = [simd_tag, &minimum_frontier, &maximum_frontier](hn::Vec<p_simd_tag> values) {
-            maximum_frontier = hn::Max(maximum_frontier, values);
-            minimum_frontier = hn::Min(minimum_frontier, hn::IfThenElse(
-                hn::Gt(values, hn::Zero(simd_tag)), values,
-                hn::Set(simd_tag, std::numeric_limits<int16_t>::max())));
-        };
-        for (size_t index = 0; index < live_extent; index += lane_count) {
-            include_vector(hn::Load(simd_tag, scratch.diagonal_column.data() + index));
-            include_vector(hn::Load(simd_tag, scratch.gap_column.data() + index));
-            include_vector(hn::Load(simd_tag, scratch.diagonal_row.data() + index));
-            include_vector(hn::Load(simd_tag, scratch.gap_row.data() + index));
-        }
-        if (direction != block_direction::grow) include_vector(diagonal_corner);
-        const auto live_maximum = hn::ReduceMax(simd_tag, maximum_frontier);
-        if (live_maximum > k_block_score_minimum) {
-            include_frontier(hn::ReduceMin(simd_tag, minimum_frontier));
-            include_frontier(live_maximum);
-        }
-        if (block_row_start == 0 && block_column_start == 0)
-            include_frontier(k_block_score_bias - score_offset);
-        if (frontier_minimum == std::numeric_limits<std::int32_t>::max())
-            return std::unexpected(alignment_contract_error::score_range);
-        const std::int64_t minimum_adjustment = 1 + transition_bound - frontier_minimum;
-        const std::int64_t maximum_adjustment = 32766 - transition_bound - frontier_maximum;
-        if (minimum_adjustment > maximum_adjustment)
-            return std::unexpected(alignment_contract_error::score_range);
-        const auto adjustment = std::clamp(std::int64_t{0}, minimum_adjustment, maximum_adjustment);
-        if (adjustment < std::numeric_limits<int16_t>::min() || adjustment > std::numeric_limits<int16_t>::max())
-            return std::unexpected(alignment_contract_error::score_range);
-        if (adjustment != 0) {
-            const auto adjustment_vector = hn::Set(simd_tag, static_cast<int16_t>(adjustment));
-            offset_block_scores(simd_tag, live_extent, scratch.diagonal_column, scratch.gap_column, adjustment_vector);
-            offset_block_scores(simd_tag, live_extent, scratch.diagonal_row, scratch.gap_row, adjustment_vector);
-            diagonal_corner = add_block_reachable(simd_tag, diagonal_corner, adjustment_vector);
-            score_offset -= static_cast<int32_t>(adjustment);
+        if (needs_score_rebasing) {
+            const size_t live_extent = direction == block_direction::grow
+                ? previous_block_size : block_size;
+            const std::int64_t transition_bound = 2 * static_cast<std::int64_t>(block_size)
+                * (magnitude - negative_gap_open - negative_gap_extension);
+            std::int32_t frontier_minimum = std::numeric_limits<std::int32_t>::max();
+            std::int32_t frontier_maximum = std::numeric_limits<std::int32_t>::min();
+            const auto include_frontier = [&frontier_minimum, &frontier_maximum](std::int32_t value) {
+                if (value <= k_block_score_minimum) return;
+                frontier_minimum = std::min(frontier_minimum, value);
+                frontier_maximum = std::max(frontier_maximum, value);
+            };
+            auto minimum_frontier = hn::Set(simd_tag, std::numeric_limits<int16_t>::max());
+            auto maximum_frontier = hn::Zero(simd_tag);
+            const auto include_vector = [simd_tag, &minimum_frontier, &maximum_frontier](hn::Vec<p_simd_tag> values) {
+                maximum_frontier = hn::Max(maximum_frontier, values);
+                minimum_frontier = hn::Min(minimum_frontier, hn::IfThenElse(
+                    hn::Gt(values, hn::Zero(simd_tag)), values,
+                    hn::Set(simd_tag, std::numeric_limits<int16_t>::max())));
+            };
+            for (size_t index = 0; index < live_extent; index += lane_count) {
+                include_vector(hn::Load(simd_tag, frontier_diagonal_column + index));
+                include_vector(hn::Load(simd_tag, frontier_gap_column + index));
+                include_vector(hn::Load(simd_tag, frontier_diagonal_row + index));
+                include_vector(hn::Load(simd_tag, frontier_gap_row + index));
+            }
+            if (direction != block_direction::grow) include_vector(diagonal_corner);
+            const auto live_maximum = hn::ReduceMax(simd_tag, maximum_frontier);
+            if (live_maximum > k_block_score_minimum) {
+                include_frontier(hn::ReduceMin(simd_tag, minimum_frontier));
+                include_frontier(live_maximum);
+            }
+            if (block_row_start == 0 && block_column_start == 0)
+                include_frontier(k_block_score_bias - score_offset);
+            if (frontier_minimum == std::numeric_limits<std::int32_t>::max())
+                return std::unexpected(alignment_contract_error::score_range);
+            const std::int64_t minimum_adjustment = 1 + transition_bound - frontier_minimum;
+            const std::int64_t maximum_adjustment = 32766 - transition_bound - frontier_maximum;
+            if (minimum_adjustment > maximum_adjustment)
+                return std::unexpected(alignment_contract_error::score_range);
+            const auto adjustment = std::clamp(std::int64_t{0}, minimum_adjustment, maximum_adjustment);
+            if (adjustment < std::numeric_limits<int16_t>::min() || adjustment > std::numeric_limits<int16_t>::max())
+                return std::unexpected(alignment_contract_error::score_range);
+            if (adjustment != 0) {
+                const auto adjustment_vector = hn::Set(simd_tag, static_cast<int16_t>(adjustment));
+                offset_block_scores(simd_tag, live_extent, scratch.diagonal_column, scratch.gap_column, adjustment_vector);
+                offset_block_scores(simd_tag, live_extent, scratch.diagonal_row, scratch.gap_row, adjustment_vector);
+                diagonal_corner = add_block_reachable(simd_tag, diagonal_corner, adjustment_vector);
+                score_offset -= static_cast<int32_t>(adjustment);
+            }
         }
 
         auto growth_maximum_scores = hn::Set(simd_tag, k_block_score_minimum);

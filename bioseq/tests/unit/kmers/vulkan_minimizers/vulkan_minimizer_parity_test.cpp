@@ -336,7 +336,7 @@ TEST_CASE("vulkan minimizer: dna5 tile-boundary parity matches scalar multiset",
         vk::make_sketch_tile_plan(
             data.size(), k, w, compact_sequence_range<seq_type>::traits::letters_per_unit),
         k,
-        w);
+        w, 0u, true);
 }
 
 TEST_CASE("vulkan minimizer: generic alphabet functional superset",

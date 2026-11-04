@@ -38,18 +38,38 @@ uint native_packed_rank_mask(gpu_sequence_view sequence) {
         ? sequence.char_mask : (1u << compile_time_native_rank_bits) - 1u;
 }
 uint packed_sequence_byte(uint64_t byte_index, bool query);
+// Rank widths dividing a byte have no padding between native storage units.
+// Borrow the same bytes as 32-bit transport words, retaining the logical origin
+// and length. The host admits the constant only for matching descriptors. Padded
+// widths and mixed-width dispatches retain their original native geometry.
+gpu_sequence_view native_packed_transport_view(gpu_sequence_view sequence) {
+    if (compile_time_native_rank_bits != 0u
+        && (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) == 0u) {
+        const uint slots = 32u / max(1u, compile_time_native_rank_bits);
+        sequence.seq_word_offset += uint64_t(sequence.leading_symbol_offset / slots);
+        sequence.leading_symbol_offset %= slots;
+        sequence.letters_per_unit = slots;
+        sequence.unit_bits = 32u;
+    }
+    return sequence;
+}
 // Native storage cursor: divide once, then advance through slots and unit padding.
 // Quotient/remainder precede the leading offset so UINT32_MAX positions cannot
-// wrap. Large logical origins and packed byte bases retain their 64-bit range.
+// wrap. Logical positions remain 64-bit. Every alignment/prefilter dispatch
+// bounds its physical buffers by the uint32 maxStorageBufferRange device limit,
+// so admitted byte offsets and cursor updates fit uint32.
 struct native_packed_cursor {
-    uint64_t unit_byte_index;
+    uint unit_byte_index;
     uint slot;
 };
 native_packed_cursor native_packed_begin(gpu_sequence_view sequence, uint64_t position) {
     uint64_t unit_index;
     uint slot;
     bool binary_geometry = (sequence.letters_per_unit & (sequence.letters_per_unit - 1u)) == 0u;
-    if (position <= uint64_t(0xffffffffu)) {
+    if (binary_geometry) {
+        unit_index = position >> uint(findLSB(sequence.letters_per_unit));
+        slot = uint(position) & (sequence.letters_per_unit - 1u);
+    } else if (position <= uint64_t(0xffffffffu)) {
         uint local_position = uint(position);
         uint local_unit_index = binary_geometry
             ? local_position >> uint(findLSB(sequence.letters_per_unit))
@@ -68,11 +88,12 @@ native_packed_cursor native_packed_begin(gpu_sequence_view sequence, uint64_t po
         slot -= sequence.letters_per_unit;
     }
     return native_packed_cursor(
-        sequence.seq_word_offset * uint64_t(4)
-            + unit_index * uint64_t(sequence.unit_bits / 8u),
+        uint(sequence.seq_word_offset) * 4u
+            + uint(unit_index) * (sequence.unit_bits / 8u),
         slot);
 }
 uint native_packed_rank(gpu_sequence_view sequence, uint64_t position, bool query) {
+    sequence = native_packed_transport_view(sequence);
     native_packed_cursor cursor = native_packed_begin(sequence, position);
     uint bit_offset = cursor.slot * native_packed_rank_bits(sequence);
     uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset / 8u);
@@ -89,18 +110,19 @@ inline constexpr std::string_view k_native_packed_cursor_reader = R"GLSL(
 uint native_packed_arena_word(uint64_t word_index);
 // Retain a packed word across adjacent chunks without expanding source storage.
 struct native_packed_word_cache {
-    uint64_t word_index;
+    uint word_index;
     uint word;
 };
-uint cached_native_packed_word(uint64_t word_index, inout native_packed_word_cache cache) {
+uint cached_native_packed_word(uint word_index, inout native_packed_word_cache cache) {
     if (word_index != cache.word_index) {
         cache.word_index = word_index;
         cache.word = native_packed_arena_word(word_index);
     }
     return cache.word;
 }
-// Read active rank fields occupying at most 32 bits inside one native unit.
-// The caller bounds first_slot/count; inactive slots and spare unit bits are masked.
+// Read at most 32 active rank bits. Continuous layouts may cross a transport
+// word; padded layouts stay inside their native unit. The caller bounds the
+// logical interval, and inactive slots and spare unit bits are masked.
 uint native_packed_chunk_bits(
     gpu_sequence_view sequence,
     native_packed_cursor cursor,
@@ -110,33 +132,38 @@ uint native_packed_chunk_bits(
 {
     uint bit_offset = first_slot * native_packed_rank_bits(sequence);
     uint bit_count = count * native_packed_rank_bits(sequence);
-    uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
-    uint64_t word_index = byte_index >> 2u;
+    uint byte_index = cursor.unit_byte_index + (bit_offset >> 3u);
+    uint word_index = byte_index >> 2u;
     uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
     uint bits = cached_native_packed_word(word_index, cache) >> word_shift;
     if (word_shift + bit_count > 32u)
-        bits |= cached_native_packed_word(word_index + uint64_t(1), cache) << (32u - word_shift);
+        bits |= cached_native_packed_word(word_index + 1u, cache) << (32u - word_shift);
     return bits & (0xffffffffu >> (32u - bit_count));
 }
-// Advance by at most the active slots left in this unit; callers skip the final advance.
+// Advance by at most one unit's capacity, allowing a contiguous chunk to cross
+// its boundary. Padded layouts still pass only the remaining active slots.
+// Callers skip the final advance, so no pointer moves beyond its logical span.
 void advance_native_packed_cursor(
     gpu_sequence_view sequence,
     inout native_packed_cursor cursor,
     uint count,
     bool reverse)
 {
+    const bool continuous_transport = compile_time_native_rank_bits != 0u
+        && (compile_time_native_rank_bits & (compile_time_native_rank_bits - 1u)) == 0u;
     if (reverse) {
         if (count <= cursor.slot) {
             cursor.slot -= count;
         } else {
-            cursor.unit_byte_index -= uint64_t(sequence.unit_bits / 8u);
-            cursor.slot = sequence.letters_per_unit - 1u;
+            cursor.unit_byte_index -= sequence.unit_bits / 8u;
+            cursor.slot = continuous_transport
+                ? cursor.slot + sequence.letters_per_unit - count : sequence.letters_per_unit - 1u;
         }
     } else {
         cursor.slot += count;
-        if (cursor.slot == sequence.letters_per_unit) {
-            cursor.slot = 0u;
-            cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
+        if (cursor.slot >= sequence.letters_per_unit) {
+            cursor.slot = continuous_transport ? cursor.slot - sequence.letters_per_unit : 0u;
+            cursor.unit_byte_index += sequence.unit_bits / 8u;
         }
     }
 }
@@ -182,12 +209,10 @@ uint native_packed_arena_word(uint64_t word_index) {
 bool prefilter_job_is_in_bounds(prefilter_job job) {
     if (job.query_record_index >= pc.query_record_count || job.target_record_index >= pc.target_record_count)
         return false;
-    gpu_sequence_view query = query_records[job.query_record_index];
-    gpu_sequence_view target = target_records[job.target_record_index];
-    // Both operands are uint32 fields, so each widened sum fits uint64.
-    return uint64_t(job.query_start) + uint64_t(job.query_length) <= query.bp_count
-        && uint64_t(job.target_start) + uint64_t(job.target_length) <= target.bp_count
-        && (job.orientation == 0u || (job.orientation == 3u && canonical_reverse_complement != 0u));
+    // validate_prefilter_inputs already checked every immutable job's complete
+    // coordinates and orientation before upload. Do not reload both 64-bit
+    // sequence descriptors just to repeat those checks in each shader job.
+    return true;
 }
 // Normalize only a bounded register chunk when rank widths or orientation differ.
 uint native_packed_chunk_rank_bytes(
@@ -209,11 +234,12 @@ uint native_packed_chunk_rank_bytes(
 // slots, including non-power-of-two letters/unit and cross-word symbols.
 // Caller has already proved [position, position + 4) is inside this descriptor.
 uint native_packed_rank_quad(gpu_sequence_view sequence, uint64_t position) {
+    sequence = native_packed_transport_view(sequence);
     native_packed_cursor cursor = native_packed_begin(sequence, position);
     uint initial_bit = cursor.slot * native_packed_rank_bits(sequence);
     uint64_t word_index =
         (cursor.unit_byte_index + uint64_t(initial_bit >> 3u)) >> 2u;
-    native_packed_word_cache cache = native_packed_word_cache(word_index, packed_words[uint(word_index)]);
+    native_packed_word_cache cache = native_packed_word_cache(uint(word_index), packed_words[uint(word_index)]);
     uint expanded_ranks = 0u;
     for (uint lane = 0u; lane < 4u; ++lane) {
         uint rank = native_packed_chunk_bits(sequence, cursor, cursor.slot, 1u, cache);
@@ -222,7 +248,7 @@ uint native_packed_rank_quad(gpu_sequence_view sequence, uint64_t position) {
             ++cursor.slot;
             if (cursor.slot == sequence.letters_per_unit) {
                 cursor.slot = 0u;
-                cursor.unit_byte_index += uint64_t(sequence.unit_bits / 8u);
+                cursor.unit_byte_index += sequence.unit_bits / 8u;
             }
         }
     }

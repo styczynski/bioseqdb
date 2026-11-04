@@ -1224,6 +1224,69 @@ TEST_CASE("Manual native AA27 CPU scoring probe",
     // END_TEMPORARY_REGISTERED_CPU_SCORING_ORACLE_CALL
 }
 
+TEST_CASE("Block gap transitions preserve unreachable cells across native alphabets",
+          "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    namespace probe = manual_protein_alignment_probe;
+    const auto check_alphabet = []<sequence_alphabet Alphabet>() {
+        using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, std::uint64_t>>;
+        using matrix_type = scoring_matrix<Alphabet>;
+        constexpr auto ranks = seqan3::alphabet_size<Alphabet>;
+        constexpr auto dimension = matrix_type::k_alphabet_dimension;
+        std::array<std::int32_t, matrix_type::k_entry_count> entries{};
+        for (std::size_t target = 0; target < ranks; ++target)
+            for (std::size_t query = 0; query < ranks; ++query)
+                entries[target * dimension + query] = target == query ? 7 : -5;
+        entries[(ranks - 1) * dimension] = 2;
+        entries[ranks - 1] = -9;
+        const auto matrix = matrix_type::from_entries(entries).value();
+        const auto pack = [](const std::vector<std::uint8_t>& values) {
+            std::vector<Alphabet> letters;
+            for (const auto rank : values)
+                letters.push_back(seqan3::assign_rank_to(rank, Alphabet{}));
+            return range_type(letters);
+        };
+        std::vector<std::uint8_t> first, second;
+        for (std::size_t index = 0; index < ranks + 17; ++index)
+            first.push_back(static_cast<std::uint8_t>(index % ranks));
+        second = first;
+        second.insert(second.begin() + 9, 3, static_cast<std::uint8_t>(ranks - 1));
+        second[4] = static_cast<std::uint8_t>(ranks - 1);
+        const auto& kernels = fixed_alignment_kernels<Alphabet>();
+        for (const auto [gap_open, gap_extend] :
+             {std::pair{0, 1}, std::pair{4, 2}, std::pair{200, 20}}) {
+            for (const bool transpose : {false, true}) {
+                const auto& query = transpose ? second : first;
+                const auto& target = transpose ? first : second;
+                const auto expected = probe::affine_oracle(query, target, matrix, gap_open, gap_extend);
+                auto query_range = pack(query), target_range = pack(target);
+                auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_range);
+                auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_range);
+                const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
+                const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
+                for (const bool trace : {false, true}) {
+                    INFO("alphabet size=" << +ranks << " gap=" << gap_open << ',' << gap_extend
+                        << " transpose=" << transpose << " trace=" << trace);
+                    auto parameters = global_params(16, 64, trace);
+                    parameters.gap_open = gap_open;
+                    parameters.gap_extend = gap_extend;
+                    const auto result = kernels.align_block(false, false, query_view, target_view,
+                        0, query.size(), 0, target.size(), matrix, parameters, nullptr, nullptr);
+                    REQUIRE(result.has_value());
+                    CHECK(result->score == expected);
+                    CHECK(result->max_q == static_cast<std::int32_t>(query.size()) - 1);
+                    CHECK(result->max_t == static_cast<std::int32_t>(target.size()) - 1);
+                    if (trace) probe::check_cigar(*result, query, target, matrix, gap_open, gap_extend);
+                }
+            }
+        }
+    };
+    [&check_alphabet]<class... Entries>(std::tuple<Entries...>) {
+        (check_alphabet.template operator()<typename Entries::alphabet_type>(), ...);
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+}
+
 // Temporary, uncommitted addition to the existing manual native CPU probe.
 // Append inside namespace bioseq::simd in tests/unit/alignment/block_aligner_test.cpp,
 // after /tmp/bioseq_native_cpu_probe.cpp, whose native fixtures/oracle are reused.

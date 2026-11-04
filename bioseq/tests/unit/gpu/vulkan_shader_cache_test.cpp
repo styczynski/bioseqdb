@@ -525,6 +525,7 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
         windowed.partition_count = 2u;
         windowed.descriptor_bytes = 2u * sizeof(gv::gpu_grouped_soa_resident_partition_descriptor);
         windowed.resident_descriptors.bytes = windowed.descriptor_bytes;
+        windowed.resident_descriptors.allocation_bytes = windowed.descriptor_bytes;
         windowed.binding_window_count = 2u;
         windowed.direct_count_dispatches = 2u;
         windowed.direct_emit_dispatches = 2u;

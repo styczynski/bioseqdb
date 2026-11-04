@@ -171,7 +171,8 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
                                               static_cast<std::uint32_t>(w),
                                               range_type::traits::letters_per_unit),
                     static_cast<std::uint32_t>(k),
-                    static_cast<std::uint32_t>(w));
+                    static_cast<std::uint32_t>(w), 0u,
+                    seqan3::nucleotide_alphabet<p_alphabet_type>);
             }
         }
     };
@@ -289,7 +290,7 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         vk::make_sketch_tile_plan(
             fragmented.bp_size(), 15, 10, range_type::traits::letters_per_unit),
         15,
-        10);
+        10, 0u, true);
 }
 
 TEST_CASE("Vulkan borrowed segment-pair admission covers arena high-water",

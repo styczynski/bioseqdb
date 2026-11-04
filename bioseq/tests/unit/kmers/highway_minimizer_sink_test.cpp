@@ -187,7 +187,10 @@ template<class p_minimizer_type>
     result.reserve(count);
     for (std::size_t index = 0u; index < count; ++index) {
         result.emplace_back(
-            static_cast<std::uint64_t>(index * 2654435761u + 17u),
+            // Exercise transport with valid fields in each physical layout;
+            // narrow records must not rely on constructor truncation.
+            static_cast<std::uint64_t>(index * 2654435761u + 17u)
+                & p_minimizer_type::k_hash_field_mask,
             static_cast<std::uint64_t>(index),
             static_cast<std::uint64_t>(index & 1u));
     }

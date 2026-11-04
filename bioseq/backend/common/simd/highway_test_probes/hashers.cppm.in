@@ -68,7 +68,8 @@ template<
     using simd_tag_type = hn::ScalableTag<p_input>;
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
-    constexpr std::size_t k_kmer_length = 10U;
+    constexpr std::size_t k_kmer_length = std::min<std::size_t>(10U,
+        std::numeric_limits<p_input>::digits / traits_type::bits_per_char);
 
     auto source = short_dna4_sequence();
     range_type sequence{source};
