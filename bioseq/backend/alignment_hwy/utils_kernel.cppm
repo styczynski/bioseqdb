@@ -14,6 +14,7 @@ module;
 export module bioseq.highway.sources.alignment_utils;
 
 import std;
+import bioseq.common.seqan_adapter;
 import bioseq.alignment.utils;
 import bioseq.sequences;
 
@@ -22,6 +23,45 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 
 namespace hn = hwy::HWY_NAMESPACE;
+
+/**
+ * Decode the selected oriented interval directly into its final DP storage.
+ * Reuse the backend's write-order callback; validate native ranks before any
+ * matrix lookup, fusing validation with copying when the backend borrows bytes.
+ */
+template<bool QueryReversed, bool WriteReversed, class Sequence,
+         class D = hn::ScalableTag<std::uint8_t>>
+[[nodiscard]] HWY_INLINE std::expected<void, alignment_contract_error> copy_checked_alignment_ranks(
+    const Sequence& sequence, std::span<std::uint8_t> destination,
+    std::size_t begin, std::size_t end, D descriptor = {}) {
+    static_assert(std::same_as<hn::TFromD<D>, std::uint8_t>);
+    using alphabet_type = typename Sequence::traits::alphabet_type;
+    constexpr auto alphabet_size = seqan3::alphabet_size<alphabet_type>;
+    if (end < begin || end > sequence.bp_size() || destination.size() != end - begin)
+        return std::unexpected(alignment_contract_error::coordinates);
+    const auto reader = sequence.template rank_reader<QueryReversed, WriteReversed, std::uint8_t>();
+    const auto ranks = reader.read_checked(begin, destination.size(), destination);
+    if (!ranks) return std::unexpected(alignment_contract_error::source_read_failed);
+    const bool needs_copy = ranks->data() != destination.data();
+    const auto lane_count = hn::Lanes(descriptor);
+    std::size_t offset = 0;
+    for (; destination.size() - offset >= lane_count; offset += lane_count) {
+        const auto values = hn::LoadU(descriptor, ranks->data() + offset);
+        if constexpr (alphabet_size <= std::numeric_limits<std::uint8_t>::max()) {
+            if (!hn::AllTrue(descriptor, hn::Lt(values,
+                    hn::Set(descriptor, static_cast<std::uint8_t>(alphabet_size)))))
+                return std::unexpected(alignment_contract_error::invalid_matrix_layout);
+        }
+        if (needs_copy) hn::StoreU(values, descriptor, destination.data() + offset);
+    }
+    for (; offset < destination.size(); ++offset) {
+        const auto rank = (*ranks)[offset];
+        if (rank >= alphabet_size)
+            return std::unexpected(alignment_contract_error::invalid_matrix_layout);
+        if (needs_copy) destination[offset] = rank;
+    }
+    return {};
+}
 
 /**
  * Score independently varying target/query rank pairs in the current DP vector.

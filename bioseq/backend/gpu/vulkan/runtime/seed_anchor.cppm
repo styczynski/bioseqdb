@@ -22,257 +22,6 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/**
- * Verify native k-spans on the device, prefix-scan validity and emit dense anchors.
- * Borrowed windows and optional provider state remain alive until each fence.
- * Temporary and retained allocations use the existing memory admission owner.
- */
-gpu_verified_seed_buffer runtime::verify_seed_anchors_locked(
-    const buffer& candidates, std::uint64_t candidate_byte_offset, std::uint32_t candidate_count,
-    const gpu_native_sequence_upload& query, const gpu_native_sequence_upload& target,
-    const vulkan_rank_lut& rank_policy, std::uint32_t query_length,
-    std::uint32_t kmer_size, std::uint64_t target_position_bias,
-    const gpu_native_sequence_provider& target_provider,
-    runtime_pipeline_use_collector* collector, std::size_t job_index) {
-    gpu_verified_seed_buffer result{};
-    result.candidate_count = candidate_count;
-    if (candidate_count == 0u) return result;
-    const std::uint64_t candidate_bytes = std::uint64_t{candidate_count} * sizeof(gpu_anchor_wire);
-    if (kmer_size == 0u || kmer_size > 31u || query_length < kmer_size ||
-        query.symbol_count != query_length || candidate_byte_offset > candidates.bytes ||
-        candidate_bytes > candidates.bytes - candidate_byte_offset ||
-        candidate_bytes > features_.max_storage_buffer_range ||
-        features_.max_workgroup_count_x == 0u || rank_policy.alphabet_size == 0u ||
-        rank_policy.alphabet_size > rank_policy.rank_to_code.size() ||
-        rank_policy.canonical_reverse_complement > 1u || rank_policy.seed_policy_id == 0u) {
-        throw vulkan_runtime_error("native seed verification input contract is invalid");
-    }
-    for (std::size_t rank = 0u; rank < rank_policy.alphabet_size; ++rank) {
-        if (rank_policy.rank_to_code[rank] != rank ||
-            (rank_policy.canonical_reverse_complement != 0u &&
-             rank_policy.rank_to_rc_code[rank] >= rank_policy.alphabet_size))
-            throw vulkan_runtime_error("native seed rank policy is malformed");
-    }
-    const auto binding_alignment = std::max<std::uint64_t>(features_.min_storage_buffer_offset_alignment, 1u);
-    std::uint64_t candidate_binding_offset = candidate_byte_offset / binding_alignment * binding_alignment;
-    while ((candidate_byte_offset - candidate_binding_offset) % sizeof(gpu_anchor_wire) != 0u) {
-        if (candidate_binding_offset < binding_alignment)
-            throw vulkan_runtime_error("native candidate interval has incompatible descriptor alignment");
-        candidate_binding_offset -= binding_alignment;
-    }
-    const auto candidate_index_bias = (candidate_byte_offset - candidate_binding_offset) / sizeof(gpu_anchor_wire);
-    const auto candidate_binding_bytes = candidate_bytes + candidate_byte_offset - candidate_binding_offset;
-    if (candidate_index_bias > std::numeric_limits<std::uint32_t>::max() ||
-        candidate_binding_bytes > features_.max_storage_buffer_range)
-        throw vulkan_runtime_error("native candidate binding exceeds device address range");
-    const std::uint32_t groups = std::min(
-        bioseq::common::ceil_div(candidate_count, 128u), features_.max_workgroup_count_x);
-    const auto prepare = [collector](const compute_pipeline& pipeline) {
-        if (collector != nullptr)
-            collector->prepare(make_shader_key(pipeline.kind, 384u, pipeline.local_size,
-                                               pipeline.max_span), pipeline.metal_archive_receipt);
-    };
-    const auto begin_submission = [this, collector](const char* label) {
-        reset_dispatch_descriptor_pool_locked();
-        check_vk(vkResetCommandBuffer(command_buffer_, 0u), label);
-        VkCommandBufferBeginInfo begin{};
-        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), label);
-        if (collector != nullptr) collector->begin(command_buffer_);
-        record_host_to_shader(command_buffer_);
-        record_compute_barrier(command_buffer_);
-    };
-    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
-    gpu_native_sequence_upload selected_target = target;
-    if (target_provider.prepare != nullptr) {
-        if (!target.windows.empty() || target_provider.symbol_count < kmer_size)
-            throw vulkan_runtime_error("native seed target provider conflicts with supplied windows");
-        const std::uint64_t coverage_bytes = std::uint64_t{candidate_count} * sizeof(sequence_upload_interval);
-        if (coverage_bytes > features_.max_storage_buffer_range)
-            throw vulkan_runtime_error("native seed coverage exceeds storage buffer range");
-        const auto coverage_requirement = bioseq::common::saturating_add(
-            buffer_memory_requirement_locked(coverage_bytes, k_compute_buffer_usage),
-            buffer_memory_requirement_locked(sizeof(std::uint32_t), k_compute_buffer_usage));
-        auto coverage_permit = admission.try_reserve(coverage_requirement);
-        if (!coverage_permit) throw vulkan_runtime_error("native seed coverage admission denied");
-        buffer coverage = create_device_buffer(coverage_bytes, k_compute_buffer_usage);
-        buffer status = create_device_buffer(sizeof(std::uint32_t), k_compute_buffer_usage);
-        if (coverage.mapped == nullptr || status.mapped == nullptr)
-            throw vulkan_runtime_error("native seed coverage requires mapped device memory");
-        std::memset(status.mapped, 0, sizeof(std::uint32_t));
-        const auto pipeline = get_compute_pipeline_locked(shader_kind::seed_native_coverage, 128u, 1u);
-        prepare(pipeline);
-        struct coverage_push {
-            std::uint32_t candidate_count, kmer_size;
-            std::uint64_t target_position_bias, symbol_count;
-            std::uint32_t candidate_index_bias, reserved;
-        };
-        static_assert(sizeof(coverage_push) == 32u);
-        const coverage_push push{candidate_count, kmer_size, target_position_bias,
-                                 target_provider.symbol_count, static_cast<std::uint32_t>(candidate_index_bias), 0u};
-        const std::array<VkDescriptorBufferInfo, 3> infos{{
-            {candidates.buffer_handle, candidate_binding_offset, candidate_binding_bytes},
-            {coverage.buffer_handle, 0u, coverage.bytes}, {status.buffer_handle, 0u, status.bytes}}};
-        begin_submission("begin(native_seed_coverage)");
-        record_compute_dispatch_locked(command_buffer_, pipeline, infos, &push, sizeof(push),
-                                       groups, collector, job_index);
-        record_shader_to_host(command_buffer_);
-        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(native_seed_coverage)", collector);
-        result.coverage_submit_wait_identity = next_operation_identity_locked();
-        std::uint32_t status_value{};
-        std::memcpy(&status_value, status.mapped, sizeof(status_value));
-        if (status_value != 0u) throw vulkan_runtime_error("native seed coverage rejected candidate coordinates");
-        result.coverage_interval_count = candidate_count;
-        result.vulkan_allocation_bytes = coverage.allocation_bytes + status.allocation_bytes;
-        selected_target = target_provider.prepare(target_provider.context,
-            std::span{static_cast<const sequence_upload_interval*>(coverage.mapped), candidate_count});
-        if (selected_target.symbol_count != target_provider.symbol_count)
-            throw vulkan_runtime_error("native seed provider changed source length");
-    }
-    std::uint64_t packed_bytes = 0u;
-    const auto validate_windows = [&rank_policy, &packed_bytes](const gpu_native_sequence_upload& source) {
-        std::uint64_t previous_end = 0u;
-        if (source.windows.empty() || source.windows.size() > std::numeric_limits<std::uint32_t>::max())
-            throw vulkan_runtime_error("native seed source has no bounded windows");
-        for (const auto& upload : source.windows) {
-            const auto& descriptor = upload.sequence;
-            if (!packed_sequence_upload_is_valid(upload) || descriptor.bp_count == 0u ||
-                descriptor.bp_count > std::numeric_limits<std::uint32_t>::max() ||
-                descriptor.bp_offset < previous_end || descriptor.bp_offset > source.symbol_count ||
-                descriptor.bp_count > source.symbol_count - descriptor.bp_offset ||
-                descriptor.alphabet_size != rank_policy.alphabet_size ||
-                descriptor.alphabet_code != rank_policy.alphabet_code ||
-                descriptor.seed_policy_id != rank_policy.seed_policy_id)
-                throw vulkan_runtime_error("native seed windows have invalid geometry, ranks or identity");
-            previous_end = descriptor.bp_offset + descriptor.bp_count;
-            packed_bytes = bioseq::common::saturating_add(packed_bytes, descriptor.padded_byte_count);
-        }
-    };
-    validate_windows(query);
-    validate_windows(selected_target);
-    const auto record_count = query.windows.size() + selected_target.windows.size();
-    if (record_count > std::numeric_limits<std::uint32_t>::max())
-        throw vulkan_runtime_error("native seed descriptor count exceeds uint32");
-    const std::uint64_t record_bytes = record_count * sizeof(gpu_sequence_view_wire);
-    const std::uint64_t flag_bytes = std::uint64_t{candidate_count} * sizeof(std::uint32_t);
-    const auto block_count = bioseq::common::ceil_div(candidate_count, k_prefix_scan_block_size);
-    const std::uint64_t block_bytes = std::uint64_t{block_count} * sizeof(std::uint32_t);
-    const std::array<std::uint64_t, 8> logical_sizes{
-        packed_bytes, record_bytes, sizeof(vulkan_rank_lut), flag_bytes, flag_bytes,
-        block_bytes, 2u * sizeof(std::uint32_t), candidate_bytes};
-    std::uint64_t required_bytes = 0u;
-    for (const auto bytes : logical_sizes) {
-        if (bytes == 0u || bytes > features_.max_storage_buffer_range)
-            throw vulkan_runtime_error("native seed verification exceeds storage buffer range");
-        required_bytes = bioseq::common::saturating_add(required_bytes,
-            buffer_memory_requirement_locked(bytes, k_compute_buffer_usage));
-    }
-    auto reserved = admission.try_reserve(required_bytes);
-    if (!reserved) throw vulkan_runtime_error("native seed verification admission denied");
-    auto permit = std::move(*reserved);
-    buffer packed = create_device_buffer(packed_bytes, k_compute_buffer_usage);
-    buffer records = create_device_buffer(record_bytes, k_compute_buffer_usage);
-    buffer policy = create_device_buffer(sizeof(vulkan_rank_lut), k_compute_buffer_usage);
-    buffer validity = create_device_buffer(flag_bytes, k_compute_buffer_usage);
-    buffer prefix = create_device_buffer(flag_bytes, k_compute_buffer_usage);
-    buffer blocks = create_device_buffer(block_bytes, k_compute_buffer_usage);
-    buffer counters = create_device_buffer(2u * sizeof(std::uint32_t), k_compute_buffer_usage);
-    for (const auto* allocation : {&packed, &records, &policy, &validity, &prefix, &blocks, &counters})
-        if (allocation->mapped == nullptr) throw vulkan_runtime_error("native seed verification requires mapped memory");
-    std::size_t packed_offset = 0u;
-    std::size_t record_offset = 0u;
-    const auto copy_windows = [&packed, &records, &packed_offset, &record_offset](auto windows) {
-        for (const auto& upload : windows) {
-            const auto placed = place_packed_sequence_upload(upload, packed_offset,
-                std::span{static_cast<std::byte*>(packed.mapped), static_cast<std::size_t>(packed.bytes)}, packed_sequence_upload_is_valid);
-            if (!placed) throw vulkan_runtime_error("native seed packed placement failed");
-            std::memcpy(static_cast<std::byte*>(records.mapped) + record_offset, &*placed, sizeof(*placed));
-            packed_offset += upload.sequence.padded_byte_count;
-            record_offset += sizeof(*placed);
-        }
-    };
-    copy_windows(query.windows);
-    copy_windows(selected_target.windows);
-    std::memcpy(policy.mapped, &rank_policy, sizeof(rank_policy));
-    std::memset(counters.mapped, 0, 2u * sizeof(std::uint32_t));
-    const auto verify_count = get_compute_pipeline_locked(shader_kind::seed_verify_count, 128u, 1u);
-    const auto verify_emit = get_compute_pipeline_locked(shader_kind::seed_verify_emit, 128u, 1u);
-    const auto scan_block = get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
-    const auto scan_add = get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
-    for (const auto& pipeline : {verify_count, verify_emit, scan_block, scan_add}) prepare(pipeline);
-    struct verify_push {
-        std::uint32_t candidate_count, mode, kmer_size, query_length;
-        std::uint64_t target_position_bias;
-        std::uint32_t verified_count, query_window_count, target_window_count, reserved;
-    };
-    static_assert(sizeof(verify_push) == 40u);
-    verify_push push{candidate_count, 0u, kmer_size, query_length, target_position_bias, 0u,
-        static_cast<std::uint32_t>(query.windows.size()),
-        static_cast<std::uint32_t>(selected_target.windows.size()), static_cast<std::uint32_t>(candidate_index_bias)};
-    std::array<VkDescriptorBufferInfo, 8> infos{{
-        {candidates.buffer_handle, candidate_binding_offset, candidate_binding_bytes},
-        {packed.buffer_handle, 0u, packed.bytes}, {records.buffer_handle, 0u, records.bytes},
-        {policy.buffer_handle, 0u, policy.bytes}, {validity.buffer_handle, 0u, validity.bytes},
-        {prefix.buffer_handle, 0u, prefix.bytes},
-        {candidates.buffer_handle, candidate_binding_offset, candidate_binding_bytes},
-        {counters.buffer_handle, 0u, counters.bytes}}};
-    const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-        {validity.buffer_handle, 0u, validity.bytes}, {prefix.buffer_handle, 0u, prefix.bytes},
-        {blocks.buffer_handle, 0u, blocks.bytes}}};
-    const scan_push_constants scan0{candidate_count, k_prefix_scan_block_size, block_count, 0u};
-    const scan_push_constants scan1{candidate_count, k_prefix_scan_block_size, block_count, 1u};
-    begin_submission("begin(native_seed_verify_count)");
-    record_compute_dispatch_locked(command_buffer_, verify_count, infos, &push, sizeof(push), groups, collector, job_index);
-    record_compute_barrier(command_buffer_);
-    record_compute_dispatch_locked(command_buffer_, scan_block, scan_infos, &scan0, sizeof(scan0),
-        std::min(block_count, features_.max_workgroup_count_x), collector, job_index);
-    record_compute_barrier(command_buffer_);
-    record_compute_dispatch_locked(command_buffer_, scan_add, scan_infos, &scan0, sizeof(scan0), 1u, collector, job_index);
-    record_compute_barrier(command_buffer_);
-    record_compute_dispatch_locked(command_buffer_, scan_add, scan_infos, &scan1, sizeof(scan1), groups, collector, job_index);
-    record_shader_to_host(command_buffer_);
-    submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(native_seed_verify_count)", collector);
-    result.verify_count_submit_wait_identity = next_operation_identity_locked();
-    std::array<std::uint32_t, 2> counts{};
-    std::memcpy(counts.data(), counters.mapped, sizeof(counts));
-    if (counts[0] != 0u) throw vulkan_runtime_error("native seed verification rejected invalid input or missing coverage");
-    std::uint32_t final_prefix{}, final_validity{};
-    std::memcpy(&final_prefix, static_cast<const std::byte*>(prefix.mapped) + flag_bytes - 4u, sizeof(final_prefix));
-    std::memcpy(&final_validity, static_cast<const std::byte*>(validity.mapped) + flag_bytes - 4u, sizeof(final_validity));
-    result.verified_count = std::uint64_t{final_prefix} + final_validity;
-    if (final_validity > 1u || result.verified_count > candidate_count)
-        throw vulkan_runtime_error("native seed validity prefix exceeds candidate count");
-    const auto output_bytes = std::max<std::uint64_t>(sizeof(gpu_anchor_wire),
-        result.verified_count * sizeof(gpu_anchor_wire));
-    buffer output = create_device_buffer(output_bytes, k_compute_buffer_usage);
-    if (output.mapped == nullptr) throw vulkan_runtime_error("native seed output requires mapped memory");
-    infos[6] = VkDescriptorBufferInfo{output.buffer_handle, 0u, output.bytes};
-    push.mode = 1u;
-    push.verified_count = static_cast<std::uint32_t>(result.verified_count);
-    begin_submission("begin(native_seed_verify_emit)");
-    record_compute_dispatch_locked(command_buffer_, verify_emit, infos, &push, sizeof(push), groups, collector, job_index);
-    record_shader_to_host(command_buffer_);
-    submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(native_seed_verify_emit)", collector);
-    result.verify_emit_submit_wait_identity = next_operation_identity_locked();
-    std::memcpy(counts.data(), counters.mapped, sizeof(counts));
-    result.emitted_count = counts[1];
-    if (counts[0] != 0u || result.emitted_count != result.verified_count)
-        throw vulkan_runtime_error("native seed emission count disagrees with verified prefix");
-    std::uint64_t actual_bytes = output.allocation_bytes;
-    for (const auto* allocation : {&packed, &records, &policy, &validity, &prefix, &blocks, &counters})
-        actual_bytes = bioseq::common::saturating_add(actual_bytes, allocation->allocation_bytes);
-    if (actual_bytes > permit.bytes()) throw vulkan_runtime_error("native seed allocation exceeded admission");
-    permit.shrink_to(actual_bytes);
-    result.vulkan_allocation_bytes += actual_bytes;
-    result.permit = permit.split_off(output.allocation_bytes);
-    result.anchors = std::move(output);
-    if (collector != nullptr)
-        collector->set_seed_native_verification(job_index, result.candidate_count, result.verified_count,
-                                                result.emitted_count, result.coverage_interval_count);
-    return result;
-}
-
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 /// @brief Checks that a query slice matches the completed GPU sketch and its devicn buffer.
 /// @return Identifier of the matching sketch record.
@@ -342,6 +91,10 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     }
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw vulkan_runtime_error("seed lookup missing resident index buffers");
+    }
+    if (kmer_size == 0u || kmer_size > std::numeric_limits<std::uint8_t>::max() ||
+        query_len < kmer_size || query_len > std::numeric_limits<std::uint32_t>::max()) {
+        throw vulkan_runtime_error("seed lookup span or query length exceeds the anchor ABI");
     }
     const std::uint64_t minimizer_count = prefix_counts.size() - 1u;
     if (inputs.device_minimizer_words == nullptr) {
@@ -683,28 +436,17 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
         collector->commit(command_buffer_);
 #endif
 
-    if (inputs.native_rank_policy == nullptr || query_len > std::numeric_limits<std::uint32_t>::max())
-        throw vulkan_runtime_error("seed lookup lacks native source identity");
-    const buffer& sorted_anchors = radix_result_in_scratch ? anchors_scratch_buf : anchors_buf;
-    auto verified = verify_seed_anchors_locked(sorted_anchors, 0u,
-        static_cast<std::uint32_t>(exact_anchor_count), inputs.native_query, inputs.native_target,
-        *inputs.native_rank_policy, static_cast<std::uint32_t>(query_len), kmer_size,
-        inputs.target_position_offset, {}
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        , collector.get(), 0u
-#endif
-        );
     seed_lookup_result result;
-    result.count = verified.verified_count;
-    result.candidate_count = exact_anchor_count;
-    result.native_verification_vulkan_allocation_bytes = verified.vulkan_allocation_bytes;
+    result.count = exact_anchor_count;
     result.actual_vulkan_allocation_bytes = actual_vulkan_allocation_bytes;
     result.seed_lookup_dispatches = 1u;
     result.open_addressed_lookup_dispatches = inputs.bucket_count == 0u ? 1u : 0u;
     result.sorted_dense_lookup_dispatches = inputs.bucket_count != 0u ? 1u : 0u;
-    result.host_bytes.resize(static_cast<std::size_t>(result.count * sizeof(gpu_anchor_wire)));
-    if (!result.host_bytes.empty())
-        std::memcpy(result.host_bytes.data(), verified.anchors.mapped, result.host_bytes.size());
+    result.host_bytes.resize(static_cast<std::size_t>(anchor_bytes));
+    const buffer& sorted_anchors = radix_result_in_scratch ? anchors_scratch_buf : anchors_buf;
+    download_locked(scratch,
+                    sorted_anchors,
+                    std::span<std::byte>{result.host_bytes.data(), result.host_bytes.size()});
     const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
         std::span<std::byte>{result.host_bytes.data(), result.host_bytes.size()}, result.count);
     if (!tie_normalization.gpu_ref_order_checked || !tie_normalization.gpu_ref_order_accepted) {
@@ -819,6 +561,10 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
             throw vulkan_runtime_error("gpu seed idle arena release found live slices");
         }
         return result;
+    }
+    if (kmer_size == 0u || kmer_size > std::numeric_limits<std::uint8_t>::max() ||
+        query_len < kmer_size || query_len > std::numeric_limits<std::uint32_t>::max()) {
+        throw vulkan_runtime_error("gpu seed span or query length exceeds the anchor ABI");
     }
     const std::uint32_t num_blocks = bioseq::common::ceil_div(mc, k_prefix_scan_block_size);
     const std::uint64_t min_words_bytes =
@@ -1143,21 +889,12 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
                         );
     }
     const gpu_arena_slice& sorted_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
-    if (inputs.native_rank_policy == nullptr || query_len > std::numeric_limits<std::uint32_t>::max())
-        throw vulkan_runtime_error("fused seed lookup lacks native source identity");
-    auto verified = verify_seed_anchors_locked(*sorted_anchors.buffer, sorted_anchors.offset,
-        static_cast<std::uint32_t>(total), inputs.native_query, inputs.native_target,
-        *inputs.native_rank_policy, static_cast<std::uint32_t>(query_len), kmer_size, 0u, {}
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        , collector.get(), 0u
-#endif
-        );
-    result.count = verified.verified_count;
-    result.candidate_count = total;
-    result.native_verification_vulkan_allocation_bytes = verified.vulkan_allocation_bytes;
-    result.host_bytes.resize(static_cast<std::size_t>(result.count * sizeof(gpu_anchor_wire)));
-    if (!result.host_bytes.empty())
-        std::memcpy(result.host_bytes.data(), verified.anchors.mapped, result.host_bytes.size());
+    result.count = total;
+    result.host_bytes.resize(static_cast<std::size_t>(total * 24u));
+    std::memcpy(result.host_bytes.data(),
+                static_cast<const std::byte*>(sorted_anchors.buffer->mapped) +
+                    sorted_anchors.offset,
+                static_cast<std::size_t>(total * 24u));
     const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
         std::span<std::byte>{result.host_bytes.data(), result.host_bytes.size()}, result.count);
     if (!tie_normalization.gpu_ref_order_checked || !tie_normalization.gpu_ref_order_accepted) {

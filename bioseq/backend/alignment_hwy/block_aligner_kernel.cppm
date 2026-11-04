@@ -438,12 +438,6 @@ public:
             if (!target_copy) return std::unexpected(target_copy.error());
         }
 
-        if (!count_equal_rank_chunk(query_padded.data_at(1), query_padded.data_at(1), query_length,
-                sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks
-            || !count_equal_rank_chunk(target_padded.data_at(1), target_padded.data_at(1), target_length,
-                sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks)
-            return std::unexpected(alignment_contract_error::invalid_matrix_layout);
-
         const bool is_trace_enabled = parameters.is_trace_enabled;
         if (construction_stats != nullptr) {
             ++construction_stats->scratch_allocations;

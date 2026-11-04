@@ -1342,7 +1342,7 @@ template <sequence_alphabet p_alphabet, class p_query, class p_group, class p_pr
                       : spill.error());
         }
         const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
-            target_generation.backend);
+            target_generation.backend, alphabet_code, target_generation.identity.runtime_kmer_size);
         const bioseq::indexing::grouped_soa_generation_options options{
             .layout = bioseq::indexing::minimizer_generation_layout::
                 grouped_soa_segment_local,
@@ -1717,7 +1717,8 @@ template <sequence_alphabet p_alphabet>
         raise_transient_generation_error("transient MPS spill", spill.error());
     }
     const auto scheme =
-        bioseq::indexing::minimizer_scheme_identity_for_backend(target_backend);
+        bioseq::indexing::minimizer_scheme_identity_for_backend(
+            target_backend, alphabet_code, target_identity.runtime_kmer_size);
     const bioseq::indexing::grouped_soa_generation_options options{
         .layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
         .generation_id = source_epoch,

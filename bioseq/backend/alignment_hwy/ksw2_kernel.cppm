@@ -225,7 +225,16 @@ template<
             static_cast<uint8_t>(-gap_open_long - gap_extend_long));
         state.fill_array(state.gap_f2_offset_base,
             static_cast<uint8_t>(-gap_open_long - gap_extend_long));
+    } else {
+        state.fill_leading_arrays(storage_plan->state_array_count, std::uint8_t{0});
     }
+    // Active ranks are decoded below. Initialize only the rounded tails and
+    // final vector halo, which the anti-diagonal SIMD loads can also touch.
+    std::fill_n(state.target_bytes + target_length,
+        storage_plan->state_array_bytes - target_length, std::uint8_t{0});
+    std::fill_n(state.query_reversed + query_length,
+        (storage_plan->query_vector_count + 1u) * storage_plan->vector_bytes - query_length,
+        std::uint8_t{0});
 
     // Keep full scores for each anti-diagonal  when exact maximum tracking
     // is requested. This row is temporary alignment storage.
@@ -273,12 +282,6 @@ template<
             target_seq, target_destination, target_start, target_end);
         if (!target_copy) return std::unexpected(target_copy.error());
     }
-
-    if (!count_equal_rank_chunk(state.query_reversed, state.query_reversed, query_length,
-            sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks
-        || !count_equal_rank_chunk(state.target_bytes, state.target_bytes, target_length,
-            sequence_rank_validation::upper_bound, seqan3::alphabet_size<p_alphabet>).valid_ranks)
-        return std::unexpected(alignment_contract_error::invalid_matrix_layout);
 
     // Track one promising position when approximate maxima are requested.
     p_full_score_type approx_score = 0;

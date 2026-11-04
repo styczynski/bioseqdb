@@ -103,23 +103,12 @@ struct gpu_native_sequence_upload {
     std::uint64_t symbol_count{};
 };
 
-/** Half-open original sequence coordinates requested by device seed coverage. */
+/** Half-open original sequence coordinates requested by bounded packed uploads. */
 struct sequence_upload_interval {
     std::uint64_t begin{};
     std::uint64_t end{};
 };
 static_assert(sizeof(sequence_upload_interval) == 2u * sizeof(std::uint64_t));
-
-/**
- * Borrows a caller-owned source and prepares only device-requested native windows.
- * The caller retains the returned windows until the next prepare call or return
- * from the synchronous runtime operation. No callback runs in a device kernel.
- */
-struct gpu_native_sequence_provider {
-    void* context = nullptr;
-    gpu_native_sequence_upload (*prepare)(void*, std::span<const sequence_upload_interval>) = nullptr;
-    std::uint64_t symbol_count{};
-};
 
 /** Checks packed geometry and byte extent without reading symbol ranks. */
 [[nodiscard]] inline bool packed_sequence_upload_geometry_is_valid(const gpu_packed_sequence_upload& upload) noexcept {

@@ -31,23 +31,24 @@ using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_type = compact_sequence_range<dna4_u64>;
 
 /**
- * Returns DNA4 alignment kernels for the test CPU target.
- * Throws std::logic_error if the generated table lacks the DNA4 entry.
+ * Returns native-alphabet alignment kernels for the test CPU target.
+ * Throws std::logic_error if the generated table lacks the requested entry.
  */
-[[nodiscard]] auto fixed_alignment_kernels() -> const alignment_kernels<seq::dna4>& {
+template<sequence_alphabet Alphabet = seq::dna4>
+[[nodiscard]] auto fixed_alignment_kernels() -> const alignment_kernels<Alphabet>& {
     const auto& root = ::bioseq::simd_dispatch::highway_test_kernel_table();
     const auto* identity =
-        root.is_complete() ? root.resolve_alphabet_identity<seq::dna4>() : nullptr;
+        root.is_complete() ? root.resolve_alphabet_identity<Alphabet>() : nullptr;
     if (identity == nullptr ||
         root.resolve_alphabet_identity(identity->alphabet_code) != identity) {
-        throw std::logic_error{"generated fixed-target test table lacks DNA4 identity"};
+        throw std::logic_error{"generated fixed-target test table lacks requested alphabet identity"};
     }
     for (const auto& entry : root.alignment_by_alphabet) {
         if (entry.alphabet_code == identity->alphabet_code && entry.typed_table != nullptr) {
-            return *static_cast<const alignment_kernels<seq::dna4>*>(entry.typed_table);
+            return *static_cast<const alignment_kernels<Alphabet>*>(entry.typed_table);
         }
     }
-    throw std::logic_error{"generated fixed-target test table lacks DNA4 alignment"};
+    throw std::logic_error{"generated fixed-target test table lacks requested alphabet alignment"};
 }
 
 /** Converts ASCII bases to DNA4 symbols for a test sequence. */
@@ -84,9 +85,10 @@ using range_type = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * Builds DNA4 alignment settings with exact edit counting enabled.
- * Uses the test CPU target and throws if its DNA4 entry is missing
+ * Builds native-alphabet settings with exact edit counting enabled.
+ * Uses the test CPU target and throws if its requested alphabet entry is missing.
  */
+template<sequence_alphabet Alphabet = seq::dna4>
 [[nodiscard]] auto exact_alignment_params() -> minimap2_parameters {
     minimap2_parameters parameters{};
     const auto& binding = ::bioseq::simd_dispatch::highway_test_target_binding();
@@ -94,10 +96,10 @@ using range_type = compact_sequence_range<dna4_u64>;
     parameters.highway_executed_target = binding.target;
     const auto* identity = binding.kernels == nullptr || !binding.kernels->is_complete()
                                ? nullptr
-                               : binding.kernels->resolve_alphabet_identity<seq::dna4>();
+                               : binding.kernels->resolve_alphabet_identity<Alphabet>();
     if (identity == nullptr ||
         binding.kernels->resolve_alphabet_identity(identity->alphabet_code) != identity) {
-        throw std::logic_error{"generated fixed-target test binding lacks DNA4 identity"};
+        throw std::logic_error{"generated fixed-target test binding lacks requested alphabet identity"};
     }
     parameters.alphabet_code = identity->alphabet_code;
     parameters.match_score = 2;
@@ -203,7 +205,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         || kind == fixture_kind::single_seed_flank_mismatch) {
         anchors.push_back(make_anchor(31, reverse));
         if (kind == fixture_kind::single_seed_collision) {
-            // A bypassed hash collision must fail defensive implicit-seed replay.
+            // Hash-candidate seeds may contain substitutions in their implicit M run.
             target_text[26] = 'C';
             target_text[29] = 'C';
         } else if (kind == fixture_kind::single_seed_flank_mismatch) {
@@ -278,10 +280,7 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         parameters,
         nullptr);
     for (const auto& result : {ksw2_result, block_result, batched_result}) {
-        if (kind == fixture_kind::single_seed_collision) {
-            REQUIRE_FALSE(result);
-            CHECK(result.error() == alignment_contract_error::trace_accounting);
-        } else REQUIRE(result);
+        REQUIRE(result);
     }
     return fixture_regions;
 }
@@ -328,7 +327,7 @@ TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
     CHECK(*existing_cigar_text == "8M2D");
 }
 
-TEST_CASE("Single-seed replay rejects a colliding hash and clears all backend outputs",
+TEST_CASE("Single-seed replay scores hash-candidate substitutions across alignment backends",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
     context::context test_context;
     context::installed_context_scope installed_context(test_context);
@@ -336,13 +335,74 @@ TEST_CASE("Single-seed replay rejects a colliding hash and clears all backend ou
         CAPTURE(reverse);
         const auto regions = run_fixture(reverse, fixture_kind::single_seed_collision);
         for (const auto* region : {&regions.ksw2, &regions.block, &regions.batched}) {
-            CHECK_FALSE(region->has_alignment);
-            CHECK(region->dp_score == 0);
-            CHECK(region->dp_max_score == 0);
-            CHECK(region->edit_distance == 0u);
-            CHECK(region->cigar.empty());
+            CHECK(region->has_alignment);
+            CHECK(region->dp_score == 4);
+            check_exact_region(*region, 2u, 8u, 8u);
+            const auto cigar_text = bioseq::format_cigar(region->cigar);
+            REQUIRE(cigar_text);
+            CHECK(*cigar_text == "8M");
         }
     }
+    const auto check_native_pairs = []<sequence_alphabet Alphabet>() {
+        CAPTURE(supported_biological_alphabets::entry_for<Alphabet>::alphabet_name_sv);
+        using instance = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        std::vector<Alphabet> query_symbols(8u, seqan3::assign_rank_to(0u, Alphabet{}));
+        auto target_symbols = query_symbols;
+        query_symbols[5] = seqan3::assign_rank_to(1u, Alphabet{});
+        target_symbols[2] = seqan3::assign_rank_to(1u, Alphabet{});
+        target_symbols[6] = seqan3::assign_rank_to(1u, Alphabet{});
+        query_symbols[4] = target_symbols[4] = seqan3::assign_rank_to(
+            seqan3::alphabet_size<Alphabet> - 1u, Alphabet{});
+        const compact_sequence_range<instance> query_range{query_symbols};
+        const compact_sequence_range<instance> target_range{target_symbols};
+        const auto query = bioseq::storage::make_lazy_sequence_view(query_range);
+        const auto target = bioseq::storage::make_lazy_sequence_view(target_range);
+        const auto uniform = scoring_matrix<Alphabet>::generate(2, 4, 1).value();
+        std::array<std::int32_t, scoring_matrix<Alphabet>::k_entry_count> dense_entries{};
+        std::ranges::copy(uniform.score_entries(), dense_entries.begin());
+        // Preserve a uniform diagonal but deliberately asymmetric off-diagonal
+        // scores. Diagonal uniformity alone must not enable the count shortcut.
+        dense_entries[scoring_matrix<Alphabet>::k_alphabet_dimension] = 3;
+        dense_entries[1] = -3;
+        const auto asymmetric = scoring_matrix<Alphabet>::from_entries(dense_entries).value();
+        REQUIRE(asymmetric.summary().uniform_diagonal);
+        REQUIRE_FALSE(asymmetric.summary().uniform_off_diagonal);
+        const std::array anchors{make_anchor(7u, false)};
+        const auto& kernels = fixed_alignment_kernels<Alphabet>();
+        for (const bool dense : {false, true}) {
+            CAPTURE(dense);
+            const auto& matrix = dense ? asymmetric : uniform;
+            auto parameters = exact_alignment_params<Alphabet>();
+            for (const bool exact_edits : {false, true}) {
+                CAPTURE(exact_edits);
+                parameters.compute_edit_distance = exact_edits;
+                backend_regions regions{
+                    .ksw2 = make_region(anchors, query.bp_size()),
+                    .block = make_region(anchors, query.bp_size()),
+                    .batched = make_region(anchors, query.bp_size())};
+                REQUIRE(align_regions<base_alignment_algorithm::ksw2>(
+                    std::span<alignment_region>{&regions.ksw2, 1u}, anchors,
+                    query, target, matrix, kernels, parameters));
+                REQUIRE(align_regions<base_alignment_algorithm::block_aligner>(
+                    std::span<alignment_region>{&regions.block, 1u}, anchors,
+                    query, target, matrix, kernels, parameters));
+                REQUIRE(kernels.align_ksw2_batched(
+                    std::span<alignment_region>{&regions.batched, 1u}, anchors,
+                    query, target, matrix, parameters, nullptr));
+                for (const auto* region : {&regions.ksw2, &regions.block, &regions.batched}) {
+                    CHECK(region->has_alignment);
+                    CHECK(region->dp_score == (dense ? 13 : -2));
+                    check_exact_region(*region, exact_edits ? 3u : 0u, 8u, 8u);
+                    const auto cigar_text = bioseq::format_cigar(region->cigar);
+                    REQUIRE(cigar_text);
+                    CHECK(*cigar_text == "8M");
+                }
+            }
+        }
+    };
+    std::apply([&check_native_pairs]<class... Entries>(Entries...) {
+        (check_native_pairs.template operator()<typename Entries::alphabet_type>(), ...);
+    }, supported_biological_alphabets::alphabet_entries_tuple{});
 }
 
 TEST_CASE("Multi-seed exact edit accounting is unchanged by implicit seed handling",

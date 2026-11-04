@@ -103,34 +103,6 @@ pg_vulkan_seed_lookup_selected(const minimap2_parameters& params) noexcept {
     return limit;
 }
 
-[[nodiscard]] inline bioseq::indexing::gpu_index_cache_identity
-pg_gpu_index_identity(std::uint64_t rowno,
-                      std::string_view index_name,
-                      sequence_size_t clip_lo_bp,
-                      sequence_size_t clip_hi_bp,
-                      bioseq::minimizers::minimizer_sketch_backend sketch_backend) noexcept {
-    const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(sketch_backend);
-    std::uint64_t identity_hash = bioseq::indexing::splitmix64(rowno);
-    identity_hash ^=
-        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_lo_bp) + (identity_hash << 1));
-    identity_hash ^=
-        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_hi_bp) + (identity_hash << 1));
-    for (const unsigned char index_character : index_name) {
-        identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(index_character) +
-                                                      (identity_hash << 1));
-    }
-    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(sketch_backend) +
-                                                  (identity_hash << 1));
-    identity_hash ^=
-        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.id) + (identity_hash << 1));
-    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.revision) +
-                                                  (identity_hash << 1));
-    if (identity_hash == 0) {
-        identity_hash = 0x9e3779b97f4a7c15ULL;
-    }
-    return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = identity_hash};
-}
-
 /**
  * @brief Hashes an assembled-index key for lofkup in the GPU cache.
  * @param[in] key Relation, minimizer scheme, query, and sequence-window identity.
@@ -1620,7 +1592,12 @@ make_persisted_gpu_cache_validation_stats(
         source) noexcept {
     const auto& audit = source.audit;
     const auto& coordinate = audit.result;
-    const auto submit_wait_identities = audit.submission_wait_identities();
+    const std::array<std::uint64_t, 4> submit_wait_identities{
+        audit.count_submit_wait_identity,
+        audit.emit_submit_wait_identity,
+        audit.sort_range_submit_wait_identity,
+        audit.chain_coordinate_submit_wait_identity,
+    };
     ::bioseq::pipeline_stats::persisted_gpu_job_stats job_stats{
         .logical_target_row = audit.logical_target_row,
         .logical_query_ordinal = audit.logical_query_ordinal,
@@ -1637,10 +1614,6 @@ make_persisted_gpu_cache_validation_stats(
         .direct_count_dispatches = audit.direct_count_dispatches,
         .direct_scan_dispatches = audit.direct_scan_dispatches,
         .anchor_count = audit.anchor_count,
-        .seed_candidate_count = audit.seed_candidate_count,
-        .seed_verified_count = audit.seed_verified_count,
-        .seed_emitted_count = audit.seed_emitted_count,
-        .seed_coverage_interval_count = audit.seed_coverage_interval_count,
         .direct_emit_dispatches = audit.direct_emit_dispatches,
         .sort_operations = audit.sort_operations,
         .range_build_dispatches = audit.range_build_dispatches,
@@ -1670,14 +1643,11 @@ make_persisted_gpu_cache_validation_stats(
                 .is_valid = coordinate.is_valid != 0u,
             },
     };
-    std::size_t completed_submission = 0u;
     for (std::size_t submission_index = 0u; submission_index < job_stats.submissions.size();
          ++submission_index) {
-        if (submit_wait_identities[submission_index] == 0u)
-            continue;
         job_stats.submissions[submission_index] = {
             .operation_identity = source.shape_pipeline_operation_identity,
-            .ordinal = source.shape_submission_ordinals[completed_submission++],
+            .ordinal = source.shape_submission_ordinals[submission_index],
             .submit_wait_identity = submit_wait_identities[submission_index],
         };
     }

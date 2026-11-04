@@ -520,8 +520,7 @@ export {
                        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                        pipe::minimizer_batch_view<p_minimizer> query_minimizers,
                        std::vector<p_minimizer> target_minimizers,
-                       pipe::statement_execution_plan_owner execution_plan,
-                       pipe::transient_target_index_release_authorization exact_origin) {
+                       pipe::statement_execution_plan_owner execution_plan) {
         if (!execution_plan) {
             throw std::invalid_argument("target preparation requires its statement plan");
         }
@@ -534,37 +533,13 @@ export {
         // target index on the GPU. Release the unused target vector here.
         const bool is_gpu_target_index_build =
             ::bioseq::simd::pipe::is_gpu_target_index_build_active(params);
-        bool same_call_origin = false;
-        if constexpr (bioseq::minimizers::generated_minimizer_physical_record<p_minimizer>) {
-            same_call_origin = !is_gpu_target_index_build && exact_origin.exact_query_owner_
-                && exact_origin.exact_query_data_ == query_minimizers.data()
-                && exact_origin.exact_query_count_ == query_minimizers.size()
-                && exact_origin.pending_target_data_ == target_minimizers.data()
-                && exact_origin.pending_target_count_ == target_minimizers.size()
-                && exact_origin.exact_seed_span_ == static_cast<std::size_t>(params.kmer_size)
-                && exact_origin.exact_record_id_
-                    == bioseq::minimizers::minimizer_physical_record_detail::record_id<p_minimizer>()
-                && exact_origin.same_exact_source(exact_origin.exact_query_source_,
-                                                  query_seq.borrow_rank_source(true))
-                && exact_origin.same_exact_source(exact_origin.exact_target_source_,
-                                                  target_seq.borrow_rank_source(true));
-        }
-        if (!same_call_origin) exact_origin.clear_exact_origin();
         if (!is_gpu_target_index_build) {
             target_index.build_consuming(std::move(target_minimizers), target_len);
-            if (same_call_origin && target_index.positions.size() == exact_origin.pending_target_count_) {
-                exact_origin.exact_index_ = &target_index;
-                exact_origin.pending_target_data_ = nullptr;
-                exact_origin.pending_target_count_ = 0u;
-            } else {
-                exact_origin.clear_exact_origin();
-            }
         } else {
             // The empty host index still supplies the GPU cache key's target extent.
             target_index.target_len = target_len;
             std::vector<p_minimizer>{}.swap(target_minimizers);
         }
-        exact_origin.index = &target_index;
         static const auto* _with_index_desc =
             bioseq::instrumentation::register_static_region("minimap2_port_with_index");
         auto _with_index_scope = bioseq::instrumentation::region(_with_index_desc);
@@ -582,7 +557,7 @@ export {
             nullptr,
             {},
             is_gpu_target_index_build,
-            std::move(exact_origin));
+            pipe::transient_target_index_release_authorization{.index = &target_index});
     }
 
     } // namespace pipe_entry_detail

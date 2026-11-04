@@ -245,7 +245,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
     if (opened_hash_major.session) {
         index_storage_hash_major_minimizer_read_session& hash_major_session =
             *opened_hash_major.session;
-        const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(sketch_backend);
+        const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
+            sketch_backend, alphabet_code, runtime_kmer_size);
         const auto producer =
             bioseq::indexing::minimizer_producer_backend_identity_for_backend(sketch_backend);
         const auto hash_major_candidate_manifest = hash_major_session.manifest();
@@ -731,7 +732,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
                 ? std::max<std::uint64_t>(1u, fragment_load_finished_ns - fragment_load_started_ns)
                 : 1u;
         const auto scheme =
-            bioseq::indexing::minimizer_scheme_identity_for_backend(group.sketch_backend);
+            bioseq::indexing::minimizer_scheme_identity_for_backend(
+                group.sketch_backend, alphabet_code, group.kmer_size);
         const auto producer_backend =
             bioseq::indexing::minimizer_producer_backend_identity_for_backend(group.sketch_backend);
         const std::uint64_t expected_metadata_rows = 2u + read_stats.directory_chunks_read;
@@ -914,7 +916,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
                       1u, grouped_soa_load_finished_ns - grouped_soa_load_started_ns)
                 : 1u;
         const auto scheme =
-            bioseq::indexing::minimizer_scheme_identity_for_backend(group.sketch_backend);
+            bioseq::indexing::minimizer_scheme_identity_for_backend(
+                group.sketch_backend, alphabet_code, group.kmer_size);
         const auto producer_backend =
             bioseq::indexing::minimizer_producer_backend_identity_for_backend(group.sketch_backend);
         const bool read_validation_matches =

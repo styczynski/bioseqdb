@@ -72,6 +72,10 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
     const std::uint32_t mc = inputs.minimizer_count;
     if (mc == 0u || max_occ < 0)
         return result;
+    if (kmer_size == 0u || kmer_size > std::numeric_limits<std::uint8_t>::max() ||
+        query_len < kmer_size) {
+        throw vulkan_runtime_error("gpu seed-to-coordinate span exceeds the anchor ABI");
+    }
 
     // Mirrors the range-builder push block for this one-query dispatch.
     struct chain_range_push_constants {
@@ -296,32 +300,7 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
                                  awg.elems_per_wg,
                                  3u,
                                  sorted_in_scratch);
-        record_shader_to_host(command_buffer_);
-        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed_coord_sort)");
-    }
-    if (inputs.native_rank_policy == nullptr || query_len > std::numeric_limits<std::uint32_t>::max())
-        throw vulkan_runtime_error("coordinate seeding lacks native source bindings");
-    const gpu_arena_slice& candidate_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
-    auto verified = verify_seed_anchors_locked(*candidate_anchors.buffer, candidate_anchors.offset,
-        total_u32, inputs.native_query, inputs.native_target, *inputs.native_rank_policy,
-        static_cast<std::uint32_t>(query_len), kmer_size);
-    if (verified.verified_count == 0u) {
-        arena.rewind(mark);
-        return result;
-    }
-    const auto verified_count = static_cast<std::uint32_t>(verified.verified_count);
-    const gpu_chain_range_build_span_wire verified_span{0u, verified_count, 0u, 0u};
-    std::memcpy(span_buf.mapped, &verified_span, sizeof(verified_span));
-    const gpu_arena_slice sorted_anchors{&verified.anchors, 0u, verified.anchors.bytes};
-    {
-        reset_dispatch_descriptor_pool_locked();
-        check_vk(vkResetCommandBuffer(command_buffer_, 0u), "reset(pc_seed_coord_ranges)");
-        VkCommandBufferBeginInfo begin{};
-        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed_coord_ranges)");
-        record_host_to_shader(command_buffer_);
-        record_compute_barrier(command_buffer_);
+        const gpu_arena_slice& sorted_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
         const std::array<VkDescriptorBufferInfo, 6> range_infos{{
             {sorted_anchors.buffer->buffer_handle, sorted_anchors.offset, sorted_anchors.size},
             {range_count_buf.buffer_handle, 0, range_count_buf.bytes},
@@ -350,14 +329,14 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
         arena.rewind(mark);
         return result;
     }
-    if (compacted_anchor_count > verified_count) {
+    if (compacted_anchor_count > total_u32) {
         arena.rewind(mark);
         throw vulkan_runtime_error("gpu seed-to-coordinate compacted anchor overflow");
     }
     const bool use_compacted_anchors =
-        compacted_anchor_count != 0u && compacted_anchor_count < verified_count;
+        compacted_anchor_count != 0u && compacted_anchor_count < total_u32;
     const std::uint32_t active_anchor_count =
-        use_compacted_anchors ? compacted_anchor_count : verified_count;
+        use_compacted_anchors ? compacted_anchor_count : total_u32;
 
     buffer score_buf = create_device_buffer(
         std::uint64_t{active_anchor_count} * sizeof(std::int32_t), k_compute_buffer_usage);
@@ -369,6 +348,7 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
         std::uint64_t{active_anchor_count} * sizeof(std::uint32_t), k_compute_buffer_usage);
     buffer result_buf =
         create_device_buffer(sizeof(gpu_coordinate_result_wire), k_compute_buffer_usage);
+    const gpu_arena_slice& sorted_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
     const gpu_arena_slice& active_anchors =
         use_compacted_anchors ? compacted_anchors_s : sorted_anchors;
 

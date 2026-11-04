@@ -8,6 +8,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -145,6 +146,22 @@ struct minimizer_registry_spec {
         "unknown minimizer registry profile '" + std::string{name} + "'");
 }
 
+/** Find the smaller exact capacity available at one position-band boundary. */
+[[nodiscard]] inline std::uint8_t minimizer_previous_hash_capacity(
+    const minimizer_registry_spec& registry,
+    const minimizer_physical_record_spec& record,
+    const std::uint8_t position_bits) {
+    std::uint8_t previous_hash_bits{};
+    for (const auto& candidate : registry.records) {
+        if (candidate.hash_bits < record.hash_bits && candidate.position_log2 >= position_bits
+            && ::bioseq::minimizers::minimizer_capacity_minimum_position(
+                std::span<const minimizer_physical_record_spec>{registry.records}, candidate) <= position_bits) {
+            previous_hash_bits = std::max(previous_hash_bits, candidate.hash_bits);
+        }
+    }
+    return previous_hash_bits;
+}
+
 /** Build physical hash-capacity records and alphabet owners without a k/w template axis. */
 [[nodiscard]] inline minimizer_registry_spec make_minimizer_registry(
     const minimizer_registry_profile profile,
@@ -177,6 +194,14 @@ struct minimizer_registry_spec {
     // Retain the measured short/default native-hash position shapes, not their old k-mer axis.
     add_record(15u, 32u);
     add_record(28u, 32u);
+    const auto retained_record_count = result.records.size();
+    // Preserve the established single-word exact coordinate envelope. These are
+    // physical position landmarks, not alphabet widths or runtime-k template axes.
+    // Fill the available word bits instead of rounding the stored hash to its carrier.
+    constexpr auto compact_word_bits = std::numeric_limits<std::uint64_t>::digits;
+    for (const std::uint8_t position_bits : std::array<std::uint8_t, 4>{15u, 20u, 28u, 33u}) {
+        add_record(position_bits, static_cast<std::uint8_t>(compact_word_bits - 1u - position_bits));
+    }
     const std::array<std::string, 2> storage_types{"u32", "u64"};
     const auto add_profile = [&result](const structural_analysis::alphabet_manifest_entry& alphabet,
                                       const minimizer_physical_record_spec& record,
@@ -185,17 +210,38 @@ struct minimizer_registry_spec {
                                       const std::uint16_t maximum_k,
                                       const std::uint8_t minimum_position,
                                       const minimizer_highway_owner_spec* owner) {
-        for (const std::string_view storage : {"u32", "u64"}) {
-            result.runtime_profiles.push_back(minimizer_runtime_profile_spec{
-                .requested_algorithm = std::string{algorithm}, .effective_algorithm = std::string{algorithm},
-                .alphabet_cpp_type = alphabet.qualified_cpp_type, .alphabet_id = alphabet.ordinal,
-                .runtime_kmer_size = maximum_k, .runtime_window_size = 0u,
-                .minimum_position_log2 = minimum_position, .maximum_position_log2 = record.position_log2,
-                .packed_storage = std::string{storage}, .record_key = record.key,
-                .hash_width = record.hash_output_width, .dispatch_kind = std::string{kind},
-                .highway_owner_key = owner == nullptr ? std::string{} : owner->owner_key,
-                .export_symbol = owner == nullptr ? std::string{} : owner->export_base + "_" + std::string{storage},
-            });
+        const bool bounded = maximum_k == 0u;
+        const auto first_position = bounded ? minimum_position : std::max(
+            minimum_position, ::bioseq::minimizers::minimizer_capacity_minimum_position(
+                std::span<const minimizer_physical_record_spec>{result.records}, record));
+        for (std::uint16_t position = first_position; position <= record.position_log2;) {
+            const auto first = static_cast<std::uint8_t>(position);
+            const auto minimum_k = bounded ? 0u : static_cast<unsigned>(
+                minimizer_previous_hash_capacity(result, record, first)
+                    / alphabet.exact_seed_rank_bits + 1u);
+            auto last = first;
+            while (last < record.position_log2) {
+                const auto next = static_cast<std::uint8_t>(last + 1u);
+                const auto next_minimum_k = bounded ? 0u : static_cast<unsigned>(
+                    minimizer_previous_hash_capacity(result, record, next)
+                        / alphabet.exact_seed_rank_bits + 1u);
+                if (next_minimum_k != minimum_k) break;
+                last = next;
+            }
+            position = static_cast<std::uint16_t>(last) + 1u;
+            if (!bounded && minimum_k > maximum_k) continue;
+            for (const std::string_view storage : {"u32", "u64"}) {
+                result.runtime_profiles.push_back(minimizer_runtime_profile_spec{
+                    .requested_algorithm = std::string{algorithm}, .effective_algorithm = std::string{algorithm},
+                    .alphabet_cpp_type = alphabet.qualified_cpp_type, .alphabet_id = alphabet.ordinal,
+                    .runtime_kmer_size = maximum_k, .runtime_window_size = 0u,
+                    .minimum_position_log2 = first, .maximum_position_log2 = last,
+                    .packed_storage = std::string{storage}, .record_key = record.key,
+                    .hash_width = record.hash_output_width, .dispatch_kind = std::string{kind},
+                    .highway_owner_key = owner == nullptr ? std::string{} : owner->owner_key,
+                    .export_symbol = owner == nullptr ? std::string{} : owner->export_base + "_" + std::string{storage},
+                });
+            }
         }
     };
     for (const auto& alphabet : alphabets) {
@@ -217,7 +263,13 @@ struct minimizer_registry_spec {
                 .export_base = "minimap2_reference_repr_" + suffix,
             });
             const auto maximum_k = static_cast<std::uint16_t>(std::min<unsigned>(31u, record.hash_bits / alphabet.exact_seed_rank_bits));
+            const auto prior_profile_count = result.runtime_profiles.size();
             add_profile(alphabet, record, "simd_minimap2_reference", "highway_export", maximum_k, minimum_position, &result.highway_owners.back());
+            // Keep existing typed output routes even when automatic selection now
+            // prefers a compact record. Do not add a new alphabet/record export
+            // when no complete native k fits between adjacent capacities.
+            if (record.id > retained_record_count
+                && result.runtime_profiles.size() == prior_profile_count) result.highway_owners.pop_back();
             add_profile(alphabet, record, "scalar", "scalar_collect_minimizers", maximum_k, minimum_position, nullptr);
             if (record.storage_bits >= 64u) {
                 std::uint8_t two_stack_minimum_position{};
@@ -229,8 +281,20 @@ struct minimizer_registry_spec {
                 }
                 add_profile(alphabet, record, "two_stack_nthash", "highway_slot", maximum_k, two_stack_minimum_position, nullptr);
             }
-            if (record.hash_bits == 32u) {
-                add_profile(alphabet, record, "vulkan_minimap_integer", "vulkan_minimap_integer", 0u, minimum_position, nullptr);
+            const auto vulkan_exact_maximum_k = static_cast<std::uint16_t>(
+                std::min<unsigned>(32u, record.hash_bits / alphabet.exact_seed_rank_bits));
+            if (vulkan_exact_maximum_k != 0u) {
+                add_profile(alphabet, record, "vulkan_minimap_integer", "vulkan_minimap_integer",
+                    vulkan_exact_maximum_k, minimum_position, nullptr);
+            }
+            if (record.hash_bits == 32u
+                && std::numeric_limits<std::uint64_t>::digits / alphabet.exact_seed_rank_bits < 31u) {
+                // Zero maximum_k marks the existing bounded profile; its range
+                // begins only after the complete native exact key exceeds u64.
+                add_profile(alphabet, record, "vulkan_minimap_integer", "vulkan_minimap_integer",
+                    0u, minimum_position, nullptr);
+                add_profile(alphabet, record, "scalar", "scalar_collect_minimizers",
+                    0u, minimum_position, nullptr);
             }
             if (record.hash_bits == 32u) {
                 result.highway_owners.push_back(minimizer_highway_owner_spec{
@@ -260,7 +324,7 @@ struct minimizer_runtime_profile_capabilities final {
 minimizer_runtime_profile_capabilities_for(
     const minimizer_registry_spec& registry,
     const minimizer_runtime_profile_spec& binding) {
-    if (binding.requested_algorithm == "bounded_nthash_simd" || binding.requested_algorithm == "vulkan_minimap_integer") {
+    if (binding.requested_algorithm == "bounded_nthash_simd") {
         return {1u, 31u, 1u, 64u};
     }
     const auto alphabet = std::ranges::find_if(registry.alphabets, [&binding](const auto& candidate) {
@@ -272,12 +336,18 @@ minimizer_runtime_profile_capabilities_for(
     if (alphabet == registry.alphabets.end() || record == registry.records.end() || alphabet->exact_seed_rank_bits == 0u) {
         throw std::logic_error("runtime minimizer profile has unresolved alphabet or physical record");
     }
-    std::uint8_t previous_hash_bits{};
-    for (const auto& candidate : registry.records) {
-        if (candidate.hash_bits < record->hash_bits) previous_hash_bits = std::max(previous_hash_bits, candidate.hash_bits);
+    if ((binding.requested_algorithm == "vulkan_minimap_integer" || binding.requested_algorithm == "scalar")
+        && binding.runtime_kmer_size == 0u) {
+        const auto minimum_k = static_cast<std::uint16_t>(
+            std::numeric_limits<std::uint64_t>::digits / alphabet->exact_seed_rank_bits + 1u);
+        return {minimum_k, 31u, 1u, 64u};
     }
+    const auto previous_hash_bits = minimizer_previous_hash_capacity(
+        registry, *record, binding.minimum_position_log2);
     const auto minimum_k = static_cast<std::uint16_t>(previous_hash_bits / alphabet->exact_seed_rank_bits + 1u);
-    const auto maximum_k = static_cast<std::uint16_t>(std::min<unsigned>(31u, record->hash_bits / alphabet->exact_seed_rank_bits));
+    const auto maximum_k = static_cast<std::uint16_t>(std::min<unsigned>(
+        binding.requested_algorithm == "vulkan_minimap_integer" ? 32u : 31u,
+        record->hash_bits / alphabet->exact_seed_rank_bits));
     return {minimum_k, maximum_k, 1u, 256u};
 }
 

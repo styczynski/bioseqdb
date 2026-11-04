@@ -54,10 +54,10 @@ struct record_parse_result {
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fasta_parser_state {
     fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
-    /// Start of this record's header in the batch header buffer.
-    std::size_t header_start_offset = 0;
     /// Whether the next body byte begins a physical line (preserved across slabs).
     bool body_line_start = true;
+    /// Start of this record's header in the batch header buffer.
+    std::size_t header_start_offset = 0;
     bioseq::simd::active_target::encode_state<p_storage_unit, p_bits_per_char, p_letters_per_unit>
         body{};
     /// Batch header buffer used while this record is being parsed.

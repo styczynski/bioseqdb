@@ -815,4 +815,490 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
           == block_packed_certificate_decision::not_eligible);
 }
 
+// BEGIN_TEMPORARY_NATIVE_PROTEIN_PROBE — DO NOT COMMIT
+// Temporary, uncommitted probe. Insert immediately before the closing
+// namespace bioseq::simd in bioseq/tests/unit/alignment/block_aligner_test.cpp.
+// Existing imports and block_aligner_test_support provide every dependency.
+// Focused Catch expression: "Manual native AA27 CPU scoring probe"
+// Remove this block after the MCP-managed manual run; do not commit it.
+namespace manual_protein_alignment_probe {
+
+using alphabet = seq::aa27;
+using packed_source = sequence_custom_alphabet<alphabet, std::uint64_t>;
+using packed_range = compact_sequence_range<packed_source>;
+using matrix_type = scoring_matrix<alphabet>;
+
+/** Construct native SeqAn ranks directly, including ranks above the first byte table. */
+template<sequence_alphabet Alphabet = alphabet>
+[[nodiscard]] std::vector<Alphabet> letters(std::span<const std::uint8_t> ranks) {
+    std::vector<Alphabet> output;
+    output.reserve(ranks.size());
+    for (const auto rank : ranks) {
+        REQUIRE(rank < seqan3::alphabet_size<Alphabet>);
+        output.push_back(seqan3::assign_rank_to(rank, Alphabet{}));
+    }
+    return output;
+}
+
+/** Independent O(T)-memory scalar Gotoh oracle; no existing scalar affine oracle was found. */
+template<class Matrix>
+[[nodiscard]] std::int64_t affine_oracle(
+    std::span<const std::uint8_t> query, std::span<const std::uint8_t> target,
+    const Matrix& matrix, std::int32_t gap_open, std::int32_t gap_extend) {
+    constexpr auto unreachable = std::numeric_limits<std::int64_t>::min() / 4;
+    std::vector<std::int64_t> prior(target.size() + 1), current(target.size() + 1);
+    std::vector<std::int64_t> insertions(target.size() + 1, unreachable);
+    for (std::size_t column = 1; column <= target.size(); ++column)
+        prior[column] = -std::int64_t{gap_open} - std::int64_t{gap_extend} * static_cast<std::int64_t>(column);
+    for (std::size_t row = 1; row <= query.size(); ++row) {
+        current[0] = -std::int64_t{gap_open} - std::int64_t{gap_extend} * static_cast<std::int64_t>(row);
+        auto deletion = unreachable;
+        for (std::size_t column = 1; column <= target.size(); ++column) {
+            insertions[column] = std::max(prior[column] - gap_open - gap_extend,
+                                          insertions[column] - gap_extend);
+            deletion = std::max(current[column - 1] - gap_open - gap_extend,
+                                deletion - gap_extend);
+            const auto diagonal = prior[column - 1]
+                + matrix.at(target[column - 1], query[row - 1]);
+            current[column] = std::max({diagonal, insertions[column], deletion});
+        }
+        prior.swap(current);
+    }
+    return prior.back();
+}
+
+/** Replay the returned native CIGAR against the same ranks and independently charge each run. */
+template<class Matrix>
+void check_cigar(const ksw_alignment_result& result,
+    std::span<const std::uint8_t> query, std::span<const std::uint8_t> target,
+    const Matrix& matrix, std::int32_t gap_open, std::int32_t gap_extend) {
+    std::vector<bioseq::cigar_run> runs;
+    REQUIRE(bioseq::decode_native_cigar(result.cigar, runs).has_value());
+    std::size_t query_position = 0, target_position = 0;
+    std::int64_t score = 0;
+    for (const auto& run : runs) {
+        const auto operation = seqan3::to_char(run.operation);
+        INFO("CIGAR operation=" << operation << " length=" << run.length);
+        if (operation == 'M' || operation == '=' || operation == 'X') {
+            REQUIRE(run.length <= query.size() - query_position);
+            REQUIRE(run.length <= target.size() - target_position);
+            for (std::size_t offset = 0; offset < run.length; ++offset)
+                score += matrix.at(target[target_position + offset], query[query_position + offset]);
+            query_position += run.length;
+            target_position += run.length;
+        } else if (operation == 'I') {
+            REQUIRE(run.length <= query.size() - query_position);
+            query_position += run.length;
+            score -= std::int64_t{gap_open} + std::int64_t{gap_extend} * run.length;
+        } else if (operation == 'D') {
+            REQUIRE(run.length <= target.size() - target_position);
+            target_position += run.length;
+            score -= std::int64_t{gap_open} + std::int64_t{gap_extend} * run.length;
+        } else {
+            FAIL("Unexpected global-alignment CIGAR operation");
+        }
+    }
+    CHECK(query_position == query.size());
+    CHECK(target_position == target.size());
+    CHECK(score == result.score);
+}
+
+/** Exercise the existing fixed-target tables, without constructing another alignment wrapper. */
+void run_case(std::string_view label,
+    const std::vector<std::uint8_t>& query, const std::vector<std::uint8_t>& target,
+    const matrix_type& matrix, std::int64_t expected,
+    std::size_t minimum_block = 16, std::size_t maximum_block = 64,
+    bool include_dominated_dual = true) {
+    INFO("case=" << label << " query=" << query.size() << " target=" << target.size());
+    constexpr std::int32_t gap_open = 4, gap_extend = 2;
+    const auto oracle = affine_oracle(query, target, matrix, gap_open, gap_extend);
+    REQUIRE(oracle == expected);
+    packed_range query_range(letters(query));
+    packed_range target_range(letters(target));
+    auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_range);
+    auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_range);
+    const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
+    const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
+    const auto& kernels = fixed_alignment_kernels<alphabet>();
+    ksw_single_affine_parameters single;
+    single.gap_open = gap_open;
+    single.gap_extend = gap_extend;
+    single.band_width = -1;
+    single.z_drop = -1;
+    const auto ksw = kernels.align_ksw2_single_affine(false, query_view, target_view,
+        0, query.size(), 0, target.size(), matrix, single);
+    REQUIRE(ksw.has_value());
+    CHECK(ksw->score == oracle);
+    check_cigar(*ksw, query, target, matrix, gap_open, gap_extend);
+
+    if (include_dominated_dual) {
+        ksw_dual_affine_parameters dual;
+        dual.gap_open_short = gap_open;
+        dual.gap_extend_short = gap_extend;
+        dual.gap_open_long = 1000;
+        dual.gap_extend_long = 1000;
+        dual.band_width = -1;
+        dual.z_drop = -1;
+        const auto dominated = kernels.align_ksw2_dual_affine(false, query_view, target_view,
+            0, query.size(), 0, target.size(), matrix, dual);
+        REQUIRE(dominated.has_value());
+        CHECK(dominated->score == oracle);
+        CHECK(dominated->cigar == ksw->cigar);
+        check_cigar(*dominated, query, target, matrix, gap_open, gap_extend);
+    }
+
+    auto parameters = global_params(minimum_block, maximum_block);
+    parameters.gap_open = gap_open;
+    parameters.gap_extend = gap_extend;
+    block_aligner_execution_stats stats;
+    block_aligner_construction_stats construction;
+    const auto block = kernels.align_block(false, false, query_view, target_view,
+        0, query.size(), 0, target.size(), matrix, parameters, &stats, &construction);
+    REQUIRE(block.has_value());
+    CHECK(block->score == oracle);
+    CHECK(block->max_q == static_cast<std::int32_t>(query.size()) - 1);
+    CHECK(block->max_t == static_cast<std::int32_t>(target.size()) - 1);
+    CHECK(stats.is_internally_consistent());
+    CHECK(stats.simd_diagonal_certificate_calls == 0);
+    CHECK(stats.forbidden_ksw2_calls == 0);
+    CHECK(stats.forbidden_scalar_biological_fallbacks == 0);
+    if (!query.empty() && !target.empty()) CHECK(stats.simd_dp_vector_batches > 0);
+    check_cigar(*block, query, target, matrix, gap_open, gap_extend);
+}
+} // namespace manual_protein_alignment_probe
+
+// BEGIN_TEMPORARY_REGISTERED_CPU_SCORING_ORACLE
+namespace manual_protein_alignment_probe {
+
+/** Reuse the independent Gotoh oracle across the registered native scoring layouts. */
+template<sequence_alphabet Alphabet>
+void run_registered_view_case(std::string_view label,
+    const std::vector<std::uint8_t>& query, const std::vector<std::uint8_t>& target,
+    const scoring_matrix<Alphabet>& matrix,
+    bioseq::storage::lazy_sequence_view<Alphabet> query_view,
+    bioseq::storage::lazy_sequence_view<Alphabet> target_view,
+    std::size_t& oracle_cases, std::size_t& alignment_calls) {
+    INFO("alphabet=" << static_cast<std::size_t>(supported_biological_alphabets::template index_of<Alphabet>())
+        << " cardinality=" << std::size_t{seqan3::alphabet_size<Alphabet>}
+        << " matrix_kind=" << static_cast<unsigned>(matrix.kind())
+        << " case=" << label << " query=" << query.size() << " target=" << target.size());
+    constexpr std::int32_t gap_open = 4, gap_extend = 2;
+    const auto expected = affine_oracle(query, target, matrix, gap_open, gap_extend);
+    ++oracle_cases;
+    const auto& kernels = fixed_alignment_kernels<Alphabet>();
+
+    for (const bool trace : {true, false}) {
+        CAPTURE(trace);
+        ksw_single_affine_parameters single;
+        single.gap_open = gap_open;
+        single.gap_extend = gap_extend;
+        single.band_width = -1;
+        single.z_drop = -1;
+        single.flags.score_only = !trace;
+        const auto single_result = kernels.align_ksw2_single_affine(false,
+            query_view, target_view, 0u, query.size(), 0u, target.size(), matrix, single);
+        ++alignment_calls;
+        REQUIRE(single_result.has_value());
+        CHECK(single_result->score == expected);
+        if (trace) check_cigar(*single_result, query, target, matrix, gap_open, gap_extend);
+        else {
+            CHECK(single_result->cigar.empty());
+            CHECK(single_result->edit_distance == 0u);
+            CHECK_FALSE(single_result->is_edit_distance_valid);
+        }
+
+        // Both curves normalize to the oracle's single affine cost for every positive gap length.
+        ksw_dual_affine_parameters dual;
+        dual.gap_open_short = gap_open;
+        dual.gap_extend_short = gap_extend;
+        dual.gap_open_long = 1000;
+        dual.gap_extend_long = 1000;
+        dual.band_width = -1;
+        dual.z_drop = -1;
+        dual.flags.score_only = !trace;
+        const auto dual_result = kernels.align_ksw2_dual_affine(false,
+            query_view, target_view, 0u, query.size(), 0u, target.size(), matrix, dual);
+        ++alignment_calls;
+        REQUIRE(dual_result.has_value());
+        CHECK(dual_result->score == expected);
+        if (trace) check_cigar(*dual_result, query, target, matrix, gap_open, gap_extend);
+        else {
+            CHECK(dual_result->cigar.empty());
+            CHECK(dual_result->edit_distance == 0u);
+            CHECK_FALSE(dual_result->is_edit_distance_valid);
+        }
+
+        auto parameters = global_params(16u, 128u, trace);
+        parameters.gap_open = gap_open;
+        parameters.gap_extend = gap_extend;
+        block_aligner_execution_stats stats;
+        block_aligner_construction_stats construction;
+        const auto block_result = kernels.align_block(false, false, query_view, target_view,
+            0u, query.size(), 0u, target.size(), matrix, parameters, &stats, &construction);
+        ++alignment_calls;
+        REQUIRE(block_result.has_value());
+        CHECK(block_result->score == expected);
+        CHECK(block_result->max_q == static_cast<std::int32_t>(query.size()) - 1);
+        CHECK(block_result->max_t == static_cast<std::int32_t>(target.size()) - 1);
+        CHECK(stats.is_internally_consistent());
+        CHECK(stats.forbidden_ksw2_calls == 0u);
+        CHECK(stats.forbidden_scalar_biological_fallbacks == 0u);
+        if (trace) check_cigar(*block_result, query, target, matrix, gap_open, gap_extend);
+        else {
+            CHECK(block_result->cigar.empty());
+            CHECK(block_result->edit_distance == 0u);
+            CHECK_FALSE(block_result->is_edit_distance_valid);
+            CHECK(stats.trace_calls == 0u);
+            CHECK(construction.trace_allocations == 0u);
+        }
+    }
+}
+
+/** Keep width-specific source ownership outside the Alphabet-only numerical runner. */
+template<sequence_alphabet Alphabet, std::unsigned_integral Unit>
+void run_registered_case(std::string_view label,
+    const std::vector<std::uint8_t>& query, const std::vector<std::uint8_t>& target,
+    const scoring_matrix<Alphabet>& matrix,
+    std::size_t& oracle_cases, std::size_t& alignment_calls) {
+    INFO("storage_bits=" << std::numeric_limits<Unit>::digits);
+    using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, Unit>>;
+    using traits = typename range_type::traits;
+    range_type query_range(letters<Alphabet>(query));
+    range_type target_range(letters<Alphabet>(target));
+    // Unused physical bits and final slots may contain invalid ranks; no path may consume them.
+    const auto poison_padding = [](range_type& range) {
+        for (auto& unit : range.packed_units)
+            unit |= static_cast<Unit>(~traits::used_storage_mask);
+        for (std::size_t slot = traits::letters_per_unit - range.padding();
+             slot < traits::letters_per_unit; ++slot)
+            range.packed_units.back() |= static_cast<Unit>(
+                traits::char_mask << (slot * traits::bits_per_char));
+    };
+    poison_padding(query_range);
+    poison_padding(target_range);
+    auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_range);
+    auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_range);
+    run_registered_view_case<Alphabet>(label, query, target, matrix,
+        bioseq::storage::make_lazy_sequence_view(query_owner),
+        bioseq::storage::make_lazy_sequence_view(target_owner), oracle_cases, alignment_calls);
+}
+
+/** Derive every rank, physical tail, and matrix stride from the selected alphabet. */
+template<sequence_alphabet Alphabet, std::unsigned_integral Unit>
+void run_registered_width(const scoring_matrix<Alphabet>& uniform,
+    const scoring_matrix<Alphabet>& dense,
+    std::size_t& oracle_cases, std::size_t& alignment_calls) {
+    using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, Unit>>;
+    using traits = typename range_type::traits;
+    constexpr std::size_t rank_count = seqan3::alphabet_size<Alphabet>;
+    constexpr auto highest = static_cast<std::uint8_t>(rank_count - 1u);
+    std::size_t logical_size = 2u * rank_count + 1u;
+    if constexpr (traits::letters_per_unit > 1u)
+        if (logical_size % traits::letters_per_unit == 0u) ++logical_size;
+    std::vector<std::uint8_t> native_ranks(logical_size);
+    for (std::size_t position = 0u; position < logical_size; ++position)
+        native_ranks[position] = static_cast<std::uint8_t>(position % rank_count);
+    if constexpr (traits::letters_per_unit > 1u)
+        REQUIRE(logical_size % traits::letters_per_unit != 0u);
+    auto longer = native_ranks;
+    longer.insert(longer.begin() + static_cast<std::ptrdiff_t>(logical_size / 2u),
+        3u, highest);
+    const std::vector<std::uint8_t> empty;
+    const std::vector<std::uint8_t> low{std::uint8_t{0u}};
+    const std::vector<std::uint8_t> high{highest};
+    for (const bool use_dense : {false, true}) {
+        const auto& prepared = use_dense ? dense : uniform;
+        run_registered_case<Alphabet, Unit>("all native ranks with physical tail bits", native_ranks, native_ranks,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("target high query low", low, high,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("target low query high", high, low,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("longer query", longer, native_ranks,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("longer target", native_ranks, longer,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("empty query", empty, high,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("empty target", high, empty,
+            prepared, oracle_cases, alignment_calls);
+        run_registered_case<Alphabet, Unit>("both empty", empty, empty,
+            prepared, oracle_cases, alignment_calls);
+    }
+}
+/** Prepare each scoring layout once per alphabet and reuse it across packed word widths. */
+template<sequence_alphabet Alphabet>
+void run_registered_alphabet(std::size_t& oracle_cases, std::size_t& alignment_calls) {
+    using matrix = scoring_matrix<Alphabet>;
+    constexpr std::size_t rank_count = seqan3::alphabet_size<Alphabet>;
+    constexpr std::size_t dimension = matrix::k_alphabet_dimension;
+    const auto uniform = matrix::generate(3, 5, 1);
+    REQUIRE(uniform.has_value());
+    REQUIRE(uniform->kind() == substitution_kind::uniform);
+    std::array<std::int32_t, matrix::k_entry_count> entries{};
+    for (std::size_t target_rank = 0u; target_rank < rank_count; ++target_rank)
+        for (std::size_t query_rank = 0u; query_rank < rank_count; ++query_rank)
+            entries[target_rank * dimension + query_rank] = target_rank == query_rank
+                ? 3 + static_cast<std::int32_t>(target_rank % 3u) : -5;
+    entries[(rank_count - 1u) * dimension] = 1;
+    entries[rank_count - 1u] = -6;
+    const auto dense = matrix::from_entries(entries);
+    REQUIRE(dense.has_value());
+    REQUIRE(dense->kind() == substitution_kind::dense);
+    REQUIRE(dense->at(rank_count - 1u, 0u) == 1);
+    REQUIRE(dense->at(0u, rank_count - 1u) == -6);
+    using entry = supported_biological_alphabets::entry_for<Alphabet>;
+    using header = compact_sequence_stdc<supported_alphabets<entry>>;
+    [&uniform, &dense, &oracle_cases, &alignment_calls]<std::size_t... Widths>(
+            supported_storage_unit_byte_widths<Widths...>) {
+        (run_registered_width<Alphabet,
+             typename compact_sequence_stdc_instance<header, Alphabet, Widths>::storage_unit>(
+                 *uniform, *dense, oracle_cases, alignment_calls), ...);
+    }(all_storage_unit_byte_widths{});
+}
+
+/** Add the registry/word-width matrix to the existing temporary AA27 test case. */
+void run_registered_matrix() {
+    std::size_t oracle_cases = 0u;
+    std::size_t alignment_calls = 0u;
+    [&oracle_cases, &alignment_calls]<class... Entries>(std::tuple<Entries...>) {
+        (run_registered_alphabet<typename Entries::alphabet_type>(oracle_cases, alignment_calls), ...);
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+    constexpr std::size_t alphabet_count =
+        std::tuple_size_v<supported_biological_alphabets::alphabet_entries_tuple>;
+    CHECK(oracle_cases == alphabet_count * all_storage_unit_byte_widths::width_count * 2u * 8u);
+    CHECK(alignment_calls == oracle_cases * 2u * 3u);
+}
+} // namespace manual_protein_alignment_probe
+// END_TEMPORARY_REGISTERED_CPU_SCORING_ORACLE
+
+TEST_CASE("Manual native AA27 CPU scoring probe",
+          "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    namespace probe = manual_protein_alignment_probe;
+    constexpr auto rank_count = seqan3::alphabet_size<probe::alphabet>;
+    constexpr auto dimension = probe::matrix_type::k_alphabet_dimension;
+    REQUIRE(rank_count == 27); // This manual fixture deliberately exercises ranks 16..26.
+    std::array<std::int32_t, probe::matrix_type::k_entry_count> entries{};
+    for (std::size_t target = 0; target < rank_count; ++target)
+        for (std::size_t query = 0; query < rank_count; ++query)
+            entries[target * dimension + query] = target == query
+                ? 2 + static_cast<std::int32_t>(target % 5) : -4;
+    entries[26 * dimension + 16] = 1;
+    entries[16 * dimension + 26] = -5;
+    const auto prepared = probe::matrix_type::from_entries(entries);
+    REQUIRE(prepared.has_value());
+    const auto& matrix = *prepared;
+    REQUIRE(matrix.kind() == substitution_kind::dense);
+    REQUIRE(matrix.at(rank_count, rank_count) == 0);
+    REQUIRE(matrix.summary().maximum == 6);
+    REQUIRE(matrix.at(0, 0) == 2);
+
+    std::vector<std::uint8_t> high_ranks;
+    for (std::size_t repeat = 0; repeat < 4; ++repeat)
+        for (std::size_t rank = 16; rank < rank_count; ++rank)
+            high_ranks.push_back(static_cast<std::uint8_t>(rank));
+    probe::run_case("all high ranks", high_ranks, high_ranks, matrix, 172);
+    probe::run_case("asymmetric target26 query16", {16}, {26}, matrix, 1);
+    probe::run_case("asymmetric target16 query26", {26}, {16}, matrix, -5);
+    auto longer = high_ranks;
+    longer.insert(longer.begin() + 22, 3, std::uint8_t{26});
+    probe::run_case("longer query", longer, high_ranks, matrix, 162);
+    probe::run_case("longer target", high_ranks, longer, matrix, 162);
+    probe::run_case("empty query", {}, {16,17,18,19,20}, matrix, -14);
+    probe::run_case("empty target", {16,17,18,19,20}, {}, matrix, -14);
+    probe::run_case("both empty", {}, {}, matrix, 0);
+
+    // 3072*6 exceeds the positive headroom above Block's initial bias16384.
+    // Correct full score therefore requires at least one successful frontier rebase.
+    const std::vector<std::uint8_t> long_target(3072, std::uint8_t{24});
+    auto long_query = long_target;
+    long_query.insert(long_query.begin() + 1536, 128, std::uint8_t{26});
+    probe::run_case("long insertion and rebase", long_query, long_target,
+        matrix, 18172, 16, 256, false);
+    probe::run_case("long deletion and rebase", long_target, long_query,
+        matrix, 18172, 16, 256, false);
+    // BEGIN_TEMPORARY_REGISTERED_CPU_SCORING_ORACLE_CALL
+    probe::run_registered_matrix();
+    // END_TEMPORARY_REGISTERED_CPU_SCORING_ORACLE_CALL
+}
+
+// Temporary, uncommitted addition to the existing manual native CPU probe.
+// Append inside namespace bioseq::simd in tests/unit/alignment/block_aligner_test.cpp,
+// after /tmp/bioseq_native_cpu_probe.cpp, whose native fixtures/oracle are reused.
+// Catch expression: "Manual native CPU dual gap normalization probe"
+// Root executes only through bioseq-build MCP; remove before committing.
+TEST_CASE("Manual native CPU dual gap normalization probe",
+          "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
+    context::context storage;
+    context::installed_context_scope installed{storage};
+    namespace probe = manual_protein_alignment_probe;
+    const auto matrix = probe::matrix_type::generate(2, 4, 1);
+    REQUIRE(matrix.has_value());
+    constexpr auto highest = static_cast<std::uint8_t>(seqan3::alphabet_size<probe::alphabet> - 1u);
+    const std::array<ksw_dual_affine_parameters, 3> curves{{
+        // The second pair dominates for all integer gap lengths, despite greater q.
+        {.gap_open_short=0, .gap_extend_short=4, .gap_open_long=2, .gap_extend_long=1,
+         .band_width=-1, .z_drop=-1},
+        // Equal one-symbol costs still collapse to the lower extension slope.
+        {.gap_open_short=0, .gap_extend_short=3, .gap_open_long=2, .gap_extend_long=1,
+         .band_width=-1, .z_drop=-1},
+        // Genuine crossing: short wins length1, long wins length4.
+        {.gap_open_short=0, .gap_extend_short=2, .gap_open_long=3, .gap_extend_long=1,
+         .band_width=-1, .z_drop=-1},
+    }};
+    std::size_t alignment_cases = 0u;
+    for (std::size_t curve_index=0; curve_index<curves.size(); ++curve_index) {
+        for (const auto gap_length : {std::size_t{1}, std::size_t{2}, std::size_t{4}}) {
+            const auto& curve = curves[curve_index];
+            const auto first_cost = std::int64_t{curve.gap_open_short}
+                + static_cast<std::int64_t>(gap_length) * curve.gap_extend_short;
+            const auto second_cost = std::int64_t{curve.gap_open_long}
+                + static_cast<std::int64_t>(gap_length) * curve.gap_extend_long;
+            const bool first_wins = first_cost <= second_cost;
+            const auto selected_open = first_wins ? curve.gap_open_short : curve.gap_open_long;
+            const auto selected_extend = first_wins ? curve.gap_extend_short : curve.gap_extend_long;
+            const auto expected = std::int64_t{2} - std::min(first_cost, second_cost);
+            const std::vector<std::uint8_t> short_ranks{highest};
+            std::vector<std::uint8_t> long_ranks(gap_length, static_cast<std::uint8_t>(highest - 1u));
+            long_ranks.push_back(highest); // Optimal gap must precede the sole matching residue.
+            for (const bool longer_query : {false, true}) {
+                const auto& query = longer_query ? long_ranks : short_ranks;
+                const auto& target = longer_query ? short_ranks : long_ranks;
+                CAPTURE(curve_index, gap_length, longer_query);
+                // Here every optimal path has one leading gap and the sole equal pair.
+                // The independent affine oracle for that gap's cheaper pair proves the score.
+                REQUIRE(probe::affine_oracle(query, target, *matrix,
+                    selected_open, selected_extend) == expected);
+                auto query_letters = probe::letters(query);
+                auto target_letters = probe::letters(target);
+                probe::packed_range query_range{query_letters};
+                probe::packed_range target_range{target_letters};
+                auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_range);
+                auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_range);
+                const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
+                const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
+                for (const bool swap_pairs : {false, true}) {
+                    CAPTURE(swap_pairs);
+                    auto parameters = curve;
+                    if (swap_pairs) {
+                        std::swap(parameters.gap_open_short, parameters.gap_open_long);
+                        std::swap(parameters.gap_extend_short, parameters.gap_extend_long);
+                    }
+                    const auto aligned = fixed_alignment_kernels<probe::alphabet>().align_ksw2_dual_affine(
+                        false, query_view, target_view, 0u, query.size(), 0u, target.size(), *matrix, parameters);
+                    ++alignment_cases;
+                    REQUIRE(aligned.has_value());
+                    CHECK(aligned->score == expected);
+                    probe::check_cigar(*aligned, query, target, *matrix, selected_open, selected_extend);
+                }
+            }
+        }
+    }
+    CHECK(alignment_cases == 36u);
+}
+
+// END_TEMPORARY_NATIVE_PROTEIN_PROBE
+
 } // namespace bioseq::simd

@@ -24,7 +24,7 @@ namespace idx = ::bioseq::indexing;
 
 using namespace vulkan_minimizers_test_support;
 
-TEST_CASE("vulkan minimizer: native32 rejects narrow hash fields and preserves 64/128-bit records",
+TEST_CASE("vulkan minimizer: exact profiles preserve 16/32/64/128-bit records",
           "[component:bioseq][layer:unit][feature:seeding][resource:gpu]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
@@ -41,8 +41,10 @@ TEST_CASE("vulkan minimizer: native32 rejects narrow hash fields and preserves 6
     static_assert(sizeof(representation_64) == 8);
     static_assert(sizeof(representation_128) == 16);
 
-    REQUIRE(gpu_sketch<representation_16>(dna4_fixture, 10, 2).empty());
-    REQUIRE(gpu_sketch<representation_32>(dna4_fixture, 10, 9).empty());
+    REQUIRE(triples(cpu_sketch<representation_16>(dna4_fixture, 10, 2)) ==
+            triples(gpu_sketch<representation_16>(dna4_fixture, 10, 2)));
+    REQUIRE(triples(cpu_sketch<representation_32>(dna4_fixture, 10, 9)) ==
+            triples(gpu_sketch<representation_32>(dna4_fixture, 10, 9)));
     {
         const auto cpu = triples(cpu_sketch<representation_64>(dna4_fixture, 10, 15));
         const auto gpu = triples(gpu_sketch<representation_64>(dna4_fixture, 10, 15));
@@ -78,11 +80,17 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
             storage_unit,
             bioseq::storage::default_fragment_storage_units>;
         using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
-        using minimizer_type = minimap_sketch_data;
-
         constexpr std::size_t w = 10;
         constexpr std::size_t k = 15;
-        // Native32 admits every rank, including ambiguity and stop symbols.
+        constexpr auto exact_rank_bits =
+            bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet_type>;
+        constexpr bool needs_wide_exact_record =
+            bioseq::minimizers::exact_minimizer_shape_fits(exact_rank_bits, k) &&
+            !bioseq::minimizers::exact_minimizer_shape_fits(
+                exact_rank_bits, k, minimap_sketch_data::layout_type::k_hash_bits);
+        using minimizer_type = std::conditional_t<needs_wide_exact_record,
+            minimizer_representation<63u, 64u>, minimap_sketch_data>;
+        // Native protein ranks stay seedable; exact nucleotide ambiguity resets the window.
         constexpr std::size_t k_native_rank_count = seqan3::alphabet_size<p_alphabet_type>;
         const std::size_t letter_count = range_type::traits::letters_per_unit * 50000u;
         std::vector<typename configuration_type::alphabet_type> letters;

@@ -1830,6 +1830,48 @@ inline void verify_bounded_minimizer_representation_owners() {
         return record.hash_bits == 14u && record.position_log2 == 17u && record.storage_bits == 32u;
     });
     require(old_short_shape != baseline_registry.records.end(), "exact k7 retains its 32-bit physical record");
+    auto native_alphabets = fixture_alphabets();
+    native_alphabets.push_back({
+        .qualified_cpp_type = "::seq::aa10li", .literal_name = "aa10li", .ordinal = 2u,
+        .cardinality = 10u, .rank_bits = 4u, .exact_seed_rank_bits = 4u,
+        .is_amino_acid = true, .is_complementable = false,
+        .source_digest = std::string(64u, '2')});
+    native_alphabets.push_back({
+        .qualified_cpp_type = "::seq::aa20", .literal_name = "aa20", .ordinal = 3u,
+        .cardinality = 20u, .rank_bits = 5u, .exact_seed_rank_bits = 5u,
+        .is_amino_acid = true, .is_complementable = false,
+        .source_digest = std::string(64u, '3')});
+    const auto native_registry = make_minimizer_registry(
+        minimizer_registry_profile::baseline, native_alphabets);
+    validate_minimizer_registry(native_registry);
+    const auto check_native_profile = [&native_registry](
+        const std::string_view alphabet, const std::string_view algorithm,
+        const std::uint16_t kmer_size, const std::uint8_t expected_hash_bits,
+        const std::uint16_t expected_window_limit) {
+        std::size_t admitted = 0u;
+        for (const auto& binding : native_registry.runtime_profiles) {
+            if (binding.alphabet_cpp_type != alphabet || binding.requested_algorithm != algorithm
+                || binding.packed_storage != "u64" || binding.minimum_position_log2 > 28u
+                || binding.maximum_position_log2 < 28u) continue;
+            const auto limits = minimizer_runtime_profile_capabilities_for(native_registry, binding);
+            if (kmer_size < limits.minimum_runtime_kmer_size
+                || kmer_size > limits.maximum_runtime_kmer_size) continue;
+            ++admitted;
+            const auto record = std::ranges::find(native_registry.records, binding.record_key,
+                &minimizer_physical_record_spec::key);
+            require(record != native_registry.records.end() && record->hash_bits == expected_hash_bits
+                && limits.maximum_runtime_window_size == expected_window_limit,
+                "adaptive scalar/Vulkan profiles preserve complete exact keys or the bounded native scheme");
+        }
+        require(admitted == 1u, "adaptive native shapes select one non-overlapping physical profile");
+    };
+    for (const std::string_view algorithm : {"scalar", "vulkan_minimap_integer"}) {
+        check_native_profile("::seq::dna5", algorithm, 15u, 32u, 256u);
+        check_native_profile("::seq::aa10li", algorithm, 15u, 64u, 256u);
+        check_native_profile("::seq::aa10li", algorithm, 17u, 32u, 64u);
+        check_native_profile("::seq::aa20", algorithm, 12u, 64u, 256u);
+        check_native_profile("::seq::aa20", algorithm, 13u, 32u, 64u);
+    }
     const std::string owner_source = R"cpp(export module fixture.owner;
 namespace bioseq { namespace simd {
 [[bioseq::template_flatten_when("route", "raw")]]
@@ -1875,11 +1917,16 @@ namespace bioseq { namespace simd {
                    registry_manifest,
                    "\tsimd_minimap2_reference\tsimd_minimap2_reference\t"
                    "::seq::dna5\t")
-                == baseline_registry.records.size() * 2u
+                == std::ranges::count_if(baseline_registry.runtime_profiles, [](const auto& binding) {
+                    return binding.requested_algorithm == "simd_minimap2_reference"
+                        && binding.alphabet_cpp_type == "::seq::dna5";
+                })
             && occurrences(
                    registry_manifest,
                    "\tvulkan_minimap_integer\tvulkan_minimap_integer\t")
-                == baseline_bounded_exports
+                == std::ranges::count_if(baseline_registry.runtime_profiles, [](const auto& binding) {
+                    return binding.requested_algorithm == "vulkan_minimap_integer";
+                })
             && records.contains(
                 "constexpr ::std::uint16_t minimizer_profile_alphabet_id()")
             && records.contains(

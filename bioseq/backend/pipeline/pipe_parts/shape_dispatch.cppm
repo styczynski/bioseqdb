@@ -289,10 +289,15 @@ export {
                         > std::numeric_limits<std::uint64_t>::digits / rank_bits)
                     throw std::invalid_argument{"exact minimizer exceeds the native hash domain"};
                 const auto required = static_cast<std::size_t>(params.kmer_size) * rank_bits;
+                const auto required_position = ::bioseq::minimizers::minimizer_position_requirement(
+                    std::max(query.bp_size(), target.bp_size()));
+                constexpr auto records = ::bioseq::minimizers::registered_minimizer_physical_records();
                 std::optional<std::size_t> selected;
-                for (std::size_t index = 0u; index < hash_bits_buckets_n; ++index) {
-                    const auto width = hash_bits_buckets[index];
-                    if (width >= required && (!selected || width < *selected)) selected = width;
+                for (const auto& record : records) {
+                    if (record.hash_bits >= required && record.position_log2 >= required_position
+                        && ::bioseq::minimizers::minimizer_capacity_minimum_position(records, record)
+                            <= required_position
+                        && (!selected || record.hash_bits < *selected)) selected = record.hash_bits;
                 }
                 if (!selected) throw std::invalid_argument{"no registered exact hash width"};
                 return *selected;

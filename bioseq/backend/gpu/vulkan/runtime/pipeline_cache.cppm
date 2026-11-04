@@ -406,11 +406,7 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
         }
     }
     const shader_variant_key shader_key = make_shader_key(kind, 384u, local_size, max_span);
-    shader_compile_request geometry_request{};
-    geometry_request.kind = kind;
-    geometry_request.tile_size = 384u;
-    geometry_request.local_size = local_size;
-    geometry_request.max_span = max_span;
+    const shader_compile_request geometry_request = shader_key.to_request();
     const shader_workgroup_size workgroup = expected_shader_workgroup_size(geometry_request);
     const std::uint64_t workgroup_invocations = static_cast<std::uint64_t>(workgroup.x) *
                                                 static_cast<std::uint64_t>(workgroup.y) *
@@ -522,12 +518,7 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     } else {
         std::vector<std::uint32_t> spirv;
         try {
-            shader_compile_request request{};
-            request.kind = kind;
-            request.tile_size = 384;
-            request.local_size = local_size;
-            request.max_span = max_span;
-            spirv = compile_shader_spirv(request);
+            spirv = compile_shader_spirv(shader_key.to_request());
         } catch (const std::exception& compile_error) {
             throw vulkan_runtime_error(
                 fmt::format("seed lookup shader compile failed: {}", compile_error.what()));
@@ -688,23 +679,6 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
              !scan.has_push_constant_offsets(std::array<std::uint32_t, 16>{
                  0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u}))) {
             throw vulkan_runtime_error("SPIR-V alignment CIGAR extension layout mismatch");
-        }
-        if ((kind == shader_kind::seed_verify_count || kind == shader_kind::seed_verify_emit) &&
-            (!scan.has_binding_array_stride(0u, 0u, 24u) ||
-             !scan.has_binding_struct_offsets(0u, 0u, std::array<std::uint32_t, 4>{0u,8u,16u,20u}) ||
-             !scan.has_binding_array_stride(0u, 2u, 88u) ||
-             !scan.has_binding_struct_offsets(0u, 2u,
-                 std::array<std::uint32_t,16>{0u,8u,16u,24u,32u,40u,48u,52u,56u,60u,64u,68u,72u,76u,80u,84u}) ||
-             !scan.has_binding_array_stride(0u, 6u, 24u) ||
-             !scan.has_push_constant_offsets(std::array<std::uint32_t,9>{0u,4u,8u,12u,16u,24u,28u,32u,36u}))) {
-            throw vulkan_runtime_error("SPIR-V native seed verification ABI mismatch");
-        }
-        if (kind == shader_kind::seed_native_coverage &&
-            (!scan.has_binding_array_stride(0u, 0u, 24u) ||
-             !scan.has_binding_array_stride(0u, 1u, 16u) ||
-             !scan.has_binding_struct_offsets(0u, 1u, std::array<std::uint32_t,2>{0u,8u}) ||
-             !scan.has_push_constant_offsets(std::array<std::uint32_t,6>{0u,4u,8u,16u,24u,28u}))) {
-            throw vulkan_runtime_error("SPIR-V native seed verification ABI mismatch");
         }
         if ((kind == shader_kind::sneaky_snake_rank_batch || is_gatekeeper_rank_batch_kind(kind)) &&
             (!scan.has_binding_array_stride(0u, 0u, 4u) ||

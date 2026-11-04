@@ -753,7 +753,8 @@ TEST_CASE("real N-rich dna5 Vulkan target adopts either exact authority and buil
     REQUIRE(result->arena_trimmed_before_host_materialization);
     REQUIRE_FALSE(result->host_minimizers.empty());
     REQUIRE(result->host_minimizers.size()
-            <= vk::target_minimizer_count_upper_bound(letter_count, kmer_size));
+            <= vk::target_minimizer_count_upper_bound(letter_count, kmer_size,
+                vk::vulkan_minimizer_seed_policy_id<decltype(sequence)::traits>(kmer_size)));
     const std::uint64_t host_capacity_bytes =
         result->host_minimizers.capacity() * sizeof(sketch_type);
     const bool footprint_authority =

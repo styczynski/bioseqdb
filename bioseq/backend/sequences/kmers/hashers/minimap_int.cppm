@@ -6,8 +6,10 @@
 module;
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 export module bioseq.sequences.kmers.hashers.minimap_int;
@@ -87,6 +89,52 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
         key = key ^ (key >> clamp(28u));
         key = (key + (key << clamp(31u))) & kmer_mask;
         return key;
+    }
+
+    /**
+     * @brief Recovers the packed code whose integer mix equals `hash`.
+     * Reverses the odd affine multipliers and right-xorshifts in `scramble`.
+     * @param hash Mixed value within `kmer_mask`.
+     * @param kmer_mask Nonzero contiguous low-bit mask for the exact key domain.
+     * @return Unique preimage in that domain, with the same word-width shift caps.
+     * @pre `hash <= kmer_mask`; `kmer_mask` fits `p_input_type`.
+     * Uses non-promoting unsigned words, matching the resident u32/u64 mixers.
+     */
+    template <std::unsigned_integral p_input_type>
+        requires std::same_as<p_input_type, decltype(+p_input_type{})>
+    [[nodiscard]] static constexpr p_input_type unscramble(
+        const p_input_type hash, const p_input_type kmer_mask) {
+        using calculation_type = p_input_type;
+        constexpr std::size_t word_bits = std::numeric_limits<p_input_type>::digits;
+        constexpr auto clamp = [](const std::size_t shift) constexpr {
+            return std::min(shift, word_bits - 1u);
+        };
+        const calculation_type mask = kmer_mask;
+        // Newton lifting doubles the known inverse bits at each step.
+        const auto inverse_odd = [mask](const calculation_type multiplier) constexpr {
+            calculation_type inverse = 1u;
+            for (std::size_t known_bits = 1u; known_bits < word_bits; known_bits *= 2u)
+                inverse *= calculation_type{2u} - multiplier * inverse;
+            return inverse & mask;
+        };
+        // Invert x ^ (x >> shift) by composing doubled right shifts.
+        constexpr auto undo_right_xor = [](calculation_type value,
+                                          const std::size_t shift) constexpr {
+            for (std::size_t distance = shift; distance < word_bits; distance *= 2u)
+                value ^= value >> distance;
+            return value;
+        };
+        constexpr calculation_type one = 1u;
+        calculation_type key = hash;
+        key = (key * inverse_odd(one + (one << clamp(31u)))) & mask;
+        key = undo_right_xor(key, clamp(28u));
+        key = (key * inverse_odd(one + (one << clamp(2u)) + (one << clamp(4u)))) & mask;
+        key = undo_right_xor(key, clamp(14u));
+        key = (key * inverse_odd(one + (one << clamp(3u)) + (one << clamp(8u)))) & mask;
+        key = undo_right_xor(key, clamp(24u));
+        // The first forward step is ((2^shift - 1) * key - 1) modulo 2^B.
+        key = ((key + one) * inverse_odd((one << clamp(21u)) - one)) & mask;
+        return static_cast<p_input_type>(key);
     }
 };
 

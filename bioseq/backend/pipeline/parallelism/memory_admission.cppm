@@ -631,13 +631,22 @@ inline bool memory_permit::absorb(memory_permit&& other) noexcept {
     return true;
 }
 
-/** Reserves and materializes a fresh vector, retaining its exact physical capacity permit.
+/** Select whether a vector reservation can be released after footprint reconciliation. */
+enum class vector_admission_policy {
+    reconcile_footprint,
+    retain_permit,
+};
+
+/** Reserves a fresh vector and reconciles or retains its exact physical capacity permit.
  * @tparam p_admission_error Existing caller-boundary exception for rejected admission.
+ * @tparam p_policy Reconcile touched footprint by default, or retain the full capacity permit.
  * @param values Empty vector with no allocated capacity.
- * @param retained_permit Empty permit receiving ownership of the retained allocation.
+ * @param retained_permit Empty permit receiving any reservation retained for the allocation.
  * @param count Required element capacity; zero leaves the owner empty.
  */
-template <class p_admission_error, class p_value>
+template <class p_admission_error,
+          vector_admission_policy p_policy = vector_admission_policy::reconcile_footprint,
+          class p_value>
 void prepare_admitted_vector_capacity(
     std::vector<p_value>& values,
     bioseq::parallelism::memory_permit& retained_permit,
@@ -666,40 +675,50 @@ void prepare_admitted_vector_capacity(
     std::vector<p_value> pending_values;
     auto* const pending_values_owner = std::addressof(pending_values);
     auto* const pending_permit_owner = std::addressof(pending_permit);
-    const auto materialization = admission.materialize(
-        *pending_permit,
-        [pending_values_owner, pending_permit_owner, count]() {
-            pending_values_owner->reserve(count);
-            const auto actual = bioseq::common::checked_mul(
-                static_cast<std::uint64_t>(pending_values_owner->capacity()),
-                sizeof(p_value));
-            if (!actual || *actual > (*pending_permit_owner)->bytes()) {
-                throw std::length_error{"Vulkan query allocation exceeds admitted capacity"};
-            }
-            (*pending_permit_owner)->shrink_to(*actual);
-            std::uint64_t fully_touched = 0u;
-            if constexpr (std::is_trivially_copyable_v<p_value> &&
-                          std::is_default_constructible_v<p_value>) {
-                pending_values_owner->resize(pending_values_owner->capacity());
-                std::memset(pending_values_owner->data(),
-                            0,
-                            static_cast<std::size_t>(*actual));
-                pending_values_owner->clear();
-                fully_touched = *actual;
-            }
-            return bioseq::parallelism::memory_materialization_snapshot{
-                .actual_allocation_bytes = *actual,
-                .fully_touched_bytes = fully_touched,
-                .is_host_visible = true,
-                .is_host_coherent = true,
-                .is_process_footprint_reflected = true,
-            };
-        });
-    const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
-    if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
-        materialization.admitted_bytes != actual ||
-        materialization.is_permit_released == static_cast<bool>(*pending_permit)) {
-        throw std::logic_error{"Vulkan query materialization did not reconcile physical storage"};
+    const auto allocate_capacity = [pending_values_owner, pending_permit_owner, count]() {
+        pending_values_owner->reserve(count);
+        const auto actual = bioseq::common::checked_mul(
+            static_cast<std::uint64_t>(pending_values_owner->capacity()),
+            sizeof(p_value));
+        if (!actual || *actual > (*pending_permit_owner)->bytes()) {
+            throw std::length_error{"Vulkan query allocation exceeds admitted capacity"};
+        }
+        (*pending_permit_owner)->shrink_to(*actual);
+        std::uint64_t fully_touched = 0u;
+        if constexpr (p_policy == vector_admission_policy::reconcile_footprint &&
+                      std::is_trivially_copyable_v<p_value> &&
+                      std::is_default_constructible_v<p_value>) {
+            pending_values_owner->resize(pending_values_owner->capacity());
+            std::memset(pending_values_owner->data(),
+                        0,
+                        static_cast<std::size_t>(*actual));
+            pending_values_owner->clear();
+            fully_touched = *actual;
+        }
+        return bioseq::parallelism::memory_materialization_snapshot{
+            .actual_allocation_bytes = *actual,
+            .fully_touched_bytes = fully_touched,
+            .is_host_visible = true,
+            .is_host_coherent = true,
+            .is_process_footprint_reflected =
+                p_policy == vector_admission_policy::reconcile_footprint,
+        };
+    };
+    if constexpr (p_policy == vector_admission_policy::reconcile_footprint) {
+        const auto materialization = admission.materialize(*pending_permit, allocate_capacity);
+        const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
+        if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
+            materialization.admitted_bytes != actual ||
+            materialization.is_permit_released == static_cast<bool>(*pending_permit)) {
+            throw std::logic_error{"Vulkan query materialization did not reconcile physical storage"};
+        }
+    } else {
+        const auto allocation = allocate_capacity();
+        const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
+        if (allocation.actual_allocation_bytes != actual || !*pending_permit ||
+            pending_permit->bytes() != actual) {
+            throw std::logic_error{"Vulkan query reservation does not cover physical storage"};
+        }
     }
     values.swap(pending_values);
     retained_permit = std::move(*pending_permit);

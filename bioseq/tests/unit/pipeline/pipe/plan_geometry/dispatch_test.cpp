@@ -644,7 +644,7 @@ TEST_CASE("algorithm-aware k20 layout separates hash width from runtime biologic
         algorithm::vulkan_minimap_integer, 4'000'000'000u, 20u, 15u);
     REQUIRE(vulkan.requested_algorithm == algorithm::vulkan_minimap_integer);
     REQUIRE(vulkan.effective_algorithm == algorithm::vulkan_minimap_integer);
-    REQUIRE(vulkan.hash_bits == 32u);
+    REQUIRE(vulkan.hash_bits == 40u);
     REQUIRE(vulkan.record_position_log2 == 63u);
     const auto promoted = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
         algorithm::simd_minimap2_reference, 1024u, 20u, 15u);
@@ -656,6 +656,39 @@ TEST_CASE("algorithm-aware k20 layout separates hash width from runtime biologic
     REQUIRE(dna5.requested_algorithm == algorithm::simd_minimap2_reference);
     REQUIRE(dna5.effective_algorithm == algorithm::simd_minimap2_reference);
     REQUIRE(dna5.hash_bits == 40u);
+    // Exact layouts keep the established compact coordinate envelope without
+    // widening ordinary k15 hash transport or narrowing explicit bounded32 hashes.
+    for (const auto selected : {algorithm::scalar, algorithm::simd_minimap2_reference,
+                               algorithm::two_stack_nthash, algorithm::vulkan_minimap_integer}) {
+        const auto ordinary = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            selected, std::uint64_t{1u} << 28u, 15u, 10u);
+        REQUIRE(ordinary.hash_bits == 32u);
+        REQUIRE(ordinary.hash_width == minimizer_scalar_width::u32);
+        const auto compact = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            selected, std::uint64_t{1u} << 33u, 15u, 10u);
+        REQUIRE(compact.hash_bits == 30u);
+        REQUIRE(compact.record_position_log2 == 33u);
+        REQUIRE(compact.hash_width == minimizer_scalar_width::u32);
+        REQUIRE(visit_minimizer_physical_layout(compact,
+            []<class record>() { return sizeof(record); }) == sizeof(std::uint64_t));
+        const auto split = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            selected, (std::uint64_t{1u} << 33u) + 1u, 15u, 10u);
+        REQUIRE(visit_minimizer_physical_layout(split,
+            []<class record>() { return sizeof(record); }) == 2u * sizeof(std::uint64_t));
+    }
+    for (const auto [kmer_size, position_bits] :
+         std::array{std::pair{17u, 28u}, std::pair{21u, 20u}, std::pair{24u, 15u}}) {
+        const auto compact = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            algorithm::two_stack_nthash, std::uint64_t{1u} << position_bits,
+            static_cast<std::uint16_t>(kmer_size), 10u);
+        REQUIRE(compact.hash_width == minimizer_scalar_width::u64);
+        REQUIRE(visit_minimizer_physical_layout(compact,
+            []<class record>() { return sizeof(record); }) == sizeof(std::uint64_t));
+    }
+    const auto bounded = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+        algorithm::bounded_nthash_simd, std::uint64_t{1u} << 33u, 15u, 10u);
+    REQUIRE(bounded.hash_bits == std::numeric_limits<std::uint32_t>::digits);
+    REQUIRE(bounded.record_position_log2 == 63u);
     REQUIRE_THROWS_AS((select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
         algorithm::bounded_nthash_simd, (std::uint64_t{1u} << 63u) + 1u, 20u, 15u)),
         std::length_error);

@@ -3,7 +3,10 @@
  * @brief Declares row filtering and mmsearch operand evaluation.
  */
 module;
-#include <bioseq/pg_compat.h>
+// These PostgreSQL objects are borrowed through pointers; their layouts stay private.
+struct TupleTableSlot;
+struct ExprState;
+struct ExprContext;
 
 export module bioseq.postgres.table:custom_scan_scan_runtime_tuple_production_contracts;
 

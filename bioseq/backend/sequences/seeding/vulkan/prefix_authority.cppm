@@ -72,8 +72,6 @@ struct mapped_sorted_dense_prefix_view {
         resident;
     /** Sorted hash entries with offsets and counts into the target-position array. */
     const bioseq::indexing::gpu_minimizer_slot* controls = nullptr;
-    /** Validated encoded native target positions retained by the same owner. */
-    const std::uint64_t* positions = nullptr;
     /** Number of sorted halh entries in controls. */
     std::uint32_t bucket_count = 0u;
     /** Number of encoded target positions backing the controls. */
@@ -181,7 +179,6 @@ validated_mapped_sorted_dense_prefix_view(
     }
     return mapped_sorted_dense_prefix_view{
         .controls = controls.data(),
-        .positions = positions.data(),
         .bucket_count = static_cast<std::uint32_t>(controls.size()),
         .position_count = static_cast<std::uint32_t>(positions.size()),
     };
@@ -202,10 +199,9 @@ validated_mapped_sorted_dense_prefix_view(
 validated_mapped_sorted_dense_prefix_view(
     const bioseq::gpu::vulkan::runtime& vulkan_runtime,
     const std::shared_ptr<const bioseq::indexing::
-        gpu_resident_minimizer_index>& resident, bool strict_prefix = true)
+        gpu_resident_minimizer_index>& resident)
 {
     using bioseq::indexing::gpu_index_representation;
-    using bioseq::indexing::gpu_resident_accounting_authority;
     using bioseq::common::saturating_mul;
     if (!resident || !resident->slots.is_valid()
         || !resident->positions.is_valid()
@@ -217,10 +213,10 @@ validated_mapped_sorted_dense_prefix_view(
         || !resident->positions.is_host_visible_coherent()
         || resident->representation
             != gpu_index_representation::source_direct_sorted_dense
-        || (strict_prefix && (!resident->key.source_direct_sorted_dense
-            || resident->key.representation != gpu_index_representation::source_direct_sorted_dense
-            || resident->key.sorted_dense_abi_revision
-                != bioseq::indexing::k_minimizer_sorted_dense_gpu_abi_revision))
+        || !resident->key.source_direct_sorted_dense
+        || resident->key.representation != gpu_index_representation::source_direct_sorted_dense
+        || resident->key.sorted_dense_abi_revision
+            != bioseq::indexing::k_minimizer_sorted_dense_gpu_abi_revision
         || resident->bucket_count == 0u
         || resident->bucket_count != resident->unique_key_count
         || resident->bucket_count != resident->slot_capacity
@@ -231,13 +227,17 @@ validated_mapped_sorted_dense_prefix_view(
         || !resident->gate_identity.is_well_formed()
         || !resident->gate_identity.is_exactly_equal_to(
             bioseq::indexing::gpu_index_gate_identity_from_key(resident->key))
-        || (strict_prefix && (resident->target_position_offset != 0u
-            || resident->gate_identity.enabled || resident->key.gate_enabled
-            || resident->key.gate_word_count != 0u || resident->key.gate_mask != 0u
-            || resident->key.gate_digest_lo != 0u || resident->key.gate_digest_hi != 0u
-            || resident->key.gate_canonical_words))
+        || resident->target_position_offset != 0u
+        || resident->gate_identity.enabled || resident->key.gate_enabled
+        || resident->key.gate_word_count != 0u || resident->key.gate_mask != 0u
+        || resident->key.gate_digest_lo != 0u || resident->key.gate_digest_hi != 0u
+        || resident->key.gate_canonical_words
         || resident->key.device_uuid != vulkan_runtime.features().device_uuid
-        || !resident->has_completed_mapped_payload_validation()) {
+        || resident->source_stream_checksum == 0u
+        || resident->source_stream_checksum != resident->mapped_stream_checksum
+        || (resident->complete_source_traversals != 1u && resident->complete_source_traversals != 2u)
+        || resident->complete_mapped_traversals != 2u
+        || resident->ownership != bioseq::gpu::vulkan::gpu_index_build_stats{}) {
         throw mapped_prefix_invalid_error{};
     }
     const std::uint64_t control_bytes = saturating_mul(
@@ -263,10 +263,9 @@ validated_mapped_sorted_dense_prefix_view(
             actual_allocation_sum)) {
         throw mapped_prefix_invalid_error{};
     }
-    // Source-copy owners retain independent source-versus-mapped validation;
-    // adopted GPU owners retain checked build receipts and a completed mapped
-    // structural pass. Both stay read-only during lookup. Reuse their completed
-    // proof; borrowed spans still require the full payload/checksum check.
+    // Source-copy owners retain independent source-versus-mapped validation.
+    // Their buffers remain read-only during lookup. Borrowed spans still use
+    // the full payload/checksum check at their ingress boundary.
     if (resident->target_len == 0u) {
         throw mapped_prefix_invalid_error{};
     }
@@ -274,20 +273,19 @@ validated_mapped_sorted_dense_prefix_view(
         .resident = resident,
         .controls = static_cast<const bioseq::indexing::gpu_minimizer_slot*>(
             resident->slots.mapped),
-        .positions = static_cast<const std::uint64_t*>(resident->positions.mapped),
         .bucket_count = resident->bucket_count,
         .position_count = resident->position_count,
     };
 }
 
 /**
- * @brief Finds the checked control record for a minimizer hash.
+ * @brief Finds the number of target positions for a minimizer hash.
  * @param view Checked control table and lookup counters.
  * @param hash Hash to find.
- * @return Matching control, or null when the hash is absent.
+ * @return Full occurrence count, or zero if absent.
  * @throws mapped_prefix_invalid_error If the matching entry references invalid positions.
  */
-[[nodiscard]] inline const bioseq::indexing::gpu_minimizer_slot* mapped_sorted_dense_control(
+[[nodiscard]] inline std::uint32_t mapped_sorted_dense_position_count(
     mapped_sorted_dense_prefix_view& view,
     std::uint64_t hash)
 {
@@ -304,7 +302,7 @@ validated_mapped_sorted_dense_prefix_view(
         }
     }
     if (lo == view.bucket_count || view.controls[lo].hash != hash) {
-        return {};
+        return 0u;
     }
     const std::uint64_t offset = view.controls[lo].pos_offset;
     const std::uint64_t count = view.controls[lo].pos_count;
@@ -312,23 +310,7 @@ validated_mapped_sorted_dense_prefix_view(
         || count > view.position_count - offset) {
         throw mapped_prefix_invalid_error{};
     }
-    return &view.controls[lo];
-}
-
-/** Borrow matching postings through the same checked lookup used for prefix counts. */
-[[nodiscard]] inline std::span<const std::uint64_t> mapped_sorted_dense_positions(
-    mapped_sorted_dense_prefix_view& view, std::uint64_t hash) {
-    const auto* control = mapped_sorted_dense_control(view, hash);
-    if (control == nullptr) return {};
-    if (view.positions == nullptr) throw mapped_prefix_invalid_error{};
-    return {view.positions + control->pos_offset, control->pos_count};
-}
-
-/** Return the occurrence count through the same checked lookup used for native source coverage. */
-[[nodiscard]] inline std::uint32_t mapped_sorted_dense_position_count(
-    mapped_sorted_dense_prefix_view& view, std::uint64_t hash) {
-    const auto* control = mapped_sorted_dense_control(view, hash);
-    return control == nullptr ? 0u : control->pos_count;
+    return view.controls[lo].pos_count;
 }
 
 /**

@@ -127,7 +127,7 @@ TEST_CASE("vulkan minimizer: target-index host scratch ends before exact main ad
     REQUIRE(small_words.host_transient_released_before_execution_bytes == 0u);
 }
 
-TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host result",
+TEST_CASE("vulkan minimizer: bounded 500-Mbp w10 dispatch excludes pessimistic host result",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     constexpr std::uint64_t bp_size = 500'000'000u;
     constexpr std::uint64_t window_size = 10u;
@@ -136,7 +136,8 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
     constexpr std::uint64_t packed_sequence_bytes = bp_size / 4u;
 
     const std::uint64_t max_minimizers =
-        vk::estimate_vulkan_minimizer_capacity(bp_size, window_size);
+        vk::estimate_vulkan_minimizer_capacity(
+            bp_size, window_size, bioseq::minimizers::k_bounded_nthash_scheme_id);
     REQUIRE(max_minimizers == 1'000'000'000u);
 
     const std::uint64_t pessimistic_initial_host_bytes = bioseq::common::saturating_mul(
@@ -340,7 +341,7 @@ TEST_CASE("vulkan minimizer: replacement authority admits dense resident upload"
     STATIC_REQUIRE(transferred_margin_bytes == 640'091'550u);
 }
 
-TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak",
+TEST_CASE("vulkan target index: bounded 500-Mbp ungated count replaces C-sized main peak",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     constexpr std::uint64_t bp_size = 500'000'000u;
     constexpr std::uint64_t packed_sequence_bytes = 125'000'000u;
@@ -352,21 +353,21 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
     constexpr std::uint64_t safe_memory_ceiling = 5'102'125'056u;
 
     const std::uint64_t semantic_hard_bound =
-        vk::target_minimizer_count_upper_bound(bp_size, kmer_size);
+        vk::target_minimizer_count_upper_bound(bp_size, kmer_size, bioseq::minimizers::k_bounded_nthash_scheme_id);
     REQUIRE(semantic_hard_bound == 999'999'972u);
     REQUIRE(exact_minimizer_count <= semantic_hard_bound);
     REQUIRE(semantic_hard_bound <= (std::numeric_limits<std::uint32_t>::max)());
-    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(14u, 15u) == 0u);
-    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(bp_size, 0u) == 0u);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(14u, 15u, bioseq::minimizers::k_bounded_nthash_scheme_id) == 0u);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(bp_size, 0u, bioseq::minimizers::k_bounded_nthash_scheme_id) == 0u);
     STATIC_REQUIRE(
-        vk::target_minimizer_count_upper_bound((std::numeric_limits<std::uint32_t>::max)(), 1u) ==
+        vk::target_minimizer_count_upper_bound((std::numeric_limits<std::uint32_t>::max)(), 1u, bioseq::minimizers::k_bounded_nthash_scheme_id) ==
         std::uint64_t{2u} * (std::numeric_limits<std::uint32_t>::max)());
     constexpr std::uint64_t maximum_count = (std::numeric_limits<std::uint64_t>::max)();
-    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u, 1u) ==
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u, 1u, bioseq::minimizers::k_bounded_nthash_scheme_id) ==
                    maximum_count - 1u);
-    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u + 1u, 1u) ==
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count / 2u + 1u, 1u, bioseq::minimizers::k_bounded_nthash_scheme_id) ==
                    maximum_count);
-    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count, 1u) == maximum_count);
+    STATIC_REQUIRE(vk::target_minimizer_count_upper_bound(maximum_count, 1u, bioseq::minimizers::k_bounded_nthash_scheme_id) == maximum_count);
 
     const std::array<std::uint32_t, 2> ordinary_counts{3u, 5u};
     const auto ordinary_count = vk::checked_sketch_output_count(
@@ -399,7 +400,8 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
     REQUIRE_FALSE(vk::checked_sketch_output_count(std::span{truncated_count}, 0u, wide_bound));
 
     const std::uint64_t pessimistic_capacity =
-        vk::estimate_vulkan_minimizer_capacity(bp_size, window_size);
+        vk::estimate_vulkan_minimizer_capacity(
+            bp_size, window_size, bioseq::minimizers::k_bounded_nthash_scheme_id);
     REQUIRE(pessimistic_capacity == 1'000'000'000u);
 
     // Compare buffers sized from the estimated capacity with buffers sized from
@@ -502,7 +504,7 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(sequence);
     const auto sequence_view = bioseq::storage::make_lazy_sequence_view(sequence_owner);
     const std::uint64_t max_minimizers =
-        vk::estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+        vk::estimate_vulkan_minimizer_capacity(upload.bp_size, window_size, 0u);
 
     const auto dispatch_admission_bytes =
         [&runtime, &upload, max_minimizers, window_size, kmer_size]() {

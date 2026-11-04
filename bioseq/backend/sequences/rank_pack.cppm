@@ -103,6 +103,21 @@ validate_packed_rank_payload(
     const auto expected_padding = symbol_count % letters == 0u ? 0u : letters - symbol_count % letters;
     if (padding != expected_padding)
         return std::unexpected(packed_rank_validation_error{packed_rank_validation_status::invalid_padding});
+    // Every complete word is valid when all rank codes are assigned and the
+    // symbols occupy the whole word. Only the final partial word has unused bits.
+    if constexpr (traits::alphabet_size - 1u == traits::char_mask &&
+                  letters * traits::bits_per_char == std::numeric_limits<storage_unit>::digits) {
+        if (padding != 0u) {
+            const auto index = words.size() - 1u;
+            const auto used_bits = (letters - padding) * traits::bits_per_char;
+            const storage_unit active_mask =
+                static_cast<storage_unit>((storage_unit{1u} << used_bits) - 1u);
+            if ((words[index] & static_cast<storage_unit>(~active_mask)) != 0u)
+                return std::unexpected(packed_rank_validation_error{
+                    packed_rank_validation_status::nonzero_unused_bits, index, index * letters});
+        }
+        return {};
+    }
     std::size_t logical_position{};
     for (std::size_t index = 0; index < words.size(); ++index) {
         const auto active = std::min(letters, symbol_count - logical_position);

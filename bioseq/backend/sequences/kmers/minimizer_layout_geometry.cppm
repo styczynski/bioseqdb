@@ -4,7 +4,10 @@
  */
 module;
 
+#include <algorithm>
 #include <bit>
+#include <limits>
+#include <span>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -14,6 +17,37 @@ export module bioseq.sequences.kmers.minimizer_layout_geometry;
 
 
 export namespace bioseq::minimizers {
+
+/**
+ * Return the first position band in which a compact capacity is preferred.
+ * Full-range hash families start at zero. A partial exact capacity follows the
+ * reserved under-filled records of its rounded carrier, preserving their typed
+ * routes and physical-maximum policy. Shared by codegen and generic dispatch.
+ */
+template<class p_record>
+    requires requires(const p_record& record) {
+        record.position_log2;
+        record.hash_bits;
+        record.storage_bits;
+    }
+[[nodiscard]] constexpr std::uint8_t minimizer_capacity_minimum_position(
+    const std::span<const p_record> records, const p_record& record) {
+    constexpr auto maximum_position_bits = std::numeric_limits<std::uint64_t>::digits - 1u;
+    for (const auto& candidate : records) {
+        if (candidate.hash_bits == record.hash_bits
+            && candidate.position_log2 == maximum_position_bits) return 0u;
+    }
+    const auto carrier_bits = std::bit_ceil(static_cast<unsigned>(record.hash_bits));
+    std::uint8_t minimum_position{};
+    for (const auto& candidate : records) {
+        if (candidate.hash_bits == carrier_bits && candidate.storage_bits == record.storage_bits
+            && 1u + candidate.position_log2 + carrier_bits < candidate.storage_bits) {
+            minimum_position = std::max(minimum_position,
+                static_cast<std::uint8_t>(candidate.position_log2 + 1u));
+        }
+    }
+    return minimum_position;
+}
 
 /** Return the storage width of a record without instantiating its C++ type. */
 [[nodiscard]] constexpr std::size_t minimizer_record_storage_bits(

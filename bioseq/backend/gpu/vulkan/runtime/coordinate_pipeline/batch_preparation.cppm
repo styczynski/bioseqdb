@@ -71,7 +71,6 @@ struct gpu_seed_coordinate_wave_state {
     buffer range_count_buf;
     buffer compacted_anchors_buf;
     buffer span_buf;
-    gpu_verified_seed_buffer verified{};
     bool sorted_in_scratch = false;
     std::uint32_t range_count = 0;
     std::uint32_t compacted_anchor_count = 0;
@@ -87,11 +86,6 @@ struct gpu_seed_coordinate_wave_state {
     bool has_anchors = false;
     bool has_ranges = false;
     bool chain_active = false;
-
-    /** Returns dense verified anchors after the native verification fence. */
-    [[nodiscard]] gpu_arena_slice verified_anchors_slice() noexcept {
-        return gpu_arena_slice{&verified.anchors, 0u, verified.anchors.bytes};
-    }
 
     /// @brief Views the complete primary anchor allocation.
     /// @return Arena slice spanning `anchors_buf`.
@@ -499,6 +493,9 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
     bool grouped_soa_selected,
     std::uint32_t kmer_size) {
     const std::uint32_t total_mc = query_inputs.minimizer_count;
+    if (kmer_size == 0u || kmer_size > std::numeric_limits<std::uint8_t>::max()) {
+        throw vulkan_runtime_error("gpu seed-to-coordinate span exceeds the anchor ABI");
+    }
     if (query_inputs.host_query_records.empty()) {
         throw vulkan_runtime_error("gpu seed-to-coordinate batch missing query records");
     }
@@ -512,9 +509,11 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
         if (qrec.minimizer_count == 0u) {
             continue;
         }
+        if (qrec.query_len < kmer_size) {
+            throw vulkan_runtime_error("gpu seed-to-coordinate query is shorter than its anchor span");
+        }
         if (grouped_soa_selected &&
-            (qrec.query_len < kmer_size ||
-             qrec.minimizer_count == (std::numeric_limits<std::uint32_t>::max)() ||
+            (qrec.minimizer_count == (std::numeric_limits<std::uint32_t>::max)() ||
              (static_cast<std::uint64_t>(qrec.minimizer_count) + 1u) * sizeof(std::uint32_t) >
                  features.max_storage_buffer_range)) {
             throw vulkan_runtime_error(
@@ -524,11 +523,13 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
 
     coordinate_query_layout layout{};
     layout.required_words_per_minimizer =
-        query_inputs.minimizer_word_kind == 0u || query_inputs.minimizer_word_kind == 1u ? 1u
-        : query_inputs.minimizer_word_kind == 2u                                         ? 2u
-                                                                                         : 4u;
+        query_inputs.minimizer_word_kind == 0u ? 0u
+        : query_inputs.minimizer_word_kind == 1u ? 1u
+        : query_inputs.minimizer_word_kind == 2u ? 2u : 4u;
     if (query_inputs.minimizer_word_kind > 3u ||
-        query_inputs.minimizer_words32_per_record < layout.required_words_per_minimizer ||
+        (query_inputs.minimizer_word_kind == 0u
+            ? query_inputs.minimizer_words32_per_record != 0u
+            : query_inputs.minimizer_words32_per_record < layout.required_words_per_minimizer) ||
         (query_inputs.minimizer_word_kind != 0u &&
          static_cast<std::uint64_t>(total_mc) >
              (std::numeric_limits<std::uint64_t>::max)() /

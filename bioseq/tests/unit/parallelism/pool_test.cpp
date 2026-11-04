@@ -1763,6 +1763,104 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     bioseq::parallelism::release_admitted_vector_capacity_before_permit(old_runs.values,
                                                                         old_runs.permit);
     REQUIRE(admission.reserved_bytes() == baseline);
+
+    // Temporary retained-policy validation; reuse this case's owners and cleanup guard.
+    constexpr auto retained_policy = bioseq::parallelism::vector_admission_policy::retain_permit;
+    {
+        owned_u64_vector retained;
+        bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+            retained.values, retained.permit, 0u);
+        REQUIRE(retained.values.empty());
+        REQUIRE(retained.values.capacity() == 0u);
+        REQUIRE_FALSE(static_cast<bool>(retained.permit));
+        REQUIRE(admission.reserved_bytes() == baseline);
+
+        bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+            retained.values, retained.permit, 4u);
+        const std::uint64_t retained_bytes = retained.values.capacity() * sizeof(std::uint64_t);
+        REQUIRE(retained.values.empty());
+        REQUIRE(retained.values.capacity() >= 4u);
+        REQUIRE(static_cast<bool>(retained.permit));
+        REQUIRE(retained.permit.controller() == &admission);
+        REQUIRE(retained.permit.bytes() == retained_bytes);
+        REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+
+        // Capacity alone must reject even with zero count and an empty argument permit.
+        bioseq::parallelism::memory_permit rejected_permit;
+        REQUIRE_THROWS_AS(
+            (bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+                retained.values, rejected_permit, 0u)),
+            std::invalid_argument);
+        REQUIRE_FALSE(static_cast<bool>(rejected_permit));
+        REQUIRE(retained.values.empty());
+        REQUIRE(retained.values.capacity() * sizeof(std::uint64_t) == retained_bytes);
+
+        // A live permit alone must reject an otherwise fresh zero-count vector.
+        std::vector<std::uint64_t> fresh_values;
+        REQUIRE_THROWS_AS(
+            (bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+                fresh_values, retained.permit, 0u)),
+            std::invalid_argument);
+        REQUIRE(fresh_values.capacity() == 0u);
+        REQUIRE(retained.permit.bytes() == retained_bytes);
+        REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+
+        retained.values.emplace_back(17u);
+        REQUIRE_THROWS_AS(
+            (bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+                retained.values, retained.permit, 1u)),
+            std::invalid_argument);
+        REQUIRE(retained.values == std::vector<std::uint64_t>{17u});
+        retained.values.clear();
+        REQUIRE(retained.permit.bytes() == retained_bytes);
+        REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            retained.values, retained.permit);
+        REQUIRE(retained.values.capacity() == 0u);
+        REQUIRE_FALSE(static_cast<bool>(retained.permit));
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+
+    STATIC_REQUIRE_FALSE(std::is_default_constructible_v<destruction_observer>);
+    STATIC_REQUIRE_FALSE(std::is_trivially_copyable_v<destruction_observer>);
+    bool retained_destroyed = false;
+    bool retained_reservation_live = false;
+    {
+        // The observer cannot be default-constructed by capacity preparation.
+        bioseq::parallelism::memory_permit retained_permit;
+        std::vector<destruction_observer> retained_values;
+        bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+            retained_values, retained_permit, 4u);
+        const std::uint64_t retained_bytes = retained_values.capacity() * sizeof(destruction_observer);
+        REQUIRE(retained_values.empty());
+        REQUIRE(retained_values.capacity() >= 4u);
+        REQUIRE(static_cast<bool>(retained_permit));
+        REQUIRE(retained_permit.bytes() == retained_bytes);
+        REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+        REQUIRE_FALSE(retained_destroyed);
+        retained_values.emplace_back(&admission, baseline + retained_bytes,
+                                     &retained_destroyed, &retained_reservation_live);
+        REQUIRE(retained_values.size() == 1u);
+        REQUIRE_FALSE(retained_destroyed);
+    }
+    REQUIRE(retained_destroyed);
+    REQUIRE(retained_reservation_live);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    // A nonzero cap leaves only one byte above existing reservations: no large allocation.
+    // Keep this last; the existing restore_cap_guard restores the caller's limit on all exits.
+    admission.set_index_memory_cap_bytes(baseline + 1u);
+    {
+        owned_u64_vector denied;
+        REQUIRE_THROWS_AS(
+            (bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error, retained_policy>(
+                denied.values, denied.permit, 1u)),
+            std::runtime_error);
+        REQUIRE(denied.values.empty());
+        REQUIRE(denied.values.capacity() == 0u);
+        REQUIRE_FALSE(static_cast<bool>(denied.permit));
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
 }
 
 TEST_CASE("memory materialization releases reservation after reflected ownership validation",

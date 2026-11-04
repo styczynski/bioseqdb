@@ -58,7 +58,7 @@
     "test2-m7a": {
       "address": "3.236.120.233",
       "build_receipt_id": "br_122a61b2885d42a71f0e546d6edad5e3",
-      "template_profile": "dna4_uint64",
+      "template_profile": "all_alphabets_uint64",
       "machine_policy": {
         "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_M7A.yaml",
         "account_id": "090072209895",
@@ -85,7 +85,7 @@
     "test2-m7i": {
       "address": "98.80.104.54",
       "build_receipt_id": "br_ffed36193d781a37a7c3a0290b3fcea6",
-      "template_profile": "dna4_uint64",
+      "template_profile": "all_alphabets_uint64",
       "machine_policy": {
         "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_M7I.yaml",
         "account_id": "090072209895",

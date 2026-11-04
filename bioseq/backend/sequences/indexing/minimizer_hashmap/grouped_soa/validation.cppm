@@ -180,7 +180,8 @@ validate_minimizer_generation_storage_contract(
         !is_supported_minimizer_producer_backend_identity(expected_producer_backend) ||
         !is_valid_minimizer_generation_algorithm_identity(expected.algorithm_identity,
                                                           expected_producer_backend) ||
-        minimizer_scheme_identity_for_producer_backend(expected_producer_backend) !=
+        minimizer_scheme_identity_for_producer_backend(expected_producer_backend,
+            expected.alphabet_code, expected.kmer_size) !=
             expected_profile->minimizer_scheme ||
         *manifest_profile != *expected_profile ||
         manifest.gpu_abi_revision != manifest_profile->gpu_abi_revision ||

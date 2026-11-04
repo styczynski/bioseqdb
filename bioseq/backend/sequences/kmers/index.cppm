@@ -63,6 +63,8 @@ inline constexpr std::size_t logical_bits_per_symbol_v = [] {
  * Rolling hashes feed a circular window. A new minimum replaces the current
  * one, and an expired minimum triggers a window scan. Tied hashes keep
  * their separate positions. Ambiguous nucleotides restart k-mer construction.
+ * Minimap integer hashing uses the native bounded scalar scheme only when the
+ * complete exact k-mer exceeds the rolling word; custom hashers retain their scheme.
  * Reported positions start at zero within the selected interval.
  */
 template <template <typename p_hash_alphabet> typename p_scalar_hasher_template,
@@ -83,16 +85,35 @@ inline void collect_minimizers_view(p_collector_type& collector,
                                     const p_iterator& sequence_end,
                                     const std::size_t window_size,
                                     const std::size_t kmer_size) {
+    using sequence_traits = typename p_sequence_view::traits;
+    using alphabet_type = typename sequence_traits::alphabet_type;
+    static constexpr bool k_native_rolling = p_hash_algorithm ==
+        ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash;
+    using native_hasher_type =
+        typename ::bioseq::minimizers::bounded_nthash_seed_policy<alphabet_type>::scalar_state;
+    if constexpr (!k_native_rolling && std::same_as<
+        p_scalar_hasher_template<alphabet_type>, minimap_int_hasher<alphabet_type>>
+        && !::bioseq::minimizers::exact_minimizer_shape_fits(
+            ::bioseq::minimizers::minimizer_exact_rank_bits<alphabet_type>,
+            native_hasher_type::traits::k_max_kmer_length)) {
+        if (!::bioseq::minimizers::exact_minimizer_shape_fits(
+                ::bioseq::minimizers::minimizer_exact_rank_bits<alphabet_type>, kmer_size)) {
+            // Preserve scalar execution and the requested k; only the hash scheme
+            // changes when a complete native exact key cannot fit its rolling word.
+            collect_minimizers_view<p_scalar_hasher_template, p_minimizer_type,
+                p_sequence_view, p_iterator, p_hash_value, p_collector_type,
+                ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
+                    collector, sequence, sequence_begin, sequence_end, window_size, kmer_size);
+            return;
+        }
+    }
+
     static const auto* region_description =
         bioseq::instrumentation::register_static_region("mm_sketch");
     auto region_scope = bioseq::instrumentation::region(region_description);
 
-    using sequence_traits = typename p_sequence_view::traits;
-    using alphabet_type = typename sequence_traits::alphabet_type;
     // Convert nucleotide ranks to minimap2's A/C/G/T codes. DNA5 N
     // becomes the ambiguity sentinel. Other alphabets keep their ranks.
-    static constexpr bool k_native_rolling = p_hash_algorithm ==
-        ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash;
     static_assert(k_native_rolling || p_hash_algorithm ==
         ::bioseq::minimizers::minimizer_kernel_algorithm::minimap2_reference);
     static constexpr bool k_is_nucleotide = !k_native_rolling
@@ -135,9 +156,12 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
     bioseq::common::circular_append_buffer<p_minimizer_type, k_max_window_span> buffer(window_size);
 
-    std::array<bool, k_max_window_span> buffer_valid{};
-    p_minimizer_type current_min{};
-    bool current_min_valid = false;
+    std::array<bool, k_native_rolling ? k_max_window_span : 0u> buffer_valid{};
+    // Exact selection reserves its physical maximum; bounded selection retains
+    // the zero payload plus independent validity for an empty ring slot.
+    const p_minimizer_type empty_slot{
+        k_native_rolling ? 0u : p_minimizer_type::k_hash_field_mask, 0u, 0u};
+    p_minimizer_type current_min = empty_slot;
     auto current_min_pos = buffer.get_begin_position();
 
     std::size_t valid_length = 0u;
@@ -156,7 +180,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
                           &buffer,
                           &buffer_valid,
                           &hasher,
-                          &current_min_valid,
+                          &empty_slot,
                           &current_min,
                           &current_min_pos, &native_rank_ring, &native_suffix,
                           &native_prefix, &native_rank_slot, &native_window_slot,
@@ -177,8 +201,9 @@ inline void collect_minimizers_view(p_collector_type& collector,
             }
             if (is_ambiguous) {
                 // Mark this position unusable and restart k-mer construction.
-                buffer.push_back(p_minimizer_type{});
-                buffer_valid[buffer.get_last_write_position()] = false;
+                buffer.push_back(empty_slot);
+                if constexpr (k_native_rolling)
+                    buffer_valid[buffer.get_last_write_position()] = false;
                 valid_length = 0u;
                 hasher.reset();
                 if constexpr (k_native_rolling) {
@@ -205,21 +230,27 @@ inline void collect_minimizers_view(p_collector_type& collector,
                     }
                 }();
 
-                // An excluded palindrome occupies an explicitly invalid window slot.
+                // Exact schemes exclude the physical maximum hash; bounded hashes
+                // retain their full value domain, including all-ones values.
                 ++valid_length;
+                const bool excluded_exact_hash = !k_native_rolling
+                    && canonical_hash == p_minimizer_type::k_hash_field_mask;
 
-                if (strand == sequence_strand_mode::equal) {
-                    buffer.push_back(p_minimizer_type{});
-                    buffer_valid[buffer.get_last_write_position()] = false;
+                if (strand == sequence_strand_mode::equal || excluded_exact_hash) {
+                    buffer.push_back(empty_slot);
+                    if constexpr (k_native_rolling)
+                        buffer_valid[buffer.get_last_write_position()] = false;
                 } else if (valid_length >= kmer_size) {
                     buffer.push_back(p_minimizer_type(
                         /*kmer=*/canonical_hash,
                         /*last_pos=*/sequence_position,
                         /*strand=*/static_cast<std::uint64_t>(strand)));
-                    buffer_valid[buffer.get_last_write_position()] = true;
+                    if constexpr (k_native_rolling)
+                        buffer_valid[buffer.get_last_write_position()] = true;
                 } else {
-                    buffer.push_back(p_minimizer_type{});
-                    buffer_valid[buffer.get_last_write_position()] = false;
+                    buffer.push_back(empty_slot);
+                    if constexpr (k_native_rolling)
+                        buffer_valid[buffer.get_last_write_position()] = false;
                 }
             }
 
@@ -254,49 +285,48 @@ inline void collect_minimizers_view(p_collector_type& collector,
             }
 
             if ((valid_length == window_size + kmer_size - 1 && p_is_initializing) &&
-                current_min_valid) { // first full window
+                current_min.kmer() != p_minimizer_type::k_hash_field_mask) { // first full window
                 // Emit the other positions tied with the first window's minimum.
                 buffer.for_each_filled_value_unsafe(
-                    [&collector, &current_min, &buffer_valid](const auto& index, const auto& candidate, const auto&) {
-                        if (buffer_valid[index] && p_minimizer_type::does_sketch_match(current_min, candidate)) {
+                    [&collector, &current_min](const auto&, const auto& candidate, const auto&) {
+                        if (p_minimizer_type::does_sketch_match(current_min, candidate)) {
                             collector.collect(candidate);
                         }
                     });
             }
-            if (buffer_valid[buffer.get_last_write_position()]
-                && (!current_min_valid || buffer.get_last_value() <= current_min)) {
+            // An invalid exact slot equals the initial maximum: take this branch
+            // before expiry so an unfilled ring is never scanned at startup.
+            if (buffer.get_last_value() <= current_min) {
                 if ((valid_length >= window_size + kmer_size || !p_is_initializing) &&
-                    current_min_valid) {
+                    current_min.kmer() != p_minimizer_type::k_hash_field_mask) {
                     collector.collect(current_min);
                 }
                 current_min_pos = buffer.get_last_write_position();
                 current_min = buffer.get_last_value();
-                current_min_valid = true;
             } else if (buffer.get_last_write_position() == current_min_pos) {
                 if ((valid_length >= window_size + kmer_size - 1 || !p_is_initializing) &&
-                    current_min_valid) {
+                    current_min.kmer() != p_minimizer_type::k_hash_field_mask) {
                     collector.collect(current_min);
                 }
 
-                current_min_valid = false;
+                current_min = empty_slot;
                 // Recomputes the rightmost minimum after its ring slot expires.
                 buffer.for_each_filled_value_unsafe(
-                    [&current_min, &current_min_valid, &buffer_valid,
+                    [&current_min,
                      &current_min_pos](const auto& index, const auto& candidate, const auto&) {
-                        if (buffer_valid[index] && (!current_min_valid || current_min >= candidate)) {
+                        if (current_min >= candidate) {
                             current_min = candidate;
-                            current_min_valid = true;
                             current_min_pos = index;
                         }
                     });
 
                 if ((valid_length >= window_size + kmer_size - 1 || !p_is_initializing) &&
-                    current_min_valid) { // emit other tied positions
+                    current_min.kmer() != p_minimizer_type::k_hash_field_mask) { // emit other tied positions
                     // Emit tied records with a different position or strand.
                     buffer.for_each_filled_value_unsafe(
-                        [&collector, &buffer_valid,
-                         &current_min](const auto& index, const auto& candidate, const auto&) {
-                            if (buffer_valid[index] && p_minimizer_type::does_sketch_match(current_min, candidate)) {
+                        [&collector,
+                         &current_min](const auto&, const auto& candidate, const auto&) {
+                            if (p_minimizer_type::does_sketch_match(current_min, candidate)) {
                                 collector.collect(candidate);
                             }
                         });
@@ -310,7 +340,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
     collect_range(std::bool_constant<false>{});
 
     if constexpr (!k_native_rolling) {
-        if (current_min_valid) collector.collect(current_min);
+        if (current_min.kmer() != p_minimizer_type::k_hash_field_mask) collector.collect(current_min);
     }
 }
 

@@ -24,11 +24,11 @@ namespace bioseq::gpu::vulkan {
 
 /// @brief Loads the pipelines needed to build a target index. The caller holds the runtime lock.
 /// @param[in] params Selects the sketch shader for the packed sequence forfat.
-void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& params) {
+void runtime::prepare_target_index_pipelines_locked(const vulkan_rank_lut& rank_lut, const vulkan_sketch_params& params) {
     // Load every pipeline used below before reserving the build workspace.
     // The runtime keeps these pipelines and their memory permits, so later
     // lookups during, counting, sorting, and bucket  creation use the cache
-    (void)get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
+    (void)get_compute_pipeline_locked(ordered_sketch_kind(rank_lut),
                                       k_sketch_local_size,
                                       choose_ordered_sketch_window_capacity(params.window_size));
     (void)get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
@@ -43,7 +43,7 @@ void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& 
 /// @brief Locks the runtime and loads the target-index pipelines before the build reserves memory.
 /// @param[in] params Selects the sketch shader for the packed sequence format.
 /// @throws vulkan_runtime_error If the runtime is unavailable or the window is zero.
-void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params) {
+void runtime::prepare_target_index_pipelines(const vulkan_rank_lut& rank_lut, const vulkan_sketch_params& params) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
         throw vulkan_runtime_error("prepare_target_index_pipelines on unavailable device");
@@ -51,7 +51,7 @@ void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params)
     if (params.window_size == 0u) {
         throw vulkan_runtime_error("prepare_target_index_pipelines with zero window");
     }
-    prepare_target_index_pipelines_locked(params);
+    prepare_target_index_pipelines_locked(rank_lut, params);
 }
 
 /// @brief Builds GPU target buckets sorted by minimizer hash.
@@ -126,7 +126,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     }
     // Direct callers also need the pipelines ready before allocating the build
     // workspace. The production wrapper has already loaded them at this point.
-    prepare_target_index_pipelines_locked(params);
+    prepare_target_index_pipelines_locked(rank_lut, params);
     out.gate_identity = std::move(query_gate_identity);
     out.ownership.query_gate_enabled = query_gate_word_count != 0u ? 1u : 0u;
     out.ownership.query_gate_word_count = query_gate_word_count;
@@ -304,7 +304,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     }
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile,
+        ordered_sketch_kind(rank_lut),
         k_sketch_local_size,
         choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
@@ -413,7 +413,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         out.ownership.exact_count_control_readbacks += 1u;
         const std::uint64_t prefix_count = static_cast<std::uint64_t>(last_offset) + last_count;
         const std::uint64_t hard_bound =
-            target_minimizer_count_upper_bound(bp, kmer_size);
+            target_minimizer_count_upper_bound(bp, kmer_size, rank_lut.seed_policy_id);
         const auto checked_count = checked_sketch_output_count(
             std::span<const std::byte>{
                 base + tcounts_s.offset,
@@ -1144,7 +1144,7 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
         max_target_minimizers == 0u) {
         return out;
     }
-    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size);
+    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size, rank_lut.seed_policy_id);
     if (max_target_minimizers >
             static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())
         || hard_bound > (std::numeric_limits<std::uint32_t>::max)()) {
@@ -1222,7 +1222,7 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     std::memset(base + tcounts_s.offset, 0, static_cast<std::size_t>(tcounts_s.size));
 
     const compute_pipeline sketch_pipe =
-        get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
+        get_compute_pipeline_locked(ordered_sketch_kind(rank_lut),
                                     k_sketch_local_size,
                                     choose_ordered_sketch_window_capacity(window_size));
 

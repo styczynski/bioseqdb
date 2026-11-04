@@ -252,8 +252,8 @@ triples(const std::vector<p_minimizer_type>& minimizers) {
 }
 
 /**
- * Check  that the GPU returned every scalar minimizer, including duplicates.
- * Limit the number of extra records using the tile count and window size.
+ * Check the complete scalar/GPU minimizer multiset, including duplicates.
+ * Input emission order is not part of this comparison.
  * @param scalar_tuples Scalar reference tuples.
  * @param vulkan_tuples GPU tuples.
  * @param tile_plan Tile count used to bound extra output.
@@ -307,7 +307,7 @@ require_gpu_triple_parity(std::vector<minimizer_tuple_type> scalar_tuples,
 }
 
 /**
- * Check packed GPU records against the scalar records, allowing bounded extras.
+ * Check the complete packed GPU/scalar minimizer multiset and count.
  * @tparam p_minimizer_type Packed minimizer, record.
  * @param scalar_minimizers Scalar reference records.
  * @param vulkan_minimizers GPU records.
@@ -364,14 +364,13 @@ inline void require_gpu_pair_parity(
                                                     biological_position_offset);
 }
 
-/** Run the common native32 scalar scheme directly on a packed or lazy source view. */
+/** Run the shared scalar selector for the same exact-or-bounded native shape as Vulkan. */
 template<class p_record, class p_collector, class p_view, class p_iterator>
 inline void collect_native_scalar_view(p_collector& collector, const p_view& view,
     const p_iterator& begin, const p_iterator& end, const std::size_t window,
     const std::size_t kmer) {
     collect_minimizers_view<minimap_int_hasher, p_record, p_view, p_iterator,
-        std::uint32_t, p_collector, ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
-            collector, view, begin, end, window, kmer);
+        std::uint64_t, p_collector>(collector, view, begin, end, window, kmer);
 }
 
 /**
@@ -426,13 +425,13 @@ inline std::vector<seq::dna4> dna4_fixture{
 inline std::vector<seq::dna5> dna5_with_t{
     "ACGTACGTGGCATTACGATCGATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATCG"
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5};
-/** dna5 input with native seedable N ranks inside complete minimizer windows. */
+/** DNA5 input with N ranks excluded by exact policy and seeded by explicit bounded policy. */
 inline std::vector<seq::dna5> dna5_with_n{
     "ACGTACGTGGCATTACGNNNNNATCGTAGCTAGCTACGTACGATCGATCGTAGCTAGCATCGATC"
     "GTTACGATNNCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACG"_dna5};
 
 /**
- * Check that GPU-only batch output matches the version also copied to the  host
+ * Check that GPU-only batch output matches the version also copied to the host.
  * Compare record order, per-query ranges, and the memory held by each result.
  * @tparam p_alphabet Sequence alphabet.
  * @param first_data First input sequence.
@@ -457,7 +456,8 @@ inline void require_exact_device_only_batch_parity(std::vector<p_alphabet> first
         // padding must still allow, both sequences in the same GPU batch.
         REQUIRE(uploads[0].padding_letters != uploads[1].padding_letters);
     }
-    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(first_sequence)>();
+    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(first_sequence)>(
+        vk::vulkan_minimizer_seed_policy_id<typename decltype(first_sequence)::traits>(kmer_size));
     const std::span<const vk::sequence_upload_view> upload_span{uploads.data(), uploads.size()};
 
     auto host_and_device = vk::collect_minimap_sketch_data_vulkan_upload_batch_result(

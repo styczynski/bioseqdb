@@ -358,51 +358,6 @@ TEST_CASE("source-direct operation emits an exact two-receipt transaction",
         REQUIRE(state.terminal_success_invariants());
     }
 
-    SECTION("native verification reconciles admitted candidates to exact output ownership") {
-        for (const std::uint64_t verified_bytes : std::array<std::uint64_t, 2u>{512u, 0u}) {
-            CAPTURE(verified_bytes);
-            auto state = resident_pipeline_test_support::full_resident_state(
-                resident_authority_type::retained_exact_permit);
-            state.slab_actual_bytes = verified_bytes;
-            state.slab_retained_permit_bytes = verified_bytes;
-            REQUIRE(state.slab_requested_bytes == 1'024u);
-            REQUIRE(state.slab_permit_releases == 1u);
-            REQUIRE(state.seed_dispatches == 1u);
-            REQUIRE(state.seed_fence_completions == 1u);
-            REQUIRE(state.zero_anchor_bypasses == 0u);
-            REQUIRE(state.terminal_success_invariants());
-            state.log_terminal("success", "focused_verified_output_reconciliation");
-            REQUIRE(state.terminal_success);
-            REQUIRE(state.terminal_receipts == 1u);
-
-            auto rejected = state;
-            rejected.slab_actual_bytes = 1'025u;
-            rejected.slab_retained_permit_bytes = 1'025u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            ++rejected.slab_retained_permit_bytes;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.slab_permit_releases = 0u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.slab_permit_releases = 2u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.zero_anchor_bypasses = 1u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.seed_dispatches = 0u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.seed_fence_completions = 0u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-            rejected = state;
-            rejected.seed_reserved_bytes = 3'071u;
-            REQUIRE_FALSE(rejected.terminal_success_invariants());
-        }
-    }
-
     SECTION("zero anchors still complete two mapped-prefix passes") {
         auto state = resident_pipeline_test_support::full_resident_state(
             resident_authority_type::retained_exact_permit);
@@ -803,8 +758,6 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
     auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_sequence);
     const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
     const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
-    const auto counter = fixed_highway_kernels()->common.count_equal_rank_chunk;
-    const auto packed_equality = fixed_highway_kernels()->common.resolve_sequence_packed_equality;
 
     SECTION("all spans emit when their global count is admitted") {
         context::context ctx;
@@ -814,7 +767,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         segmented_seed_index index;
         REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          query_view, target_view, counter, packed_equality,
+                                          query_view, target_view,
                                           /*max_occ=*/3,
                                           /*kmer_size=*/15,
                                           anchors));
@@ -833,7 +786,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         segmented_seed_index index;
         REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          query_view, target_view, counter, packed_equality,
+                                          query_view, target_view,
                                           /*max_occ=*/2,
                                           /*kmer_size=*/15,
                                           anchors));
@@ -849,7 +802,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         index.positions_available = false;
         REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                           index,
-                                          query_view, target_view, counter, packed_equality,
+                                          query_view, target_view,
                                           /*max_occ=*/2,
                                           /*kmer_size=*/15,
                                           anchors));
@@ -865,7 +818,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         index.positions_available = false;
         REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                                             index,
-                                                            query_view, target_view, counter, packed_equality,
+                                                            query_view, target_view,
                                                             /*max_occ=*/3,
                                                             /*kmer_size=*/15,
                                                             anchors),
@@ -881,7 +834,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         index.reported_count = 2;
         REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
                                                             index,
-                                                            query_view, target_view, counter, packed_equality,
+                                                            query_view, target_view,
                                                             /*max_occ=*/2,
                                                             /*kmer_size=*/15,
                                                             anchors),
@@ -889,7 +842,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         REQUIRE(anchors.size() == 0);
     }
 
-    SECTION("native rank disagreement removes a colliding hash before chaining") {
+    SECTION("native rank disagreement retains an in-bounds hash candidate") {
         context::context ctx;
         context::installed_context_scope installed{ctx};
         auto scope = ctx.push<context::arena::chain>();
@@ -901,24 +854,35 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto colliding_owner = bioseq::storage::make_resident_lazy_sequence(colliding_sequence);
         const auto colliding_view = bioseq::storage::make_lazy_sequence_view(colliding_owner);
         REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
-            query_view, colliding_view, counter, packed_equality, 3, 15, anchors));
-        REQUIRE(anchors.size() == 2u);
-        CHECK(anchors.data()[0].ref_position == 300u);
-        CHECK(anchors.data()[1].ref_position == 200u);
+            query_view, colliding_view, 3, 15, anchors));
+        REQUIRE(anchors.size() == 3u);
+        CHECK(anchors.data()[0].ref_position == 100u);
+        CHECK(anchors.data()[1].ref_position == 300u);
+        CHECK(anchors.data()[2].ref_position == 200u);
     }
 
-    SECTION("invalid native spans clear previously collected output") {
+    SECTION("invalid seed geometry clears previously collected output") {
         context::context ctx;
         context::installed_context_scope installed{ctx};
         auto scope = ctx.push<context::arena::chain>();
         auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
-        anchors.push_back({});
-        segmented_seed_index index;
-        const auto result = ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
-            query_view, target_view, counter, packed_equality, 3, 0, anchors);
-        REQUIRE_FALSE(result);
-        CHECK(result.error() == ::bioseq::simd::alignment_contract_error::coordinates);
-        CHECK(anchors.empty());
+        for (const auto [seed_span, target_end] :
+             std::array<std::pair<std::int32_t, std::uint64_t>, 4u>{
+                 std::pair{0, std::uint64_t{300}},
+                 std::pair{256, std::uint64_t{300}},
+                 std::pair{15, std::uint64_t{1000}},
+                 std::pair{15, std::uint64_t{5}}}) {
+            CAPTURE(seed_span, target_end);
+            anchors.push_back({});
+            segmented_seed_index index;
+            // The last span fails after earlier valid candidates have been appended.
+            index.second[0] = target_end << 1u;
+            const auto result = ::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
+                query_view, target_view, 3, seed_span, anchors);
+            REQUIRE_FALSE(result);
+            CHECK(result.error() == ::bioseq::simd::alignment_contract_error::coordinates);
+            CHECK(anchors.empty());
+        }
     }
 }
 

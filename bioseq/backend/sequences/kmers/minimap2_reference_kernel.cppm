@@ -400,7 +400,14 @@ inline void collect_minimizers_simd(
 
             // Reuse one palindrome comparison for both hash and strand masking.
             const hash_mask_type palindrome_mask = hasher.palindrome_mask(d);
-            const hash_mask_type valid_mask = hn::AndNot(palindrome_mask, rank_valid);
+            hash_mask_type valid_mask = hn::AndNot(palindrome_mask, rank_valid);
+            if constexpr (p_minimizer_type::k_hash_field_mask <= std::numeric_limits<hash_value>::max()) {
+                if (kmer_size * ::bioseq::minimizers::minimizer_exact_rank_bits<alphabet_type>
+                    == std::bit_width(p_minimizer_type::k_hash_field_mask)) {
+                    valid_mask = hn::And(valid_mask, hn::Ne(hash_vec, hn::Set(d,
+                        static_cast<hash_value>(p_minimizer_type::k_hash_field_mask))));
+                }
+            }
             hash_vec = hn::IfThenElse(valid_mask, hash_vec, max_vec);
             // Clear the strand for palindromes; explicit validity excludes padding.
             strand_vec = hn::IfThenZeroElse(hn::And(palindrome_mask, mask), strand_vec);

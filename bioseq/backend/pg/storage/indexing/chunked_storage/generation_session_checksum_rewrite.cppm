@@ -91,7 +91,8 @@ rewrite_source_checksum_pg(Oid table_oid, std::uint64_t query_key, std::uint64_t
     minimizer_generation_manifest manifest{};
     {
         constexpr auto k_fixture_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
-            bioseq::indexing::minimizer_sketch_backend::scalar);
+            bioseq::indexing::minimizer_sketch_backend::scalar,
+            bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>(), 15u);
         constexpr auto k_fixture_layout =
             bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
                 bioseq::simd::minimizer_algorithm::scalar,

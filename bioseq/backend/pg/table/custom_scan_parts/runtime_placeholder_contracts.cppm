@@ -3,7 +3,10 @@
  * @brief Holds the writable constants used to project match results and symbol counts.
  */
 module;
-#include <bioseq/pg_compat.h>
+#include <cstdint>
+
+// PostgreSQL owns this global tag; placeholders only retain borrowed pointers.
+struct Const;
 
 export module bioseq.postgres.table:custom_scan_runtime_placeholder_contracts;
 
@@ -20,7 +23,7 @@ export {
         Const* placeholder = nullptr;
         int rank = -1;
         char letter = '\0';
-        int16_t column_attno = 0; // sequence column whose symbols are counted
+        std::int16_t column_attno = 0; // sequence column whose symbols are counted
         std::string column_name;  // column name used in rewrite diagnostics
     };
 

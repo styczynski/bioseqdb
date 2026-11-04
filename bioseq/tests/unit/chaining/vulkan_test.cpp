@@ -8,6 +8,7 @@
 #include <vulkan/vulkan.h>
 
 import std;
+import bioseq.tests.unit.alignment.block_aligner_support;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.common.context;
@@ -59,7 +60,8 @@ struct packed_alignment_fixture {
     [[nodiscard]] gv::gpu_packed_sequence_upload upload() const {
         auto begin = sequence.cbegin();
         const auto bytes = std::as_bytes(std::span{sequence.read_cptr(begin), sequence.size()});
-        const auto rank_lut = gv::make_vulkan_rank_lut<range_type>();
+        const auto rank_lut = gv::make_vulkan_rank_lut<range_type>(
+            bioseq::minimizers::k_bounded_nthash_scheme_id);
         return {.sequence = {
             .seq_word_offset = 0u,
             .byte_count = bytes.size(),
@@ -1462,6 +1464,417 @@ TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
         REQUIRE(scan.has_binding(3));
     }
 }
+
+// BEGIN_TEMPORARY_NATIVE_PROTEIN_PROBE — DO NOT COMMIT
+// TEMPORARY / UNCOMMITTED INSERTION BLOCK.
+// Existing owner: bioseq/tests/unit/chaining/vulkan_test.cpp.
+// Add import bioseq.tests.unit.alignment.block_aligner_support; beside its imports.
+// Insert this block inside its existing bioseq::simd::HWY_NAMESPACE namespace.
+// Catch expression: "Manual native AA27 GPU dense scoring probe,Manual native protein registry GPU dense scoring probe"
+// Execute only via bioseq-build MCP; remove before committing.
+namespace manual_native_gpu_alignment_probe {
+using alphabet = seq::aa27;
+using matrix_type = scoring_matrix<alphabet>;
+
+/** Independent bounded scalar Gotoh oracle, reused from the temporary CPU probe. */
+template <class Matrix>
+[[nodiscard]] std::int64_t oracle(std::span<const std::uint32_t> query,
+    std::span<const std::uint32_t> target, const Matrix& matrix,
+    std::int32_t gap_open, std::int32_t gap_extend) {
+    constexpr auto unreachable = std::numeric_limits<std::int64_t>::min() / 4;
+    std::vector<std::int64_t> prior(target.size() + 1u), current(target.size() + 1u);
+    std::vector<std::int64_t> insertions(target.size() + 1u, unreachable);
+    for (std::size_t column = 1u; column <= target.size(); ++column)
+        prior[column] = -std::int64_t{gap_open} - std::int64_t{gap_extend} * static_cast<std::int64_t>(column);
+    for (std::size_t row = 1u; row <= query.size(); ++row) {
+        current[0] = -std::int64_t{gap_open} - std::int64_t{gap_extend} * static_cast<std::int64_t>(row);
+        auto deletion = unreachable;
+        for (std::size_t column = 1u; column <= target.size(); ++column) {
+            insertions[column] = std::max(prior[column] - gap_open - gap_extend,
+                                          insertions[column] - gap_extend);
+            deletion = std::max(current[column - 1u] - gap_open - gap_extend,
+                                deletion - gap_extend);
+            current[column] = std::max({prior[column - 1u] +
+                matrix.at(target[column - 1u], query[row - 1u]), insertions[column], deletion});
+        }
+        prior.swap(current);
+    }
+    return prior.back();
+}
+
+/** Replay native CIGAR ranks and gap costs independently of both DP implementations. */
+template <class Matrix>
+void replay(std::span<const std::uint32_t> cigar, std::span<const std::uint32_t> query,
+    std::span<const std::uint32_t> target, const Matrix& matrix,
+    std::int32_t gap_open, std::int32_t gap_extend, std::int64_t expected_score) {
+    std::vector<bioseq::cigar_run> runs;
+    REQUIRE(bioseq::decode_native_cigar(cigar, runs).has_value());
+    std::size_t query_position = 0u, target_position = 0u;
+    std::int64_t score = 0;
+    for (const auto& run : runs) {
+        const auto operation = seqan3::to_char(run.operation);
+        INFO("CIGAR operation=" << operation << " length=" << run.length);
+        if (operation == 'M' || operation == '=' || operation == 'X') {
+            REQUIRE(run.length <= query.size() - query_position);
+            REQUIRE(run.length <= target.size() - target_position);
+            for (std::size_t offset = 0u; offset < run.length; ++offset)
+                score += matrix.at(target[target_position + offset], query[query_position + offset]);
+            query_position += run.length;
+            target_position += run.length;
+        } else if (operation == 'I') {
+            REQUIRE(run.length <= query.size() - query_position);
+            query_position += run.length;
+            score -= std::int64_t{gap_open} + std::int64_t{gap_extend} * static_cast<std::int64_t>(run.length);
+        } else if (operation == 'D') {
+            REQUIRE(run.length <= target.size() - target_position);
+            target_position += run.length;
+            score -= std::int64_t{gap_open} + std::int64_t{gap_extend} * static_cast<std::int64_t>(run.length);
+        } else FAIL("Unexpected global alignment CIGAR operation");
+    }
+    CHECK(query_position == query.size());
+    CHECK(target_position == target.size());
+    CHECK(score == expected_score);
+}
+} // namespace manual_native_gpu_alignment_probe
+
+/** Reuse the same CPU/GPU/oracle checks at native matrix strides and packed tails. */
+template <sequence_alphabet Alphabet>
+void exercise_native_dense_gpu(std::size_t base_length, std::size_t inserted_length = 1u) {
+    using namespace manual_native_gpu_alignment_probe;
+    using alphabet = Alphabet;
+    using matrix_type = scoring_matrix<alphabet>;
+    CAPTURE(supported_biological_alphabets::template index_of<alphabet>(), base_length);
+    namespace cpu_helpers = bioseq::simd::block_aligner_test_support;
+    auto& runtime = gv::runtime::instance();
+    INFO("Vulkan initialization: " << runtime.initialization_error());
+    REQUIRE(ch::is_vulkan_chaining_supported()); // A manual run must not silently skip hardware.
+    REQUIRE_FALSE(runtime.features().software_device);
+    context::context storage;
+    context::installed_context_scope installed{storage};
+    constexpr auto rank_count = seqan3::alphabet_size<alphabet>;
+    constexpr auto dimension = matrix_type::k_alphabet_dimension;
+    constexpr auto highest = static_cast<std::uint32_t>(rank_count - 1u);
+    constexpr std::int32_t gap_open = 20, gap_extend = 3;
+    const auto uniform = matrix_type::generate(6, 6, 1);
+    REQUIRE(uniform.has_value());
+    std::array<std::int32_t, matrix_type::k_entry_count> entries{};
+    std::ranges::copy(uniform->score_entries(), entries.begin());
+    for (std::size_t target_rank = 0u; target_rank < rank_count; ++target_rank)
+        for (std::size_t query_rank = 0u; query_rank < rank_count; ++query_rank)
+            entries[target_rank * dimension + query_rank] = target_rank == query_rank
+                ? 5 + static_cast<std::int32_t>(target_rank % 3u) : -6;
+    entries[(highest - 1u) * dimension + highest] = 2;
+    entries[highest * dimension + highest - 1u] = -9;
+    const auto matrix = matrix_type::from_entries(entries);
+    REQUIRE(matrix.has_value());
+    REQUIRE(matrix->kind() == substitution_kind::dense);
+    const auto device_matrix = gv::gpu_substitution_matrix::from_prepared(*matrix);
+    REQUIRE(device_matrix.has_value());
+    REQUIRE(device_matrix->header().rank_count == rank_count);
+    REQUIRE(device_matrix->header().row_stride == rank_count);
+    REQUIRE(device_matrix->header().element_count == rank_count * rank_count);
+    REQUIRE(device_matrix->header().alphabet_code == supported_biological_alphabets::template index_of<alphabet>());
+    for (std::size_t target_rank = 0u; target_rank < rank_count; ++target_rank)
+        for (std::size_t query_rank = 0u; query_rank < rank_count; ++query_rank)
+            CHECK(device_matrix->values()[target_rank * rank_count + query_rank]
+                == entries[target_rank * dimension + query_rank]);
+
+    std::vector<std::uint32_t> base(base_length);
+    for (std::size_t index = 0u; index < base.size(); ++index)
+        base[index] = highest - static_cast<std::uint32_t>(index % 3u);
+    auto changed = base;
+    changed[3u] = highest - 1u;
+    changed[12u] = highest - 1u;
+    auto inserted = base;
+    inserted.insert(inserted.begin() + base_length / 2u, inserted_length, highest);
+    const std::array<std::pair<std::vector<std::uint32_t>, std::vector<std::uint32_t>>, 4> cases{{
+        {base, changed}, {changed, base}, {inserted, base}, {base, inserted}}};
+    // Closed-form scores: two asymmetric substitutions or one one-symbol gap.
+    // No golden is regenerated from either DP implementation or the oracle.
+    std::int64_t diagonal_total = 0;
+    for (const auto rank : base) diagonal_total += 5 + static_cast<std::int32_t>(rank % 3u);
+    const auto changed_diagonal = 5 + static_cast<std::int32_t>(highest % 3u);
+    const std::array<std::int64_t, 4> hand_checked_scores{
+        diagonal_total - 2 * changed_diagonal + 4,
+        diagonal_total - 2 * changed_diagonal - 18,
+        diagonal_total - gap_open - gap_extend * static_cast<std::int64_t>(inserted_length),
+        diagonal_total - gap_open - gap_extend * static_cast<std::int64_t>(inserted_length)};
+    if constexpr (std::same_as<alphabet, seq::aa27>) {
+        if (base_length == 24u && inserted_length == 1u) {
+            constexpr std::array<std::int64_t, 4> original_scores{134, 112, 121, 121};
+            REQUIRE(hand_checked_scores == original_scores);
+        }
+    }
+    std::array<std::int64_t, 4> scores{};
+    for (std::size_t case_index = 0u; case_index < cases.size(); ++case_index) {
+        const auto& [query, target] = cases[case_index];
+        CAPTURE(case_index, query.size(), target.size());
+        const auto expected = oracle(query, target, *matrix, gap_open, gap_extend);
+        REQUIRE(expected == hand_checked_scores[case_index]);
+        scores[case_index] = expected;
+        packed_alignment_fixture<alphabet> query_fixture{query};
+        packed_alignment_fixture<alphabet> target_fixture{target};
+        auto query_owner = bioseq::storage::make_resident_lazy_sequence(query_fixture.sequence);
+        auto target_owner = bioseq::storage::make_resident_lazy_sequence(target_fixture.sequence);
+        const auto query_view = bioseq::storage::make_lazy_sequence_view(query_owner);
+        const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
+        const auto cpu = cpu_helpers::fixed_alignment_kernels<alphabet>().align_ksw2_single_affine(
+            false, query_view, target_view, 0u, query.size(), 0u, target.size(), *matrix,
+            ksw_single_affine_parameters{.gap_open = gap_open, .gap_extend = gap_extend,
+                .band_width = -1, .z_drop = -1});
+        REQUIRE(cpu.has_value());
+        CHECK(cpu->score == expected);
+        replay({cpu->cigar.data(), cpu->cigar.size()}, query, target, *matrix,
+               gap_open, gap_extend, expected);
+        const auto query_length = static_cast<std::uint32_t>(query.size());
+        const auto target_length = static_cast<std::uint32_t>(target.size());
+        const auto band = std::max(query_length, target_length);
+        const std::uint32_t cigar_capacity = query_length + target_length;
+        const std::array<gv::gpu_alignment_cigar_job_wire, 1> jobs{{{
+            .query_symbol_offset = 0u, .target_symbol_offset = 0u,
+            .query_len = query_length, .target_len = target_length,
+            .query_global_start = 7u, .target_global_start = 101u,
+            .band_width = band, .flags = 0u, .cigar_offset = 0u,
+            .cigar_capacity = cigar_capacity, .traceback_tile_offset = 0u,
+            .traceback_tile_count = (query_length + 1u) * (target_length + 1u)}}};
+        const gv::gpu_alignment_cigar_params parameters{
+            .alphabet_size = rank_count, .max_band_width = band,
+            .tile_query = gv::k_gpu_alignment_cigar_traceback_tile_len,
+            .tile_target = gv::k_gpu_alignment_cigar_traceback_tile_len,
+            .match_score = 6, .mismatch_penalty = 6,
+            .gap_open_short = gap_open, .gap_extend_short = gap_extend,
+            .gap_open_long = gap_open, .gap_extend_long = gap_extend,
+            .z_drop = -1, .end_bonus = 0, .flags = 0u, .reserved = 0u};
+        const auto dispatch_before = runtime.alignment_extension_dispatch_count();
+        const auto gpu = runtime.run_alignment_simple_cigar_roundtrip(
+            query_fixture.upload(), target_fixture.upload(), jobs, parameters,
+            *device_matrix, cigar_capacity);
+        REQUIRE(gpu.has_value());
+        REQUIRE(runtime.alignment_extension_dispatch_count() > dispatch_before);
+        REQUIRE(gpu->results.size() == 1u);
+        const auto& result = gpu->results.front();
+        REQUIRE(result.status == gv::k_gpu_alignment_extension_status_ok);
+        CHECK(result.score == expected);
+        CHECK(result.score == cpu->score);
+        CHECK(result.query_start == 7u);
+        CHECK(result.query_end == 7u + query_length);
+        CHECK(result.target_start == 101u);
+        CHECK(result.target_end == 101u + target_length);
+        REQUIRE(result.cigar_offset <= gpu->packed_cigar.size());
+        REQUIRE(result.cigar_length <= gpu->packed_cigar.size() - result.cigar_offset);
+        const std::span<const std::uint32_t> returned_cigar{gpu->packed_cigar};
+        const auto cigar = returned_cigar.subspan(result.cigar_offset, result.cigar_length);
+        replay(cigar, query, target, *matrix, gap_open, gap_extend, expected);
+        INFO("CPU CIGAR=" << cpu_helpers::packed_cigar_string(cpu->cigar)
+             << " GPU CIGAR=" << cpu_helpers::packed_cigar_string(cigar)
+             << " score=" << result.score);
+
+        const std::array<gv::gpu_alignment_extension_job_wire, 1> score_jobs{{{
+            0u, 0u, query_length, target_length, band, 0u, 0u, 0u}}};
+        const gv::gpu_alignment_extension_params score_parameters{
+            .max_query_len = query_length, .max_target_len = target_length,
+            .max_band_width = band, .alphabet_size = rank_count,
+            .match_score = 6, .mismatch_penalty = 6,
+            .gap_open_penalty = gap_open, .gap_extend_penalty = gap_extend};
+        const auto score_dispatch_before = runtime.alignment_extension_dispatch_count();
+        const auto score_only = runtime.run_alignment_extension_roundtrip(
+            query_fixture.upload(), target_fixture.upload(), score_jobs, score_parameters, *device_matrix);
+        REQUIRE(score_only.has_value());
+        REQUIRE(runtime.alignment_extension_dispatch_count() > score_dispatch_before);
+        REQUIRE(score_only->size() == 1u);
+        CHECK(score_only->front().status == gv::k_gpu_alignment_extension_status_ok);
+        CHECK(score_only->front().score == expected);
+        CHECK(score_only->front().query_end == query_length);
+        CHECK(score_only->front().target_end == target_length);
+    }
+    CHECK(scores[0] - scores[1] == 2 * (2 - (-9)));
+
+}
+
+/** Exercise native dense extrema and numeric/descriptor rejection without large allocations. */
+template <sequence_alphabet Alphabet>
+void exercise_native_dense_gpu_admission() {
+    using matrix_type = scoring_matrix<Alphabet>;
+    constexpr auto rank_count = seqan3::alphabet_size<Alphabet>;
+    constexpr auto dimension = matrix_type::k_alphabet_dimension;
+    constexpr auto highest = static_cast<std::uint32_t>(rank_count - 1u);
+    CAPTURE(supported_biological_alphabets::template index_of<Alphabet>());
+    auto& runtime = gv::runtime::instance();
+    REQUIRE(ch::is_vulkan_chaining_supported());
+    REQUIRE_FALSE(runtime.features().software_device);
+    context::context storage;
+    context::installed_context_scope installed{storage};
+    const auto uniform = matrix_type::generate(1, 1, 1);
+    REQUIRE(uniform.has_value());
+    std::array<std::int32_t, matrix_type::k_entry_count> entries{};
+    std::ranges::copy(uniform->score_entries(), entries.begin());
+    for (std::size_t target_rank = 0u; target_rank < rank_count; ++target_rank)
+        for (std::size_t query_rank = 0u; query_rank < rank_count; ++query_rank)
+            entries[target_rank * dimension + query_rank] = target_rank == query_rank ? 127 : -127;
+    entries[0u] = 126;
+    entries[1u] = 1; // Positive off-diagonal; keep the extrema fixture genuinely dense.
+    const auto matrix = matrix_type::from_entries(entries);
+    REQUIRE(matrix.has_value());
+    REQUIRE(matrix->kind() == substitution_kind::dense);
+    const auto device_matrix = gv::gpu_substitution_matrix::from_prepared(*matrix);
+    REQUIRE(device_matrix.has_value());
+    const std::array<std::uint32_t, 1> query_ranks{highest}, exact_target{highest}, changed_target{0u};
+    const packed_alignment_fixture<Alphabet> query{query_ranks};
+    const packed_alignment_fixture<Alphabet> exact{exact_target};
+    const packed_alignment_fixture<Alphabet> changed{changed_target};
+    // B = (Q+T)*(M+q+e) = 2*(127 + (2^28-129) + 1) = 2^29-2.
+    // Increasing q by one reaches the rejected boundary exactly, with one symbol per operand.
+    constexpr std::int32_t gap_open = (std::int32_t{1} << 28) - 129;
+    constexpr std::int32_t gap_extend = 1;
+    const auto cpu_domain = validate_alignment_numeric_contract(matrix->summary(), 1u, 1u, gap_open, gap_extend);
+    REQUIRE_FALSE(cpu_domain.has_value());
+    CHECK(cpu_domain.error() == alignment_contract_error::score_range);
+    // GPU intentionally admits int32 arithmetic beyond KSW's narrow-difference domain.
+    const std::array<gv::gpu_alignment_extension_job_wire, 1> score_jobs{{{0u, 0u, 1u, 1u, 1u, 0u, 0u, 0u}}};
+    const gv::gpu_alignment_extension_params score_params{
+        .max_query_len = 1u, .max_target_len = 1u, .max_band_width = 1u,
+        .alphabet_size = rank_count, .match_score = 1, .mismatch_penalty = 1,
+        .gap_open_penalty = gap_open, .gap_extend_penalty = gap_extend};
+    const std::array<gv::gpu_alignment_cigar_job_wire, 1> cigar_jobs{{{
+        .query_len = 1u, .target_len = 1u, .query_global_start = 7u, .target_global_start = 101u,
+        .band_width = 1u, .cigar_capacity = 2u, .traceback_tile_count = 4u}}};
+    const gv::gpu_alignment_cigar_params cigar_params{
+        .alphabet_size = rank_count, .max_band_width = 1u,
+        .tile_query = gv::k_gpu_alignment_cigar_traceback_tile_len,
+        .tile_target = gv::k_gpu_alignment_cigar_traceback_tile_len,
+        .match_score = 1, .mismatch_penalty = 1,
+        .gap_open_short = gap_open, .gap_extend_short = gap_extend,
+        .gap_open_long = gap_open, .gap_extend_long = gap_extend, .z_drop = -1};
+    for (const bool mismatch : {false, true}) {
+        const auto target_upload = mismatch ? changed.upload() : exact.upload();
+        const auto target_ranks = mismatch ? changed_target : exact_target;
+        const auto expected = manual_native_gpu_alignment_probe::oracle(
+            query_ranks, target_ranks, *matrix, gap_open, gap_extend);
+        REQUIRE(expected == (mismatch ? -127 : 127));
+        const auto before = runtime.alignment_extension_dispatch_count();
+        const auto cigar = runtime.run_alignment_simple_cigar_roundtrip(
+            query.upload(), target_upload, cigar_jobs, cigar_params, *device_matrix, 2u);
+        REQUIRE(cigar.has_value());
+        REQUIRE(runtime.alignment_extension_dispatch_count() > before);
+        REQUIRE(cigar->results.size() == 1u);
+        const auto& result = cigar->results.front();
+        REQUIRE(result.status == gv::k_gpu_alignment_extension_status_ok);
+        CHECK(result.score == expected);
+        CHECK(result.query_start == 7u);
+        CHECK(result.query_end == 8u);
+        CHECK(result.target_start == 101u);
+        CHECK(result.target_end == 102u);
+        REQUIRE(result.cigar_offset <= cigar->packed_cigar.size());
+        REQUIRE(result.cigar_length <= cigar->packed_cigar.size() - result.cigar_offset);
+        manual_native_gpu_alignment_probe::replay(
+            std::span<const std::uint32_t>{cigar->packed_cigar}.subspan(result.cigar_offset, result.cigar_length),
+            query_ranks, target_ranks, *matrix, gap_open, gap_extend, expected);
+        const auto score_before = runtime.alignment_extension_dispatch_count();
+        const auto score = runtime.run_alignment_extension_roundtrip(
+            query.upload(), target_upload, score_jobs, score_params, *device_matrix);
+        REQUIRE(score.has_value());
+        REQUIRE(runtime.alignment_extension_dispatch_count() > score_before);
+        REQUIRE(score->size() == 1u);
+        CHECK(score->front().status == gv::k_gpu_alignment_extension_status_ok);
+        // Score-only extension is local; the negative one-cell case has score zero.
+        CHECK(score->front().score == (mismatch ? 0 : 127));
+    }
+    const auto before_rejections = runtime.alignment_extension_dispatch_count();
+    const auto reject_score = [&runtime, &exact, &score_jobs, &score_params, &device_matrix](
+        const gv::gpu_packed_sequence_upload& query_upload, alignment_contract_error expected) {
+        const auto result = runtime.run_alignment_extension_roundtrip(
+            query_upload, exact.upload(), score_jobs, score_params, *device_matrix);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error() == expected);
+    };
+    auto malformed = query.upload();
+    malformed.sequence.unit_bits = 9u;
+    reject_score(malformed, alignment_contract_error::coordinates);
+    malformed = query.upload();
+    malformed.bytes = malformed.bytes.first(malformed.bytes.size() - 1u);
+    reject_score(malformed, alignment_contract_error::coordinates);
+    // First native rank is invalid while all geometry and backing extents remain valid.
+    auto invalid_rank_upload = query.upload();
+    std::vector<std::byte> invalid_bytes(invalid_rank_upload.bytes.begin(), invalid_rank_upload.bytes.end());
+    std::uint32_t first_unit{};
+    std::memcpy(&first_unit, invalid_bytes.data(), sizeof(first_unit));
+    first_unit = (first_unit & ~static_cast<std::uint32_t>(invalid_rank_upload.sequence.char_mask))
+        | static_cast<std::uint32_t>(rank_count);
+    std::memcpy(invalid_bytes.data(), &first_unit, sizeof(first_unit));
+    invalid_rank_upload.bytes = invalid_bytes;
+    reject_score(invalid_rank_upload, alignment_contract_error::coordinates);
+    auto invalid_jobs = score_jobs;
+    invalid_jobs.front().query_offset = std::numeric_limits<std::uint32_t>::max();
+    const auto invalid_offset = runtime.run_alignment_extension_roundtrip(
+        query.upload(), exact.upload(), invalid_jobs, score_params, *device_matrix);
+    REQUIRE_FALSE(invalid_offset.has_value());
+    CHECK(invalid_offset.error() == alignment_contract_error::coordinates);
+    auto excessive_score = score_params;
+    ++excessive_score.gap_open_penalty;
+    const auto overflow_score = runtime.run_alignment_extension_roundtrip(
+        query.upload(), exact.upload(), score_jobs, excessive_score, *device_matrix);
+    REQUIRE_FALSE(overflow_score.has_value());
+    CHECK(overflow_score.error() == alignment_contract_error::score_accumulation);
+    auto excessive_cigar = cigar_params;
+    ++excessive_cigar.gap_open_short;
+    ++excessive_cigar.gap_open_long;
+    const auto overflow_cigar = runtime.run_alignment_simple_cigar_roundtrip(
+        query.upload(), exact.upload(), cigar_jobs, excessive_cigar, *device_matrix, 2u);
+    REQUIRE_FALSE(overflow_cigar.has_value());
+    CHECK(overflow_cigar.error() == alignment_contract_error::score_accumulation);
+    auto reverse_jobs = cigar_jobs;
+    reverse_jobs.front().flags = gv::k_gpu_alignment_cigar_job_flag_reverse_target;
+    const auto reverse = runtime.run_alignment_simple_cigar_roundtrip(
+        query.upload(), exact.upload(), reverse_jobs, cigar_params, *device_matrix, 2u);
+    REQUIRE_FALSE(reverse.has_value());
+    CHECK(reverse.error() == alignment_contract_error::orientation);
+    // Same cardinality cannot authorize the other ten-letter protein alphabet.
+    if constexpr (std::same_as<Alphabet, seq::aa10li> || std::same_as<Alphabet, seq::aa10murphy>) {
+        malformed = query.upload();
+        using other = std::conditional_t<std::same_as<Alphabet, seq::aa10li>, seq::aa10murphy, seq::aa10li>;
+        malformed.sequence.alphabet_code = supported_biological_alphabets::template index_of<other>();
+        reject_score(malformed, alignment_contract_error::coordinates);
+    }
+    for (const std::int32_t invalid_score : {-128, 128}) {
+        auto invalid_entries = entries;
+        invalid_entries[0u] = invalid_score;
+        const auto invalid_matrix = matrix_type::from_entries(invalid_entries);
+        REQUIRE_FALSE(invalid_matrix.has_value());
+        CHECK(invalid_matrix.error() == alignment_contract_error::score_range);
+    }
+    CHECK(runtime.alignment_extension_dispatch_count() == before_rejections);
+}
+
+TEST_CASE("Manual native AA27 GPU dense scoring probe",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    exercise_native_dense_gpu<seq::aa27>(24u);
+}
+
+TEST_CASE("Manual native protein registry GPU dense scoring probe",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    constexpr std::array short_lengths{24u, 25u, 31u};
+    std::size_t checked_profiles = 0u;
+    const auto exercise = [&checked_profiles, &short_lengths]<sequence_alphabet Alphabet>() {
+        if constexpr (supported_biological_alphabets::entry_for<Alphabet>::is_amino_acid) {
+            for (const auto length : short_lengths) {
+                exercise_native_dense_gpu<Alphabet>(length);
+                ++checked_profiles;
+            }
+            exercise_native_dense_gpu<Alphabet>(129u, 65u);
+            ++checked_profiles;
+            exercise_native_dense_gpu_admission<Alphabet>();
+        }
+    };
+    std::apply([&exercise](auto... entry) {
+        (exercise.template operator()<typename decltype(entry)::alphabet_type>(), ...);
+    }, supported_biological_alphabets::alphabet_entries_tuple{});
+    constexpr auto protein_count = []<class... Entries>(std::tuple<Entries...>) {
+        return (std::size_t{} + ... + static_cast<std::size_t>(Entries::is_amino_acid));
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+    CHECK(checked_profiles == protein_count * (short_lengths.size() + 1u));
+}
+
+// END_TEMPORARY_NATIVE_PROTEIN_PROBE
 
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

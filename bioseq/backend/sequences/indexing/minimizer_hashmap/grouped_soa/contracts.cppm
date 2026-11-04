@@ -192,17 +192,24 @@ is_supported_minimizer_scheme_identity(std::uint16_t scheme_id,
             scheme_revision == k_bounded_nthash_u32_r7_sum_scheme_revision);
 }
 
-/// Get the hash and selection scheme used by a backend. For exact_simd this
-/// describes the continuation/index path. Unknown backends return, an invalid identity.
+/// Resolve the hash/selection scheme from backend and complete native exact-key capacity.
 [[nodiscard]] constexpr minimizer_scheme_identity
-minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept {
+minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend,
+    std::size_t alphabet_code, std::size_t kmer_size) noexcept {
+    const auto rank_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(alphabet_code);
+    if (!rank_bits || kmer_size == 0u)
+        return {};
+    const bool exact_fits = bioseq::minimizers::exact_minimizer_shape_fits(*rank_bits, kmer_size);
     switch (backend) {
     case minimizer_sketch_backend::scalar:
-    case minimizer_sketch_backend::exact_simd:
-        return k_minimap_scheme_identity;
     case minimizer_sketch_backend::vulkan_segment:
+        if (exact_fits) return k_minimap_scheme_identity;
+        [[fallthrough]];
     case minimizer_sketch_backend::bounded_nthash_simd:
-        return k_bounded_nthash_u32_r7_sum_scheme_identity;
+        return kmer_size <= 31u ? k_bounded_nthash_u32_r7_sum_scheme_identity
+                               : minimizer_scheme_identity{};
+    case minimizer_sketch_backend::exact_simd:
+        return exact_fits ? k_minimap_scheme_identity : minimizer_scheme_identity{};
     }
     return {};
 }
@@ -245,10 +252,18 @@ template <sequence_alphabet p_alphabet>
     return static_cast<std::uint8_t>(typed_code);
 }
 
-/** Ordinary storage has no scheme tag and can contain only exact minimap hashes. */
+/** Ordinary storage's alphabet-derived fixed k always fits; explicit bounded producers cannot write it. */
 [[nodiscard]] constexpr bool ordinary_minimizer_index_backend_supported(
     const minimizer_sketch_backend backend) noexcept {
-    return minimizer_scheme_identity_for_backend(backend) == k_minimap_scheme_identity;
+    switch (backend) {
+    case minimizer_sketch_backend::scalar:
+    case minimizer_sketch_backend::exact_simd:
+    case minimizer_sketch_backend::vulkan_segment:
+        return true;
+    case minimizer_sketch_backend::bounded_nthash_simd:
+        return false;
+    }
+    return false;
 }
 
 /**
@@ -275,17 +290,24 @@ minimizer_algorithm_for_explicit_sketch_backend(minimizer_sketch_backend backend
 /// Get the hsh and selection scheme for a saved producer identity.
 /// Unsupported IDs or revisions return  an invalid scheme.
 [[nodiscard]] constexpr minimizer_scheme_identity
-minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity identity) noexcept {
+minimizer_scheme_identity_for_producer_backend(minimizer_producer_identity identity,
+    std::size_t alphabet_code, std::size_t kmer_size) noexcept {
     if (!is_supported_minimizer_producer_backend_identity(identity)) {
         return {};
     }
     switch (identity.id) {
     case minimizer_producer_backend::scalar:
+        return minimizer_scheme_identity_for_backend(
+            minimizer_sketch_backend::scalar, alphabet_code, kmer_size);
     case minimizer_producer_backend::exact_simd:
-        return k_minimap_scheme_identity;
+        return minimizer_scheme_identity_for_backend(
+            minimizer_sketch_backend::exact_simd, alphabet_code, kmer_size);
     case minimizer_producer_backend::vulkan_segment:
+        return minimizer_scheme_identity_for_backend(
+            minimizer_sketch_backend::vulkan_segment, alphabet_code, kmer_size);
     case minimizer_producer_backend::bounded_nthash_simd:
-        return k_bounded_nthash_u32_r7_sum_scheme_identity;
+        return minimizer_scheme_identity_for_backend(
+            minimizer_sketch_backend::bounded_nthash_simd, alphabet_code, kmer_size);
     case minimizer_producer_backend::invalid:
         break;
     }
@@ -488,9 +510,12 @@ make_minimizer_generation_algorithm_identity(
                                                          selection.packed_storage_bits);
     using family_type = minimizer_physical_layout_family;
     using algorithm_type = ::bioseq::simd::minimizer_algorithm;
-    const family_type expected_family =
-        selection.requested_algorithm == algorithm_type::bounded_nthash_simd ||
-                selection.requested_algorithm == algorithm_type::vulkan_minimap_integer
+    const bool uses_bounded_hash = selection.requested_algorithm == algorithm_type::bounded_nthash_simd ||
+        ((selection.requested_algorithm == algorithm_type::vulkan_minimap_integer
+                || selection.requested_algorithm == algorithm_type::scalar)
+            && !exact_minimizer_shape_fits_for_alphabet_code(
+                selection.alphabet_id, selection.runtime_kmer_size));
+    const family_type expected_family = uses_bounded_hash
             ? family_type::fixed_u32_hash
             : selection.effective_algorithm == algorithm_type::scalar
                 ? family_type::minimap2_scalar_reference_exact_k
@@ -1075,7 +1100,8 @@ expected_grouped_soa_generation_identity_for_backend(
     std::uint16_t kmer_size,
     std::uint16_t window_size,
     std::optional<std::uint64_t> max_occ_cap = std::nullopt) noexcept {
-    const minimizer_scheme_identity scheme = minimizer_scheme_identity_for_backend(backend);
+    const minimizer_scheme_identity scheme = minimizer_scheme_identity_for_backend(
+        backend, alphabet_code, kmer_size);
     const minimizer_producer_identity producer_backend =
         minimizer_producer_backend_identity_for_backend(backend);
     const auto profile = derive_grouped_soa_minimizer_profile(

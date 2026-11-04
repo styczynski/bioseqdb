@@ -31,7 +31,6 @@ export import :reservation;
 import bioseq.common.checked_arithmetic;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_index;
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.chaining.core;
 import bioseq.pipeline.minimap_port;
@@ -39,8 +38,6 @@ import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;
-import bioseq.sequences;
 
 export namespace bioseq::seeding {
 
@@ -210,6 +207,7 @@ struct vulkan_seed_lookup_completion {
         const seed_anchor_wire wire =
             bioseq::gpu::vulkan::load_seed_anchor_wire(payload, index);
         if (wire.ref_position < target_position_offset
+            || wire.ref_position - target_position_offset < minimum_query_end
             || wire.ref_position >= target_end
             || wire.query_position < minimum_query_end
             || wire.query_position >= query_length
@@ -382,6 +380,7 @@ struct vulkan_seed_lookup_completion {
         const std::size_t canonical_offset = pending.anchors.size();
         for (const gpu_anchor_wire& wire : job_wires) {
             if (wire.ref_position < target_position_offset ||
+                wire.ref_position < minimum_query_end ||
                 wire.ref_position >= target_end ||
                 wire.query_position < minimum_query_end ||
                 wire.query_position >= query_record.query_len ||
@@ -441,87 +440,6 @@ struct vulkan_seed_lookup_completion {
         std::move(job_storage));
 }
 
-/** Retain only native query intervals covered by the supplied minimizers. */
-template<sequence_alphabet Alphabet, class Minimizer>
-[[nodiscard]] auto prepare_native_query_seed_windows(
-    bioseq::storage::lazy_sequence_view<Alphabet> source,
-    std::span<const Minimizer> minimizers, std::uint32_t kmer_size) {
-    if (kmer_size == 0u) throw bioseq::gpu::vulkan::vulkan_runtime_error("native seed span is zero");
-    return bioseq::gpu::vulkan::prepare_native_seed_windows(source,
-        [minimizers, kmer_size, source](auto emit) {
-            for (const auto& minimizer : minimizers) {
-                const auto last = static_cast<std::uint64_t>(minimizer.last_pos());
-                if (last >= source.bp_size() || kmer_size > last + 1u)
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error("native query seed span is invalid");
-                emit(bioseq::gpu::vulkan::sequence_upload_interval{last + 1u - kmer_size, last + 1u});
-            }
-        });
-}
-
-/** Retain native target k-spans selected by exactly the lookup's occurrence pruning.
- * Sorted resident indexes reuse their checked mapped authority. Ordinary fused indexes
- * use their existing host lookup owner. Grouped GPU indexes provide GPU-produced coverage
- * directly to prepare_native_seed_windows instead of decoding grouped postings here.
- */
-template<sequence_alphabet Alphabet, class Minimizer>
-[[nodiscard]] auto prepare_native_target_seed_windows(
-    bioseq::storage::lazy_sequence_view<Alphabet> source,
-    std::span<const Minimizer> minimizers,
-    const bioseq::gpu::vulkan::runtime& runtime,
-    const std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index>& resident,
-    std::int32_t max_occ, std::uint32_t kmer_size,
-    const bioseq::indexing::minimizer_hashmap_fragment_index* host_index = nullptr) {
-    if (!resident || kmer_size == 0u || resident->target_position_offset > source.bp_size()
-        || resident->target_len > source.bp_size() - resident->target_position_offset
-        || resident->key.alphabet_code != supported_biological_alphabets::template index_of<Alphabet>())
-        throw bioseq::gpu::vulkan::vulkan_runtime_error("native target source disagrees with its seed index");
-    if (minimizers.empty() || max_occ < 0 || resident->position_count == 0u)
-        return bioseq::gpu::vulkan::prepare_native_seed_windows(source,
-            std::span<const bioseq::gpu::vulkan::sequence_upload_interval>{});
-    std::optional<mapped_sorted_dense_prefix_view> mapped;
-    if (resident->has_completed_mapped_payload_validation()) {
-        mapped = validated_mapped_sorted_dense_prefix_view(runtime, resident, false);
-    } else if (resident->source_stream_checksum != 0u || resident->mapped_stream_checksum != 0u ||
-               resident->complete_source_traversals != 0u || resident->complete_mapped_traversals != 0u ||
-               resident->ownership != bioseq::gpu::vulkan::gpu_index_build_stats{}) {
-        // Ordinary uploaded indexes may use their host owner below. An
-        // incomplete/corrupt carried receipt must not take that fallback.
-        throw mapped_prefix_invalid_error{};
-    }
-    if (!mapped && host_index == nullptr)
-        throw bioseq::gpu::vulkan::vulkan_runtime_error("native target coverage has no posting authority");
-    return bioseq::gpu::vulkan::prepare_native_seed_windows(source,
-        [minimizers, resident, max_occ, kmer_size, host_index, mapped](auto emit) mutable {
-            if (max_occ < 0) return;
-            const auto emit_positions = [resident, kmer_size, &emit](auto positions) {
-                for (const auto encoded : positions) {
-                    const auto last = static_cast<std::uint64_t>(encoded) >> 1u;
-                    if (last >= resident->target_len || kmer_size > last + 1u)
-                        throw bioseq::gpu::vulkan::vulkan_runtime_error("native target seed span is invalid");
-                    const auto end = resident->target_position_offset + last + 1u;
-                    emit(bioseq::gpu::vulkan::sequence_upload_interval{end - kmer_size, end});
-                }
-            };
-            for (const auto& minimizer : minimizers) {
-                if (mapped) {
-                    const auto positions = mapped_sorted_dense_positions(*mapped, minimizer.kmer());
-                    if (positions.size() <= static_cast<std::uint32_t>(max_occ)) emit_positions(positions);
-                } else {
-                    const auto hits = bioseq::indexing::lookup_minimizer_spans(*host_index, minimizer.kmer());
-                    if (hits.global_occurrence_count() == 0u
-                        || hits.global_occurrence_count() > static_cast<std::uint32_t>(max_occ)) continue;
-                    if (!hits.positions_complete() || !hits.well_formed())
-                        throw bioseq::gpu::vulkan::vulkan_runtime_error("native target postings are incomplete");
-                    const auto narrow = hits.contiguous_positions32();
-                    const auto wide = hits.contiguous_positions();
-                    if (!narrow.empty()) emit_positions(narrow);
-                    else if (!wide.empty()) emit_positions(wide);
-                    else for (const auto& segment : hits.segmented_positions()) emit_positions(segment.positions);
-                }
-            }
-        });
-}
-
 /**
  * Looks up target matches for query minimizers and returns sorted chaining anchors.
  *
@@ -548,15 +466,13 @@ template<sequence_alphabet Alphabet, class Minimizer>
  * Input or planning failures can return false. Runtime and  result-validation
  * failures can throw. Keep the completion reservation until the output anchors are freed.
  */
-template <class p_minimizer_type, sequence_alphabet Alphabet>
+template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_lookup_completion collect_seed_hits_vulkan(
     std::span<const p_minimizer_type> query_minimizers,
     std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer_type>>
         device_minimizers,
     const bioseq::indexing::minimizer_hashmap_fragment_index* target_index,
     std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> resident_index,
-    bioseq::storage::lazy_sequence_view<Alphabet> query_sequence,
-    bioseq::storage::lazy_sequence_view<Alphabet> target_sequence,
     bool vulkan_enabled,
     bioseq::storage::sequence_size_t query_len,
     std::int32_t max_occ,
@@ -640,16 +556,6 @@ template <class p_minimizer_type, sequence_alphabet Alphabet>
             vulkan_runtime.features().max_workgroup_count_x;
     }
 
-    if (query_sequence.bp_size() != query_len)
-        throw bioseq::gpu::vulkan::vulkan_runtime_error("native query source length disagrees with seed lookup");
-    auto native_query = prepare_native_query_seed_windows(
-        query_sequence, query_minimizers, static_cast<std::uint32_t>(kmer_size));
-    auto native_target = prepare_native_target_seed_windows(
-        target_sequence, query_minimizers, vulkan_runtime, resident_index,
-        max_occ, static_cast<std::uint32_t>(kmer_size), target_index);
-    using native_instance = bioseq::gpu::vulkan::admitted_sequence_detail::borrowed_u32_instance<Alphabet>;
-    const auto native_rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<compact_sequence_range<native_instance>>();
-
     const bool mapped_prefix_authority =
         resident_index->key.source_direct_sorted_dense;
     if (mapped_prefix_authority && fused_frontend) {
@@ -703,9 +609,6 @@ template <class p_minimizer_type, sequence_alphabet Alphabet>
                 })));
         }
         bioseq::gpu::vulkan::gpu_seed_inputs inputs{
-            .native_query = native_query.view(),
-            .native_target = native_target.view(),
-            .native_rank_policy = &native_rank_policy,
             .host_minimizer_bytes = fused_device_words != nullptr
                 ? std::span<const std::byte>{}
                 : std::as_bytes(query_minimizers),
@@ -1054,9 +957,6 @@ template <class p_minimizer_type, sequence_alphabet Alphabet>
                     query_minimizers, *target_index, max_occ, prefix_plan);
             }
             bioseq::gpu::vulkan::runtime_seed_lookup_inputs inputs{
-                .native_query = native_query.view(),
-                .native_target = native_target.view(),
-                .native_rank_policy = &native_rank_policy,
                 .host_minimizer_bytes = has_device_minimizers
                     ? std::span<const std::byte>{}
                     : std::as_bytes(query_minimizers),
@@ -1097,8 +997,7 @@ template <class p_minimizer_type, sequence_alphabet Alphabet>
 #endif
                 );
 
-            if (readback.count > exact_anchors
-                || readback.candidate_count != exact_anchors
+            if (readback.count != exact_anchors
                 || readback.actual_vulkan_allocation_bytes
                     != reservation.vulkan_allocation_requirement_bytes
                 || !readback.anchor_order_audit.canonical_order_checked

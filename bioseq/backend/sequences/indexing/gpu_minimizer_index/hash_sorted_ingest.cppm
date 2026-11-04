@@ -44,6 +44,7 @@ import bioseq.instrumentation;
 import bioseq.parallelism.memory_admission;
 import bioseq.pipeline.runtime_contract;
 import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
@@ -58,6 +59,13 @@ next_gpu_source_direct_operation_identity() noexcept {
         identity = next_identity.fetch_add(1u, std::memory_order_relaxed);
     }
     return identity;
+}
+
+/** Resolve the existing GPU cache policy atom for the selected native Vulkan shape. */
+[[nodiscard]] inline constexpr std::uint32_t gpu_source_direct_seed_policy_id(
+    std::uint32_t alphabet_code, std::uint32_t kmer_size) noexcept {
+    return bioseq::minimizers::exact_minimizer_shape_fits_for_alphabet_code(alphabet_code, kmer_size)
+        ? 0u : bioseq::minimizers::k_bounded_nthash_scheme_id;
 }
 
 /// Describe a minimizer build by its operation, record layout, counts, and GPU.
@@ -82,7 +90,7 @@ make_gpu_source_direct_sorted_dense_identity(
         .operation_identity = operation_identity,
         .alphabet_size = alphabet_size,
         .alphabet_code = alphabet_code,
-        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
+        .seed_policy_id = gpu_source_direct_seed_policy_id(alphabet_code, kmer_size),
         .packed_storage_bits = 32u,
         .kmer_size = kmer_size,
         .window_size = window_size,
@@ -101,9 +109,8 @@ make_gpu_source_direct_sorted_dense_identity(
 }
 
 /// Check that a generated Vulkan profile supports this K/W pair and record layout.
-/// The caller must selec the alphabet and packed sequence format before this
-/// check. Here alphabet_size is only checked for a valid range because the
-/// cache identity does not carry the alphabet  code or packed sequence width.
+/// The caller supplies the native alphabet identity and selected physical record;
+/// the generated profile resolves exact versus bounded hash capacity for this shape.
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
     std::uint32_t alphabet_code,
@@ -114,7 +121,7 @@ make_gpu_source_direct_sorted_dense_identity(
     std::uint32_t minimizer_hash_bits,
     std::uint32_t minimizer_position_bits) noexcept
 {
-    if (alphabet_size == 0u || alphabet_size > 256u || kmer_size <= 0 ||
+    if (alphabet_size == 0u || alphabet_size > std::numeric_limits<std::uint8_t>::max() + 1u || kmer_size <= 0 ||
         kmer_size > static_cast<std::int64_t>((std::numeric_limits<std::uint16_t>::max)()) ||
         window_size <= 0 ||
         window_size > static_cast<std::int64_t>((std::numeric_limits<std::uint16_t>::max)()) ||
@@ -185,7 +192,7 @@ template <class p_minimizer>
         && identity.table_size <= identity.position_count;
     return identity.source_direct_sorted_dense
         && identity.operation_identity != 0u
-        && identity.seed_policy_id == bioseq::minimizers::k_bounded_nthash_scheme_id
+        && identity.seed_policy_id == gpu_source_direct_seed_policy_id(identity.alphabet_code, identity.kmer_size)
         && identity.packed_storage_bits == 32u
         && (empty != nonempty)
         && identity.canonical_empty == empty
@@ -736,7 +743,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
 /// both buffers. It keeps their permit unless the measured process footprint
 /// already accounts for the allocation when the buffers are built.
 ///
-/// @tparam p_minimizer Eight-byte minimizer  with 30 hash bits and 33 position bits.
+/// @tparam p_minimizer Registered native minimizer with a hash fitting the GPU uint64 field.
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -752,7 +759,7 @@ materialize_sorted_dense_from_presorted_minimizers(
     using layout = typename p_minimizer::layout_type;
     if constexpr (!std::is_standard_layout_v<p_minimizer>
         || !std::is_trivially_copyable_v<p_minimizer>
-        || layout::k_hash_bits < 32u || layout::k_hash_bits > 64u
+        || layout::k_hash_bits == 0u || layout::k_hash_bits > 64u
         || layout::k_position_bits == 0u || layout::k_position_bits > 63u) {
         return std::unexpected{gpu_source_direct_materialization_failure{
             .error = gpu_source_direct_materialization_error::
@@ -780,7 +787,7 @@ materialize_sorted_dense_from_presorted_minimizers(
         || key.caller_identity != key.operation_identity
         || !gpu_source_direct_tuple_supported<p_minimizer>(
             key.alphabet_size, key.alphabet_code, key.kmer_size, key.window_size)
-        || key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id
+        || key.seed_policy_id != gpu_source_direct_seed_policy_id(key.alphabet_code, key.kmer_size)
         || key.packed_storage_bits != 32u
         || key.minimizer_size != sizeof(p_minimizer)
         || key.minimizer_alignment != alignof(p_minimizer)
@@ -1074,7 +1081,7 @@ make_gpu_mapped_fragment_sorted_dense_key(
         .operation_identity = operation_identity,
         .alphabet_size = alphabet_size,
         .alphabet_code = alphabet_code,
-        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
+        .seed_policy_id = gpu_source_direct_seed_policy_id(alphabet_code, kmer_size),
         .packed_storage_bits = 32u,
         .kmer_size = kmer_size,
         .window_size = window_size,
@@ -2018,6 +2025,11 @@ materialize_sorted_dense_from_mapped_fragment_reader(
     const std::uint32_t source_hash_bits = reader.fragment_source_hash_bits();
     constexpr std::uint32_t selected_hash_bits =
         layout::k_hash_bits;
+    const auto exact_rank_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(alphabet_code);
+    const std::uint32_t expected_source_hash_bits = exact_rank_bits &&
+        bioseq::minimizers::exact_minimizer_shape_fits(*exact_rank_bits, kmer_size)
+        ? static_cast<std::uint32_t>(*exact_rank_bits * kmer_size)
+        : std::numeric_limits<std::uint32_t>::digits;
     const bool device_uuid_bound = std::any_of(
         runtime.features().device_uuid.begin(),
         runtime.features().device_uuid.end(),
@@ -2037,7 +2049,7 @@ materialize_sorted_dense_from_mapped_fragment_reader(
         source_hash_bits == 0u || source_hash_bits > selected_hash_bits ||
         !gpu_source_direct_tuple_supported<p_minimizer>(
             alphabet_size, alphabet_code, kmer_size, window_size) ||
-        source_hash_bits != 32u ||
+        source_hash_bits != expected_source_hash_bits ||
         control_upper_bound > (std::numeric_limits<std::uint32_t>::max)() ||
         position_count > (std::numeric_limits<std::uint32_t>::max)()) {
         return std::unexpected{gpu_source_direct_materialization_failure{
@@ -2484,9 +2496,9 @@ adopt_gpu_built_index(
         || required_bucket_bytes > built.slots.bytes
         || built.slot_mask != 0u
         || built.occupied_slots > built.position_count
-        // The built record does not carry k; k=1 gives the shared broad bound.
+        // The built record carries neither k nor policy; retain the broad bound for both selectors.
         || built.position_count > bioseq::gpu::vulkan::target_minimizer_count_upper_bound(
-               built.target_len, 1u)
+               built.target_len, 1u, bioseq::minimizers::k_bounded_nthash_scheme_id)
         || (built.position_count == 0u) != (built.occupied_slots == 0u)) {
         return std::unexpected{gpu_built_index_adoption_error::invalid_build};
     }
@@ -2645,98 +2657,6 @@ adopt_gpu_built_index(
         : gpu_index_representation::open_addressed_70;
     built.valid = false;
     return resident;
-}
-
-/**
- * Prepare an adopted GPU-built index for CPU searches of its mapped buffers.
- *
- * Check the build record, then validate sorted hashes, contiguous intervals,
- * complete coverage and every position's target bound in one mapped pass.
- * This producer has no independent source payload or expected source checksum;
- * its checksum and source-traversal fields stay zero. Publish the completed
- * mapped pass only after all checks succeed. The completed build's existing
- * buffers remain read-only and are used by both CPU and GPU code.
- */
-[[nodiscard]] inline bool authenticate_gpu_built_sorted_dense_prefix(
-    const bioseq::gpu::vulkan::runtime& runtime,
-    gpu_resident_minimizer_index& resident, bool strict_prefix = true) noexcept {
-    static const auto* authentication_region_description =
-        bioseq::instrumentation::register_static_region("gpu_index_authenticate");
-    auto authentication_region_scope =
-        bioseq::instrumentation::region(authentication_region_description);
-    const auto& key = resident.key;
-    if (!runtime.is_usable() || !resident.slots.is_valid() ||
-        !resident.positions.is_valid() || resident.slots.owner != &runtime ||
-        resident.positions.owner != &runtime || resident.slots.mapped == nullptr ||
-        resident.positions.mapped == nullptr ||
-        !resident.slots.is_host_visible_coherent() ||
-        !resident.positions.is_host_visible_coherent() ||
-        resident.representation != gpu_index_representation::source_direct_sorted_dense ||
-        (strict_prefix && (!key.source_direct_sorted_dense ||
-            key.representation != gpu_index_representation::source_direct_sorted_dense ||
-            key.sorted_dense_abi_revision != k_minimizer_sorted_dense_gpu_abi_revision)) ||
-        key.alphabet_size == 0u || key.seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id ||
-        !resident.gate_identity.is_exactly_equal_to(gpu_index_gate_identity_from_key(key)) ||
-        key.target_len != static_cast<std::uint64_t>(resident.target_len) ||
-        key.table_size != resident.bucket_count ||
-        key.position_count != resident.position_count || resident.bucket_count == 0u ||
-        resident.position_count == 0u || resident.bucket_count > resident.position_count ||
-        resident.slot_mask != 0u || (strict_prefix && resident.target_position_offset != 0u) ||
-        resident.unique_key_count != resident.bucket_count ||
-        resident.slot_capacity != resident.bucket_count ||
-        (strict_prefix && (resident.gate_identity.enabled || key.gate_enabled ||
-            key.gate_word_count != 0u || key.gate_mask != 0u || key.gate_digest_lo != 0u ||
-            key.gate_digest_hi != 0u || key.gate_canonical_words)) ||
-        key.device_uuid != runtime.features().device_uuid ||
-        !resident.has_gpu_build_adoption_receipt() ||
-        resident.source_stream_checksum != 0u || resident.mapped_stream_checksum != 0u ||
-        resident.complete_source_traversals != 0u ||
-        resident.complete_mapped_traversals != 0u) {
-        return false;
-    }
-    const std::uint64_t control_bytes = bioseq::common::saturating_mul(
-        resident.bucket_count, sizeof(gpu_minimizer_slot));
-    const std::uint64_t position_bytes = bioseq::common::saturating_mul(
-        resident.position_count, sizeof(std::uint64_t));
-    if (control_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
-        position_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
-        control_bytes > resident.slots.bytes || position_bytes > resident.positions.bytes) {
-        return false;
-    }
-    const auto controls = std::span<const gpu_minimizer_slot>{
-        static_cast<const gpu_minimizer_slot*>(resident.slots.mapped),
-        resident.bucket_count};
-    const auto positions = std::span<const std::uint64_t>{
-        static_cast<const std::uint64_t*>(resident.positions.mapped),
-        resident.position_count};
-    std::uint64_t covered_positions = 0u;
-    std::uint64_t previous_hash = 0u;
-    bool have_previous_hash = false;
-    for (const gpu_minimizer_slot& control : controls) {
-        const std::uint64_t offset = control.pos_offset;
-        const std::uint64_t count = control.pos_count;
-        if (count == 0u || offset != covered_positions || offset > positions.size() ||
-            count > positions.size() - offset ||
-            (have_previous_hash && control.hash <= previous_hash)) {
-            return false;
-        }
-        covered_positions += count;
-        previous_hash = control.hash;
-        have_previous_hash = true;
-    }
-    if (covered_positions != positions.size()) {
-        return false;
-    }
-
-    // Contiguous control intervals cover the complete position span. Preserve
-    // the existing per-position bounds check without introducing an order rule.
-    for (const std::uint64_t encoded : positions) {
-        if ((encoded >> 1u) >= resident.target_len) {
-            return false;
-        }
-    }
-    resident.complete_mapped_traversals = 1u;
-    return true;
 }
 
 } // namespace bioseq::indexing

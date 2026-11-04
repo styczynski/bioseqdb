@@ -71,9 +71,7 @@ enum class shader_kind : std::uint8_t {
     // Keep new MAPQ shader identifiers at the end to preserve cache keys.
     chain_candidate_reduce = 59,
     mapping_quality_reduce = 60,
-    seed_verify_count = 61,
-    seed_verify_emit = 62,
-    seed_native_coverage = 63,
+    ordered_sketch_exact_tile = 61, // Exact packed keys and origin ordered selection.
 };
 
 /// @brief Return whether a shader kind belongs to the GateKeeper rank-batch family.
@@ -108,8 +106,6 @@ enum class descriptor_layout_kind : std::uint8_t {
     align_extension = 12, // { QuerySymbols, TargetSymbols, Jobs, Results }
     align_extension_cigar = 13,
     packed_prefilter = 21,
-    seed_verify = 22,
-    seed_coverage = 23,
     // Ten buffers for reading  grouped indexes and emitting anchors.
     grouped_soa_seed = 18,
     // Chain extraction reads chaining buffers and writes candidate records.
@@ -151,10 +147,6 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
         return 8;
     case descriptor_layout_kind::packed_prefilter:
         return 6;
-    case descriptor_layout_kind::seed_verify:
-        return 8;
-    case descriptor_layout_kind::seed_coverage:
-        return 3;
     case descriptor_layout_kind::align_extension_cigar:
         return 8;
     case descriptor_layout_kind::grouped_soa_seed:
@@ -170,11 +162,6 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
 /// @brief Map a shader kind to the descriptor layout it binds.
 [[nodiscard]] constexpr descriptor_layout_kind descriptor_layout_for(shader_kind kind) noexcept {
     switch (kind) {
-    case shader_kind::seed_verify_count:
-    case shader_kind::seed_verify_emit:
-        return descriptor_layout_kind::seed_verify;
-    case shader_kind::seed_native_coverage:
-        return descriptor_layout_kind::seed_coverage;
     case shader_kind::chain_tiled_dp_u64:
         return descriptor_layout_kind::chain_tiled_dp;
     case shader_kind::seed_lookup_anchors:
@@ -182,6 +169,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
     case shader_kind::sort_anchors_bitonic:
         return descriptor_layout_kind::anchor_sort;
     case shader_kind::ordered_sketch_tile:
+    case shader_kind::ordered_sketch_exact_tile:
     case shader_kind::sketch_emit_flags:
     case shader_kind::sketch_emit_carry:
     case shader_kind::sketch_emit_words:
@@ -246,11 +234,6 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
 /// Anchor sorting reads its ange from a buffer and needs no push parameters.
 [[nodiscard]] constexpr std::uint32_t push_constant_size(shader_kind kind) noexcept {
     switch (kind) {
-    case shader_kind::seed_verify_count:
-    case shader_kind::seed_verify_emit:
-        return 40;
-    case shader_kind::seed_native_coverage:
-        return 32;
     case shader_kind::chain_tiled_dp_u64:
         return 36; // Chaining parameters.
     case shader_kind::seed_lookup_anchors:
@@ -259,6 +242,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
         return 0;
     // These sizes must match the C++ structures passed by the runtime.
     case shader_kind::ordered_sketch_tile:
+    case shader_kind::ordered_sketch_exact_tile:
     case shader_kind::sketch_emit_flags:
     case shader_kind::sketch_emit_carry:
     case shader_kind::sketch_emit_words:
@@ -331,6 +315,7 @@ struct shader_compile_request {
     std::uint32_t word_kind = 0;
     std::uint32_t alphabet_kind = 0;
     std::uint32_t unit_bits = 0;
+    // SneakySnake's decoded native rank width; zero keeps per-descriptor geometry.
     std::uint32_t bits_per_char = 0;
 };
 

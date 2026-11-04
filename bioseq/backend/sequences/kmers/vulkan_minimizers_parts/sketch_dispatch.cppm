@@ -56,7 +56,7 @@ export namespace bioseq::gpu::vulkan {
  * @param rank_lut Alphabet decoding table.
  * @param window_size K-mers per window.
  * @param kmer_size Symbols per k-mer.
- * @param capacity_bound Proven capacity, or zero for automatic owned device/budget-aware allocation.
+ * @param capacity_bound Explicit output limit, or zero for an automatically sized owned output.
  * @param capacity_overflowed Optional output-capacity failure flag.
  * @param query_gate Optional bitmap filtering target hashes.
  * @param decline_out Optional rejection details, including failures after dispatch.
@@ -111,7 +111,10 @@ sketch_uploaded_window_result(
             decline_out->max_minimizers = max_minimizers;
         }
     };
-    if constexpr (minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
+    if (!vulkan_minimizer_kmer_size_supported(
+            rank_lut.exact_rank_bits, kmer_size, rank_lut.seed_policy_id,
+            minimizer_wire_traits<p_minimizer_type>::k_hash_bits)
+        || !vulkan_minimizer_window_size_supported(window_size, rank_lut.seed_policy_id)) {
         decline(vulkan_sketch_decline_reason::minimizer_layout_unsupported);
         return std::nullopt;
     }
@@ -173,7 +176,7 @@ sketch_uploaded_window_result(
 
     const std::uint64_t max_minimizers =
         capacity_bound == 0u
-            ? estimate_vulkan_minimizer_capacity(upload.bp_size, window_size)
+            ? estimate_vulkan_minimizer_capacity(upload.bp_size, window_size, rank_lut.seed_policy_id)
             : capacity_bound;
     if (max_minimizers > std::numeric_limits<std::uint32_t>::max()) {
         decline(
@@ -198,9 +201,9 @@ sketch_uploaded_window_result(
     const bool automatic_owned_allocation =
         capacity_bound == 0u && borrowed_dispatch_permit == nullptr;
     bool allocate_from_count = false;
-    // Preserve one submission when the proven output fits the device and budget.
-    // Automatic owned requests can count first when only that worst-case output
-    // exceeds the descriptor range or its full reservation is denied by the budget.
+    // Preserve one submission when the initial output fits the device and budget.
+    // Actual scanned tile ranges protect this capacity. Automatic owned requests
+    // can count first or recover an underestimated output using the same permit.
     const std::uint64_t requested_device_bytes =
         vulkan_sketch_resident_bytes<p_minimizer_type>(max_minimizers);
     const bool count_required_by_output_range = automatic_owned_allocation
@@ -406,13 +409,17 @@ sketch_uploaded_window_result(
                     padded_sequence.size()},
                 rank_lut,
                 sketch_params,
-                max_minimizers,
+                allocate_from_count && automatic_owned_allocation
+                    ? std::min(target_minimizer_count_upper_bound(upload.bp_size,
+                        static_cast<std::uint32_t>(kmer_size), rank_lut.seed_policy_id),
+                        std::uint64_t{(std::numeric_limits<std::uint32_t>::max)()})
+                    : max_minimizers,
                 query_gate.words,
                 query_gate.mask,
                 allocate_from_count ? vulkan_sketch_output_allocation::exact_count
-                                    : vulkan_sketch_output_allocation::proven_capacity,
-                allocate_from_count ? dispatch_permit : nullptr,
-                allocate_from_count ? bioseq::common::saturating_add(
+                                    : vulkan_sketch_output_allocation::preallocated,
+                automatic_owned_allocation ? dispatch_permit : nullptr,
+                automatic_owned_allocation ? bioseq::common::saturating_add(
                     host_transient_headroom_bytes, query_gate_bytes) : 0u);
         }
         if (!raw.arena_trimmed_before_return) {
@@ -464,7 +471,7 @@ sketch_uploaded_window_result(
         const std::uint64_t actual_device_allocation_bytes =
             raw.minimizer_words.allocation_bytes;
         if (actual_device_allocation_bytes >
-                (allocate_from_count ? dispatch_permit->bytes() : resident_allocation_bytes)) {
+                (automatic_owned_allocation ? dispatch_permit->bytes() : resident_allocation_bytes)) {
             throw vulkan_runtime_error{
                 "Vulkan minimizer device allocation exceeded admission"};
         }
@@ -659,7 +666,8 @@ sketch_uploaded_window_result(
             storage->permit = std::move(*dispatch_permit);
         }
         storage->count = raw.count;
-        storage->capacity = is_empty_collection ? 0u : allocate_from_count ? raw.count : max_minimizers;
+        storage->capacity = is_empty_collection ? 0u
+            : (allocate_from_count || raw.count > max_minimizers) ? raw.count : max_minimizers;
 
         return vulkan_sketch_result<p_minimizer_type>{
             .host_permit = std::move(owned_host_permit),

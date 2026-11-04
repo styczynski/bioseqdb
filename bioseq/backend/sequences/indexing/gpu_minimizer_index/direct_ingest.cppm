@@ -542,47 +542,9 @@ struct gpu_resident_minimizer_index {
     std::uint64_t source_stream_checksum = 0u;
     std::uint64_t mapped_stream_checksum = 0u;
     std::uint64_t complete_source_traversals = 0u;
-    /// Complete mapped coverages: adopted GPU data requires one structural
-    /// pass; source-copy producers retain separate validation and CRC passes.
+    /// Source-copy producers retain separate mapped validation and CRC passes.
     /// This counts source-level passes, not physical loads or cache traffic.
     std::uint64_t complete_mapped_traversals = 0u;
-
-    /** Recognize the nonempty adoption/count receipt of a validated GPU build.
-     * Full dispatch, gate and memory validation remains in adopt_gpu_built_index;
-     * this checks the carried adoption identity and matching output counts.
-     */
-    [[nodiscard]] bool has_gpu_build_adoption_receipt() const noexcept {
-        return position_count != 0u &&
-               ownership.count_submit_admissions == 1u &&
-               ownership.execution_peak_admissions == 1u &&
-               ownership.count_emit_parity_verified == 1u &&
-               ownership.counted_minimizer_count == position_count &&
-               ownership.verified_emit_count == position_count &&
-               ownership.retained_minimizer_count == position_count &&
-               ownership.distinct_minimizer_count == bucket_count &&
-               ownership.resident_transfers == 1u &&
-               ownership.adoption_successes == 1u &&
-               ownership.adoption_rereserve_attempts == 0u;
-    }
-
-    /** Check the completed mapped-payload proof for this owner's producer.
-     * Adopted GPU builds require a published structural pass; they have no
-     * independent source traversal or checksum. Source-copy owners require
-     * their nonzero matching CRCs and both mapped passes. Partial GPU receipts
-     * cannot fall through as source-copy owners. Buffer/key/accounting checks
-     * remain the responsibility of the mapped prefix view.
-     */
-    [[nodiscard]] bool has_completed_mapped_payload_validation() const noexcept {
-        if (has_gpu_build_adoption_receipt()) {
-            return source_stream_checksum == 0u && mapped_stream_checksum == 0u &&
-                   complete_source_traversals == 0u && complete_mapped_traversals == 1u;
-        }
-        return source_stream_checksum != 0u &&
-               source_stream_checksum == mapped_stream_checksum &&
-               (complete_source_traversals == 1u || complete_source_traversals == 2u) &&
-               complete_mapped_traversals == 2u &&
-               ownership == bioseq::gpu::vulkan::gpu_index_build_stats{};
-    }
 };
 static_assert(std::is_standard_layout_v<gpu_resident_minimizer_index>);
 static_assert(offsetof(gpu_resident_minimizer_index, permit)

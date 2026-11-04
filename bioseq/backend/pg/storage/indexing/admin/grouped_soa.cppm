@@ -281,7 +281,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
     }
 
     const bioseq::indexing::minimizer_scheme_identity scheme =
-        bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+        bioseq::indexing::minimizer_scheme_identity_for_backend(backend, k_alphabet_code, kmer_size);
     const bioseq::indexing::minimizer_producer_identity producer_backend =
         bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
     bioseq::indexing::grouped_soa_minimizer_profile profile{};

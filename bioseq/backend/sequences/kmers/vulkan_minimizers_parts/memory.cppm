@@ -452,20 +452,27 @@ template <class p_minimizer_type>
 /**
  * @brief Estimates an initial output  capacity for a minimizer dispatch
  *
- * The bound includes both equal-hash window endpoints, including repetitive
- * inputs. Target-index construction can count first for an exact allocation.
+ * Exact selection preserves its initial density estimate; bounded selection
+ * reserves both endpoints even for repetitive input. Target-index construction
+ * counts first for an exact allocation.
  * @param bp_size Input length in symbols.
  * @param window_size K-mers per window.
- * @return Suggested record capacity.
+ * @param seed_policy_id Resolved exact or bounded hash policy.
+ * @return Suggested initial record capacity.
  */
 [[nodiscard]] inline std::uint64_t estimate_vulkan_minimizer_capacity(
-    std::uint64_t bp_size, std::uint64_t window_size) noexcept
+    std::uint64_t bp_size, std::uint64_t window_size, std::uint32_t seed_policy_id) noexcept
 {
-    (void)window_size;
-    // A bounded window can emit both equal-hash endpoints. Dense repeated
-    // ranks approach two records per position; a density estimate is unsound.
-    return std::max<std::uint64_t>(64u,
-        bioseq::common::saturating_mul(bp_size, std::uint64_t{2u}));
+    if (seed_policy_id != 0u) {
+        return std::max<std::uint64_t>(64u,
+            bioseq::common::saturating_mul(bp_size, std::uint64_t{2u}));
+    }
+    // Preserve the exact profile's initial density estimate. Dispatch detects
+    // capacity overflow; target-index construction counts before final allocation.
+    if (bp_size <= k_default_sketch_tile_bp) return std::max<std::uint64_t>(64u, bp_size);
+    const auto base = window_size == 0u ? bp_size
+        : bioseq::common::saturating_add(bp_size / window_size, 64u);
+    return std::max<std::uint64_t>(64u, bioseq::common::saturating_mul(base, 3u));
 }
 
 /**

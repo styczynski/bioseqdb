@@ -559,10 +559,10 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     struct rank_window_reader {
         lazy_sequence_view const* parent{};
 
-        /** Reads a bounded window through the selected orientation callback. Scratch must hold every requested rank. */
-        [[nodiscard]] p_stored_type const* read_at(sequence_size_t bp_from,
-                                                   std::size_t required_length,
-                                                   std::span<p_stored_type> scratch) const {
+        /** Reads through the selected orientation callback, returning a source/range failure. */
+        [[nodiscard]] std::expected<std::span<const p_stored_type>, rank_window_read_failure>
+        read_checked(sequence_size_t bp_from, std::size_t required_length,
+                     std::span<p_stored_type> scratch) const {
             static_assert(std::same_as<p_stored_type, std::uint8_t>);
             static_assert(p_max_loaded_slots == 2, "facade backends implement the two-slot API");
             constexpr std::size_t k_orientation =
@@ -572,7 +572,14 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                 .read_at = parent->ops_->read_at[k_orientation],
                 .symbol_count = parent->bp_size(),
             };
-            const auto result = source.read_checked(bp_from, required_length, scratch);
+            return source.read_checked(bp_from, required_length, scratch);
+        }
+
+        /** Reads a bounded window or aborts on an invalid backend/range contract. */
+        [[nodiscard]] p_stored_type const* read_at(sequence_size_t bp_from,
+                                                  std::size_t required_length,
+                                                  std::span<p_stored_type> scratch) const {
+            const auto result = read_checked(bp_from, required_length, scratch);
             if (!result) {
                 abort_lazy_sequence_access("lazy sequence rank read failed");
             }

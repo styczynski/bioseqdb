@@ -81,8 +81,10 @@ template <sequence_alphabet p_alphabet, class p_callable>
     using legacy_record = minimizers::minimap_sketch_data;
     constexpr auto algorithm =
         ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer;
-    if (kmer_size == 0u || kmer_size > 31u
-        || !vulkan_minimizer_window_size_supported(window_size)
+    constexpr auto exact_rank_bits = minimizers::minimizer_exact_rank_bits<p_alphabet>;
+    const auto seed_policy_id = vulkan_minimizer_seed_policy_id(exact_rank_bits, kmer_size);
+    if (!vulkan_minimizer_kmer_size_supported(exact_rank_bits, kmer_size, seed_policy_id)
+        || !vulkan_minimizer_window_size_supported(window_size, seed_policy_id)
         || window_size > (std::numeric_limits<std::uint16_t>::max)()) {
         throw vulkan_runtime_error{
             "Vulkan segment pair shape exceeds its runtime kernel capacity"};
@@ -97,7 +99,10 @@ template <sequence_alphabet p_alphabet, class p_callable>
             minimizers::minimizer_profile_alphabet_id<p_alphabet>();
         constexpr auto legacy_id =
             minimizers::minimizer_physical_record_detail::record_id<legacy_record>();
-        constexpr std::uint64_t required_hash_mask = std::numeric_limits<std::uint32_t>::max();
+        const auto required_hash_bits = seed_policy_id == 0u
+            ? exact_rank_bits * kmer_size : std::numeric_limits<std::uint32_t>::digits;
+        const auto required_hash_mask = *bioseq::common::checked_low_bits_mask<std::uint64_t>(
+            required_hash_bits);
         const auto* legacy_descriptor =
             minimizers::find_minimizer_physical_record(legacy_id);
         if (legacy_descriptor != nullptr

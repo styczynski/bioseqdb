@@ -157,6 +157,17 @@ struct sequence_simd_iteration_state {
     using alphabet_type = typename p_sequence_traits::alphabet_type;
     using hash_alphabet = std::conditional_t<seqan3::nucleotide_alphabet<alphabet_type>, seq::dna4, alphabet_type>;
     using hash_traits = typename hasher_base<hash_alphabet, storage_unit>::traits;
+    static constexpr int k_strand_bits =
+        static_cast<int>(hash_traits::canonical_reverse_complement);
+    static constexpr bool k_checks_physical_maximum =
+        p_minimizer_type::k_hash_field_mask <= std::numeric_limits<storage_unit>::max()
+        && (!k_has_static_kmer || p_static_kmer_size * hash_traits::bits_per_char
+            >= std::bit_width(p_minimizer_type::k_hash_field_mask));
+    // Only the owned integer permutation supplies this proven inverse. A derived
+    // or otherwise different hasher keeps its existing scramble-and-compare path.
+    static constexpr bool k_uses_integer_preimage = std::same_as<
+        p_simd_hasher_template<hash_alphabet>, minimap_int_hasher<hash_alphabet>>
+        && std::same_as<storage_unit, decltype(+storage_unit{})>;
     static constexpr bool has_unseedable_rank = [] {
         if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
             for (const auto rank : k_nt4_lut<alphabet_type>)
@@ -176,16 +187,11 @@ struct sequence_simd_iteration_state {
     vector_stream_type state_rc;
     vector_stream_type prefix_min;
     vector_stream_type prefix_kmer;
-    vector_stream_type prefix_strand;
-    mask_stream_type prefix_valid;
     vector_stream_type valid_run;
     vector_stream_type pos_local;
     vector_stream_type last_emit_pos;
-    mask_stream_type last_emit_valid;
     std::array<vector_stream_type, k_buffer_capacity> ring_buf_elem;
     std::array<vector_stream_type, k_buffer_capacity> ring_buf_hash_strand;
-    std::array<vector_stream_type, k_buffer_capacity> ring_buf_strand;
-    std::array<mask_stream_type, k_buffer_capacity> ring_buf_valid;
     std::size_t pos_wrap_delta;
     size_t step;
     size_t ring_idx;
@@ -193,6 +199,9 @@ struct sequence_simd_iteration_state {
 
     // Loop-invariant SIMD constants.
     vector_type v_kmer_mask;
+    [[no_unique_address]] std::conditional_t<
+        k_checks_physical_maximum && k_uses_integer_preimage,
+        vector_type, std::monostate> v_excluded_canonical;
     vector_type v_zero;
     vector_type v_one;
     vector_type v_pos_mask;
@@ -303,7 +312,8 @@ struct sequence_simd_iteration_state {
         const auto strand_value = if_then_else(strand, v_one, v_zero);
 
         // Combine jash and position, marking inactive or excluded palindromic lanes invalid.
-        const vector_stream_type elem_valid = bit_or(hash_full, pos_local);
+        const vector_stream_type elem_valid = bit_or(hash_full,
+            bit_or(shift_left<k_strand_bits>(pos_local), strand_value));
         auto valid_mask = equal(state_fwd, state_fwd);
         valid_mask = bit_and(valid_mask, live_mask);
         if constexpr (has_unseedable_rank)
@@ -314,21 +324,34 @@ struct sequence_simd_iteration_state {
             const mask_stream_type palindrome = equal(state_fwd, state_rc);
             valid_mask = bit_and_not(palindrome, valid_mask);
         }
-        const auto packed_element = elem_valid;
+        if constexpr (k_checks_physical_maximum) {
+            if (kmer_mask_scalar >= p_minimizer_type::k_hash_field_mask) {
+                if constexpr (k_uses_integer_preimage) {
+                    valid_mask = bit_and(valid_mask, not_equal(lex, v_excluded_canonical));
+                } else {
+                    const auto output_hash = vector_stream_detail::lift_operation(
+                        [d, this](auto canonical) {
+                            return p_simd_hasher_template<hash_alphabet>::template scramble_simd<simd_tag_type>(
+                                d, canonical, v_kmer_mask);
+                        }, lex);
+                    valid_mask = bit_and(valid_mask, not_equal(output_hash,
+                        vector_stream_type::splat(d,
+                            static_cast<storage_unit>(p_minimizer_type::k_hash_field_mask))));
+                }
+            }
+        }
+        // Local positions reserve the all-ones ordering word for invalid slots.
+        const auto v_max = hn::Set(d, (std::numeric_limits<storage_unit>::max)());
+        const auto packed_element = if_then_else(valid_mask, elem_valid, v_max);
 
         ring_buf_elem[ring_idx]        = packed_element;
         ring_buf_hash_strand[ring_idx] = lex;
-        ring_buf_strand[ring_idx] = strand_value;
-        ring_buf_valid[ring_idx] = valid_mask;
 
         // Extend the prefix minimum with the new, candidate
-        const mask_stream_type prefix_better = bit_and(valid_mask,
-            bit_or(bit_and_not(prefix_valid, valid_mask), less(packed_element, prefix_min)));
+        const mask_stream_type prefix_better = less(packed_element, prefix_min);
         prefix_min = if_then_else(prefix_better, packed_element, prefix_min);
         prefix_kmer = if_then_else(
             prefix_better, lex, prefix_kmer);
-        prefix_strand = if_then_else(prefix_better, strand_value, prefix_strand);
-        prefix_valid = bit_or(prefix_valid, valid_mask);
 
         ++ring_idx;
         ++step;
@@ -344,80 +367,71 @@ struct sequence_simd_iteration_state {
                         constexpr size_t i = p_static_window_size - 1 - decltype(idx_const)::value;
                         const auto current_slot = ring_buf_elem[i];
                         const auto previous_slot = ring_buf_elem[i - 1];
-                        const auto current_better = bit_and(ring_buf_valid[i],
-                            bit_or(bit_and_not(ring_buf_valid[i - 1], ring_buf_valid[i]),
-                                less(current_slot, previous_slot)));
+                        const auto current_better = less(current_slot, previous_slot);
                         ring_buf_elem[i - 1] =
                             if_then_else(current_better, current_slot, previous_slot);
                         ring_buf_hash_strand[i - 1] = if_then_else(
                             current_better, ring_buf_hash_strand[i], ring_buf_hash_strand[i - 1]);
-                        ring_buf_strand[i - 1] = if_then_else(
-                            current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
-                        ring_buf_valid[i - 1] = bit_or(ring_buf_valid[i - 1], ring_buf_valid[i]);
                     });
             } else {
                 for (size_t i = w - 1; i > 0; --i) {
                     const auto current_slot   = ring_buf_elem[i];
                     const auto previous_slot  = ring_buf_elem[i - 1];
-                    const auto current_better = bit_and(ring_buf_valid[i],
-                        bit_or(bit_and_not(ring_buf_valid[i - 1], ring_buf_valid[i]),
-                            less(current_slot, previous_slot)));
+                    const auto current_better = less(current_slot, previous_slot);
                     ring_buf_elem[i - 1] =
                         if_then_else(current_better, current_slot, previous_slot);
                     ring_buf_hash_strand[i - 1] =
                         if_then_else(current_better,
                             ring_buf_hash_strand[i],
                             ring_buf_hash_strand[i - 1]);
-                    ring_buf_strand[i - 1] = if_then_else(
-                        current_better, ring_buf_strand[i], ring_buf_strand[i - 1]);
-                    ring_buf_valid[i - 1] = bit_or(ring_buf_valid[i - 1], ring_buf_valid[i]);
                 }
             }
             prefix_min  = packed_element;
             prefix_kmer = lex;
-            prefix_strand = strand_value;
-            prefix_valid = valid_mask;
             ring_idx = 0;
         }
 
         // The current window joins the new prefix and the saved suffix.
         const vector_stream_type  suffix_min  = ring_buf_elem[ring_idx];
         const vector_stream_type  suffix_kmer = ring_buf_hash_strand[ring_idx];
-        const mask_stream_type prefix_wins = bit_and(prefix_valid,
-            bit_or(bit_and_not(ring_buf_valid[ring_idx], prefix_valid), less(prefix_min, suffix_min)));
+        const mask_stream_type prefix_wins = less(prefix_min, suffix_min);
         const vector_stream_type  window_min  =
             if_then_else(prefix_wins, prefix_min, suffix_min);
         const vector_stream_type  window_hs   =
             if_then_else(prefix_wins, prefix_kmer, suffix_kmer);
-        const auto window_strand = if_then_else(prefix_wins, prefix_strand, ring_buf_strand[ring_idx]);
-        const auto window_valid = bit_or(prefix_valid, ring_buf_valid[ring_idx]);
-        auto window_pos = bit_and(window_min, v_pos_mask);
+        const auto window_strand = bit_and(window_min,
+            hn::Set(d, static_cast<storage_unit>(hash_traits::canonical_reverse_complement)));
+        const auto window_valid = not_equal(window_min, v_max);
+        auto window_pos = bit_and(shift_right<k_strand_bits>(window_min), v_pos_mask);
 
         // Rebase local positions before the packed position field wraps.
         if (step == next_wrap_step) [[unlikely]] {
+            // Only ordering keys carry shifted positions; coordinate state stays raw.
+            const auto ordering_wrap = hn::ShiftLeft<k_strand_bits>(v_wrap);
             pos_local = subtract(pos_local, v_wrap);
-            prefix_min = if_then_else(prefix_valid, subtract(prefix_min, v_wrap), prefix_min);
-            last_emit_valid = bit_and(last_emit_valid, greater_equal(last_emit_pos, v_wrap));
+            prefix_min = if_then_else(not_equal(prefix_min, v_max),
+                subtract(prefix_min, ordering_wrap), v_max);
+            // The raw position sentinel is outside every valid local position.
+            const auto emit_seen = bit_and(not_equal(last_emit_pos, v_max),
+                greater_equal(last_emit_pos, v_wrap));
             last_emit_pos = if_then_else(
-                last_emit_valid, subtract(last_emit_pos, v_wrap), last_emit_pos);
+                emit_seen, subtract(last_emit_pos, v_wrap), v_max);
             window_pos = subtract(window_pos, v_wrap);
-            const auto wrap_one = [this](auto idx_const) [[gnu::always_inline]] {
+            const auto wrap_one = [this, v_max, ordering_wrap](auto idx_const) [[gnu::always_inline]] {
                 constexpr size_t i = decltype(idx_const)::value;
-                ring_buf_valid[i] = bit_and(ring_buf_valid[i],
-                    greater_equal(bit_and(ring_buf_elem[i], v_pos_mask), v_wrap));
-                ring_buf_elem[i] = if_then_else(ring_buf_valid[i],
-                    subtract(ring_buf_elem[i], v_wrap),
-                    ring_buf_elem[i]);
+                const auto keep = bit_and(not_equal(ring_buf_elem[i], v_max),
+                    greater_equal(bit_and(shift_right<k_strand_bits>(ring_buf_elem[i]), v_pos_mask), v_wrap));
+                ring_buf_elem[i] = if_then_else(keep,
+                    subtract(ring_buf_elem[i], ordering_wrap), v_max);
             };
             if constexpr (k_has_static_window) {
                 for_each_index<p_static_window_size>(wrap_one);
             } else {
                 for (size_t i = 0; i < w; ++i) {
-                    ring_buf_valid[i] = bit_and(ring_buf_valid[i],
-                        greater_equal(bit_and(ring_buf_elem[i], v_pos_mask), v_wrap));
-                    ring_buf_elem[i] = if_then_else(ring_buf_valid[i],
-                        subtract(ring_buf_elem[i], v_wrap),
-                        ring_buf_elem[i]);
+                    const auto keep = bit_and(not_equal(ring_buf_elem[i], v_max),
+                        greater_equal(bit_and(shift_right<k_strand_bits>(ring_buf_elem[i]), v_pos_mask), v_wrap));
+                    ring_buf_elem[i] = if_then_else(keep,
+                        subtract(ring_buf_elem[i], ordering_wrap), v_max);
                 }
             }
             pos_wrap_delta += wrap_delta_amount;
@@ -426,8 +440,8 @@ struct sequence_simd_iteration_state {
 
         // Emit when the selected position changes after window warmup.
         if (step >= emit_warmup) {
-            const mask_stream_type pos_changed = bit_or(
-                bit_and_not(last_emit_valid, window_valid), not_equal(window_pos, last_emit_pos));
+            const mask_stream_type pos_changed =
+                not_equal(window_pos, last_emit_pos);
             auto real_emit = bit_and(pos_changed, window_valid);
             if constexpr (has_unseedable_rank)
                 real_emit = bit_and(real_emit, greater_equal(valid_run,
@@ -504,7 +518,6 @@ struct sequence_simd_iteration_state {
                 });
                 last_emit_pos =
                     if_then_else(real_emit, window_pos, last_emit_pos);
-                last_emit_valid = bit_or(last_emit_valid, real_emit);
             }
         }
     }
@@ -615,14 +628,21 @@ collect_minimizers_two_stack_nthash_simd_impl(
         hash_traits::exact_kmer_mask(kmer_size);
     const vector_type v_kmer_mask = hn::Set(d, kmer_mask);
 
-    // Pack the ordering hash in the high half and the local position in the low half
+    // Keep the full high-half hash; canonical strands use one low metadata bit.
     constexpr size_t k_storage_bits   = sizeof(storage_unit) * 8;
     constexpr size_t k_hash_bits      = k_storage_bits / 2;
-    constexpr storage_unit pos_mask = (k_hash_bits >= k_storage_bits)
+    constexpr storage_unit ordering_low_mask = (k_hash_bits >= k_storage_bits)
         ? static_cast<storage_unit>(-1)
         : (static_cast<storage_unit>(1) << k_hash_bits) - 1;
-    constexpr storage_unit hash_mask_high = static_cast<storage_unit>(~pos_mask);
+    constexpr storage_unit pos_mask = ordering_low_mask
+        >> static_cast<int>(hash_traits::canonical_reverse_complement);
+    constexpr storage_unit hash_mask_high = static_cast<storage_unit>(~ordering_low_mask);
     constexpr storage_unit max_val        = static_cast<storage_unit>(-1);
+    // Rebase after insertion at step pos_mask-1, before a candidate can use
+    // pos_mask. Every supported window must leave a positive rebase period.
+    static_assert(k_max_two_stack_window + std::size_t{1u}
+        < static_cast<std::size_t>(pos_mask),
+        "Resident ordering positions must reserve the all-ones sentinel");
 
     DEBUG_ASSERT(w <= k_max_two_stack_window,
         "k_max_two_stack_window must hold the requested window size");
@@ -665,32 +685,51 @@ collect_minimizers_two_stack_nthash_simd_impl(
         p_minimizer_type,
         p_hash_value,
         p_collector_type>;
+    // An admitted full exact key reaches the physical maximum only in the
+    // equal-width domain. Compute that preimage at compile time; retain the
+    // existing wider-domain internal behavior without any per-symbol inverse.
+    const storage_unit excluded_canonical = [kmer_mask]() {
+        if constexpr (state_type::k_checks_physical_maximum
+                      && state_type::k_uses_integer_preimage) {
+            using hasher = p_simd_hasher_template<hash_alphabet>;
+            constexpr auto physical_maximum = static_cast<storage_unit>(
+                p_minimizer_type::k_hash_field_mask);
+            constexpr auto preimage = hasher::template unscramble<storage_unit>(
+                physical_maximum, physical_maximum);
+            static_assert(hasher::template scramble<storage_unit>(
+                preimage, physical_maximum) == physical_maximum);
+            if (kmer_mask == physical_maximum) return preimage;
+            if (kmer_mask > physical_maximum)
+                return hasher::template unscramble<storage_unit>(physical_maximum, kmer_mask);
+        }
+        return storage_unit{};
+    }();
     state_type state{
         .state_fwd                  = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
         .state_rc                   = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
         .prefix_min                 = vector_stream_type::splat(d, max_val),
         .prefix_kmer                = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
-        .prefix_strand              = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
-        .prefix_valid               = mask_stream_type::splat_false(d),
         .valid_run                  = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
         .pos_local                  = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
         .last_emit_pos              = vector_stream_type::splat(d, max_val),
-        .last_emit_valid            = mask_stream_type::splat_false(d),
         .ring_buf_elem              = two_stack_internal::
             make_undefined_vector_stream_array<
                 buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
         .ring_buf_hash_strand       = two_stack_internal::
             make_undefined_vector_stream_array<
                 buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
-        .ring_buf_strand            = two_stack_internal::
-            make_undefined_vector_stream_array<
-                buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
-        .ring_buf_valid             = {},
         .pos_wrap_delta             = static_cast<storage_unit>(0),
         .step                       = 0,
         .ring_idx                   = 0,
         .next_wrap_step             = wrap_period + w,
         .v_kmer_mask                = v_kmer_mask,
+        .v_excluded_canonical       = [d, excluded_canonical]() {
+            if constexpr (state_type::k_checks_physical_maximum
+                          && state_type::k_uses_integer_preimage)
+                return hn::Set(d, excluded_canonical);
+            else
+                return std::monostate{};
+        }(),
         .v_zero                     = v_zero,
         .v_one                      = v_one,
         .v_pos_mask                 = v_pos_mask,
@@ -712,8 +751,6 @@ collect_minimizers_two_stack_nthash_simd_impl(
         for (size_t i = 0; i < w; ++i) {
             state.ring_buf_elem[i]        = initial_elem;
             state.ring_buf_hash_strand[i] = initial_hs;
-            state.ring_buf_strand[i] = initial_hs;
-            state.ring_buf_valid[i] = mask_stream_type::splat_false(d);
         }
     }
 

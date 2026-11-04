@@ -183,17 +183,15 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
             throw_vulkan_strict_decline(
                 "Vulkan segment minimizer pair path", path_decline);
         } else {
-            if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
+            if (!vulkan_minimizer_kmer_size_supported<traits>(
+                    kmer_size, minimizer_wire_traits<p_minimizer_type>::k_hash_bits)) {
                 path_decline.reason =
                     vulkan_sketch_decline_reason::kmer_size_unsupported;
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            if constexpr (minimizer_type::layout_type::k_hash_bits < 32u) {
-                path_decline.reason = vulkan_sketch_decline_reason::kmer_size_unsupported;
-                throw_vulkan_strict_decline("native32 Vulkan record requires all hash bits", path_decline);
-            }
-            if (!vulkan_minimizer_window_size_supported(window_size)) {
+            if (!vulkan_minimizer_window_size_supported(
+                    window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
                 path_decline.reason =
                     vulkan_sketch_decline_reason::window_size_unsupported;
                 throw_vulkan_strict_decline(
@@ -234,7 +232,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     "Vulkan segment minimizer pair path", path_decline);
             }
 
-            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>();
+            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>(vulkan_minimizer_seed_policy_id<traits>(kmer_size));
             const std::size_t lpu =
                 std::max<std::size_t>(1u, traits::letters_per_unit);
             const std::size_t context_units =
@@ -273,7 +271,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     static_cast<std::uint64_t>(lpu)));
             const std::uint64_t maximum_dispatch_minimizers =
                 estimate_vulkan_minimizer_capacity(
-                    maximum_sub_bp, window_size);
+                    maximum_sub_bp, window_size, rank_lut.seed_policy_id);
             const std::uint64_t maximum_sequence_bytes = aligned_upload_bytes(
                 bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(maximum_sub_units),
@@ -347,7 +345,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 maximum_host_materialization_bytes);
             const std::uint64_t initial_filtered_count =
                 estimate_vulkan_minimizer_capacity(
-                    descriptor.window_bp, window_size);
+                    descriptor.window_bp, window_size, rank_lut.seed_policy_id);
             const auto headroom_bytes =
                 []<class p_value>(std::uint64_t count) {
                 return bioseq::common::saturating_mul(
@@ -476,7 +474,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 const sequence_upload_view upload =
                     make_upload_view_from_window<bare>(seq, base, sub_descriptor);
                 const std::uint64_t max_minimizers =
-                    estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+                    estimate_vulkan_minimizer_capacity(upload.bp_size, window_size, rank_lut.seed_policy_id);
                 bool capacity_overflowed = false;
                 vulkan_sketch_decline decline{};
                 auto result = sketch_uploaded_window_result<minimizer_type>(
@@ -667,12 +665,14 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
             path_decline.reason = vulkan_sketch_decline_reason::alphabet_unsupported;
             throw_vulkan_strict_decline(
                 "Vulkan segment minimizer sketch", path_decline);
-        } else if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
+        } else if (!vulkan_minimizer_kmer_size_supported<traits>(
+                    kmer_size, minimizer_wire_traits<p_minimizer_type>::k_hash_bits)) {
             path_decline.reason =
                 vulkan_sketch_decline_reason::kmer_size_unsupported;
             throw_vulkan_strict_decline(
                 "Vulkan segment minimizer sketch", path_decline);
-        } else if (!vulkan_minimizer_window_size_supported(window_size)) {
+        } else if (!vulkan_minimizer_window_size_supported(
+                    window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
             path_decline.reason =
                 vulkan_sketch_decline_reason::window_size_unsupported;
             throw_vulkan_strict_decline(
@@ -706,7 +706,7 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
             throw_vulkan_strict_decline(
                 "Vulkan segment minimizer sketch", path_decline);
         }
-        const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>();
+        const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>(vulkan_minimizer_seed_policy_id<traits>(kmer_size));
         const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);
         const std::uint64_t outer_base_bp =
             static_cast<std::uint64_t>(descriptor.lo_unit) * lpu;
@@ -744,7 +744,7 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
                 make_upload_view_from_window<bare>(seq, base, sub_descriptor);
 
             const std::uint64_t max_minimizers =
-                estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+                estimate_vulkan_minimizer_capacity(upload.bp_size, window_size, rank_lut.seed_policy_id);
             bool capacity_overflowed = false;
             vulkan_sketch_decline decline{};
             auto result = sketch_uploaded_window_result<p_minimizer_type>(

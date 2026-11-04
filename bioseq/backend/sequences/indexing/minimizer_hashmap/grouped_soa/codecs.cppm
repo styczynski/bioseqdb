@@ -120,7 +120,8 @@ validate_manifest_standalone(const minimizer_generation_manifest& manifest) noex
     if (!profile) {
         return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
-    if (minimizer_scheme_identity_for_producer_backend(producer_backend) !=
+    if (minimizer_scheme_identity_for_producer_backend(producer_backend,
+            manifest.alphabet_code, manifest.kmer_size) !=
         profile->minimizer_scheme) {
         return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
@@ -510,7 +511,8 @@ hash_major_minimizer_profile_for_backend(
     const minimizer_generation_algorithm_identity& algorithm_identity,
     std::uint16_t alphabet_code,
     std::uint64_t target_length) noexcept {
-    const minimizer_scheme_identity scheme = minimizer_scheme_identity_for_backend(backend);
+    const minimizer_scheme_identity scheme = minimizer_scheme_identity_for_backend(
+        backend, alphabet_code, algorithm_identity.runtime_kmer_size);
     const minimizer_producer_identity producer =
         minimizer_producer_backend_identity_for_backend(backend);
     if (!is_supported_minimizer_scheme_identity(scheme.id, scheme.revision) ||

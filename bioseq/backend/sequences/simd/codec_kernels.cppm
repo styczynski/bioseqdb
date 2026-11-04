@@ -1,6 +1,6 @@
 /**
  * @file codec_kernels.cppm
- * @brief SIMD rank lookup, packing, and decoding for dna4 and dna5.
+ * @brief SIMD lookup, packing, and decoding of native alphabet ranks.
  */
 module;
 
@@ -233,24 +233,22 @@ struct packed_native_rank_tile {
     std::size_t word_count{};
 };
 
-/** Fuse adjacent native rank bytes into packed pairs before assembling storage words. */
+/** Pack a native rank vector; inactive lanes after rank_count must be zero. */
 template<class D, class Storage, std::size_t Bits, std::size_t Letters>
-[[nodiscard]] HWY_INLINE auto pack_native_rank_tile(D tag, std::span<const std::uint8_t> ranks) {
+[[nodiscard]] HWY_INLINE auto pack_native_rank_tile(
+        D tag, hn::Vec<D> ranks, std::size_t rank_count) {
+    DEBUG_ASSERT(rank_count <= hn::Lanes(tag), "native rank tile exceeds its SIMD vector");
     packed_native_rank_tile<Storage, (hn::MaxLanes(D{}) + Letters - 1u) / Letters> result{};
     if constexpr (Bits == 2u && Letters >= std::numeric_limits<std::uint32_t>::digits / Bits
         && hn::MaxLanes(D{}) == std::numeric_limits<std::uint32_t>::digits / Bits) {
-        std::array<std::uint8_t, hn::MaxLanes(tag)> padded{};
-        std::copy(ranks.begin(), ranks.end(), padded.begin());
-        result.words[0] = static_cast<Storage>(pack_16_dna4_to_u32(tag, hn::LoadU(tag, padded.data())));
-        result.word_count = ranks.empty() ? 0u : 1u;
+        result.words[0] = static_cast<Storage>(pack_16_dna4_to_u32(tag, ranks));
+        result.word_count = rank_count == 0u ? 0u : 1u;
     } else if constexpr (Bits <= std::numeric_limits<std::uint8_t>::digits && Letters % 2u == 0u
         && hn::MaxLanes(D{}) >= 2u) {
         // Highway's byte-lane bitcast follows native endian order. Correct that
         // once for big-endian targets before packing adjacent logical symbols.
         const hn::Repartition<std::uint16_t, D> pair_tag;
-        std::array<std::uint8_t, hn::MaxLanes(tag)> padded{};
-        std::copy(ranks.begin(), ranks.end(), padded.begin());
-        auto pairs = hn::BitCast(pair_tag, hn::LoadU(tag, padded.data()));
+        auto pairs = hn::BitCast(pair_tag, ranks);
         if constexpr (std::endian::native == std::endian::big)
             pairs = hn::Or(hn::ShiftRight<8>(pairs), hn::ShiftLeft<8>(pairs));
         const auto lower = hn::And(pairs, hn::Set(pair_tag, std::uint16_t{0xFF}));
@@ -258,8 +256,8 @@ template<class D, class Storage, std::size_t Bits, std::size_t Letters>
         pairs = hn::Or(lower, hn::ShiftLeft<Bits>(upper));
         std::array<std::uint16_t, hn::MaxLanes(pair_tag)> packed_pairs{};
         hn::StoreU(pairs, pair_tag, packed_pairs.data());
-        for (std::size_t offset = 0; offset < ranks.size(); offset += Letters) {
-            const auto take = std::min(Letters, ranks.size() - offset);
+        for (std::size_t offset = 0; offset < rank_count; offset += Letters) {
+            const auto take = std::min(Letters, rank_count - offset);
             Storage word{};
             for (std::size_t slot = 0; slot < take; slot += 2u)
                 word |= static_cast<Storage>(static_cast<Storage>(packed_pairs[(offset + slot) / 2u])
@@ -267,15 +265,30 @@ template<class D, class Storage, std::size_t Bits, std::size_t Letters>
             result.words[result.word_count++] = word;
         }
     } else {
-        for (std::size_t offset = 0; offset < ranks.size(); offset += Letters) {
-            const auto take = std::min(Letters, ranks.size() - offset);
+        std::array<std::uint8_t, hn::MaxLanes(tag)> rank_bytes{};
+        hn::StoreU(ranks, tag, rank_bytes.data());
+        for (std::size_t offset = 0; offset < rank_count; offset += Letters) {
+            const auto take = std::min(Letters, rank_count - offset);
             Storage word{};
             for (std::size_t slot = 0; slot < take; ++slot)
-                word |= static_cast<Storage>(static_cast<Storage>(ranks[offset + slot]) << (slot * Bits));
+                word |= static_cast<Storage>(static_cast<Storage>(rank_bytes[offset + slot]) << (slot * Bits));
             result.words[result.word_count++] = word;
         }
     }
     return result;
+}
+
+/** Load a bounded native rank span, zeroing its inactive lanes, then share vector packing. */
+template<class D, class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE auto pack_native_rank_tile(D tag, std::span<const std::uint8_t> ranks) {
+    DEBUG_ASSERT(ranks.size() <= hn::Lanes(tag), "native rank span exceeds its SIMD vector");
+    if (ranks.size() == hn::Lanes(tag))
+        return pack_native_rank_tile<D, Storage, Bits, Letters>(
+            tag, hn::LoadU(tag, ranks.data()), ranks.size());
+    std::array<std::uint8_t, hn::MaxLanes(tag)> tail_ranks{};
+    std::copy(ranks.begin(), ranks.end(), tail_ranks.begin());
+    return pack_native_rank_tile<D, Storage, Bits, Letters>(
+        tag, hn::LoadU(tag, tail_ranks.data()), ranks.size());
 }
 
 /** Pack a bounded native-rank tile through the existing checked word sink. */
@@ -335,18 +348,19 @@ map_native_rank_chunk(D tag, std::span<const std::uint8_t> source,
     return {};
 }
 
-/** Append an already validated bounded tile to the shared streaming pack state. */
+/** Append validated native vector ranks, with zero inactive lanes, to the shared pack state. */
 template<class D, class Storage, std::size_t Bits, std::size_t Letters>
 [[nodiscard]] HWY_INLINE sequence_encode_status append_native_rank_state(D tag,
-        std::span<const std::uint8_t> ranks, encode_state<Storage, Bits, Letters>& state) {
-    if (ranks.size() > (std::numeric_limits<std::size_t>::max)() - state.total_letters)
+        hn::Vec<D> ranks, std::size_t rank_count,
+        encode_state<Storage, Bits, Letters>& state) {
+    if (rank_count > (std::numeric_limits<std::size_t>::max)() - state.total_letters)
         return sequence_encode_status::arithmetic_overflow;
-    const auto units = (state.partial_letters + ranks.size()) / Letters;
+    const auto units = (state.partial_letters + rank_count) / Letters;
     if (units > state.output_storage->max_size() - state.output_storage->size())
         return sequence_encode_status::capacity_overflow;
-    const auto packed = pack_native_rank_tile<D, Storage, Bits, Letters>(tag, ranks);
+    const auto packed = pack_native_rank_tile<D, Storage, Bits, Letters>(tag, ranks, rank_count);
     auto write_unit = [&state](Storage word) { state.output_storage->push_back(word); return true; };
-    std::size_t remaining = ranks.size();
+    std::size_t remaining = rank_count;
     for (std::size_t index = 0; index < packed.word_count; ++index) {
         const auto take = std::min(Letters, remaining);
         const bool appended = bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
@@ -356,6 +370,18 @@ template<class D, class Storage, std::size_t Bits, std::size_t Letters>
         remaining -= take;
     }
     return sequence_encode_status::ok;
+}
+
+/** Adapt a validated span directly for full vectors; zero-pad only a short tail. */
+template<class D, class Storage, std::size_t Bits, std::size_t Letters>
+[[nodiscard]] HWY_INLINE sequence_encode_status append_native_rank_state(D tag,
+        std::span<const std::uint8_t> ranks, encode_state<Storage, Bits, Letters>& state) {
+    DEBUG_ASSERT(ranks.size() <= hn::Lanes(tag), "native rank span exceeds its SIMD vector");
+    if (ranks.size() == hn::Lanes(tag))
+        return append_native_rank_state(tag, hn::LoadU(tag, ranks.data()), ranks.size(), state);
+    std::array<std::uint8_t, hn::MaxLanes(tag)> tail_ranks{};
+    std::copy(ranks.begin(), ranks.end(), tail_ranks.begin());
+    return append_native_rank_state(tag, hn::LoadU(tag, tail_ranks.data()), ranks.size(), state);
 }
 
 /** Streaming multiline progress keeps physical line boundaries across input slabs. */
@@ -379,9 +405,22 @@ template<sequence_alphabet Alphabet, class Storage, std::size_t Bits, std::size_
     const auto initial_count = state.total_letters;
     for (std::size_t cursor = 0; cursor < length;) {
         const auto count = std::min(hn::Lanes(tag), length - cursor);
-        if (count == hn::Lanes(tag))
-            hn::StoreU(lookup_byte_table(tag, hn::LoadU(tag, input + cursor), table, compact_lookup), tag, ranks.data());
-        else for (std::size_t lane = 0; lane < count; ++lane) ranks[lane] = table[input[cursor + lane]];
+        if (count == hn::Lanes(tag)) {
+            const auto native = lookup_byte_table(
+                tag, hn::LoadU(tag, input + cursor), table, compact_lookup);
+            if (hn::AllFalse(tag, hn::Eq(native, hn::Set(tag, std::uint8_t{0xFF})))) {
+                result.at_line_start = false;
+                const auto status = append_native_rank_state(tag, native, count, state);
+                if (status != sequence_encode_status::ok) {
+                    result.encoded = {status, cursor, state.total_letters - initial_count, input[cursor]};
+                    return result;
+                }
+                cursor += count;
+                continue;
+            }
+            hn::StoreU(native, tag, ranks.data());
+        } else for (std::size_t lane = 0; lane < count; ++lane)
+            ranks[lane] = table[input[cursor + lane]];
         std::size_t begin{};
         for (std::size_t lane = 0; lane <= count; ++lane) {
             if (lane < count && ranks[lane] != std::uint8_t{0xFF}) {
@@ -435,12 +474,24 @@ template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
     };
     while (cursor < length) {
         const auto count = std::min(lanes, length - cursor);
-        if (count == lanes)
-            hn::StoreU(lookup_byte_table(tag, hn::LoadU(tag, input + cursor), table, compact_lookup),
-                tag, ranks.data());
-        else for (std::size_t lane = 0; lane < count; ++lane) ranks[lane] = table[input[cursor + lane]];
-        const bool all_valid = std::find(ranks.begin(), ranks.begin() + count,
-            std::uint8_t{0xFF}) == ranks.begin() + count;
+        bool all_valid = false;
+        if (count == lanes) {
+            const auto native = lookup_byte_table(
+                tag, hn::LoadU(tag, input + cursor), table, compact_lookup);
+            if (hn::AllFalse(tag, hn::Eq(native, hn::Set(tag, std::uint8_t{0xFF})))) {
+                const auto status = append_native_rank_state(tag, native, count, state);
+                if (status != sequence_encode_status::ok)
+                    return {status, cursor, state.total_letters - original_count, input[cursor]};
+                cursor += count;
+                continue;
+            }
+            hn::StoreU(native, tag, ranks.data());
+        } else {
+            for (std::size_t lane = 0; lane < count; ++lane)
+                ranks[lane] = table[input[cursor + lane]];
+            all_valid = std::find(ranks.begin(), ranks.begin() + count,
+                std::uint8_t{0xFF}) == ranks.begin() + count;
+        }
         if (all_valid) {
             const auto status = append_native_rank_state(tag,
                 std::span<const std::uint8_t>{ranks.data(), count}, state);
@@ -510,22 +561,37 @@ template <sequence_alphabet p_alphabet,
         hn::ScalableTag<std::uint8_t>{}, state, body_bytes, body_size);
 }
 
-/** Extract and decode native packed ranks in bounded SIMD tiles. */
+/** Extract packed words once and decode their native ranks in bounded SIMD tiles. */
 template<class D, sequence_alphabet Alphabet, class Storage,
          std::size_t Bits, std::size_t Letters>
 HWY_INLINE void decode_native_words(D tag, const Storage* HWY_RESTRICT words,
         std::uint8_t* HWY_RESTRICT output, std::size_t count, std::size_t source_begin = 0u) {
+    if (count == 0u) return;
     static constexpr auto table = build_rank_to_letter_lut<Alphabet>();
     constexpr Storage mask = static_cast<Storage>(seqan3::alphabet_size<Alphabet> == 1u
         ? 0u : (Storage{1u} << Bits) - 1u);
     std::array<std::uint8_t, hn::MaxLanes(tag)> ranks{};
     const auto lanes = hn::Lanes(tag);
+    std::size_t word_index = source_begin / Letters;
+    std::size_t letter_index = source_begin % Letters;
+    Storage remaining_word = static_cast<Storage>(words[word_index] >> (letter_index * Bits));
     for (std::size_t offset = 0; offset < count;) {
         const auto take = std::min(lanes, count - offset);
-        for (std::size_t lane = 0; lane < take; ++lane) {
-            const auto position = source_begin + offset + lane;
-            ranks[lane] = static_cast<std::uint8_t>((words[position / Letters]
-                >> ((position % Letters) * Bits)) & mask);
+        for (std::size_t lane = 0; lane < take;) {
+            const auto symbols_from_word = std::min(Letters - letter_index, take - lane);
+            for (std::size_t slot = 0; slot < symbols_from_word; ++slot) {
+                ranks[lane + slot] = static_cast<std::uint8_t>(remaining_word & mask);
+                if constexpr (Bits < std::numeric_limits<Storage>::digits)
+                    remaining_word = static_cast<Storage>(remaining_word >> Bits);
+                else remaining_word = 0;
+            }
+            lane += symbols_from_word;
+            letter_index += symbols_from_word;
+            if (letter_index == Letters) {
+                letter_index = 0u;
+                ++word_index;
+                if (offset + lane < count) remaining_word = words[word_index];
+            }
         }
         if (take == lanes) {
             const auto native = hn::LoadU(tag, ranks.data());

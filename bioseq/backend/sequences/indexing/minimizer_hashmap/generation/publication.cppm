@@ -80,7 +80,8 @@ plan_minimizer_generation(p_producer& producer,
     if (options.layout != minimizer_generation_layout::grouped_soa_segment_local || !profile ||
         !is_supported_minimizer_producer_backend_identity(producer_backend) ||
         !grouped_soa_generation_algorithm_identity_matches(options, *profile, producer_backend) ||
-        minimizer_scheme_identity_for_producer_backend(producer_backend) != producer_scheme ||
+        minimizer_scheme_identity_for_producer_backend(producer_backend,
+            options.alphabet_code, options.kmer_size) != producer_scheme ||
         producer_scheme.id != options.minimizer_scheme_id ||
         producer_scheme.revision != options.minimizer_scheme_revision) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);

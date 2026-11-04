@@ -678,25 +678,12 @@ export {
                     ? query_minimizers.device->words()
                     : nullptr;
 
-            const auto native_query = bioseq::seeding::prepare_native_query_seed_windows(
-                query_seq, sketch_span, static_cast<std::uint32_t>(params.kmer_size));
-            const std::array native_queries{native_query.view()};
-            const auto native_rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<
-                compact_sequence_range<p_alphabet>>();
-            using native_window_owner = bioseq::gpu::vulkan::admitted_sequence_detail::
-                canonical_u32_window_batch<p_alphabet>;
-            bioseq::parallelism::memory_permit native_targets_permit;
-            std::vector<native_window_owner> native_targets;
-
             std::vector<std::shared_ptr<bioseq::indexing::gpu_resident_minimizer_index>> residents;
             std::vector<bioseq::gpu::vulkan::gpu_seed_coordinate_job> jobs;
             std::vector<std::size_t> job_segment_indices;
             residents.reserve(ranges.size());
             jobs.reserve(ranges.size());
             job_segment_indices.reserve(ranges.size());
-            bioseq::parallelism::prepare_admitted_vector_capacity<
-                bioseq::gpu::vulkan::vulkan_runtime_error>(
-                    native_targets, native_targets_permit, ranges.size());
 
             const auto frozen_query_gate = pipe::freeze_gpu_query_gate(query_gate.vulkan_gate());
             const auto frozen_gate_identity = frozen_query_gate.canonical_identity();
@@ -733,17 +720,8 @@ export {
                 }
                 auto resident = std::move(*adopted);
                 resident->target_position_offset = segment_lo_bp;
-                if (!bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
-                        runtime, *resident, /*strict_prefix=*/false)) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "GPU segment native posting authority validation failed");
-                }
                 residents.push_back(resident);
-                native_targets.push_back(bioseq::seeding::prepare_native_target_seed_windows(
-                    target_seq, sketch_span, runtime, resident, params.max_occ,
-                    static_cast<std::uint32_t>(params.kmer_size)));
                 jobs.push_back(bioseq::gpu::vulkan::gpu_seed_coordinate_job{
-                    .native_target = native_targets.back().view(),
                     .slots = &resident->slots,
                     .positions = &resident->positions,
                     .target_len = resident->target_len,
@@ -770,8 +748,6 @@ export {
             const auto chain_key =
                 bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
             bioseq::gpu::vulkan::gpu_seed_query_inputs query_inputs{
-                .native_queries = native_queries,
-                .native_rank_policy = &native_rank_policy,
                 .host_minimizer_bytes = device_words != nullptr ? std::span<const std::byte>{}
                                                                 : std::as_bytes(sketch_span),
                 .device_minimizer_words = device_words,

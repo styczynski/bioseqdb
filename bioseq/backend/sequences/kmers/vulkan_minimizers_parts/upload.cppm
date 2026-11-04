@@ -407,30 +407,48 @@ public:
 
   /** Returns the number of input windows. */
   [[nodiscard, gnu::noinline]] std::size_t size() const noexcept {
-    return windows_.size();
+    return uploads_.empty() ? windows_.size() : uploads_.size();
   }
 
   /** Reserves owner metadata for count windows in a fresh batch through shared admission. */
   [[gnu::noinline]] void reserve_windows(std::size_t count) {
-    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+        bioseq::parallelism::vector_admission_policy::retain_permit>(
         windows_, windows_metadata_permit_, count);
   }
 
-  /** Reserve descriptor/owner metadata through the existing shared admission controller. */
+  /** Reserve descriptors; admit owner metadata only if a native window needs staging. */
   [[gnu::noinline]] void reserve_native_uploads(std::size_t count, std::uint64_t symbol_count) {
     DEBUG_ASSERT(windows_.empty() && uploads_.empty(), "native window batch must be fresh");
-    reserve_windows(count);
-    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+    // Keep the shared helper's freshness checks without allocating unused owners.
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+        bioseq::parallelism::vector_admission_policy::retain_permit>(
+        windows_, windows_metadata_permit_, 0u);
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+        bioseq::parallelism::vector_admission_policy::retain_permit>(
         uploads_, uploads_metadata_permit_, count);
     symbol_count_ = symbol_count;
   }
 
-  /** Retain packed bytes and their descriptor until a synchronous consumer finishes. */
-  [[gnu::noinline]] void push_native_upload(window_type&& window, gpu_packed_sequence_upload upload) {
-    DEBUG_ASSERT(windows_.size() < windows_.capacity() && uploads_.size() < uploads_.capacity(),
-                 "native window metadata must be admitted before appending");
+  /** Retain every descriptor and only owned payloads until the synchronous consumer finishes.
+   * owner_capacity is the original total upload count, bounding all possible staged owners.
+   */
+  [[gnu::noinline]] void push_native_upload(window_type&& window,
+                                          gpu_packed_sequence_upload upload,
+                                          std::size_t owner_capacity) {
+    DEBUG_ASSERT(uploads_.size() < uploads_.capacity(),
+                 "native upload metadata must be admitted before appending");
+    if (window.owner.has_value()) {
+      if (windows_.capacity() == 0u) {
+        bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+            bioseq::parallelism::vector_admission_policy::retain_permit>(
+            windows_, windows_metadata_permit_, owner_capacity);
+      }
+      DEBUG_ASSERT(windows_.size() < windows_.capacity(),
+                   "native owner metadata must be admitted before appending");
+      windows_.push_back(std::move(window));
+    }
     uploads_.push_back(upload);
-    windows_.push_back(std::move(window));
   }
 
   /** Borrow the native descriptors; this batch and borrowed source must outlive every GPU fence. */
@@ -574,7 +592,8 @@ template <sequence_alphabet p_alphabet>
     if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
         return reject(vulkan_sketch_decline_reason::kmer_size_unsupported);
     }
-    if (!vulkan_minimizer_window_size_supported(window_size)) {
+    if (!vulkan_minimizer_window_size_supported(
+            window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
         return reject(vulkan_sketch_decline_reason::window_size_unsupported);
     }
     return true;
@@ -709,9 +728,7 @@ public:
         return false;
     }
     if (!vulkan_minimizer_kmer_size_supported(
-            upload.alphabet_kind,
-            upload.bits_per_char,
-            kmer_size)) {
+            rank_lut.exact_rank_bits, kmer_size, rank_lut.seed_policy_id)) {
         return false;
     }
 
@@ -731,13 +748,22 @@ public:
         != upload.bp_size + upload.padding_letters) {
         return false;
     }
-    if (rank_lut.alphabet_size != upload.alphabet_size) return false;
+    if (rank_lut.alphabet_size != upload.alphabet_size
+        || rank_lut.canonical_reverse_complement > 1u) return false;
+    const bool exact = rank_lut.seed_policy_id == 0u;
+    const auto exact_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(rank_lut.alphabet_code);
+    if (!exact_bits || rank_lut.exact_rank_bits != *exact_bits) return false;
+    const std::uint64_t code_limit = exact
+        ? std::uint64_t{1u} << rank_lut.exact_rank_bits : upload.alphabet_size;
     for (std::uint32_t rank = 0u; rank < upload.alphabet_size; ++rank) {
-        if (rank_lut.rank_to_code[rank] != rank ||
-            (rank_lut.canonical_reverse_complement != 0u &&
-             rank_lut.rank_to_rc_code[rank] >= upload.alphabet_size)) {
-            return false;
+        const auto code = rank_lut.rank_to_code[rank];
+        if (exact && code == (std::numeric_limits<std::uint32_t>::max)()) {
+            if (rank_lut.canonical_reverse_complement == 0u) return false;
+            continue;
         }
+        if (code >= code_limit || (!exact && code != rank) ||
+            (rank_lut.canonical_reverse_complement != 0u &&
+             rank_lut.rank_to_rc_code[rank] >= code_limit)) return false;
     }
     return true;
 }
@@ -1285,7 +1311,8 @@ requires requires(Enumerator& enumerate) { enumerate([](sequence_upload_interval
     });
     bioseq::parallelism::memory_permit interval_permit;
     std::vector<sequence_upload_interval> intervals;
-    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+    bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+        bioseq::parallelism::vector_admission_policy::retain_permit>(
         intervals, interval_permit, interval_count);
     enumerate([&intervals, interval_count, source](sequence_upload_interval interval) {
         if (interval.begin > interval.end || interval.end > source.bp_size())
@@ -1307,14 +1334,15 @@ requires requires(Enumerator& enumerate) { enumerate([](sequence_upload_interval
         else intervals[merged_count++] = interval;
     }
     using instance = admitted_sequence_detail::borrowed_u32_instance<Alphabet>;
-    const auto rank_lut = make_vulkan_rank_lut<compact_sequence_range<instance>>();
+    const auto rank_lut = make_vulkan_rank_lut<compact_sequence_range<instance>>(
+        bioseq::minimizers::k_bounded_nthash_scheme_id);
     admitted_sequence_detail::canonical_u32_window_batch<Alphabet> windows;
     windows.reserve_native_uploads(merged_count, source.bp_size());
     for (std::size_t index = 0u; index < merged_count; ++index) {
         const auto interval = intervals[index];
         auto window = prepare_native_packed_window(source, interval.begin, interval.end);
         const auto upload = make_sequence_upload_view(window, interval.begin, rank_lut);
-        windows.push_native_upload(std::move(window), upload);
+        windows.push_native_upload(std::move(window), upload, merged_count);
     }
     return windows;
 }
@@ -1344,7 +1372,8 @@ template <sequence_alphabet p_alphabet, class p_function>
     std::uint32_t local_start_alignment = 1u) {
     using instance = admitted_sequence_detail::borrowed_u32_instance<p_alphabet>;
     using range_type = compact_sequence_range<instance>;
-    const auto rank_lut = make_vulkan_rank_lut<range_type>();
+    const auto rank_lut = make_vulkan_rank_lut<range_type>(
+        bioseq::minimizers::k_bounded_nthash_scheme_id);
     constexpr auto index_limit = std::numeric_limits<std::uint32_t>::max();
     if (jobs.size() > index_limit || local_start_alignment == 0u ||
         (local_start_alignment & (local_start_alignment - 1u)) != 0u) {
@@ -1491,7 +1520,8 @@ template <sequence_alphabet p_alphabet, class p_function>
         };
         bioseq::parallelism::memory_permit local_jobs_permit;
         std::vector<bioseq::prefilter::prefilter_job> local_jobs;
-        bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error>(
+        bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+            bioseq::parallelism::vector_admission_policy::retain_permit>(
             local_jobs, local_jobs_permit, jobs.size());
         bool transport_phases_preserved = true;
         for (const auto& job : jobs) {

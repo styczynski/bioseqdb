@@ -9,8 +9,29 @@ export module bioseq.gpu.vulkan.shader_variants;
 import std;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.abi;
+import bioseq.sequences;
+import bioseq.common.templating.pack_for_each;
 
 export namespace bioseq::gpu::vulkan {
+
+/** Native rank-width selectors: zero is dynamic; positive values come from the registry. */
+inline constexpr auto k_sneaky_snake_rank_widths =
+    []<class... Entries>(std::tuple<Entries...>) consteval {
+        static_assert(((Entries::rank_bits > 0u &&
+            Entries::rank_bits <= std::numeric_limits<unsigned char>::digits) && ...));
+        constexpr auto unique = [] consteval {
+            std::array<std::uint32_t, sizeof...(Entries) + 1u> widths{};
+            std::size_t count{};
+            bioseq::common::templating::append_unique_value(widths, count, std::uint32_t{0u});
+            (bioseq::common::templating::append_unique_value(
+                widths, count, static_cast<std::uint32_t>(Entries::rank_bits)), ...);
+            bioseq::common::templating::sort_in_place_ascending(widths, count);
+            return std::pair{widths, count};
+        }();
+        std::array<std::uint32_t, unique.second> widths{};
+        std::copy_n(unique.first.begin(), widths.size(), widths.begin());
+        return widths;
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
 
 /// @brief Grouped-index layout version stored in shader cache keys.
 inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 6u;
@@ -53,6 +74,7 @@ struct chaining_pipeline_key {
     case static_cast<std::uint32_t>(shader_kind::seed_lookup_anchors):
     case static_cast<std::uint32_t>(shader_kind::sort_anchors_bitonic):
     case static_cast<std::uint32_t>(shader_kind::ordered_sketch_tile):
+    case static_cast<std::uint32_t>(shader_kind::ordered_sketch_exact_tile):
     case static_cast<std::uint32_t>(shader_kind::sketch_emit_flags):
     case static_cast<std::uint32_t>(shader_kind::sketch_emit_carry):
     case static_cast<std::uint32_t>(shader_kind::prefix_scan_block):
@@ -60,9 +82,6 @@ struct chaining_pipeline_key {
     case static_cast<std::uint32_t>(shader_kind::sketch_emit_words):
     case static_cast<std::uint32_t>(shader_kind::seed_count):
     case static_cast<std::uint32_t>(shader_kind::seed_emit):
-    case static_cast<std::uint32_t>(shader_kind::seed_verify_count):
-    case static_cast<std::uint32_t>(shader_kind::seed_verify_emit):
-    case static_cast<std::uint32_t>(shader_kind::seed_native_coverage):
     case static_cast<std::uint32_t>(shader_kind::grouped_soa_seed_count):
     case static_cast<std::uint32_t>(shader_kind::grouped_soa_seed_emit):
     case static_cast<std::uint32_t>(shader_kind::radix_sort_histogram):
@@ -110,13 +129,14 @@ struct shader_variant_key {
     std::uint32_t kind = 0;
     std::uint32_t tile_size = 384;
     std::uint32_t local_size = 128;
+    // SneakySnake stores its rank-width selector here; its submaze span is fixed.
     std::uint32_t max_span = 0;
 
     /// @brief Compare all fields of the  cache key.
     [[nodiscard]] bool operator==(const shader_variant_key&) const = default;
 
     /// @brief Turn this cache key into a compiler request.
-    /// @return A request with the same parameters. Only the shader kind is checked here.
+    /// @return Decoded compiler parameters; SneakySnake restores its fixed submaze span.
     /// @throws shader_compile_error If kind is unknown.
     [[nodiscard]] shader_compile_request to_request() const {
         shader_compile_request request{};
@@ -124,6 +144,10 @@ struct shader_variant_key {
         request.tile_size = tile_size;
         request.local_size = local_size;
         request.max_span = max_span;
+        if (request.kind == shader_kind::sneaky_snake_rank_batch) {
+            request.max_span = k_gpu_sneaky_snake_submaze_length;
+            request.bits_per_char = max_span;
+        }
         return request;
     }
 };
@@ -217,6 +241,9 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
                 key.local_size == 1024u);
     case shader_kind::ordered_sketch_tile:
         return key.tile_size == 384u && key.local_size == 64u && key.max_span >= 1u &&
+               key.max_span <= 64u;
+    case shader_kind::ordered_sketch_exact_tile:
+        return key.tile_size == 384u && key.local_size == 64u && key.max_span >= 1u &&
                key.max_span <= 256u;
     case shader_kind::prefix_scan_block:
     case shader_kind::radix_sort_histogram:
@@ -226,9 +253,6 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     case shader_kind::prefix_scan_add:
     case shader_kind::seed_count:
     case shader_kind::seed_emit:
-    case shader_kind::seed_verify_count:
-    case shader_kind::seed_verify_emit:
-    case shader_kind::seed_native_coverage:
     case shader_kind::target_index_mark_runs:
     case shader_kind::target_index_emit_buckets:
         return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
@@ -269,7 +293,8 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
         return key.tile_size == 384u && (key.local_size == 1u || key.local_size == 64u) &&
                key.max_span == 512u;
     case shader_kind::sneaky_snake_rank_batch:
-        return key.tile_size == 384u && key.local_size == 64u && key.max_span == 512u;
+        return key.tile_size == 384u && key.local_size == 64u &&
+            std::ranges::find(k_sneaky_snake_rank_widths, key.max_span) != k_sneaky_snake_rank_widths.end();
     case shader_kind::gatekeeper_rank_batch:
     case shader_kind::gatekeeper_rank_batch_l32_e2:
     case shader_kind::gatekeeper_rank_batch_l32_e4:
@@ -319,14 +344,12 @@ inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& i
     emit(make_shader_key(shader_kind::sort_anchors_bitonic, 384u, 1024u, 256u));
     for (const std::uint32_t capacity : k_ordered_sketch_window_capacities) {
         emit(make_shader_key(shader_kind::ordered_sketch_tile, 384u, 64u, capacity));
+        emit(make_shader_key(shader_kind::ordered_sketch_exact_tile, 384u, 64u, capacity));
     }
     emit(make_shader_key(shader_kind::prefix_scan_block, 384u, 1u, 1u));
     emit(make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_count, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_emit, 384u, 128u, 1u));
-    emit(make_shader_key(shader_kind::seed_verify_count, 384u, 128u, 1u));
-    emit(make_shader_key(shader_kind::seed_verify_emit, 384u, 128u, 1u));
-    emit(make_shader_key(shader_kind::seed_native_coverage, 384u, 128u, 1u));
     emit(make_shader_key(
         shader_kind::grouped_soa_seed_count, 384u, 128u, k_grouped_soa_seed_cache_abi_revision));
     emit(make_shader_key(
@@ -359,7 +382,9 @@ inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& i
     emit(make_shader_key(shader_kind::align_extend_banded_affine, 384u, 1u, 512u));
     emit(make_shader_key(shader_kind::align_extend_simple_cigar, 384u, 1u, 512u));
     emit(make_shader_key(shader_kind::align_extend_simple_cigar, 384u, 64u, 512u));
-    emit(make_shader_key(shader_kind::sneaky_snake_rank_batch, 384u, 64u, 512u));
+    for (const auto rank_bits : k_sneaky_snake_rank_widths) {
+        emit(make_shader_key(shader_kind::sneaky_snake_rank_batch, 384u, 64u, rank_bits));
+    }
     emit(make_shader_key(shader_kind::gatekeeper_rank_batch, 384u, 64u, 128u));
     emit(make_shader_key(shader_kind::gatekeeper_rank_batch_l32_e2, 384u, 64u, 128u));
     emit(make_shader_key(shader_kind::gatekeeper_rank_batch_l32_e4, 384u, 64u, 128u));

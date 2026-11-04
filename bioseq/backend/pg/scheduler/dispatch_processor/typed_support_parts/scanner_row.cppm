@@ -887,7 +887,7 @@ template <class p_sequence,
                             [&assembled, &collection, fq_pg_view, ft_pg_view, execution_plan,
                              query_storage_unit_byte_width = static_cast<std::uint8_t>(sizeof(query_storage_unit)),
                              scanner_pg_ctx, row_index, &loc_opt, want_fragment,
-                             target_letters_per_unit, selected_query_backend](
+                             target_letters_per_unit, selected_query_backend, alphabet_code](
                                 typed_dispatch_fragment_read_view& storage) {
                                 if (storage.number_of_chunks(bioseq::indexing::k_directory_sub_key) == 0u)
                                     return;
@@ -908,7 +908,8 @@ template <class p_sequence,
                                         scanner_pg_ctx->main_relfilenode, scanner_pg_ctx->mmsearch_seq_attno,
                                         scanner_pg_ctx->active_index),
                                     .sketch_backend = backend,
-                                    .minimizer_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(backend),
+                                    .minimizer_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
+                                        backend, alphabet_code, execution_plan->frozen_parameters.kmer_size),
                                     .query_key = static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]),
                                 };
                                 collection = read_and_align_ordinary_minimizer_index(
@@ -939,7 +940,7 @@ template <class p_sequence,
                                            &query_minimizers,
                                            selected_query_backend,
                                            &idx_params,
-                                           row_index](std::string_view index_name,
+                                           row_index, alphabet_code](std::string_view index_name,
                                                       sequence_size_t clip_lo_bp,
                                                       sequence_size_t clip_hi_bp) {
                         const auto query_span = std::span<const minimap_sketch_data>(
@@ -960,7 +961,7 @@ template <class p_sequence,
                             .sketch_backend = sketch_backend,
                             .minimizer_scheme =
                                 bioseq::indexing::minimizer_scheme_identity_for_backend(
-                                    sketch_backend),
+                                    sketch_backend, alphabet_code, idx_params.kmer_size),
                             .query_key = static_cast<std::uint64_t>(
                                 scanner_pg_ctx->target_rownos[row_index]),
                             .query_signature = bioseq::storage::indexing::query_minimizer_signature(

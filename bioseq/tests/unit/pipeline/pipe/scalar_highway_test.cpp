@@ -980,6 +980,7 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty stats",
 
 TEST_CASE("bounded ntHash preserves native widths across resident and materialized ranges",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
+    REQUIRE(minimap2_parameters{}.minimizer_algorithm == minimizer_algorithm::scalar);
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint8_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint16_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint32_t>();

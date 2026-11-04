@@ -39,17 +39,15 @@ namespace {
     case shader_kind::sketch_emit_flags:
     case shader_kind::sketch_emit_carry:
     case shader_kind::sketch_emit_words:
-        return std::string{k_ordered_sketch_body};
+        return std::string{k_ordered_sketch_common_body} + std::string{k_bounded_sketch_selector}
+            + std::string{k_ordered_sketch_process_body};
+    case shader_kind::ordered_sketch_exact_tile:
+        return std::string{k_ordered_sketch_common_body} + std::string{k_exact_sketch_selector}
+            + std::string{k_ordered_sketch_process_body};
     case shader_kind::prefix_scan_block:
         return std::string{k_prefix_scan_block_body};
     case shader_kind::prefix_scan_add:
         return std::string{k_prefix_scan_add_body};
-    case shader_kind::seed_native_coverage:
-        return std::string{k_seed_native_coverage_body};
-    case shader_kind::seed_verify_count:
-    case shader_kind::seed_verify_emit:
-        return std::string{k_native_packed_sequence_reader} + std::string{k_native_packed_cursor_reader}
-            + std::string{k_seed_verify_body};
     case shader_kind::seed_count:
     case shader_kind::seed_emit:
         return std::string{k_seed_count_emit_body};
@@ -284,6 +282,11 @@ compile_shader_spirv(const shader_compile_request& request) {
                         request.max_span));
     }
 
+    if (request.kind == shader_kind::sneaky_snake_rank_batch &&
+        request.bits_per_char > std::numeric_limits<unsigned char>::digits) {
+        throw shader_compile_error("compile_shader_spirv: SneakySnake rank width exceeds one byte");
+    }
+
     ensure_glslang_initialized();
 
     const std::string source =
@@ -292,10 +295,12 @@ compile_shader_spirv(const shader_compile_request& request) {
                     "#define compile_time_workgroup_size_x {}\n"
                     "#define compile_time_tile_size {}\n"
                     "#define compile_time_maximum_span {}\n"
+                    "#define compile_time_native_rank_bits {}u\n"
                     "{}",
                     request.local_size,
                     request.tile_size,
                     request.max_span,
+                    request.kind == shader_kind::sneaky_snake_rank_batch ? request.bits_per_char : 0u,
                     shader_body_for(request.kind));
 
     const TBuiltInResource resource = make_default_resource();

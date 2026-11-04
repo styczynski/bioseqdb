@@ -19,6 +19,7 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.chaining.core;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.kmers.vulkan_minimizers;
@@ -1138,21 +1139,105 @@ TEST_CASE("bounded ntHash lazy index admits native and fragmented DNA5 for both 
     }
 }
 
-TEST_CASE("ordinary fragment build rejects Vulkan before recording execution evidence",
-          "[component:bioseq][layer:unit][feature:storage]") {
+TEST_CASE("ordinary fragment Vulkan build preserves native pairs and GPU execution evidence",
+          "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
     using namespace bioseq::indexing;
-    auto data = make_dna4(256u, 0x4D504656554C4B4EULL);
-    range_t range(data);
-    const auto view = bioseq::storage::make_lazy_sequence_view(range);
-    fake_fragment_storage<> storage;
-    minimizer_fragment_generation_execution_receipt evidence;
-    REQUIRE_THROWS_AS(
+    constexpr auto ordinary_k = ordinary_minimizer_index_kmer_size(
+        bioseq::minimizers::minimizer_exact_rank_bits<seq::dna4>);
+    for (const auto length : std::array<std::size_t, 2u>{
+             0u, k_ordinary_minimizer_index_window_size + ordinary_k - 2u}) {
+        range_t short_range(make_dna4(length));
+        const auto short_view = bioseq::storage::make_lazy_sequence_view(short_range);
+        fake_fragment_storage<> short_storage;
+        minimizer_fragment_generation_execution_receipt short_evidence;
+        short_evidence.scalar_core_runs = 17u; // A reused receipt must be cleared.
         minimizers_per_fragment_index<fake_fragment_storage<>>::build(
-            storage, view, minimizer_sketch_backend::vulkan_segment, nullptr, &evidence),
-        exact_simd_index_runtime_error);
-    REQUIRE_FALSE(evidence.backend_bound);
-    REQUIRE_FALSE(evidence.direct_build_accepted());
-    REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 0u);
+            short_storage, short_view, minimizer_sketch_backend::vulkan_segment,
+            nullptr, &short_evidence);
+        REQUIRE(short_evidence.backend_bound);
+        REQUIRE(short_evidence.selected_backend == minimizer_sketch_backend::vulkan_segment);
+        REQUIRE(short_evidence.target_length == length);
+        REQUIRE(short_evidence.scalar_core_runs == 0u);
+        REQUIRE(short_evidence.exact_simd_core_runs == 0u);
+        REQUIRE(short_evidence.vulkan_core_runs == 0u);
+        REQUIRE(short_evidence.vulkan_stats.completed_roundtrips == 0u);
+        REQUIRE(short_evidence.short_core_runs == (length == 0u ? 0u : 1u));
+        REQUIRE(short_evidence.direct_build_accepted() == (length != 0u));
+        REQUIRE(*short_storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u)
+                == (length == 0u ? 0 : 1));
+    }
+    if (!::bioseq::gpu::vulkan::hardware_device_available(
+            ::bioseq::gpu::vulkan::runtime::instance())) {
+        SKIP("no hardware Vulkan device");
+    }
+    const auto check_native = []<sequence_alphabet Alphabet>() {
+        CAPTURE(fixed_alphabet_code<Alphabet>());
+        using config = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        using source_range = compact_sequence_range<config>;
+        using scanner = chunked_span_sequence_scanner<std::uint64_t, 64u>;
+        using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+        constexpr std::size_t fragment_bp = 32'768u;
+        std::vector<Alphabet> symbols(fragment_bp + 173u);
+        std::uint64_t state = 0x4D504656554C4B4EULL;
+        for (auto& symbol : symbols) {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            symbol.assign_rank(static_cast<decltype(symbol.to_rank())>(
+                (state >> 33u) % seqan3::alphabet_size<Alphabet>));
+        }
+        symbols[100u].assign_rank(static_cast<decltype(symbols[100u].to_rank())>(
+            seqan3::alphabet_size<Alphabet> - 1u));
+        source_range range(symbols);
+        lazy_sequence<config, scanner> fragmented{scanner::from_range(range)};
+        const auto view = bioseq::storage::make_lazy_sequence_view(fragmented);
+        fake_fragment_storage<> scalar_storage;
+        fake_fragment_storage<> gpu_storage;
+        index_type::build(scalar_storage, view, minimizer_sketch_backend::scalar, nullptr);
+        minimizer_fragment_generation_execution_receipt evidence;
+        // PostgreSQL supplies no CPU table for Vulkan. This must perform GPU work.
+        index_type::build(gpu_storage, view, minimizer_sketch_backend::vulkan_segment,
+                          nullptr, &evidence);
+        REQUIRE(evidence.direct_build_accepted());
+        REQUIRE(evidence.selected_backend == minimizer_sketch_backend::vulkan_segment);
+        REQUIRE(evidence.minimizer_scheme == k_minimap_scheme_identity);
+        REQUIRE(evidence.scalar_core_runs == 0u);
+        REQUIRE(evidence.exact_simd_core_runs == 0u);
+        REQUIRE(evidence.bounded_nthash_core_runs == 0u);
+        REQUIRE(evidence.vulkan_core_runs > 0u);
+        REQUIRE(evidence.vulkan_stats.is_internally_consistent(true));
+        REQUIRE(evidence.vulkan_stats.completed_roundtrips > 0u);
+        REQUIRE(gpu_storage.number_of_chunks(k_directory_sub_key) == 1u);
+        REQUIRE(*gpu_storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u) == 2);
+        const auto read_pairs = [](auto& storage, index_sub_key_t fragment) {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+            REQUIRE(storage.number_of_chunks(fragment) == 1u);
+            wire_for_each_entry(storage.template read_chunk<char>(fragment, 0u),
+                                storage.chunk_byte_size(fragment, 0u),
+                                [&pairs](std::uint64_t hash, std::uint64_t position) {
+                                    pairs.emplace_back(hash, position);
+                                });
+            std::ranges::sort(pairs);
+            return pairs;
+        };
+        std::size_t stored_pairs = 0u;
+        bool wide_hash_present = false;
+        for (index_sub_key_t fragment = 0; fragment < 2; ++fragment) {
+            const auto expected = read_pairs(scalar_storage, fragment);
+            const auto actual = read_pairs(gpu_storage, fragment);
+            REQUIRE(actual == expected);
+            stored_pairs += actual.size();
+            wide_hash_present = wide_hash_present || std::ranges::any_of(actual,
+                [](const auto& pair) {
+                    return pair.first > (std::numeric_limits<std::uint32_t>::max)();
+                });
+        }
+        REQUIRE(stored_pairs > 0u);
+        if constexpr (seqan3::aminoacid_alphabet<Alphabet>) {
+            REQUIRE(wide_hash_present);
+        }
+    };
+    [&check_native]<class... Entries>(std::tuple<Entries...>) {
+        (check_native.template operator()<typename Entries::alphabet_type>(), ...);
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
 }
 
 TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments without merging them",

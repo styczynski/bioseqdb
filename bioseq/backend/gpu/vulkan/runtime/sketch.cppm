@@ -55,8 +55,9 @@ struct authorized_readback_receipt {
 } // namespace
 
 /// @brief Counts and writes one sequence's minimizers using admitted output storage.
-/// Proven capacity uses one submission. Exact allocation reuses the same count,
-/// scan and emit shaders with a count fence before reserving output memory.
+/// Preallocated capacity normally uses one submission with scanned tile bounds.
+/// Exact allocation or admitted estimate recovery reuses the same count/scan
+/// results and emits after reserving the actual output memory.
 /// Temporary  arena storage is freed before return.
 /// @param[in] packed_sequence Packed bytes copied before submission.
 /// @param[in] rank_lut Packed-rank, translation table
@@ -64,8 +65,9 @@ struct authorized_readback_receipt {
 /// @param[in] max_minimizers Output capacity in minimizers.
 /// @param[in] query_gate_words Optional query-hash bitmap.
 /// @param[in] query_gate_mask Low-bit hash mask, or zero without a bitmap.
-/// @param[in] allocation Whether output uses a proven bound or the checked count.
-/// @param[in] peak_permit Existing count/output reservation, required for exact allocation.
+/// @param[in] allocation Whether output is preallocated or allocated from the checked count.
+/// @param[in] peak_permit Existing output reservation; required for exact allocation.
+/// In preallocated mode, supplying it authorizes recovery when actual output exceeds the estimate.
 /// @param[in] retained_host_bytes Host allocations retained through both submissions.
 /// @return Exact count and owned device buffer, or overflow.
 /// @throws vulkan_runtime_error If validation or execution fails.
@@ -91,12 +93,13 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         throw vulkan_runtime_error("gpu sketch entered with live arena slices");
     }
     gpu_arena_trim_guard arena_trim{arena};
-    if (allocation != vulkan_sketch_output_allocation::proven_capacity
+    if (allocation != vulkan_sketch_output_allocation::preallocated
         && allocation != vulkan_sketch_output_allocation::exact_count) {
         throw vulkan_runtime_error("gpu sketch has invalid output allocation policy");
     }
     const bool allocate_from_count = allocation == vulkan_sketch_output_allocation::exact_count;
-    if (allocate_from_count && (peak_permit == nullptr || peak_permit->controller() == nullptr)) {
+    if ((allocate_from_count && peak_permit == nullptr)
+        || (peak_permit != nullptr && peak_permit->controller() == nullptr)) {
         throw vulkan_runtime_error("gpu sketch exact output requires a retained memory permit");
     }
     validate_native_sketch_contract(rank_lut, params);
@@ -147,8 +150,12 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                         max_minimizers,
                         params.letters_per_unit));
     }
-    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size);
-    bool unsupported_capacity = (!allocate_from_count && hard_bound > max_minimizers)
+    const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, kmer_size, rank_lut.seed_policy_id);
+    // A combined count/emit submission cannot inspect a potentially wrapped
+    // prefix on the host before writing. Its semantic count must fit uint32;
+    // the shader separately checks actual tile ranges against allocated capacity.
+    bool unsupported_capacity = (!allocate_from_count
+            && hard_bound > (std::numeric_limits<std::uint32_t>::max)())
         || max_minimizers > (std::numeric_limits<std::uint32_t>::max)();
     for (const std::uint64_t bytes : {
              memory_plan.sequence_bytes, memory_plan.rank_lut_bytes,
@@ -158,8 +165,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
              out_bytes, query_gate_bytes}) {
         unsupported_capacity = unsupported_capacity || bytes > features_.max_storage_buffer_range;
     }
-    // A one-submission call must prove the full native bound before writing.
-    // Count-first calls check actual output capacity after their first fence.
+    // Keep descriptor and prefix-width admission before dispatch. Exact-count
+    // calls additionally check the actual output capacity after their first fence.
     if (unsupported_capacity) {
         result.overflow = true;
         if (!arena_trim.release_now())
@@ -254,6 +261,10 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     std::memcpy(base + tiles_s.offset, tiles.data(), tiles.size() * sizeof(sketch_tile_type));
     std::memset(base + counts_s.offset, 0, static_cast<std::size_t>(counts_s.size));
     std::memset(base + counters_s.offset, 0, 8);
+    const std::uint32_t output_capacity = allocate_from_count
+        ? 0u : static_cast<std::uint32_t>(max_minimizers);
+    std::memcpy(base + counters_s.offset + sizeof(std::uint32_t),
+        &output_capacity, sizeof(output_capacity));
     if (query_gate_bytes != 0u) {
         std::memcpy(base + query_gate_s.offset,
                     query_gate_words.data(),
@@ -264,7 +275,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile,
+        ordered_sketch_kind(rank_lut),
         k_sketch_local_size,
         choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
@@ -379,10 +390,19 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         last_off, hard_bound);
     const std::uint64_t total = checked_total.value_or(0u);
 
-    if (!checked_total || total > max_minimizers) {
+    const bool recover_estimate = !allocate_from_count && peak_permit != nullptr
+        && total > max_minimizers;
+    if (!checked_total || (total > max_minimizers && !recover_estimate)) {
         result.overflow = true;
     } else {
-        if (allocate_from_count) {
+        if (allocate_from_count || recover_estimate) {
+            if (recover_estimate && retained_host_bytes < bioseq::common::saturating_add(
+                    memory_plan.count_submit_host_transient_bytes, query_gate_bytes)) {
+                throw vulkan_runtime_error("gpu sketch recovery staging admission is invalid");
+            }
+            // The first fence drained every use. Release a safely truncated
+            // estimate before admitting its replacement, without a second live output.
+            out_words.reset();
             const std::uint64_t exact_output_bytes = std::max<std::uint64_t>(
                 minimizer_device_bytes(params.minimizer_word_kind,
                     params.minimizer_words32, total), 4u);
@@ -408,6 +428,9 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                     }
                     if (params.minimizer_word_kind == 0u)
                         std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
+                    const auto exact_capacity = static_cast<std::uint32_t>(total);
+                    std::memcpy(base + counters_s.offset + sizeof(std::uint32_t),
+                        &exact_capacity, sizeof(exact_capacity));
                     auto emit_sketch_infos = sketch_infos;
                     emit_sketch_infos[4] = {out_words.buffer_handle, 0, VK_WHOLE_SIZE};
                     // Keep the upload, query gate, counts and offsets unchanged
@@ -483,8 +506,14 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         // The shader's final global tile owns the remaining source suffix.
         const std::uint32_t owned_hi = tile_index + 1u == tiles.size()
             ? tile.bp_count : tile.tile_hi;
-        const std::uint64_t tile_bound = target_minimizer_count_upper_bound(
-            std::uint64_t{owned_hi} - tile.tile_lo, 1u);
+        const std::uint64_t owned_span = std::uint64_t{owned_hi} - tile.tile_lo;
+        // An exact tile can emit preceding-window ties at one owned trigger,
+        // including the expiring minimum and final flush. Bound the burst in
+        // this existing pass; arbitrary input tile ranges need not be dense.
+        const std::uint64_t tile_bound = rank_lut.seed_policy_id == 0u
+            ? std::min(target_minimizer_count_upper_bound(tile.bp_count, params.kmer_size, 0u),
+                       bioseq::common::saturating_add(owned_span, params.window_size))
+            : target_minimizer_count_upper_bound(owned_span, 1u, rank_lut.seed_policy_id);
         if (tile_bound >= (std::uint64_t{1u}
                 << (std::numeric_limits<std::uint32_t>::digits - 1u)))
             throw vulkan_runtime_error("gpu sketch tile count exceeds unflagged count ABI");
@@ -520,7 +549,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         throw vulkan_runtime_error("gpu sketch query layout does not cover all tiles");
     }
     if (materialization == vulkan_sketch_host_materialization::host_and_device
-        && hard_bound > max_minimizers) {
+        && hard_bound > (std::numeric_limits<std::uint32_t>::max)()) {
         result.overflow = true;
         return result;
     }
@@ -623,6 +652,11 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::memset(base + offsets_s.offset, 0, static_cast<std::size_t>(offsets_s.size));
     std::memset(base + blocks_s.offset, 0, static_cast<std::size_t>(blocks_s.size));
     std::memset(base + counters_s.offset, 0, static_cast<std::size_t>(counters_s.size));
+    const std::uint32_t output_capacity =
+        materialization == vulkan_sketch_host_materialization::host_and_device
+            ? static_cast<std::uint32_t>(max_minimizers) : 0u;
+    std::memcpy(base + counters_s.offset + sizeof(std::uint32_t),
+        &output_capacity, sizeof(output_capacity));
     if (materialization == vulkan_sketch_host_materialization::host_and_device &&
         params.minimizer_word_kind == 0u) {
         std::memset(host_materialized_out_words.mapped,
@@ -639,7 +673,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             runtime_pipeline_operation_kind::query_sketch, 1u, next_operation_identity_locked());
     }
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile,
+        ordered_sketch_kind(rank_lut),
         k_sketch_local_size,
         choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
@@ -830,6 +864,9 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
         }
 
+        const auto exact_capacity = static_cast<std::uint32_t>(total);
+        std::memcpy(base + counters_s.offset + sizeof(std::uint32_t),
+            &exact_capacity, sizeof(exact_capacity));
         const std::array<VkDescriptorBufferInfo, 9> emit_sketch_infos{{
             {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
             {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
@@ -962,12 +999,17 @@ std::uint64_t runtime::validate_query_sketch_authorization_locked(
     std::uint32_t expected_pos_bits,
     std::span<const gpu_seed_query_record_wire> expected_query_records) const {
     const bool typed_word_shape =
+        (expected_word_kind == 0u && expected_words32_per_record == 0u) ||
         (expected_word_kind == 1u && expected_words32_per_record == 1u) ||
         (expected_word_kind == 2u && expected_words32_per_record == 2u) ||
         (expected_word_kind == 3u && expected_words32_per_record == 4u);
-    const auto exact_bytes = bioseq::common::checked_mul(
-        expected_minimizer_count,
-        static_cast<std::uint64_t>(expected_words32_per_record) * sizeof(std::uint32_t));
+    const auto exact_bytes = expected_word_kind == 0u
+        ? bioseq::common::checked_mul(
+              bioseq::common::ceil_div(expected_minimizer_count, std::uint64_t{2u}),
+              sizeof(std::uint32_t))
+        : bioseq::common::checked_mul(
+              expected_minimizer_count,
+              static_cast<std::uint64_t>(expected_words32_per_record) * sizeof(std::uint32_t));
     if (!typed_word_shape || !exact_bytes.has_value() ||
         *exact_bytes > (std::numeric_limits<std::size_t>::max)() ||
         !authorization.is_valid() || authorization.runtime_ != this ||

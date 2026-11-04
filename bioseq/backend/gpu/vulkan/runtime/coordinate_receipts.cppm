@@ -198,7 +198,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
         return false;
     }
-    const std::array<shader_variant_key, 14> keys{
+    const std::array<shader_variant_key, 12> keys{
         make_shader_key(shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u),
@@ -214,15 +214,13 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         make_shader_key(shader_kind::radix_sort_scatter, 384u, 1u, 1u),
         make_shader_key(
             shader_kind::align_extend_simple_cigar, 384u, 64u, k_gpu_alignment_extension_max_len),
-        make_shader_key(shader_kind::seed_verify_count, 384u, 128u, 1u),
-        make_shader_key(shader_kind::seed_verify_emit, 384u, 128u, 1u),
     };
     if (!std::all_of(keys.begin(), keys.end(), [](const shader_variant_key& key) {
             return is_shader_variant_key_valid(key);
         })) {
         return false;
     }
-    std::array<runtime_metal_archive_pipeline_receipt, 14> receipts{};
+    std::array<runtime_metal_archive_pipeline_receipt, 12> receipts{};
     for (std::size_t i = 0u; i < receipts.size(); ++i) {
         runtime_metal_archive_pipeline_audit audit = base_audit;
         audit.receipt_identity = 8000u + i;
@@ -285,22 +283,8 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
             shape_collector->use(command(13u), 0u, keys[slot], &receipts[slot], 1u);
             shape_collector->use(command(13u), 0u, keys[slot], &receipts[slot], 1u);
         }
+        shape_collector->use(command(13u), 0u, keys[5], &receipts[5], 1u);
         shape_collector->commit(command(13u));
-        for (const auto slot : {12u, 13u, 1u, 2u})
-            shape_collector->prepare(keys[slot], &receipts[slot]);
-        shape_collector->begin(command(15u));
-        shape_collector->use(command(15u), 0u, keys[12], &receipts[12], 1u);
-        shape_collector->use(command(15u), 0u, keys[1], &receipts[1], 1u);
-        shape_collector->use(command(15u), 0u, keys[2], &receipts[2], 1u);
-        shape_collector->use(command(15u), 0u, keys[2], &receipts[2], 1u);
-        shape_collector->commit(command(15u));
-        shape_collector->begin(command(16u));
-        shape_collector->use(command(16u), 0u, keys[13], &receipts[13], 1u);
-        shape_collector->commit(command(16u));
-        shape_collector->set_seed_native_verification(0u, 1u, 1u, 1u, 0u);
-        shape_collector->begin(command(17u));
-        shape_collector->use(command(17u), 0u, keys[5], &receipts[5], 1u);
-        shape_collector->commit(command(17u));
 
         shape_collector->begin(command(14u));
         shape_collector->use(command(14u), 0u, keys[7], &receipts[7], 1u);
@@ -358,7 +342,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         *coordinate_submission_count,
         receipt.alignment_pipeline_token_.audit().committed_submissions);
     if (!receipt.are_all_jobs_accepted() || !expected.is_internally_consistent() ||
-        expected.acceptance.shape_pipeline_receipt_count != 12u ||
+        expected.acceptance.shape_pipeline_receipt_count != 10u ||
         expected.acceptance.alignment_pipeline_receipt_count != 1u ||
         expected.acceptance.alignment_submission_count != 2u ||
         !committed_submission_count.has_value() ||

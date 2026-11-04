@@ -258,9 +258,11 @@ class runtime {
     /// @brief Builds ordered minimizers for one packed sequence.
     /// Returns a GPU buffer and minimizer count, or reports output  overflow.
     /// Optional query-hash bits restrict which minimizers are emitted.
-    /// Proven-capacity mode must cover target_minimizer_count_upper_bound and
-    /// fit uint32/device descriptor limits before the first submission. Exact-count
-    /// mode keeps the same semantic limit, counts before output allocation, and
+    /// Preallocated mode requires a uint32-safe semantic prefix bound and checks
+    /// each scanned tile against actual output capacity before writing. An optional
+    /// peak permit authorizes recovery from an underestimated capacity using the
+    /// completed count and a second emit submission. Without it, overflow is returned.
+    /// Exact-count mode keeps the supplied count limit, allocates after counting, and
     /// grows the caller's existing peak permit before emitting. retained_host_bytes
     /// covers the packed input, tile staging and query gate through both fences.
     /// The caller retains the permit until the output allocation is freed or
@@ -272,14 +274,14 @@ class runtime {
                                                std::span<const std::uint32_t> query_gate_words = {},
                                                std::uint32_t query_gate_mask = 0u,
                                                vulkan_sketch_output_allocation allocation =
-                                                   vulkan_sketch_output_allocation::proven_capacity,
+                                                   vulkan_sketch_output_allocation::preallocated,
                                                bioseq::parallelism::memory_permit* peak_permit = nullptr,
                                                std::uint64_t retained_host_bytes = 0u);
 
     /// @brief Builds ordered minimizers for a batch of query sequences.
     /// `materialization` selects a host copy or device-only output. Device-only
     /// results also carry authorization for later seed operations.
-    /// Host-and-device capacity must cover twice the owned trigger positions
+    /// Host-and-device emission checks scanned tile ranges against actual capacity
     /// across all tiles. Device-only mode counts first and accepts smaller
     /// estimates when the checked actual output fits. Capacity is at most uint32;
     /// all bound input/output descriptors must fit the device byte-range limit.
@@ -313,7 +315,7 @@ class runtime {
 #endif
 
     /// @brief Loads target-index pipelines before reserving memory for the build.
-    void prepare_target_index_pipelines(const vulkan_sketch_params& params);
+    void prepare_target_index_pipelines(const vulkan_rank_lut& rank_lut, const vulkan_sketch_params& params);
 
     /// @brief Builds a GPU minimizer index with hash-sorted buckets and position lists.
     /// Counts minimizers first to size the output. `peak_permit` must cover the
@@ -364,12 +366,15 @@ class runtime {
     /// @brief Runs SneakySnake to rule out sequence pairs beyond the edit limit.
     /// Each result includes a lower bound and status. Unsupported cases are kept
     /// for later alignment, and invalid ranges are checked before reading sequence data.
+    /// rank_bits=0 retains descriptor-driven decoding; a registered positive width
+    /// requires every supplied descriptor to use that width before dispatch.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
     run_sneaky_snake_rank_batch_roundtrip(std::span<const gpu_packed_sequence_upload> queries,
                                           std::span<const gpu_packed_sequence_upload> targets,
         const vulkan_rank_lut& rank_lut,
                                           std::span<const bioseq::prefilter::prefilter_job> jobs,
-        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
+        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks,
+        std::uint32_t rank_bits);
 
     /// @brief Runs GateKeeper to filter pairs before alignment.
     /// A mask-based rejection needs confirmation from the bounded-distance  check.
@@ -382,7 +387,8 @@ class runtime {
         bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
 
     /// @brief Aligns native packed sequence windows on the GPU and returns packed CIGAR strings.
-    /// Large batches run in waves to limit traceback memory.
+    /// Uniform scoring may accept a valid heuristic script with its accurate score; it may be suboptimal.
+    /// Dense scoring and unresolved uniform jobs use DP. Large batches run in bounded traceback waves.
     [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error>
     run_alignment_simple_cigar_roundtrip(const gpu_packed_sequence_upload& query_symbols,
                                          const gpu_packed_sequence_upload& target_symbols,
@@ -393,7 +399,8 @@ class runtime {
 
     /// @brief Aligns packed sequence windows and attaches completion records to the coordinate receipt.
     /// Each job must match a recorded coordinate candidate. Returns alignment
-    /// results and the packed CIGAR strings read from the GPU.
+    /// results and the packed CIGAR strings read from the GPU. Uniform scoring may accept valid,
+    /// accurately scored heuristic scripts that are suboptimal; dense scoring uses DP.
     [[nodiscard]] std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_error> run_persisted_alignment_cigar_roundtrip(
         std::span<const std::byte> query_packed,
         std::span<const std::byte> target_packed,
@@ -520,7 +527,6 @@ class runtime {
     [[nodiscard]] grouped_soa_seed_anchor_result run_grouped_soa_seed_anchor_roundtrip(
         const gpu_grouped_soa_resident_view& target,
         const gpu_seed_query_inputs& query_inputs,
-        const gpu_native_sequence_provider& native_target,
         std::int32_t max_occ,
         std::uint32_t kmer_size,
         device_query_sketch_authorization query_authorization);
@@ -672,8 +678,9 @@ class runtime {
     };
 
     /// @brief Borrowed handles for a cached compute pipeline and its reusable descriptor set.
-    /// The cache key is `(kind, local_size, max_span)`. Alphabet and word-format
-    /// choices are passed to dispatches as  push constants. The cache owns these handles.
+    /// The cache key is `(kind, local_size, max_span)`. SneakySnake uses max_span
+    /// as its checked rank-width selector; other geometry remains in descriptors.
+    /// The cache owns these handles.
     struct compute_pipeline {
         shader_kind kind{};                         ///< Shader, algorithm selected by the cache key
         std::uint32_t local_size = 0;               ///< Workgroup-size selector stored in the shader key.
@@ -737,7 +744,7 @@ class runtime {
     compute_pipeline
     get_compute_pipeline_locked(shader_kind kind, std::uint32_t local_size, std::uint32_t max_span);
     /// @brief Loads all pipeline variants needed to build a target index.
-    void prepare_target_index_pipelines_locked(const vulkan_sketch_params& params);
+    void prepare_target_index_pipelines_locked(const vulkan_rank_lut& rank_lut, const vulkan_sketch_params& params);
     /// @brief Binds each supplied buffer in full to the pipeline's reusable descriptor set.
     void bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                   std::span<const VkBuffer> buffers);
@@ -860,15 +867,6 @@ class runtime {
         std::uint32_t hash_shift,
         std::uint32_t pos_bits) const;
 #endif
-    /** Verifies native seed spans on device and compacts valid sorted anchors. */
-    [[nodiscard]] gpu_verified_seed_buffer verify_seed_anchors_locked(
-        const buffer& candidates, std::uint64_t candidate_byte_offset, std::uint32_t candidate_count,
-        const gpu_native_sequence_upload& query, const gpu_native_sequence_upload& target,
-        const vulkan_rank_lut& rank_policy, std::uint32_t query_length,
-        std::uint32_t kmer_size, std::uint64_t target_position_bias = 0u,
-        const gpu_native_sequence_provider& target_provider = {},
-        runtime_pipeline_use_collector* collector = nullptr, std::size_t job_index = 0u);
-
     /// @brief Returns the device-memory bytes held by the reusable prefilter buffers.
     [[nodiscard]] std::uint64_t prefilter_workspace_allocation_bytes_locked() const noexcept;
     /// @brief Grows a prefilter buffer if needed, reserving memory before, allocation.
@@ -888,7 +886,8 @@ class runtime {
         std::span<const gpu_packed_sequence_upload> targets,
         const vulkan_rank_lut& rank_lut,
         std::span<const bioseq::prefilter::prefilter_job> jobs,
-        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks);
+        bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks,
+        std::uint32_t rank_bits);
     /// @brief Returns the memory charge for metadata held by both pipeline caches.
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked() const noexcept;
     /// @brief Reserves memory before either pipeline cache grows.

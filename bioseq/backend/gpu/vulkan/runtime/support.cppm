@@ -32,31 +32,64 @@ import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
 import bioseq.simd.utils;
+import bioseq.sequences.kmers.hashers.base;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::gpu::vulkan {
 
-/** Reject incompatible native hash, physical packing and rank-policy contracts. */
+/** Select the structural sketch kernel once from the validated rank policy. */
+[[nodiscard]] constexpr shader_kind ordered_sketch_kind(const vulkan_rank_lut& policy) noexcept {
+    return policy.seed_policy_id == 0u ? shader_kind::ordered_sketch_exact_tile
+                                      : shader_kind::ordered_sketch_tile;
+}
+
+/** Reject incompatible hash profiles, physical packing and native rank contracts. */
 inline void validate_native_sketch_contract(const vulkan_rank_lut& policy,
                                              const vulkan_sketch_params& params) {
-    if (params.kmer_size == 0u || params.kmer_size > 31u || params.window_size == 0u ||
-        params.window_size > 64u || params.hash_bits < 32u || params.hash_bits > 64u ||
-        params.pos_bits == 0u || params.pos_bits > 63u ||
+    const bool exact = policy.seed_policy_id == 0u;
+    const auto exact_rank_bits = bioseq::minimizers::exact_rank_bits_for_alphabet_code(policy.alphabet_code);
+    const bool profile_valid = exact
+        ? exact_rank_bits.has_value() && policy.exact_rank_bits == *exact_rank_bits &&
+          bioseq::minimizers::exact_minimizer_shape_fits(policy.exact_rank_bits, params.kmer_size, params.hash_bits) &&
+          params.window_size <= k_ordered_sketch_window_capacities.back()
+        : policy.seed_policy_id == bioseq::minimizers::k_bounded_nthash_scheme_id &&
+          params.kmer_size <= 31u && params.window_size <= 64u && params.hash_bits >= 32u;
+    const bool ordinary_word = params.minimizer_word_kind <= static_cast<std::uint32_t>(minimizer_word_kind::u64);
+    const std::uint32_t word_bits = ordinary_word ? (16u << params.minimizer_word_kind) : 0u;
+    const bool word_valid = ordinary_word
+        ? params.minimizer_words32 == word_bits / 32u &&
+          params.hash_shift == params.pos_bits + 1u && params.hash_bits + params.pos_bits + 1u <= word_bits
+        : params.minimizer_word_kind == static_cast<std::uint32_t>(minimizer_word_kind::u64x2) &&
+          params.minimizer_words32 == 4u && params.hash_shift == 0u;
+    if (!profile_valid || !word_valid || params.kmer_size == 0u || params.window_size == 0u ||
+        params.hash_bits == 0u || params.hash_bits > 64u || params.pos_bits == 0u || params.pos_bits > 63u ||
         (params.unit_bits != 8u && params.unit_bits != 16u && params.unit_bits != 32u && params.unit_bits != 64u) ||
         params.bits_per_char == 0u || params.bits_per_char > 8u ||
         params.letters_per_unit != params.unit_bits / params.bits_per_char ||
         params.char_mask != (std::uint32_t{1u} << params.bits_per_char) - 1u ||
         policy.alphabet_size == 0u || policy.alphabet_size > policy.rank_to_code.size() ||
         policy.alphabet_size > params.char_mask + 1u || params.alphabet_size != policy.alphabet_size ||
-        policy.seed_policy_id == 0u || policy.canonical_reverse_complement > 1u ||
-        (params.minimizer_word_kind != 2u && params.minimizer_word_kind != 3u) ||
-        (params.minimizer_word_kind == 2u && (params.minimizer_words32 != 2u ||
-            params.hash_shift != params.pos_bits + 1u || params.hash_bits + params.pos_bits + 1u > 64u)) ||
-        (params.minimizer_word_kind == 3u && (params.minimizer_words32 != 4u || params.hash_shift != 0u)))
+        policy.canonical_reverse_complement > 1u) {
         throw vulkan_runtime_error("GPU sketch native rank/hash contract is invalid");
-    for (std::size_t rank = 0u; rank < policy.alphabet_size; ++rank)
-        if (policy.rank_to_code[rank] != rank || (policy.canonical_reverse_complement != 0u &&
-            policy.rank_to_rc_code[rank] >= policy.alphabet_size))
-            throw vulkan_runtime_error("GPU sketch native rank policy is invalid");
+    }
+    const auto invalid_rank = std::numeric_limits<std::uint32_t>::max();
+    for (std::size_t rank = 0u; rank < policy.alphabet_size; ++rank) {
+        if (exact) {
+            const std::uint32_t code_limit = std::uint32_t{1u} << policy.exact_rank_bits;
+            const auto code = policy.rank_to_code[rank];
+            const auto reverse_code = policy.rank_to_rc_code[rank];
+            if ((code != invalid_rank && code >= code_limit) ||
+                (policy.canonical_reverse_complement != 0u &&
+                 ((reverse_code == invalid_rank) != (code == invalid_rank) ||
+                  (reverse_code != invalid_rank && reverse_code >= code_limit)))) {
+                throw vulkan_runtime_error("GPU exact sketch rank policy is invalid");
+            }
+        } else if (policy.rank_to_code[rank] != rank ||
+                   (policy.canonical_reverse_complement != 0u &&
+                    policy.rank_to_rc_code[rank] >= policy.alphabet_size)) {
+            throw vulkan_runtime_error("GPU bounded sketch rank policy is invalid");
+        }
+    }
 }
 
 /** Check one borrowed packed logical source without expanding symbol ranks. */
@@ -797,18 +830,20 @@ void validate_prefilter_inputs(const char* algorithm,
                                std::span<const gpu_packed_sequence_upload> targets,
                                const vulkan_rank_lut& rank_lut,
                                std::span<const bioseq::prefilter::prefilter_job> jobs,
-                               bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
+                               bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks,
+                               std::uint32_t rank_bits) {
     constexpr auto limit = std::numeric_limits<std::uint32_t>::max();
     if (validate_ranks == nullptr || jobs.size() > limit || queries.size() > limit || targets.size() > limit ||
         rank_lut.alphabet_size == 0u || rank_lut.alphabet_size > vulkan_rank_lut::rank_capacity) {
         throw vulkan_runtime_error(fmt::format("{} invalid record counts or alphabet", algorithm));
     }
-    const auto validate_records = [algorithm, &rank_lut, validate_ranks](auto records) {
+    const auto validate_records = [algorithm, &rank_lut, validate_ranks, rank_bits](auto records) {
         for (const auto& upload : records) {
             const auto& sequence = upload.sequence;
             // Validate every supplied logical span once, including unreferenced
             // uploads. Placement then checks geometry without rescanning ranks.
             if (!packed_sequence_upload_geometry_is_valid(upload) ||
+                (rank_bits != 0u && sequence.bits_per_char != rank_bits) ||
                 sequence.alphabet_code != rank_lut.alphabet_code ||
                 sequence.alphabet_size != rank_lut.alphabet_size ||
                 sequence.seed_policy_id != rank_lut.seed_policy_id

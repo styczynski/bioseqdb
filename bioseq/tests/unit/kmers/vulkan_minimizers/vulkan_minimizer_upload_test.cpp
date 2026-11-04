@@ -513,7 +513,8 @@ TEST_CASE("vulkan minimizer: explicit output overflow has typed identity",
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(dna4_fixture);
     const auto upload = vk::make_sequence_upload_view(sequence);
-    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(sequence)>();
+    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(sequence)>(
+        vk::vulkan_minimizer_seed_policy_id<typename decltype(sequence)::traits>(15u));
     bool capacity_overflowed = false;
     vk::vulkan_sketch_decline decline{};
     auto result = vk::sketch_uploaded_window_result<minimap_sketch_data>(

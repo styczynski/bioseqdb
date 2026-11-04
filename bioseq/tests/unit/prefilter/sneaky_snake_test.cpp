@@ -378,10 +378,520 @@ TEST_CASE(
     }
 }
 
+// BEGIN_TEMPORARY_NATIVE_SNEAKY_PROBE -- DO NOT COMMIT
+namespace manual_native_sneaky_probe {
+namespace storage = bioseq::storage;
+constexpr std::array<std::size_t, 6u> boundaries{63u, 64u, 65u, 511u, 512u, 513u};
+constexpr std::size_t query_start = 2u;
+constexpr std::size_t target_start = 3u;
+
+/** Count optional reads without making them a requirement of a resident provider. */
+template<sequence_alphabet Alphabet>
+struct source_probe {
+    using view_type = storage::lazy_sequence_view<Alphabet>;
+    view_type parent;
+    const std::vector<std::uint8_t>& ranks;
+    std::size_t leading;
+    mutable std::size_t reads{};
+    bool allow_resident{true};
+    bool fail_reads{};
+    std::array<std::uint8_t, prefilter_rank_window::chunk_size>* shared_slot{};
+    std::vector<bool>* read_order{};
+    bool target_side{};
+
+    /** The independent rank oracle also supplies checked-reader failure diagnosis. */
+    template<bool Reverse, bool WriteReverse>
+    [[nodiscard]] static const std::uint8_t* read(
+        const void* context, storage::sequence_size_t from, std::size_t count,
+        std::span<std::uint8_t> scratch) {
+        const auto& self = *static_cast<const source_probe*>(context);
+        ++self.reads;
+        if (self.read_order != nullptr) self.read_order->push_back(self.target_side);
+        if (self.fail_reads || from > self.ranks.size() ||
+            count > self.ranks.size() - from || count > scratch.size()) return nullptr;
+        if constexpr (Reverse && !seqan3::nucleotide_alphabet<Alphabet>) return nullptr;
+        else {
+            auto output = self.shared_slot == nullptr ? scratch
+                : std::span<std::uint8_t>{*self.shared_slot};
+            if (count > output.size()) return nullptr;
+            for (std::size_t index = 0u; index < count; ++index) {
+                const auto offset = WriteReverse ? count - 1u - index : index;
+                auto rank = self.ranks[Reverse ? self.ranks.size() - 1u - from - offset : from + offset];
+                if constexpr (Reverse) {
+                    if (rank >= seqan3::alphabet_size<Alphabet>) return nullptr;
+                    rank = seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, Alphabet{})));
+                }
+                output[index] = rank;
+            }
+            return output.data();
+        }
+    }
+    /** Providers with mandatory failure or evictable storage explicitly decline residency. */
+    [[nodiscard]] static typename view_type::resident_packed_result resident(
+        const void* context, storage::sequence_size_t from, storage::sequence_size_t to,
+        std::uint8_t unit_bytes) noexcept {
+        const auto& self = *static_cast<const source_probe*>(context);
+        if (!self.allow_resident || self.fail_reads || self.shared_slot != nullptr ||
+            from > to || to > self.ranks.size()) return std::nullopt;
+        return self.parent.try_resident_packed(self.leading + from, self.leading + to, unit_bytes);
+    }
+    /** Bind existing lazy-view APIs; all backing owners outlive each synchronous batch. */
+    [[nodiscard]] view_type view() const noexcept {
+        static const typename view_type::backend_ops operations{
+            .bp_size = +[](const void* context) noexcept -> storage::sequence_size_t {
+                return static_cast<const source_probe*>(context)->ranks.size();
+            },
+            .read_at = {read<false, false>, read<false, true>, read<true, false>, read<true, true>},
+            .try_resident_packed = resident, .copy_packed_sequence = nullptr, .copy_packed_window = nullptr,
+            .worker_shareable = +[](const void*) noexcept { return false; }};
+        return view_type{this, &operations};
+    }
+};
+
+/** Own native words and a separate logical oracle; never move a bound provider. */
+template<sequence_alphabet Alphabet, class Word>
+struct native_fixture {
+    using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, Word>>;
+    using traits = typename range_type::traits;
+    std::vector<std::uint8_t> ranks;
+    range_type packed;
+    source_probe<Alphabet> source;
+
+    /** Include a prefix and suffix so boundary slots are genuinely outside the borrowed region. */
+    static range_type pack(std::span<const std::uint8_t> input, std::size_t leading, bool exact_extent) {
+        std::vector<Alphabet> letters(leading + input.size()
+            + (exact_extent ? 0u : traits::letters_per_unit), Alphabet{});
+        for (std::size_t index = 0u; index < input.size(); ++index) {
+            REQUIRE(input[index] < traits::alphabet_size);
+            letters[leading + index] = seqan3::assign_rank_to(input[index], Alphabet{});
+        }
+        return range_type{letters};
+    }
+    native_fixture(std::vector<std::uint8_t> input, std::size_t leading, bool exact_extent = false)
+        : ranks(std::move(input)), packed(pack(ranks, leading, exact_extent)),
+          source{storage::make_lazy_sequence_view(packed), ranks, leading} {
+        // Poison every unobserved symbol and unused high bit; active symbols retain their ranks.
+        for (std::size_t unit = 0u; unit < packed.packed_units.size(); ++unit) {
+            Word active{};
+            for (std::size_t slot = 0u; slot < traits::letters_per_unit; ++slot) {
+                const auto position = unit * traits::letters_per_unit + slot;
+                if (position >= leading && position - leading < ranks.size())
+                    active |= static_cast<Word>(static_cast<std::uint64_t>(traits::char_mask)
+                        << (slot * traits::bits_per_char));
+            }
+            packed.packed_units[unit] |= static_cast<Word>(~active);
+        }
+    }
+    native_fixture(const native_fixture&) = delete;
+    native_fixture(native_fixture&&) = delete;
+    /** Corrupt both representations before any resident descriptor is bound. */
+    void corrupt(std::size_t logical_position) {
+        REQUIRE(traits::alphabet_size <= traits::char_mask);
+        const auto position = source.leading + logical_position;
+        const auto shift = (position % traits::letters_per_unit) * traits::bits_per_char;
+        const auto mask = static_cast<Word>(static_cast<std::uint64_t>(traits::char_mask) << shift);
+        const auto invalid = static_cast<Word>(static_cast<std::uint64_t>(traits::alphabet_size) << shift);
+        auto& unit = packed.packed_units[position / traits::letters_per_unit];
+        unit = static_cast<Word>((unit & static_cast<Word>(~mask)) | invalid);
+        ranks[logical_position] = static_cast<std::uint8_t>(traits::alphabet_size);
+    }
+};
+
+/** One numeric job with nonzero coordinates in both independently borrowed sources. */
+[[nodiscard]] prefilter_job job_for(std::size_t length, std::uint32_t edits, bool reverse = false) {
+    return {.query_start = query_start, .target_start = target_start,
+        .query_length = static_cast<std::uint32_t>(length), .target_length = static_cast<std::uint32_t>(length),
+        .max_edits = edits, .orientation = static_cast<std::uint32_t>(reverse
+            ? storage::sequence_transform::reverse_complement : storage::sequence_transform::identity)};
+}
+
+/** Select the same scalar/Highway entry points used by ordinary callers. */
+[[nodiscard]] prefilter_batch_result run_backend(bool simd, const prefilter_batch_input& input,
+                                                sneaky_snake_options options) {
+    return simd ? fixed_sneaky_snake_kernel()(input, options) : sneaky_snake_scalar_batch(input, options);
+}
+
+/** Full result-tuple parity, paired with callback evidence of native versus byte execution. */
+template<sequence_alphabet Alphabet>
+void compare(source_probe<Alphabet>& query, source_probe<Alphabet>& target,
+             std::span<const std::uint8_t> oriented_query, const prefilter_job& job,
+             bool native_expected, bool reverse = false) {
+    std::array<storage::borrowed_rank_window_source, 1u> queries;
+    if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+        queries[0] = reverse ? query.view().template borrow_rank_source<true>(true)
+                             : query.view().template borrow_rank_source<false>(true);
+    } else {
+        REQUIRE_FALSE(reverse);
+        queries[0] = query.view().template borrow_rank_source<false>(true);
+    }
+    const std::array targets{target.view().template borrow_rank_source<false>(true)};
+    if (native_expected) {
+        REQUIRE(queries[0].resident.has_value());
+        REQUIRE(targets[0].resident.has_value());
+    }
+    const std::array jobs{job};
+    const prefilter_batch_input input{queries, targets, jobs};
+    const sneaky_snake_options options{.submaze_width = job.query_length, .max_escape_segments = 0u};
+    const auto oracle = sneaky_snake_scalar(oriented_query.subspan(job.query_start, job.query_length),
+        std::span<const std::uint8_t>{target.ranks}.subspan(job.target_start, job.target_length), job.max_edits, options);
+    for (const bool simd : {false, true}) {
+        CAPTURE(simd, job.query_length, job.max_edits, reverse, native_expected);
+        query.reads = target.reads = 0u;
+        const auto actual = run_backend(simd, input, options);
+        REQUIRE(actual.has_value());
+        REQUIRE(actual->size() == 1u);
+        REQUIRE(same_result(actual->front(), oracle));
+        if (native_expected) {
+            REQUIRE(query.reads == 0u);
+            REQUIRE(target.reads == 0u);
+        } else {
+            REQUIRE(query.reads > 0u);
+            REQUIRE(target.reads > 0u);
+        }
+    }
+}
+
+/** Compare typed first-invalid failures with the same checked byte-source contract. */
+template<sequence_alphabet Alphabet>
+void invalid_acquisition(source_probe<Alphabet>& query, source_probe<Alphabet>& target,
+                         std::size_t length, bool target_failure, std::size_t expected_position) {
+    const std::array jobs{job_for(length, static_cast<std::uint32_t>(length - 1u))};
+    const sneaky_snake_options options{.submaze_width = static_cast<std::uint32_t>(length)};
+    for (const bool simd : {false, true}) {
+        for (const bool native : {false, true}) {
+            const std::array queries{query.view().template borrow_rank_source<false>(native)};
+            const std::array targets{target.view().template borrow_rank_source<false>(native)};
+            query.reads = target.reads = 0u;
+            const auto actual = run_backend(simd, {queries, targets, jobs}, options);
+            REQUIRE_FALSE(actual.has_value());
+            REQUIRE(actual.error().code == prefilter_input_failure_code::invalid_rank);
+            REQUIRE(actual.error().job_index == 0u);
+            REQUIRE(actual.error().target_source == target_failure);
+            REQUIRE(actual.error().position == expected_position);
+            if (target_failure) {
+                REQUIRE(target.reads == 1u);
+                REQUIRE(query.reads == 0u);
+            } else {
+                REQUIRE(query.reads > 0u);
+                if (native) REQUIRE(target.reads == 0u);
+            }
+        }
+    }
+}
+
+/** Exact-extent windows distinguish full native tiles from bounded fallbacks. */
+template<sequence_alphabet Alphabet, class Word>
+void bounded_primitive_profile() {
+    using fixture = native_fixture<Alphabet, Word>;
+    using traits = typename fixture::traits;
+    constexpr auto letters = traits::letters_per_unit;
+    constexpr auto group = sizeof(std::uint64_t) / sizeof(Word) * letters;
+    const hn::ScalableTag<Word> descriptor;
+    const auto vector_symbols = hn::Lanes(descriptor) * letters;
+    // The ordinary test table is generated for this translation unit's static target.
+    REQUIRE(bioseq::simd_dispatch::highway_test_target_binding().target == HWY_TARGET);
+    const auto counter = bioseq::simd_dispatch::highway_test_kernel_table()
+        .common.resolve_sequence_packed_equality(
+            supported_biological_alphabets::template index_of<Alphabet>(), sizeof(Word), false);
+    REQUIRE(static_cast<bool>(counter));
+    const auto scalar_refill = sneaky_snake_detail::scalar_traversal::read_block_size();
+    const auto simd_refill = 1u + 2u * hn::Lanes(hn::ScalableTag<std::uint8_t>{});
+    std::vector<std::size_t> lengths{
+        1u, group - 1u, group, group + 1u,
+        vector_symbols - 1u, vector_symbols, vector_symbols + 1u,
+        scalar_refill + group, simd_refill + vector_symbols};
+    std::sort(lengths.begin(), lengths.end());
+    lengths.erase(std::unique(lengths.begin(), lengths.end()), lengths.end());
+    for (const auto length : lengths) {
+        if (length == 0u) continue; // The retained provider controls already cover zero acquisition.
+        REQUIRE(length <= std::numeric_limits<std::uint32_t>::max());
+        std::vector<std::uint8_t> query(length);
+        for (std::size_t index = 0u; index < length; ++index)
+            query[index] = static_cast<std::uint8_t>((index * 7u + traits::alphabet_size - 1u)
+                % traits::alphabet_size);
+        // length means equal; other positions exercise immediate, later-word and final mismatches.
+        std::vector<std::size_t> mutations{length, 0u, letters - 1u, letters, length - 1u};
+        std::sort(mutations.begin(), mutations.end());
+        mutations.erase(std::unique(mutations.begin(), mutations.end()), mutations.end());
+        for (const auto mutation : mutations) {
+            if (mutation > length) continue;
+            auto target = query;
+            if (mutation < length) target[mutation] = static_cast<std::uint8_t>(
+                (target[mutation] + 1u) % traits::alphabet_size);
+            // These owners have exactly the needed native objects, not the old probe's suffix.
+            fixture q{query, letters - 1u, true}, t{target, 0u, true};
+            REQUIRE(q.packed.packed_units.size() == (q.source.leading + length) / letters
+                + static_cast<std::size_t>((q.source.leading + length) % letters != 0u));
+            REQUIRE(t.packed.packed_units.size() == length / letters
+                + static_cast<std::size_t>(length % letters != 0u));
+            const prefilter_job job{
+                .query_start = 0u, .target_start = 0u,
+                .query_length = static_cast<std::uint32_t>(length),
+                .target_length = static_cast<std::uint32_t>(length), .max_edits = 0u};
+            CAPTURE(sizeof(Word), traits::alphabet_size, length, mutation, vector_symbols, group);
+            compare(q.source, t.source, q.ranks, job, true);
+            const auto compared = counter(q.packed.packed_units.data(), t.packed.packed_units.data(),
+                q.source.leading + length, q.source.leading, 0u, length);
+            REQUIRE(compared.valid_ranks);
+            REQUIRE(compared.equal_symbols == length - static_cast<std::size_t>(mutation < length));
+        }
+    }
+    // Derive the actual batch boundary from the target and the lane-sum capacity.
+    constexpr auto maximum_words = std::numeric_limits<Word>::max() / letters;
+    auto batch_words = hn::Lanes(descriptor);
+    if constexpr (maximum_words < hn::MaxLanes(hn::ScalableTag<Word>{}))
+        batch_words = std::min(batch_words, static_cast<std::size_t>(maximum_words));
+    const auto batch_symbols = batch_words * letters;
+    constexpr bool full_cardinality = traits::alphabet_size
+        == static_cast<std::size_t>(traits::char_mask) + 1u;
+    for (const auto length : std::array<std::size_t, 3u>{
+             batch_symbols - 1u, batch_symbols, batch_symbols + 1u}) {
+        std::vector<std::uint8_t> query(length, static_cast<std::uint8_t>(traits::alphabet_size - 1u));
+        std::vector<std::uint8_t> target(length, static_cast<std::uint8_t>(traits::alphabet_size - 2u));
+        fixture q{query, letters - 1u, true}, t{target, 0u, true};
+        const auto unequal = counter(q.packed.packed_units.data(), t.packed.packed_units.data(),
+            q.source.leading + length, q.source.leading, 0u, length);
+        const auto equal = counter(q.packed.packed_units.data(), q.packed.packed_units.data(),
+            q.source.leading + length, q.source.leading, q.source.leading, length);
+        REQUIRE(unequal.valid_ranks);
+        REQUIRE(equal.valid_ranks);
+        REQUIRE(unequal.equal_symbols == 0u);
+        REQUIRE(equal.equal_symbols == length);
+        const bool short_equal = length == 0u || (full_cardinality && length <= 2u * letters);
+        if (short_equal) REQUIRE(equal.vector_batches == 0u);
+        else {
+            REQUIRE(equal.vector_batches > 0u);
+            REQUIRE(unequal.vector_batches == equal.vector_batches);
+        }
+        if (length != 0u) REQUIRE(unequal.vector_batches > 0u);
+    }
+    if constexpr (traits::alphabet_size <= traits::char_mask) {
+        // Equal bad words must fail validation, including the final active rank of a partial tile.
+        const auto length = vector_symbols + 1u;
+        const std::vector<std::uint8_t> ranks(length,
+            static_cast<std::uint8_t>(traits::alphabet_size - 1u));
+        for (const auto bad_position : std::array<std::size_t, 2u>{0u, length - 1u}) {
+            fixture bad{ranks, letters - 1u, true}, valid{ranks, 0u, true};
+            bad.corrupt(bad_position); // Before either pointer is passed to the immutable input ABI.
+            REQUIRE_FALSE(counter(bad.packed.packed_units.data(), bad.packed.packed_units.data(),
+                bad.source.leading + length, bad.source.leading, bad.source.leading, length).valid_ranks);
+            REQUIRE_FALSE(counter(bad.packed.packed_units.data(), valid.packed.packed_units.data(),
+                bad.source.leading + length, bad.source.leading, 0u, length).valid_ranks);
+            REQUIRE_FALSE(counter(valid.packed.packed_units.data(), bad.packed.packed_units.data(),
+                length, 0u, bad.source.leading, length).valid_ranks);
+        }
+    }
+}
+
+/** Registry-layout matrix: native rank values, bounded leading/tails and acquisition boundaries. */
+template<sequence_alphabet Alphabet, class Word>
+void profile() {
+    using fixture = native_fixture<Alphabet, Word>;
+    using traits = typename fixture::traits;
+    constexpr auto query_leading = traits::letters_per_unit > 1u ? 1u : 0u;
+    constexpr auto target_leading = traits::letters_per_unit - 1u;
+    CAPTURE(sizeof(Word), traits::alphabet_size, traits::letters_per_unit);
+    bounded_primitive_profile<Alphabet, Word>();
+    for (const auto length : boundaries) {
+        for (unsigned pattern = 0u; pattern < 3u; ++pattern) {
+            std::vector<std::uint8_t> query(length + query_start + 1u);
+            std::vector<std::uint8_t> target(length + target_start + 1u);
+            for (std::size_t index = 0u; index < length; ++index) {
+                const auto rank = static_cast<std::uint8_t>((index * 7u + traits::alphabet_size - 1u) % traits::alphabet_size);
+                query[query_start + index] = target[target_start + index] = rank;
+            }
+            if (pattern == 1u) target[target_start + length - 1u] =
+                static_cast<std::uint8_t>((target[target_start + length - 1u] + 1u) % traits::alphabet_size);
+            if (pattern == 2u) {
+                std::fill(query.begin() + query_start, query.begin() + query_start + length, 1u);
+                std::fill(target.begin() + target_start, target.begin() + target_start + length, 1u);
+                query[query_start] = 0u;
+            }
+            fixture q{query, query_leading}, t{target, target_leading};
+            const auto q_descriptor = q.source.view().template borrow_rank_source<false>(true);
+            const auto t_descriptor = t.source.view().template borrow_rank_source<false>(true);
+            REQUIRE(q_descriptor.resident.has_value());
+            REQUIRE(t_descriptor.resident.has_value());
+            REQUIRE(q_descriptor.resident->storage_unit_width == sizeof(Word));
+            REQUIRE(t_descriptor.resident->storage_unit_width == sizeof(Word));
+            REQUIRE(q_descriptor.resident->leading_symbol_offset == query_leading);
+            REQUIRE(t_descriptor.resident->leading_symbol_offset == target_leading);
+            compare(q.source, t.source, q.ranks, job_for(length, pattern == 2u
+                ? static_cast<std::uint32_t>(length - 1u) : 2u), true);
+        }
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+            std::vector<std::uint8_t> query(length + query_start + 1u);
+            for (std::size_t index = 0u; index < query.size(); ++index)
+                query[index] = static_cast<std::uint8_t>(index % traits::alphabet_size);
+            std::vector<std::uint8_t> oriented(query.size());
+            for (std::size_t index = 0u; index < query.size(); ++index)
+                oriented[index] = seqan3::to_rank(seqan3::complement(
+                    seqan3::assign_rank_to(query[query.size() - 1u - index], Alphabet{})));
+            std::vector<std::uint8_t> target(length + target_start + 1u);
+            std::copy_n(oriented.begin() + query_start, length, target.begin() + target_start);
+            fixture q{query, query_leading}, t{target, target_leading};
+            compare(q.source, t.source, oriented, job_for(length, 2u, true),
+                std::same_as<Alphabet, seq::dna4>, true);
+        }
+    }
+    if constexpr (traits::alphabet_size <= traits::char_mask) {
+        // This invalid rank is in acquired lookahead, past the first mismatching rank.
+        std::vector<std::uint8_t> q1(65u + query_start + 1u, 0u);
+        std::vector<std::uint8_t> t1(65u + target_start + 1u, 1u);
+        fixture query1{q1, query_leading}, target1{t1, target_leading};
+        target1.corrupt(target_start + 1u);
+        invalid_acquisition(query1.source, target1.source, 65u, true, target_start + 1u);
+        // An early matching candidate must not hide corruption at the last acquired candidate.
+        std::vector<std::uint8_t> q2(513u + query_start + 1u, 1u);
+        std::vector<std::uint8_t> t2(513u + target_start + 1u, 1u);
+        q2[query_start] = 0u;
+        fixture query2{q2, query_leading}, target2{t2, target_leading};
+        query2.corrupt(query_start + prefilter_rank_window::chunk_size - 1u);
+        invalid_acquisition(query2.source, target2.source, 513u, false,
+            query_start + prefilter_rank_window::chunk_size - 1u);
+    }
+}
+
+/** A single mixed-width pair per alphabet proves the intended checked byte fallback. */
+template<sequence_alphabet Alphabet, class Narrow, class Wide>
+void fallback_profile() {
+    std::vector<std::uint8_t> query(513u + query_start + 1u, 1u);
+    std::vector<std::uint8_t> target(513u + target_start + 1u, 1u);
+    query[query_start + 64u] = 0u;
+    native_fixture<Alphabet, Narrow> q{query, 0u};
+    native_fixture<Alphabet, Wide> t{target, 0u};
+    REQUIRE(q.source.view().template borrow_rank_source<false>(true).resident.has_value());
+    REQUIRE(t.source.view().template borrow_rank_source<false>(true).resident.has_value());
+    compare(q.source, t.source, q.ranks, job_for(513u, 2u), false);
+}
+
+/** Verify native validated-cache refills and explicit byte materialization without undefined scratch reads. */
+void cache_and_provider_controls() {
+    using Alphabet = seq::aa27;
+    using Word = typename all_storage_unit_byte_widths::template storage_unit<sizeof(std::uint64_t)>;
+    std::vector<std::uint8_t> query(513u + query_start + 1u, 1u);
+    std::vector<std::uint8_t> target(513u + target_start + 1u, 1u);
+    native_fixture<Alphabet, Word> q{query, 1u}, t{target, 2u};
+    const std::array jobs{job_for(513u, 2u)};
+    const std::array queries{q.source.view().template borrow_rank_source<false>(true)};
+    const std::array targets{t.source.view().template borrow_rank_source<false>(true)};
+    const auto cached = evaluate_prefilter_job({queries, targets, jobs}, 0u,
+        [&q, &t](const prefilter_rank_window& qw, const prefilter_rank_window& tw, const prefilter_job&) {
+            REQUIRE(qw.packed != nullptr);
+            REQUIRE(tw.packed != nullptr);
+            REQUIRE(qw.acquire(0u, 17u));
+            REQUIRE(qw.acquire(0u, prefilter_rank_window::chunk_size));
+            REQUIRE(qw.contains(0u, prefilter_rank_window::chunk_size));
+            REQUIRE_FALSE(qw.materialized);
+            REQUIRE(q.source.reads == 0u);
+            const auto bytes = qw.window(7u, 1u);
+            REQUIRE(bytes.size() == 1u);
+            REQUIRE(bytes[0] == 1u);
+            REQUIRE(qw.materialized);
+            REQUIRE(q.source.reads == 1u);
+            REQUIRE(qw.acquire(prefilter_rank_window::chunk_size, 1u));
+            REQUIRE(qw.contains(prefilter_rank_window::chunk_size, 1u));
+            REQUIRE_FALSE(qw.materialized);
+            REQUIRE(q.source.reads == 1u);
+            REQUIRE(t.source.reads == 0u);
+            return true;
+        }, sneaky_snake_detail::scalar_traversal::read_block_size(),
+        &resolve_prefilter_packed_operations<sneaky_snake_detail::scalar_traversal>);
+    REQUIRE(cached.has_value());
+    REQUIRE(*cached);
+    // Mandatory failure declines residency; target failure is observed before any query callback.
+    std::vector<bool> order;
+    q.source.read_order = t.source.read_order = &order;
+    q.source.target_side = false;
+    t.source.target_side = true;
+    q.source.fail_reads = t.source.fail_reads = true;
+    for (const bool simd : {false, true}) {
+        const std::array failed_queries{q.source.view().template borrow_rank_source<false>(true)};
+        const std::array failed_targets{t.source.view().template borrow_rank_source<false>(true)};
+        REQUIRE_FALSE(failed_queries[0].resident.has_value());
+        REQUIRE_FALSE(failed_targets[0].resident.has_value());
+        q.source.reads = t.source.reads = 0u;
+        order.clear();
+        const auto actual = run_backend(simd, {failed_queries, failed_targets, jobs}, {});
+        REQUIRE_FALSE(actual.has_value());
+        REQUIRE(actual.error().code == prefilter_input_failure_code::source_read_failed);
+        REQUIRE(actual.error().target_source);
+        REQUIRE(actual.error().position == target_start);
+        REQUIRE(q.source.reads == 0u);
+        REQUIRE(t.source.reads == 1u);
+        REQUIRE(order == std::vector<bool>{true});
+    }
+    // Length-only decisions do not acquire even a deliberately failing provider.
+    for (const bool unequal : {false, true}) {
+        auto length_job = job_for(unequal ? 3u : 0u, 2u);
+        if (unequal) length_job.target_length = 4u;
+        const std::array length_jobs{length_job};
+        const std::array failed_queries{q.source.view().template borrow_rank_source<false>(true)};
+        const std::array failed_targets{t.source.view().template borrow_rank_source<false>(true)};
+        const auto oracle = sneaky_snake_scalar(
+            std::span<const std::uint8_t>{q.ranks}.subspan(query_start, length_job.query_length),
+            std::span<const std::uint8_t>{t.ranks}.subspan(target_start, length_job.target_length), 2u);
+        for (const bool simd : {false, true}) {
+            q.source.reads = t.source.reads = 0u;
+            order.clear();
+            const auto actual = run_backend(simd, {failed_queries, failed_targets, length_jobs}, {});
+            REQUIRE(actual.has_value());
+            REQUIRE(actual->size() == 1u);
+            REQUIRE(same_result(actual->front(), oracle));
+            REQUIRE(q.source.reads == 0u);
+            REQUIRE(t.source.reads == 0u);
+            REQUIRE(order.empty());
+        }
+    }
+    // The fallback must pin independent cache bytes before another callback overwrites a shared slot.
+    std::vector<std::uint8_t> alias_query(513u + query_start + 1u, 0u);
+    std::vector<std::uint8_t> alias_target(513u + target_start + 1u, 0u);
+    for (std::size_t index = 0u; index < 513u; ++index) {
+        const auto rank = static_cast<std::uint8_t>((index + 7u) % seqan3::alphabet_size<Alphabet>);
+        alias_query[query_start + index] = alias_target[target_start + index] = rank;
+    }
+    alias_target[target_start + 64u] = static_cast<std::uint8_t>(
+        (alias_target[target_start + 64u] + 1u) % seqan3::alphabet_size<Alphabet>);
+    native_fixture<Alphabet, Word> alias_q{alias_query, 1u}, alias_t{alias_target, 2u};
+    std::array<std::uint8_t, prefilter_rank_window::chunk_size> shared_slot{};
+    alias_q.source.shared_slot = alias_t.source.shared_slot = &shared_slot;
+    REQUIRE_FALSE(alias_q.source.view().template borrow_rank_source<false>(true).resident.has_value());
+    REQUIRE_FALSE(alias_t.source.view().template borrow_rank_source<false>(true).resident.has_value());
+    compare(alias_q.source, alias_t.source, alias_q.ranks, jobs[0], false);
+}
+
+/** Expand only the registered storage layouts, keeping run dimensions outside templates. */
+template<sequence_alphabet Alphabet>
+void alphabet_profiles(std::size_t& profiles) {
+    [&profiles]<std::size_t... Widths>(supported_storage_unit_byte_widths<Widths...>) {
+        ((profile<Alphabet, typename all_storage_unit_byte_widths::template storage_unit<Widths>>(), ++profiles), ...);
+        constexpr std::array widths{Widths...};
+        using Narrow = typename all_storage_unit_byte_widths::template storage_unit<widths.front()>;
+        using Wide = typename all_storage_unit_byte_widths::template storage_unit<widths.back()>;
+        static_assert(!std::same_as<Narrow, Wide>);
+        fallback_profile<Alphabet, Narrow, Wide>();
+    }(all_storage_unit_byte_widths{});
+}
+
+/** One existing case covers all registered layouts without a second target or test case. */
+void run() {
+    std::size_t profiles = 0u;
+    std::apply([&profiles](auto... entry) {
+        (alphabet_profiles<typename decltype(entry)::alphabet_type>(profiles), ...);
+    }, supported_biological_alphabets::alphabet_entries_tuple{});
+    REQUIRE(profiles == std::tuple_size_v<supported_biological_alphabets::alphabet_entries_tuple>
+        * all_storage_unit_byte_widths::width_count);
+    cache_and_provider_controls();
+}
+} // namespace manual_native_sneaky_probe
+// END_TEMPORARY_NATIVE_SNEAKY_PROBE -- DO NOT COMMIT
+
 TEST_CASE(
     "SneakySnake Highway batch exactly matches scalar for arbitrary ranks",
     "[component:bioseq][layer:unit][feature:prefilter][resource:highway]")
 {
+    // TEMPORARY native-path validation; remove with the marked helper.
+    manual_native_sneaky_probe::run();
     const hn::ScalableTag<std::uint32_t> d;
     const std::size_t job_count = std::max<std::size_t>(
         97u,

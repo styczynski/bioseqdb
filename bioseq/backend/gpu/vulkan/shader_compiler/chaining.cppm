@@ -656,8 +656,10 @@ bool better_candidate(int score, uint index, int prior_score, uint prior_index) 
 bool minimizer_position(uint local_index, out uint64_t query_position) {
     query_position = uint64_t(0);
     uint index = pc.minimizer_offset + local_index;
-    if (index < pc.minimizer_offset || pc.minimizer_words32_per_record == 0u ||
-        pc.minimizer_word_kind > 3u) {
+    if (index < pc.minimizer_offset || pc.minimizer_word_kind > 3u ||
+        (pc.minimizer_word_kind == 0u
+            ? pc.minimizer_words32_per_record != 0u
+            : pc.minimizer_words32_per_record == 0u)) {
         return false;
     }
     if (pc.minimizer_word_kind == 0u) {

@@ -618,47 +618,58 @@ template <class p_traits>
     }
 }
 
-/**
- * @brief Checks whether a k-mer fits the shader rolling state.
- *
- * Native bounded hashes consume source ranks directly and support the shared
- * k range independently of alphabet cardinality or exact-key rank width.
- */
-[[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
-    alphabet_kernel_kind alphabet_kind,
-    std::size_t bits_per_char,
-    std::size_t kmer_size) noexcept {
-    if (bits_per_char == 0u || bits_per_char > 32u) {
-        return false;
-    }
-    (void)alphabet_kind;
-    return kmer_size != 0u && kmer_size <= 31u;
+/** Resolve the Vulkan structural hash policy before choosing its output record. */
+[[nodiscard]] constexpr std::uint32_t vulkan_minimizer_seed_policy_id(
+    const std::size_t exact_rank_bits, const std::size_t kmer_size) noexcept {
+    return bioseq::minimizers::exact_minimizer_shape_fits(exact_rank_bits, kmer_size)
+        ? 0u : bioseq::minimizers::k_bounded_nthash_scheme_id;
 }
 
-/**
- * @brief Checks a k-mer length using the alphabet and packing traits.
- *
- * Both the packed input and the shader rolling state must support it.
- */
+/** Resolve a native alphabet's structural hash policy without inspecting its data. */
+template <class p_traits>
+[[nodiscard]] constexpr std::uint32_t vulkan_minimizer_seed_policy_id(
+    const std::size_t kmer_size) noexcept {
+    return vulkan_minimizer_seed_policy_id(
+        bioseq::minimizers::minimizer_exact_rank_bits<typename p_traits::alphabet_type>,
+        kmer_size);
+}
+
+/** Check the resolved rolling policy and complete output hash capacity. */
+[[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
+    const std::size_t exact_rank_bits,
+    const std::size_t kmer_size,
+    const std::uint32_t seed_policy_id,
+    const std::size_t output_hash_bits = std::numeric_limits<std::uint64_t>::digits) noexcept {
+    if (seed_policy_id == 0u) {
+        return bioseq::minimizers::exact_minimizer_shape_fits(
+            exact_rank_bits, kmer_size, output_hash_bits);
+    }
+    return seed_policy_id == bioseq::minimizers::k_bounded_nthash_scheme_id
+        && kmer_size != 0u && kmer_size <= 31u
+        && output_hash_bits >= std::numeric_limits<std::uint32_t>::digits;
+}
+
+/** Check native packing and the resolved policy against the selected output record. */
 template <class p_traits>
 [[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
-    std::size_t kmer_size) noexcept
-{
+    const std::size_t kmer_size,
+    const std::size_t output_hash_bits = std::numeric_limits<std::uint64_t>::digits) noexcept {
     if constexpr (!vulkan_minimizer_alphabet_shape_supported<p_traits>()) {
         return false;
     } else {
         return vulkan_minimizer_kmer_size_supported(
-            alphabet_kernel_kind_of_traits<p_traits>(),
-            p_traits::bits_per_char,
-            kmer_size);
+            bioseq::minimizers::minimizer_exact_rank_bits<typename p_traits::alphabet_type>,
+            kmer_size, vulkan_minimizer_seed_policy_id<p_traits>(kmer_size), output_hash_bits);
     }
 }
 
-/** Accepts the registered native minimizer windows containing 1 through 64 k-mers. */
+/** Check the selector's existing ring capacity: exact256 or bounded64. */
 [[nodiscard]] constexpr bool vulkan_minimizer_window_size_supported(
-    std::size_t window_size) noexcept
-{
-    return window_size != 0 && window_size <= 64;
+    const std::size_t window_size, const std::uint32_t seed_policy_id) noexcept {
+    return window_size != 0u && (seed_policy_id == 0u
+        ? window_size <= 256u
+        : seed_policy_id == bioseq::minimizers::k_bounded_nthash_scheme_id
+            && window_size <= bioseq::minimizers::k_bounded_nthash_max_window);
 }
 
 /** Checks the packed alphabet metadata required for Vulkan minimizer sketching. */
@@ -668,30 +679,44 @@ template <class p_traits>
     return vulkan_minimizer_alphabet_shape_supported<p_traits>();
 }
 
-/**
- * @brief Builds shader lookup tables for forward and complemented ranks.
- *
- * Forward codes preserve every valid native alphabet rank. Complement codes
- * are populated only when the shared seed policy supports canonical reverse
- * complements; all other entries retain the invalid-rank sentinel.
+/** Build only the resolved policy's rank decoding and rolling-hash tables.
+ * Exact nucleotide codes use the existing nt4 normalization; exact protein codes
+ * and all bounded codes retain native alphabet ranks. No sequence copy is made.
  */
 template <class p_sequence>
-[[nodiscard]] vulkan_rank_lut make_vulkan_rank_lut() {
+[[nodiscard]] vulkan_rank_lut make_vulkan_rank_lut(const std::uint32_t seed_policy_id) {
     using traits = typename std::remove_cvref_t<p_sequence>::traits;
     using alphabet_type = typename traits::alphabet_type;
     using policy = bioseq::minimizers::bounded_nthash_seed_policy<alphabet_type>;
+    static_assert(seqan3::alphabet_size<alphabet_type> <= vulkan_rank_lut::rank_capacity,
+        "Vulkan rank transport must hold every alphabet rank");
+    if (seed_policy_id != 0u && seed_policy_id != bioseq::minimizers::k_bounded_nthash_scheme_id)
+        throw vulkan_runtime_error{"unsupported Vulkan minimizer seed policy"};
     vulkan_rank_lut lut{};
-    lut.rank_to_code.fill(static_cast<std::uint32_t>(vulkan_rank_lut::rank_capacity));
-    lut.rank_to_rc_code.fill(static_cast<std::uint32_t>(vulkan_rank_lut::rank_capacity));
-    lut.alphabet_size = static_cast<std::uint32_t>(policy::alphabet_size);
+    constexpr auto invalid_code = (std::numeric_limits<std::uint32_t>::max)();
+    lut.rank_to_code.fill(invalid_code);
+    lut.rank_to_rc_code.fill(invalid_code);
+    lut.alphabet_size = static_cast<std::uint32_t>(seqan3::alphabet_size<alphabet_type>);
     lut.alphabet_code = policy::alphabet_code;
-    lut.seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id;
+    lut.seed_policy_id = seed_policy_id;
     lut.canonical_reverse_complement = policy::canonical_reverse_complement;
-    for (std::uint32_t rank = 0; rank < traits::alphabet_size; ++rank) {
-        lut.rank_to_code[rank] = rank;
-        lut.forward_seeds[rank] = policy::forward_seeds[rank];
-        if constexpr (policy::canonical_reverse_complement) {
-            lut.rank_to_rc_code[rank] = policy::complement_rank(rank);
+    lut.exact_rank_bits = bioseq::minimizers::minimizer_exact_rank_bits<alphabet_type>;
+    for (std::uint32_t rank = 0u; rank < lut.alphabet_size; ++rank) {
+        if (seed_policy_id == 0u) {
+            if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
+                const auto code = bioseq::simd::nt4_normalize<alphabet_type>(rank);
+                if (code == bioseq::simd::k_nt4_sentinel) continue;
+                lut.rank_to_code[rank] = code;
+                lut.rank_to_rc_code[rank] = bioseq::simd::nt4_normalize<alphabet_type>(
+                    policy::complement_rank(rank));
+            } else {
+                lut.rank_to_code[rank] = rank;
+            }
+        } else {
+            lut.rank_to_code[rank] = rank;
+            lut.forward_seeds[rank] = policy::forward_seeds[rank];
+            if constexpr (policy::canonical_reverse_complement)
+                lut.rank_to_rc_code[rank] = policy::complement_rank(rank);
         }
     }
     return lut;

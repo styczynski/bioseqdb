@@ -374,6 +374,40 @@ TEST_CASE("assemble_for_query equals whole-sequence build restricted to query km
     require_lookup_maps_equal(
         lookup_map(exact_idx, kmers),
         lookup_map(idx, kmers));
+
+    // Vulkan supplies canonical sorted runs directly; exercise the ordinary
+    // writer without a CPU kernel table and compare its assembled postings.
+    if (bioseq::gpu::vulkan::hardware_device_available(
+            bioseq::gpu::vulkan::runtime::instance())) {
+        fake_fragment_storage<> vulkan_storage;
+        vulkan_storage.run_buffer_bytes_ = 4096;
+        lazy_sequence<dna4_u64, chunked> vulkan_lazy{
+            chunked::from_range(range)};
+        const auto vulkan_sequence_view =
+            bioseq::storage::make_lazy_sequence_view(vulkan_lazy);
+        bioseq::indexing::direct_minimizer_bucket_index<
+            fake_fragment_storage<>>::build(
+                vulkan_storage,
+                vulkan_sequence_view,
+                minimizer_sketch_backend::vulkan_segment,
+                nullptr,
+                nullptr,
+                fixed_alphabet_code<::seq::dna4>());
+        REQUIRE(vulkan_storage.runs_.empty());
+        bioseq::indexing::minimizer_assembly_scratch vulkan_scratch;
+        auto vulkan_idx = bioseq::indexing::direct_minimizer_bucket_index<
+            fake_fragment_storage<>>::assemble_for_query(
+                vulkan_storage,
+                std::span<const minimap_sketch_data>(query),
+                total_bp,
+                /*max_occ=*/INT32_MAX,
+                vulkan_scratch);
+        REQUIRE(vulkan_idx.target_length() == total_bp);
+        require_lookup_maps_equal(
+            lookup_map(vulkan_idx, kmers), lookup_map(idx, kmers));
+    } else {
+        SUCCEED("ordinary Vulkan bucket parity requires a hardware Vulkan device");
+    }
 }
 
 TEST_CASE("scalar direct-bucket build stats are operation-originated and fail-closed",
@@ -578,14 +612,13 @@ TEST_CASE("assemble_for_query drops an over-frequent kmer under a tiny max_occ",
     REQUIRE(idx.lookup(over_freq_kmer).empty());
 }
 
-// Ordinary payloads do not carry a scheme identity. Native32 must use a tagged generation.
+// Ordinary payloads do not carry a scheme identity. Explicit bounded32 must use a tagged generation.
 TEST_CASE("ordinary minimizer indexes reject non-exact schemes before writing",
           "[component:bioseq][layer:unit][feature:index]") {
     using config_t = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
     auto target = make_deterministic_test_range<config_t>(256u);
     const auto sequence = bioseq::storage::make_lazy_sequence_view(target);
-    for (const auto backend : {minimizer_sketch_backend::bounded_nthash_simd,
-                               minimizer_sketch_backend::vulkan_segment}) {
+    for (const auto backend : {minimizer_sketch_backend::bounded_nthash_simd}) {
         test_fragment_storage fragments;
         test_fragment_storage buckets;
         REQUIRE_THROWS_AS(

@@ -535,7 +535,8 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
         receipt_guard.output = execution_receipt_out;
         minimizer_sequence_generation_execution_receipt& receipt = receipt_guard.receipt;
         receipt.selected_backend = backend;
-        receipt.minimizer_scheme = minimizer_scheme_identity_for_backend(backend);
+        receipt.minimizer_scheme = minimizer_scheme_identity_for_backend(
+            backend, algorithm_identity.alphabet_id, algorithm_identity.runtime_kmer_size);
         receipt.algorithm_identity = algorithm_identity;
         receipt.target_length = target_length;
         receipt.window_size = algorithm_identity.runtime_window_size;
@@ -589,7 +590,8 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
             return std::unexpected(minimizer_generation_encoding_error::segment_span);
         }
         const minimizer_scheme_identity minimizer_scheme =
-            minimizer_scheme_identity_for_backend(backend);
+            minimizer_scheme_identity_for_backend(
+                backend, algorithm_identity.alphabet_id, algorithm_identity.runtime_kmer_size);
         if (!is_supported_minimizer_scheme_identity(minimizer_scheme.id,
                                                     minimizer_scheme.revision)) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
@@ -810,9 +812,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                     static_cast<std::uint64_t>(receipt.window_size) + 1u;
                 const bool direct_canonical_output =
                     backend == minimizer_sketch_backend::scalar ||
-                    (backend == minimizer_sketch_backend::exact_simd &&
-                     algorithm_identity.effective_algorithm ==
-                         bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+                    backend == minimizer_sketch_backend::exact_simd;
                 const std::uint64_t expected_sketches =
                     backend == minimizer_sketch_backend::vulkan_segment ||
                             direct_canonical_output
@@ -890,7 +890,9 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                             };
 
                             const bioseq::gpu::vulkan::vulkan_rank_lut rank_lut =
-                                bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>();
+                                bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>(
+                                    bioseq::gpu::vulkan::vulkan_minimizer_seed_policy_id<typename upload_range::traits>(
+                                        receipt.kmer_size));
                             while (segment_lo < target_length) {
                                 if (!sql_integer_can_represent(segment_ordinal)) {
                                     return std::unexpected(

@@ -35,39 +35,6 @@ inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
 /// Maximum number of distinct pipelines recorded for one operation.
 inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 16u;
 
-/// Ordered submission phases of a native seed-and-coordinate job. A phase runs
-/// at most once per job; shared wave submissions retain their operation ordinal.
-enum class seed_coordinate_submission_phase : std::size_t {
-    count_candidates,
-    emit_candidates,
-    sort_candidates,
-    native_coverage,
-    verify_count,
-    verify_emit,
-    build_ranges,
-    chain_coordinates,
-    count
-};
-inline constexpr std::size_t k_seed_coordinate_submission_phase_count =
-    static_cast<std::size_t>(seed_coordinate_submission_phase::count);
-inline constexpr std::array<std::string_view, k_seed_coordinate_submission_phase_count>
-    seed_coordinate_submission_phase_names{
-        "count", "emit", "sort", "native_coverage", "verify_count", "verify_emit",
-        "range", "chain_coordinate"};
-inline constexpr std::array grouped_soa_coordinate_required_shaders{
-    shader_kind::grouped_soa_seed_count, shader_kind::grouped_soa_seed_emit,
-    shader_kind::prefix_scan_block, shader_kind::prefix_scan_add,
-    shader_kind::chain_range_build, shader_kind::coordinate_reduce,
-    shader_kind::chain_tiled_dp_u64};
-inline constexpr std::array seed_radix_required_shaders{
-    shader_kind::radix_sort_histogram, shader_kind::radix_sort_scan,
-    shader_kind::radix_sort_scatter};
-inline constexpr std::array seed_verification_required_shaders{
-    shader_kind::seed_verify_count, shader_kind::seed_verify_emit};
-inline constexpr std::size_t k_verified_coordinate_pipeline_count =
-    grouped_soa_coordinate_required_shaders.size() + seed_radix_required_shaders.size() +
-    seed_verification_required_shaders.size();
-
 /// @brief Counts radix-sort passes for target positions and the strand bit.
 /// Each pass sorts one byte of an anchor reference. The target span determines
 /// how many bytes can contain a position or strand bit.
@@ -402,17 +369,12 @@ struct runtime_pipeline_job_use_audit {
     std::array<std::uint64_t, k_runtime_pipeline_kind_slots> dispatches{};
     std::array<std::uint64_t, k_runtime_pipeline_kind_slots> workgroups{};
     std::uint64_t submission_operation_identity = 0u;
-    std::array<std::uint64_t, k_seed_coordinate_submission_phase_count> submission_ordinals{};
+    std::array<std::uint64_t, 4> submission_ordinals{};
     std::uint64_t committed_submissions = 0u;
     std::uint64_t minimizer_count = 0u;
     std::uint64_t target_len = 0u;
     std::uint64_t target_position_offset = 0u;
     std::uint64_t anchor_count = 0u;
-    std::uint64_t seed_candidate_count = 0u;
-    std::uint64_t seed_verified_count = 0u;
-    std::uint64_t seed_emitted_count = 0u;
-    std::uint64_t seed_coverage_interval_count = 0u;
-    bool seed_native_verification_set = false;
     std::uint64_t range_count = 0u;
     std::uint32_t binding_window_count = 0u; ///< Number of grouped-index windows needing separate count and emit dispatches.
     std::uint64_t query_authority_identity = 0u;
@@ -429,21 +391,6 @@ struct runtime_pipeline_job_use_audit {
     [[nodiscard]] std::uint64_t count(shader_kind kind) const noexcept {
         const std::size_t slot = static_cast<std::size_t>(kind);
         return slot < dispatches.size() ? dispatches[slot] : 0u;
-    }
-
-    /// Checks that native verification conserved survivors and ran its complete
-    /// count/scan/emit protocol, including when every candidate was rejected.
-    [[nodiscard]] bool has_valid_seed_native_verification() const noexcept {
-        const bool has_candidates = seed_candidate_count != 0u;
-        const bool has_coverage = seed_coverage_interval_count != 0u;
-        return seed_native_verification_set == has_candidates &&
-               seed_candidate_count <= (std::numeric_limits<std::uint32_t>::max)() &&
-               seed_verified_count <= seed_candidate_count &&
-               seed_emitted_count == seed_verified_count && anchor_count == seed_verified_count &&
-               (!has_coverage || seed_coverage_interval_count == seed_candidate_count) &&
-               count(shader_kind::seed_verify_count) == (has_candidates ? 1u : 0u) &&
-               count(shader_kind::seed_verify_emit) == (has_candidates ? 1u : 0u) &&
-               count(shader_kind::seed_native_coverage) == (has_coverage ? 1u : 0u);
     }
 };
 
@@ -531,19 +478,21 @@ class runtime_pipeline_operation_token {
     /// @brief Checks the two completed submissions that count and emit query minimizers.
     /// Requires the sketch and prefix-scan pipelines with exactly their expected dispatches.
     [[nodiscard]] bool is_valid_for_query_sketch() const noexcept {
-        constexpr std::array required{
-            shader_kind::ordered_sketch_tile,
-            shader_kind::prefix_scan_block,
-            shader_kind::prefix_scan_add,
-        };
         if (!is_common_state_valid() ||
             audit_.kind != runtime_pipeline_operation_kind::query_sketch ||
-            audit_.jobs.size() != 1u || audit_.committed_submissions != 2u ||
-            !is_prepared_exactly(required)) {
+            audit_.jobs.size() != 1u || audit_.committed_submissions != 2u) {
             return false;
         }
         const runtime_pipeline_job_use_audit& job = audit_.jobs.front();
-        if (job.committed_submissions != 2u || job.count(shader_kind::ordered_sketch_tile) != 2u ||
+        const shader_kind sketch_kind = job.count(shader_kind::ordered_sketch_exact_tile) != 0u
+            ? shader_kind::ordered_sketch_exact_tile : shader_kind::ordered_sketch_tile;
+        const std::array required{
+            sketch_kind,
+            shader_kind::prefix_scan_block,
+            shader_kind::prefix_scan_add,
+        };
+        if (!is_prepared_exactly(required) || job.committed_submissions != 2u ||
+            job.count(sketch_kind) != 2u ||
             job.count(shader_kind::prefix_scan_block) != 1u ||
             job.count(shader_kind::prefix_scan_add) != 2u) {
             return false;
@@ -596,7 +545,9 @@ class runtime_pipeline_operation_token {
                std::min(job.range_count, static_cast<std::uint64_t>(max_workgroup_count_x));
     }
 
-    /// Checks raw candidate generation, native verification and survivor ordering.
+    /// Checks completed MPF seed work from the caller-prefix or GPU-count route.
+    /// A GPU count with zero hits keeps its count/scan receipt. The caller-prefix
+    /// route requires anchors before it can issue a dispatch receipt
     [[nodiscard]] bool is_valid_for_mpf_seed_anchor_roundtrip(
         std::uint32_t max_workgroup_count_x) const noexcept {
         if (max_workgroup_count_x == 0u || !is_common_state_valid() ||
@@ -610,75 +561,77 @@ class runtime_pipeline_operation_token {
             job.minimizer_count > (std::numeric_limits<std::uint32_t>::max)() ||
             job.target_len == 0u || job.target_position_offset >= first_invalid_reference ||
             job.target_len > first_invalid_reference - job.target_position_offset ||
+            job.anchor_count > (std::numeric_limits<std::uint32_t>::max)() ||
             job.range_count != 0u || job.query_authority_identity == 0u ||
-            !job.anchor_order_checked || !job.anchor_order_accepted ||
-            !job.has_valid_seed_native_verification()) {
+            !job.anchor_order_checked || !job.anchor_order_accepted) {
             return false;
         }
         const auto count = [&job](shader_kind kind) noexcept { return job.count(kind); };
         const bool prefix_driven = count(shader_kind::seed_lookup_anchors) != 0u;
         const bool bitonic = count(shader_kind::sort_anchors_bitonic) != 0u;
-        const std::uint64_t verification_calls = job.seed_candidate_count != 0u ? 1u : 0u;
-        const std::uint64_t coverage_calls = job.seed_coverage_interval_count != 0u ? 1u : 0u;
+        std::uint64_t expected_dispatches = 0u;
+        std::uint64_t expected_submissions = 0u;
         const std::uint64_t seed_groups = (job.minimizer_count + 127u) / 128u;
-        std::uint64_t expected_dispatches = 5u * verification_calls + coverage_calls;
-        std::uint64_t expected_submissions = 2u * verification_calls + coverage_calls;
         if (prefix_driven) {
-            if (verification_calls == 0u || count(shader_kind::seed_lookup_anchors) != 1u ||
+            if (job.anchor_count == 0u || count(shader_kind::seed_lookup_anchors) != 1u ||
                 seed_groups > max_workgroup_count_x ||
-                job.workgroups[static_cast<std::size_t>(shader_kind::seed_lookup_anchors)] != seed_groups ||
-                count(shader_kind::prefix_scan_block) != verification_calls ||
-                count(shader_kind::prefix_scan_add) != 2u * verification_calls) {
+                job.workgroups[static_cast<std::size_t>(shader_kind::seed_lookup_anchors)] !=
+                    seed_groups) {
                 return false;
             }
-            ++expected_dispatches;
-            ++expected_submissions;
+            expected_dispatches = 1u;
+            expected_submissions = 1u;
             if (bitonic) {
                 constexpr std::array required{
                     shader_kind::seed_lookup_anchors, shader_kind::sort_anchors_bitonic};
-                if (!is_prepared_exactly(required, 0u, verification_calls, coverage_calls) ||
+                if (!is_prepared_exactly(required) ||
                     count(shader_kind::sort_anchors_bitonic) != 1u ||
-                    job.workgroups[static_cast<std::size_t>(shader_kind::sort_anchors_bitonic)] != 1u)
+                    job.workgroups[static_cast<std::size_t>(shader_kind::sort_anchors_bitonic)] != 1u) {
                     return false;
+                }
                 ++expected_dispatches;
             } else {
                 constexpr std::array required{shader_kind::seed_lookup_anchors};
-                if (!is_prepared_exactly(required, 1u, verification_calls, coverage_calls))
+                if (!is_prepared_exactly(required, 1u)) {
                     return false;
+                }
             }
         } else {
             constexpr std::array required{
                 shader_kind::seed_count, shader_kind::seed_emit,
                 shader_kind::prefix_scan_block, shader_kind::prefix_scan_add};
-            if (bitonic || !is_prepared_exactly(required, verification_calls,
-                                               verification_calls, coverage_calls) ||
+            if (bitonic || !is_prepared_exactly(required, job.anchor_count != 0u ? 1u : 0u) ||
                 count(shader_kind::seed_count) != 1u ||
-                count(shader_kind::prefix_scan_block) != 1u + verification_calls ||
-                count(shader_kind::prefix_scan_add) != 2u + 2u * verification_calls ||
-                count(shader_kind::seed_emit) != verification_calls ||
+                count(shader_kind::prefix_scan_block) != 1u ||
+                count(shader_kind::prefix_scan_add) != 2u ||
+                count(shader_kind::seed_emit) != (job.anchor_count != 0u ? 1u : 0u) ||
                 job.workgroups[static_cast<std::size_t>(shader_kind::seed_count)] !=
-                    std::min(seed_groups, static_cast<std::uint64_t>(max_workgroup_count_x)))
+                    std::min(seed_groups, static_cast<std::uint64_t>(max_workgroup_count_x))) {
                 return false;
-            expected_dispatches += 4u + verification_calls;
-            expected_submissions += 1u + verification_calls;
+            }
+            expected_dispatches = 4u + (job.anchor_count != 0u ? 1u : 0u);
+            expected_submissions = job.anchor_count != 0u ? 2u : 1u;
+            if (job.anchor_count == 0u &&
+                (job.anchor_digest_lo != k_seed_anchor_digest_seed_low ||
+                 job.anchor_digest_hi != k_seed_anchor_digest_seed_high)) {
+                return false;
+            }
         }
-        if (verification_calls != 0u && !bitonic) {
+        if (job.anchor_count != 0u && !bitonic) {
             const auto passes = runtime_grouped_soa_radix_pass_count(
                 job.target_position_offset, job.target_len);
             if (!passes || count(shader_kind::radix_sort_histogram) != *passes ||
                 count(shader_kind::radix_sort_scan) != *passes ||
-                count(shader_kind::radix_sort_scatter) != *passes)
+                count(shader_kind::radix_sort_scatter) != *passes) {
                 return false;
+            }
             expected_dispatches += 3u * *passes;
         }
-        if (job.anchor_count == 0u &&
-            (job.anchor_digest_lo != k_seed_anchor_digest_seed_low ||
-             job.anchor_digest_hi != k_seed_anchor_digest_seed_high))
-            return false;
         std::uint64_t actual_dispatches = 0u;
         for (const auto dispatches : job.dispatches) {
-            if (dispatches > (std::numeric_limits<std::uint64_t>::max)() - actual_dispatches)
+            if (dispatches > (std::numeric_limits<std::uint64_t>::max)() - actual_dispatches) {
                 return false;
+            }
             actual_dispatches += dispatches;
         }
         return actual_dispatches == expected_dispatches &&
@@ -687,136 +640,187 @@ class runtime_pipeline_operation_token {
     }
 #endif
 
-    /// Checks candidate generation, native verification and survivor ordering.
-    /// Empty queries submit no work; a query with no candidates keeps its scan.
+    /// @brief Checks completed anchor generation from the stored grouped minimizer inwex.
+    /// Empty query jobs may have no submissions. Other jobs must record count/scan
+    /// work and, when hits exist, anchor emission, and the required radix-sort passes.
     [[nodiscard]] bool is_valid_for_grouped_soa_seed_anchor_roundtrip() const noexcept {
         constexpr std::array required{
-            shader_kind::grouped_soa_seed_count, shader_kind::grouped_soa_seed_emit,
-            shader_kind::prefix_scan_block, shader_kind::prefix_scan_add};
-        if (!is_common_state_valid(true) || audit_.kind !=
-                runtime_pipeline_operation_kind::grouped_soa_seed_anchor_roundtrip)
+            shader_kind::grouped_soa_seed_count,
+            shader_kind::grouped_soa_seed_emit,
+            shader_kind::prefix_scan_block,
+            shader_kind::prefix_scan_add,
+        };
+        if (!is_common_state_valid(true) ||
+            audit_.kind !=
+                runtime_pipeline_operation_kind::grouped_soa_seed_anchor_roundtrip) {
             return false;
+        }
+
         std::uint64_t common_authority = 0u;
-        std::uint64_t candidate_jobs = 0u;
-        std::uint64_t coverage_jobs = 0u;
+        std::uint64_t anchored_jobs = 0u;
         std::uint64_t active_jobs = 0u;
-        for (const auto& job : audit_.jobs) {
+        for (const runtime_pipeline_job_use_audit& job : audit_.jobs) {
             if (!job.shape_contract_set || job.binding_window_count == 0u || job.target_len == 0u ||
+                job.target_position_offset >
+                    (std::numeric_limits<std::uint64_t>::max)() - (job.target_len - 1u) ||
                 job.range_count != 0u || job.query_authority_identity == 0u ||
-                !job.anchor_order_checked || !job.anchor_order_accepted ||
-                !job.has_valid_seed_native_verification())
+                !job.anchor_order_checked || !job.anchor_order_accepted) {
                 return false;
-            if (common_authority == 0u)
-                common_authority = job.query_authority_identity;
-            else if (job.query_authority_identity != common_authority)
-                return false;
-            const auto passes = runtime_grouped_soa_radix_pass_count(
-                job.target_position_offset, job.target_len);
-            if (!passes)
-                return false;
-            const std::uint64_t verified = job.seed_candidate_count != 0u ? 1u : 0u;
-            const std::uint64_t coverage = job.seed_coverage_interval_count != 0u ? 1u : 0u;
-            if (job.anchor_count == 0u &&
-                (job.anchor_digest_lo != k_seed_anchor_digest_seed_low ||
-                 job.anchor_digest_hi != k_seed_anchor_digest_seed_high))
-                return false;
-            std::uint64_t expected_total = 0u;
-            std::uint64_t expected_submissions = 0u;
-            if (job.minimizer_count == 0u) {
-                if (verified != 0u)
-                    return false;
-            } else {
-                ++active_jobs;
-                candidate_jobs += verified;
-                coverage_jobs += coverage;
-                expected_total = std::uint64_t{job.binding_window_count} + 3u +
-                    verified * (job.binding_window_count + 3u * *passes + 5u) + coverage;
-                expected_submissions = 1u + 3u * verified + coverage;
-                if (job.count(shader_kind::grouped_soa_seed_count) != job.binding_window_count ||
-                    job.count(shader_kind::prefix_scan_block) != 1u + verified ||
-                    job.count(shader_kind::prefix_scan_add) != 2u + 2u * verified ||
-                    job.count(shader_kind::grouped_soa_seed_emit) != verified * job.binding_window_count ||
-                    job.count(shader_kind::radix_sort_histogram) != verified * *passes ||
-                    job.count(shader_kind::radix_sort_scan) != verified * *passes ||
-                    job.count(shader_kind::radix_sort_scatter) != verified * *passes)
-                    return false;
             }
+            if (common_authority == 0u) {
+                common_authority = job.query_authority_identity;
+            } else if (job.query_authority_identity != common_authority) {
+                return false;
+            }
+            const auto pass_count =
+                runtime_grouped_soa_radix_pass_count(job.target_position_offset, job.target_len);
+            if (!pass_count.has_value())
+                return false;
+
             std::uint64_t actual_total = 0u;
-            for (const auto count : job.dispatches) {
+            for (const std::uint64_t count : job.dispatches) {
                 if (count > (std::numeric_limits<std::uint64_t>::max)() - actual_total)
                     return false;
                 actual_total += count;
             }
-            if (actual_total != expected_total || job.committed_submissions != expected_submissions)
+            if (job.minimizer_count == 0u) {
+                if (job.anchor_count != 0u || job.committed_submissions != 0u ||
+                    actual_total != 0u || job.anchor_digest_lo != k_seed_anchor_digest_seed_low ||
+                    job.anchor_digest_hi != k_seed_anchor_digest_seed_high) {
+                    return false;
+                }
+                continue;
+            }
+
+            ++active_jobs;
+            std::uint64_t expected_total = std::uint64_t{job.binding_window_count} + 3u;
+            if (job.count(shader_kind::grouped_soa_seed_count) != job.binding_window_count ||
+                job.count(shader_kind::prefix_scan_block) != 1u ||
+                job.count(shader_kind::prefix_scan_add) != 2u) {
+                return false;
+            }
+            if (job.anchor_count == 0u) {
+                if (job.count(shader_kind::grouped_soa_seed_emit) != 0u ||
+                    job.committed_submissions != 1u ||
+                    job.anchor_digest_lo != k_seed_anchor_digest_seed_low ||
+                    job.anchor_digest_hi != k_seed_anchor_digest_seed_high) {
+                    return false;
+                }
+            } else {
+                ++anchored_jobs;
+                const std::uint64_t passes = *pass_count;
+                expected_total += job.binding_window_count + 3u * passes;
+                if (job.count(shader_kind::grouped_soa_seed_emit) != job.binding_window_count ||
+                    job.committed_submissions != 2u ||
+                    job.count(shader_kind::radix_sort_histogram) != passes ||
+                    job.count(shader_kind::radix_sort_scan) != passes ||
+                    job.count(shader_kind::radix_sort_scatter) != passes) {
+                    return false;
+                }
+            }
+            if (actual_total != expected_total)
                 return false;
         }
-        if ((active_jobs == 0u) != (audit_.committed_submissions == 0u))
+        if (active_jobs == 0u && audit_.committed_submissions != 0u)
             return false;
-        return is_prepared_exactly(required, candidate_jobs, candidate_jobs, coverage_jobs);
+        if (active_jobs != 0u && audit_.committed_submissions == 0u)
+            return false;
+        return is_prepared_exactly(required, anchored_jobs);
     }
 
-    /// Checks seeding, filtering, range construction and chaining separately.
-    /// Sort work follows candidate counts; downstream work follows survivors.
+    /// @brief Checks the seed, sort, and chaining work that produced mapping coordinates.
+    /// Required dispatches depend on each job's anchor and  chain-range counts.
     [[nodiscard]] bool is_valid_for_grouped_soa_coordinate() const noexcept {
-        constexpr auto& coordinate_required = grouped_soa_coordinate_required_shaders;
-        constexpr auto candidate_required = [] {
-            auto required = grouped_soa_coordinate_required_shaders;
-            std::ranges::replace(required, shader_kind::coordinate_reduce,
-                                 shader_kind::chain_candidate_reduce);
-            return required;
-        }();
+        constexpr std::array legacy_required{
+            shader_kind::grouped_soa_seed_count,
+            shader_kind::grouped_soa_seed_emit,
+            shader_kind::prefix_scan_block,
+            shader_kind::prefix_scan_add,
+            shader_kind::chain_range_build,
+            shader_kind::coordinate_reduce,
+            shader_kind::chain_tiled_dp_u64,
+        };
+        constexpr std::array candidate_required{
+            shader_kind::grouped_soa_seed_count,
+            shader_kind::grouped_soa_seed_emit,
+            shader_kind::prefix_scan_block,
+            shader_kind::prefix_scan_add,
+            shader_kind::chain_range_build,
+            shader_kind::chain_candidate_reduce,
+            shader_kind::chain_tiled_dp_u64,
+        };
         if (!is_common_state_valid() ||
-            audit_.kind != runtime_pipeline_operation_kind::grouped_soa_coordinate)
+            audit_.kind != runtime_pipeline_operation_kind::grouped_soa_coordinate) {
             return false;
+        }
         const bool candidate_mode = prepared_calls(shader_kind::chain_candidate_reduce) == 1u;
-        if ((prepared_calls(shader_kind::coordinate_reduce) == 1u) == candidate_mode)
+        if ((prepared_calls(shader_kind::coordinate_reduce) == 1u) == candidate_mode) {
             return false;
-        std::uint64_t candidate_jobs = 0u;
-        std::uint64_t coverage_jobs = 0u;
-        for (const auto& job : audit_.jobs) {
-            if (!job.shape_contract_set || job.binding_window_count == 0u ||
-                job.minimizer_count == 0u || !job.has_valid_seed_native_verification())
+        }
+        std::uint64_t anchored_jobs = 0u;
+        for (const runtime_pipeline_job_use_audit& job : audit_.jobs) {
+            if (!job.shape_contract_set || job.binding_window_count == 0u || job.minimizer_count == 0u || job.target_len == 0u ||
+                job.target_position_offset >
+                    (std::numeric_limits<std::uint64_t>::max)() - (job.target_len - 1u)) {
                 return false;
-            const auto passes = runtime_grouped_soa_radix_pass_count(
-                job.target_position_offset, job.target_len);
-            if (!passes)
+            }
+            const auto pass_count =
+                runtime_grouped_soa_radix_pass_count(job.target_position_offset, job.target_len);
+            if (!pass_count.has_value())
                 return false;
-            const std::uint64_t verified = job.seed_candidate_count != 0u ? 1u : 0u;
-            const std::uint64_t coverage = job.seed_coverage_interval_count != 0u ? 1u : 0u;
-            const std::uint64_t ranged = job.anchor_count != 0u ? 1u : 0u;
-            const std::uint64_t chained = job.range_count != 0u ? 1u : 0u;
-            candidate_jobs += verified;
-            coverage_jobs += coverage;
-            if ((ranged == 0u && chained != 0u) ||
-                job.count(shader_kind::grouped_soa_seed_count) != job.binding_window_count ||
-                job.count(shader_kind::prefix_scan_block) != 1u + verified ||
-                job.count(shader_kind::prefix_scan_add) != 2u + 2u * verified ||
-                job.count(shader_kind::grouped_soa_seed_emit) != verified * job.binding_window_count ||
-                job.count(shader_kind::radix_sort_histogram) != verified * *passes ||
-                job.count(shader_kind::radix_sort_scan) != verified * *passes ||
-                job.count(shader_kind::radix_sort_scatter) != verified * *passes ||
-                job.count(shader_kind::chain_range_build) != ranged ||
-                job.count(shader_kind::chain_tiled_dp_u64) != chained ||
-                job.count(candidate_mode ? shader_kind::chain_candidate_reduce
-                                         : shader_kind::coordinate_reduce) != chained)
+            const std::uint64_t passes = *pass_count;
+            const bool front = job.count(shader_kind::grouped_soa_seed_count) == job.binding_window_count &&
+                               job.count(shader_kind::prefix_scan_block) == 1u &&
+                               job.count(shader_kind::prefix_scan_add) == 2u;
+            if (!front)
                 return false;
-            const std::uint64_t expected_total = std::uint64_t{job.binding_window_count} + 3u +
-                verified * (job.binding_window_count + 3u * *passes + 5u) +
-                coverage + ranged + 2u * chained;
-            const std::uint64_t expected_submissions =
-                1u + 4u * verified + coverage + ranged + chained;
-            std::uint64_t actual_total = 0u;
-            for (const auto count : job.dispatches) {
-                if (count > (std::numeric_limits<std::uint64_t>::max)() - actual_total)
+            std::uint64_t expected_total = std::uint64_t{job.binding_window_count} + 3u;
+            std::uint64_t expected_submissions = 1u;
+            if (job.anchor_count == 0u) {
+                if (job.range_count != 0u)
                     return false;
+            } else {
+                ++anchored_jobs;
+                expected_total = 2ull * job.binding_window_count + 4u + 3u * passes;
+                expected_submissions = 3u;
+                if (job.count(shader_kind::grouped_soa_seed_emit) != job.binding_window_count ||
+                    job.count(shader_kind::radix_sort_histogram) != passes ||
+                    job.count(shader_kind::radix_sort_scan) != passes ||
+                    job.count(shader_kind::radix_sort_scatter) != passes ||
+                    job.count(shader_kind::chain_range_build) != 1u) {
+                    return false;
+                }
+                if (job.range_count != 0u) {
+                    expected_total += 2u;
+                    expected_submissions = 4u;
+                    if (job.count(shader_kind::chain_tiled_dp_u64) != 1u ||
+                        job.count(candidate_mode ? shader_kind::chain_candidate_reduce
+                                                 : shader_kind::coordinate_reduce) != 1u ||
+                        job.count(candidate_mode ? shader_kind::coordinate_reduce
+                                                 : shader_kind::chain_candidate_reduce) != 0u) {
+                        return false;
+                    }
+                }
+            }
+            std::uint64_t actual_total = 0u;
+            for (const std::uint64_t count : job.dispatches) {
+                if (count > (std::numeric_limits<std::uint64_t>::max)() - actual_total) {
+                    return false;
+                }
                 actual_total += count;
             }
-            if (actual_total != expected_total || job.committed_submissions != expected_submissions)
+            if (actual_total != expected_total ||
+                job.committed_submissions != expected_submissions ||
+                job.count(shader_kind::coordinate_vote_reduce) != 0u ||
+                job.count(shader_kind::coordinate_vote_reduce_batch) != 0u ||
+                job.count(shader_kind::ordered_sketch_tile) != 0u ||
+                job.count(shader_kind::ordered_sketch_exact_tile) != 0u) {
                 return false;
+            }
         }
         return is_prepared_exactly(candidate_mode ? std::span<const shader_kind>{candidate_required}
-                                                  : std::span<const shader_kind>{coordinate_required},
-                                   candidate_jobs, candidate_jobs, coverage_jobs);
+                                                  : std::span<const shader_kind>{legacy_required},
+                                   anchored_jobs);
     }
 
     /// @brief Checks completed alignment jobs for packed sequence windows.
@@ -962,9 +966,7 @@ class runtime_pipeline_operation_token {
             }
             for (std::size_t i = 0u; i < job.submission_ordinals.size(); ++i) {
                 if (i < job.committed_submissions) {
-                    if (job.submission_ordinals[i] == 0u ||
-                        job.submission_ordinals[i] > audit_.committed_submissions ||
-                        (i != 0u && job.submission_ordinals[i - 1u] >= job.submission_ordinals[i]))
+                    if (job.submission_ordinals[i] == 0u)
                         return false;
                     for (std::size_t prior = 0u; prior < i; ++prior) {
                         if (job.submission_ordinals[prior] == job.submission_ordinals[i])
@@ -997,40 +999,34 @@ class runtime_pipeline_operation_token {
     }
 
     /// @brief Checks that the prepared pipelines match the operation's requirements.
-    /// Base shaders are prepared once. Each candidate-bearing job retrieves its
-    /// radix and native verification pipelines once; verification reuses the
-    /// prefix shader keys and therefore adds their preparation counts.
+    /// Each shader in `required` must be prepared once. `radix_prepared_calls`
+    /// gives the expected preparation count for ezch of the three radix shaders.
     [[nodiscard]] bool is_prepared_exactly(std::span<const shader_kind> required,
-                                           std::uint64_t radix_prepared_calls = 0u,
-                                           std::uint64_t verification_calls = 0u,
-                                           std::uint64_t coverage_calls = 0u) const noexcept {
-        std::array<std::uint64_t, k_runtime_pipeline_kind_slots> expected{};
+                                           std::uint64_t radix_prepared_calls = 0u) const noexcept {
+        const std::size_t expected_count = required.size() + (radix_prepared_calls == 0u ? 0u : 3u);
+        if (audit_.prepared_count != expected_count)
+            return false;
         for (const shader_kind kind : required) {
-            const auto slot = static_cast<std::size_t>(kind);
-            if (slot >= expected.size() || expected[slot] != 0u)
+            if (prepared_calls(kind) != 1u)
                 return false;
-            expected[slot] = 1u;
         }
-        for (const shader_kind kind : seed_radix_required_shaders) {
-            expected[static_cast<std::size_t>(kind)] = radix_prepared_calls;
-        }
-        expected[static_cast<std::size_t>(shader_kind::seed_verify_count)] = verification_calls;
-        expected[static_cast<std::size_t>(shader_kind::seed_verify_emit)] = verification_calls;
-        expected[static_cast<std::size_t>(shader_kind::seed_native_coverage)] = coverage_calls;
-        for (const auto kind : {shader_kind::prefix_scan_block, shader_kind::prefix_scan_add}) {
-            auto& count = expected[static_cast<std::size_t>(kind)];
-            if (verification_calls > (std::numeric_limits<std::uint64_t>::max)() - count)
+        const std::array radix{
+            shader_kind::radix_sort_histogram,
+            shader_kind::radix_sort_scan,
+            shader_kind::radix_sort_scatter,
+        };
+        for (const shader_kind kind : radix) {
+            if (prepared_calls(kind) != radix_prepared_calls)
                 return false;
-            count += verification_calls;
         }
         for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
-            const auto slot = static_cast<std::size_t>(audit_.prepared[i].shader_key.kind);
-            if (slot >= expected.size() || expected[slot] == 0u ||
-                audit_.prepared[i].prepared_calls != expected[slot])
+            const shader_kind actual = static_cast<shader_kind>(audit_.prepared[i].shader_key.kind);
+            const bool base = std::find(required.begin(), required.end(), actual) != required.end();
+            const bool sort = std::find(radix.begin(), radix.end(), actual) != radix.end();
+            if (!base && !(radix_prepared_calls != 0u && sort))
                 return false;
-            expected[slot] = 0u;
         }
-        return std::ranges::all_of(expected, [](const auto count) { return count == 0u; });
+        return true;
     }
 
     // Members are destroyed in reverse order Keep the reservation alive until
@@ -1294,29 +1290,6 @@ class runtime_pipeline_use_collector {
         audit_.jobs[job_index].range_count = range_count;
     }
 
-    /// Records completed native verification after both fences. Counts refer to
-    /// raw hash candidates, accepted native spans, and actually compacted anchors.
-    void set_seed_native_verification(std::size_t job_index,
-                                      std::uint64_t candidate_count,
-                                      std::uint64_t verified_count,
-                                      std::uint64_t emitted_count,
-                                      std::uint64_t coverage_interval_count) noexcept {
-        if (job_index >= audit_.jobs.size() || !audit_.jobs[job_index].shape_contract_set ||
-            audit_.jobs[job_index].seed_native_verification_set || candidate_count == 0u ||
-            candidate_count > (std::numeric_limits<std::uint32_t>::max)() ||
-            verified_count > candidate_count || emitted_count != verified_count ||
-            (coverage_interval_count != 0u && coverage_interval_count != candidate_count)) {
-            invalidate();
-            return;
-        }
-        auto& job = audit_.jobs[job_index];
-        job.seed_candidate_count = candidate_count;
-        job.seed_verified_count = verified_count;
-        job.seed_emitted_count = emitted_count;
-        job.seed_coverage_interval_count = coverage_interval_count;
-        job.seed_native_verification_set = true;
-    }
-
     /// @brief Attaches the query authorization ID and the host check of anchor order.
     /// The order check must cover exactly this job's recorded anchor  count.
     void set_seed_anchor_authentication(
@@ -1559,7 +1532,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
         return false;
     }
-    const std::array<shader_variant_key, 16> keys{
+    const std::array<shader_variant_key, 13> keys{
         make_shader_key(shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u),
@@ -1577,16 +1550,13 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
             shader_kind::align_extend_simple_cigar, 384u, 64u, k_gpu_alignment_extension_max_len),
         make_shader_key(
             shader_kind::mapping_quality_reduce, 384u, 1u, k_gpu_persisted_mapq_candidate_capacity),
-        make_shader_key(shader_kind::seed_verify_count, 384u, 128u, 1u),
-        make_shader_key(shader_kind::seed_verify_emit, 384u, 128u, 1u),
-        make_shader_key(shader_kind::seed_native_coverage, 384u, 128u, 1u),
     };
     if (!std::all_of(keys.begin(), keys.end(), [](const shader_variant_key& key) {
             return is_shader_variant_key_valid(key);
         })) {
         return false;
     }
-    std::array<runtime_metal_archive_pipeline_receipt, 16> receipts{};
+    std::array<runtime_metal_archive_pipeline_receipt, 13> receipts{};
     bool seed_claimed = false;
     for (std::size_t i = 0u; i < receipts.size(); ++i) {
         runtime_metal_archive_pipeline_audit audit = base_audit;
@@ -1600,31 +1570,6 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
     // Use fixed non-null handles to test recording  without creating Vulkan objects.
     const auto command = [](std::uintptr_t identity) {
         return reinterpret_cast<VkCommandBuffer>(identity);
-    };
-    // Completes the same per-job native protocol as the runtime verifier.
-    const auto record_verification = [&keys, &receipts, command](
-        runtime_pipeline_use_collector& collector, std::size_t job,
-        std::uint64_t candidate_count, std::uint64_t survivor_count,
-        bool coverage, std::uintptr_t command_base) {
-        if (coverage) {
-            collector.prepare(keys[15], &receipts[15]);
-            collector.begin(command(command_base));
-            collector.use(command(command_base), job, keys[15], &receipts[15], 1u);
-            collector.commit(command(command_base));
-        }
-        for (const auto slot : {13u, 14u, 1u, 2u})
-            collector.prepare(keys[slot], &receipts[slot]);
-        collector.begin(command(command_base + 1u));
-        collector.use(command(command_base + 1u), job, keys[13], &receipts[13], 1u);
-        collector.use(command(command_base + 1u), job, keys[1], &receipts[1], 1u);
-        collector.use(command(command_base + 1u), job, keys[2], &receipts[2], 1u);
-        collector.use(command(command_base + 1u), job, keys[2], &receipts[2], 1u);
-        collector.commit(command(command_base + 1u));
-        collector.begin(command(command_base + 2u));
-        collector.use(command(command_base + 2u), job, keys[14], &receipts[14], 1u);
-        collector.commit(command(command_base + 2u));
-        collector.set_seed_native_verification(job, candidate_count, survivor_count,
-                                              survivor_count, coverage ? candidate_count : 0u);
     };
     // Registers the three pipelines required by query sketching.
     const auto prepare_query = [&keys, &receipts](runtime_pipeline_use_collector& collector) {
@@ -1741,7 +1686,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         collector->set_shape_input(1u, 1u, 255u, 0u);
         collector->set_shape_input(2u, 1u, 65536u, 0u, 3u);
         collector->set_shape_outcome(0u, 0u, 0u);
-        collector->set_shape_outcome(1u, 0u, 0u);
+        collector->set_shape_outcome(1u, 1u, 0u);
         collector->set_shape_outcome(2u, 1u, 1u);
 
         collector->begin(command(11u));
@@ -1769,12 +1714,9 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
         }
+        collector->use(command(13u), 1u, keys[5], &receipts[5], 1u);
+        collector->use(command(13u), 2u, keys[5], &receipts[5], 1u);
         collector->commit(command(13u));
-        record_verification(*collector, 1u, 1u, 0u, false, 20u);
-        record_verification(*collector, 2u, 1u, 1u, true, 30u);
-        collector->begin(command(40u));
-        collector->use(command(40u), 2u, keys[5], &receipts[5], 1u);
-        collector->commit(command(40u));
 
         collector->begin(command(14u));
         collector->use(command(14u), 2u, keys[7], &receipts[7], 1u);
@@ -1785,8 +1727,8 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         return false;
     }
     if (!shape.is_valid_for_grouped_soa_coordinate() ||
-        shape.audit_.begun_command_generations != 10u ||
-        shape.audit_.committed_command_generations != 10u || !shape.capacity_permit_) {
+        shape.audit_.begun_command_generations != 4u ||
+        shape.audit_.committed_command_generations != 4u || !shape.capacity_permit_) {
         return false;
     }
     for (const auto kind : {shader_kind::grouped_soa_seed_count, shader_kind::grouped_soa_seed_emit}) {
@@ -1795,7 +1737,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         if (shape.is_valid_for_grouped_soa_coordinate()) return false;
         ++count;
     }
-    constexpr std::array<std::uint64_t, 3> expected_submissions{1u, 5u, 8u};
+    constexpr std::array<std::uint64_t, 3> expected_submissions{1u, 3u, 4u};
     for (std::size_t job = 0u; job < shape.audit_.jobs.size(); ++job) {
         const runtime_pipeline_job_use_audit& audit = shape.audit_.jobs[job];
         if (audit.submission_operation_identity != 202u ||
@@ -1805,9 +1747,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
             return false;
         }
         for (std::size_t ordinal = 0u; ordinal < audit.committed_submissions; ++ordinal) {
-            if (audit.submission_ordinals[ordinal] == 0u ||
-                (ordinal != 0u && audit.submission_ordinals[ordinal - 1u] >=
-                                      audit.submission_ordinals[ordinal])) {
+            if (audit.submission_ordinals[ordinal] != ordinal + 1u) {
                 return false;
             }
         }
@@ -1830,7 +1770,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
     runtime_pipeline_operation_token rejected_seed_only{};
     runtime_pipeline_operation_token empty_seed_only{};
     try {
-        const auto make_seed_only = [&keys, &receipts, &record_verification, command](std::uint64_t identity,
+        const auto make_seed_only = [&keys, &receipts, command](std::uint64_t identity,
                                                                 bool accepted_order) {
             auto collector = runtime_pipeline_use_collector::create(
                 runtime_pipeline_operation_kind::grouped_soa_seed_anchor_roundtrip,
@@ -1885,8 +1825,6 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
                     collector->use(emit_command, 2u, keys[slot], &receipts[slot], 1u);
             }
             collector->commit(emit_command);
-            record_verification(*collector, 2u, 1u, 1u, false,
-                                static_cast<std::uintptr_t>(identity + 10u));
             return collector->seal();
         };
         seed_only = make_seed_only(207u, true);
@@ -1911,10 +1849,10 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         return false;
     }
     if (!seed_only.is_valid_for_grouped_soa_seed_anchor_roundtrip() ||
-        seed_only.audit_.committed_submissions != 4u ||
+        seed_only.audit_.committed_submissions != 2u ||
         seed_only.audit_.jobs[0].committed_submissions != 0u ||
         seed_only.audit_.jobs[1].committed_submissions != 1u ||
-        seed_only.audit_.jobs[2].committed_submissions != 4u ||
+        seed_only.audit_.jobs[2].committed_submissions != 2u ||
         !empty_seed_only.is_valid_for_grouped_soa_seed_anchor_roundtrip() ||
         empty_seed_only.audit_.committed_submissions != 0u ||
         rejected_seed_only.is_valid_for_grouped_soa_seed_anchor_roundtrip()) {
@@ -2077,7 +2015,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
                 return false;
             }
         }
-        const auto make_mpf = [&extra_keys, &extra_receipts, &keys, &receipts, &record_verification, command](
+        const auto make_mpf = [&extra_keys, &extra_receipts, &keys, &receipts, command](
             bool fused, bool bitonic, bool empty, int mutation) {
             const std::uint64_t identity = 500u + static_cast<std::uint64_t>(mutation);
             auto collector = runtime_pipeline_use_collector::create(
@@ -2135,9 +2073,6 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
             } else if (!fused) {
                 collector->commit(first);
             }
-            if (!empty)
-                record_verification(*collector, 0u, 1u, 1u, false,
-                                    static_cast<std::uintptr_t>(identity + 20'000u));
             return collector->seal();
         };
         for (const bool fused : {false, true}) {

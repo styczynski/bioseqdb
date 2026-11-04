@@ -48,10 +48,9 @@ template<class p_simd_tag>
     std::size_t slot) noexcept
 {
     const auto slot_hash = hn::LoadU(d, combined_hash + slot);
-    const auto slot_ordinal = hn::LoadU(d, combined_ordinal + slot);
-    const auto invalid_ordinal = hn::Set(d, (std::numeric_limits<std::uint64_t>::max)());
-    const auto take = hn::And(hn::Ne(slot_ordinal, invalid_ordinal),
-        hn::Or(hn::Eq(minimum.ordinal, invalid_ordinal), hn::Le(slot_hash, minimum.hash)));
+    // Exact sketches exclude their physical maximum hash, so the same
+    // sentinel orders every invalid slot after every selectable candidate.
+    const auto take = hn::Le(slot_hash, minimum.hash);
     minimum.hash = hn::IfThenElse(take, slot_hash, minimum.hash);
     minimum.raw = hn::IfThenElse(
         take, hn::LoadU(d, combined_raw + slot), minimum.raw);
@@ -67,7 +66,7 @@ template<class p_simd_tag>
  */
 template<class p_minimizer_type, class p_collector_type>
 requires wide_simd_minimizer_representation<p_minimizer_type>
-[[nodiscard, gnu::always_inline]] inline bool append_wide_minimizer_records(
+[[nodiscard]] inline bool append_wide_minimizer_records(
     p_collector_type& collector,
     const std::uint64_t* HWY_RESTRICT hashes,
     const std::uint64_t* HWY_RESTRICT position_strands,
@@ -191,7 +190,13 @@ process_chronological_candidate_block(
         return reject_continuation(state, two_stack_continuation_status::invalid_kmer_size);
     }
     const std::uint64_t max_hash = p_minimizer_type::k_hash_field_mask;
-    const std::uint64_t max_raw = 0u;
+    const std::uint64_t max_raw = []() constexpr {
+        if constexpr (k_native_output) {
+            return static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask);
+        } else {
+            return std::uint64_t{0u};
+        }
+    }();
     const std::uint64_t kmer_mask = hash_traits::exact_kmer_mask(k);
     if (kmer_mask > p_minimizer_type::k_hash_field_mask) {
         return reject_continuation(state, two_stack_continuation_status::unsupported_representation);
@@ -224,8 +229,6 @@ process_chronological_candidate_block(
     const vector_type ordinal_unmasked = hn::Add(
         hn::Set(d, static_cast<std::uint64_t>(state.candidate_count)),
         lane_indices(d));
-    vector_type candidate_ordinal = hn::IfThenElse(
-        active_mask, ordinal_unmasked, hn::Set(d, ordinal_sentinel));
     vector_type candidate_hash = v_max_hash;
     vector_type candidate_raw = hn::Set(d, max_raw);
     mask_type palindrome_mask = hn::MaskFalse(d);
@@ -242,24 +245,25 @@ process_chronological_candidate_block(
 
         typename lexic_hasher<hash_alphabet>::template simd_hash<std::uint64_t, simd_tag_type>
             packed_hasher(d, k);
-        vector_type canonical = hn::Zero(d);
         for (std::size_t code_index = 0; code_index < k; ++code_index) {
-            canonical = packed_hasher.next(d,
-                load_promoted_dna4_codes(d, code_scratch.data() + code_index));
+            packed_hasher.append_initial(d,
+                load_promoted_dna4_codes(d, code_scratch.data() + code_index),
+                code_index);
         }
+        const vector_type canonical = packed_hasher.finish_initial();
         add_stats_counter(state.stats.scalar_orchestration_steps, k);
         const vector_type v_kmer_mask = hn::Set(d, kmer_mask);
         palindrome_mask = packed_hasher.palindrome_mask(d);
         const mask_type live_non_palindrome = hn::AndNot(palindrome_mask, active_mask);
-        candidate_valid = live_non_palindrome;
         const vector_type scrambled = minimap_int_hasher<hash_alphabet>::template scramble_simd<simd_tag_type>(
             d, canonical, v_kmer_mask);
         candidate_hash = hn::And(
             scrambled,
             hn::Set(d, static_cast<std::uint64_t>(
                 p_minimizer_type::k_hash_field_mask)));
+        candidate_valid = hn::And(live_non_palindrome, hn::Ne(candidate_hash, v_max_hash));
         candidate_hash = hn::IfThenElse(
-            live_non_palindrome, candidate_hash, v_max_hash);
+            candidate_valid, candidate_hash, v_max_hash);
 
         vector_type output_position = hn::Zero(d);
         if constexpr (std::same_as<
@@ -315,11 +319,11 @@ process_chronological_candidate_block(
                 strand);
         }
         candidate_raw = hn::IfThenElse(
-            live_non_palindrome, candidate_raw, hn::Set(d, max_raw));
+            candidate_valid, candidate_raw, hn::Set(d, max_raw));
     }
 
-    candidate_ordinal = hn::IfThenElse(candidate_valid, candidate_ordinal,
-        hn::Set(d, ordinal_sentinel));
+    const vector_type candidate_ordinal = hn::Or(
+        ordinal_unmasked, hn::VecFromMask(d, hn::Not(candidate_valid)));
 
     // Tail copies and vector stores initialize every element read below, so
     // these scratch arrays need no separate zero-fill.
@@ -377,7 +381,7 @@ process_chronological_candidate_block(
         hn::LoadU(d, previous_ordinal_storage.data());
     add_stats_counter(state.stats.scalar_orchestration_steps, 3);
 
-    const mask_type previous_valid = hn::Ne(previous_ordinal, hn::Set(d, ordinal_sentinel));
+    const mask_type previous_valid = hn::Ne(previous_hash, v_max_hash);
     mask_type first_full_window = hn::MaskFalse(d);
     mask_type steady_window = hn::MaskFalse(d);
     if constexpr (std::same_as<
@@ -406,8 +410,8 @@ process_chronological_candidate_block(
                 hn::Set(d, static_cast<std::uint64_t>(w + k)),
                 valid_run_lengths));
     }
-    const mask_type entering_wins = hn::And(candidate_valid,
-        hn::Or(hn::Not(previous_valid), hn::Le(candidate_hash, previous_hash)));
+    const mask_type entering_wins = hn::And(
+        hn::Ne(candidate_hash, v_max_hash), hn::Le(candidate_hash, previous_hash));
     const mask_type expired = hn::And(
         steady_window,
         hn::AndNot(
@@ -422,7 +426,7 @@ process_chronological_candidate_block(
         hn::And(previous_valid, hn::Or(entering_wins, expired)));
     const mask_type special_ties = hn::And(first_full_window, previous_valid);
     const mask_type expiry_ties = hn::And(
-        expired, hn::Ne(window_minimum.ordinal, hn::Set(d, ordinal_sentinel)));
+        expired, hn::Ne(window_minimum.hash, v_max_hash));
 
     const std::size_t event_stride = w + 1;
     const std::size_t row_stride =
@@ -430,12 +434,6 @@ process_chronological_candidate_block(
     // Tie processing fills every matrix  slot it reads, so zero-fill is unnecessary.
     HWY_ALIGN std::array<std::uint64_t, event_capacity> event_raw;
     HWY_ALIGN std::array<vector_type, max_lanes> event_columns{};
-    // Each tie tile assigns every active validity column and stores every
-    // consumed matrix cell; the no-tie path never reads this scratch.
-    HWY_ALIGN std::array<std::uint64_t, event_capacity> event_valid;
-    // Aggregate initialization keeps Vec construction in this target-owned function,
-    // avoiding an implicitly generated, untargeted std::array constructor.
-    HWY_ALIGN std::array<vector_type, max_lanes> event_valid_columns{};
     std::uint64_t first_window_tie_events = 0;
     std::uint64_t expiry_tie_events = 0;
     const vector_type v_max_raw = hn::Set(d, max_raw);
@@ -457,14 +455,12 @@ process_chronological_candidate_block(
             const mask_type special_match = hn::And(
                 special_ties,
                 hn::And(
-                    hn::And(hn::Eq(slot_hash, previous_hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                    hn::Eq(slot_hash, previous_hash),
                     hn::Ne(slot_raw, previous_raw)));
             const mask_type expiry_match = hn::And(
                 expiry_ties,
                 hn::And(
-                    hn::And(hn::Eq(slot_hash, window_minimum.hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                    hn::Eq(slot_hash, window_minimum.hash),
                     hn::Ne(slot_raw, window_minimum.raw)));
             actual_tie_lanes = hn::Or(
                 actual_tie_lanes, hn::Or(special_match, expiry_match));
@@ -474,6 +470,7 @@ process_chronological_candidate_block(
     if constexpr (k_native_output) {
         HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
             compressed_raw;
+        const vector_type v_raw_hash_mask = hn::Set(d, max_raw);
         if (hn::CountTrue(d, actual_tie_lanes) == 0) [[likely]] {
             compressed_count = hn::CompressStore(
                 previous_raw,
@@ -495,8 +492,6 @@ process_chronological_candidate_block(
                     if (event_slot == 0) {
                         event_columns[column] = hn::IfThenElse(
                             emit_old, previous_raw, v_max_raw);
-                        event_valid_columns[column] = hn::IfThenElse(emit_old,
-                            hn::Set(d, std::uint64_t{1u}), hn::Zero(d));
                     } else if (event_slot <= w) {
                         const std::size_t candidate_slot = event_slot - 1;
                         const vector_type slot_hash = hn::LoadU(
@@ -506,31 +501,25 @@ process_chronological_candidate_block(
                         const mask_type special_match = hn::And(
                             special_ties,
                             hn::And(
-                                hn::And(hn::Eq(slot_hash, previous_hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                                hn::Eq(slot_hash, previous_hash),
                                 hn::Ne(slot_raw, previous_raw)));
                         const mask_type expiry_match = hn::And(
                             expiry_ties,
                             hn::And(
-                                hn::And(hn::Eq(slot_hash, window_minimum.hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                                hn::Eq(slot_hash, window_minimum.hash),
                                 hn::Ne(slot_raw, window_minimum.raw)));
                         first_window_tie_events +=
                             hn::CountTrue(d, special_match);
                         expiry_tie_events += hn::CountTrue(d, expiry_match);
-                        event_valid_columns[column] = hn::IfThenElse(
-                            hn::Or(special_match, expiry_match), hn::Set(d, std::uint64_t{1u}), hn::Zero(d));
                         event_columns[column] = hn::IfThenElse(
                             hn::Or(special_match, expiry_match),
                             slot_raw,
                             v_max_raw);
                     } else {
                         event_columns[column] = v_max_raw;
-                        event_valid_columns[column] = hn::Zero(d);
                     }
                 }
-                if (!transpose_u64_lane_matrix(d, event_columns.data())
-                    || !transpose_u64_lane_matrix(d, event_valid_columns.data())) {
+                if (!transpose_u64_lane_matrix(d, event_columns.data())) {
                     return reject_continuation(
                         state,
                         two_stack_continuation_status::unsupported_vector_shape);
@@ -540,8 +529,6 @@ process_chronological_candidate_block(
                         event_columns[row],
                         d,
                         event_raw.data() + row * row_stride + column_block);
-                    hn::StoreU(event_valid_columns[row], d,
-                        event_valid.data() + row * row_stride + column_block);
                 }
                 add_stats_counter(state.stats.row_transpose_batches, 1);
                 add_stats_counter(state.stats.row_vector_stores, lanes);
@@ -556,7 +543,7 @@ process_chronological_candidate_block(
                 const vector_type events = hn::LoadU(
                     d, event_raw.data() + offset);
                 const mask_type valid_events = hn::Ne(
-                    hn::LoadU(d, event_valid.data() + offset), hn::Zero(d));
+                    hn::And(events, v_raw_hash_mask), v_raw_hash_mask);
                 compressed_count += hn::CompressStore(
                     events,
                     valid_events,
@@ -608,8 +595,6 @@ process_chronological_candidate_block(
                     if (event_slot == 0) {
                         event_columns[column] = hn::IfThenElse(
                             emit_old, previous_raw, v_max_raw);
-                        event_valid_columns[column] = hn::IfThenElse(emit_old,
-                            hn::Set(d, std::uint64_t{1u}), hn::Zero(d));
                         event_hash_columns[column] = hn::IfThenElse(
                             emit_old, previous_hash, v_max_hash);
                     } else if (event_slot <= w) {
@@ -621,14 +606,12 @@ process_chronological_candidate_block(
                         const mask_type special_match = hn::And(
                             special_ties,
                             hn::And(
-                                hn::And(hn::Eq(slot_hash, previous_hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                                hn::Eq(slot_hash, previous_hash),
                                 hn::Ne(slot_raw, previous_raw)));
                         const mask_type expiry_match = hn::And(
                             expiry_ties,
                             hn::And(
-                                hn::And(hn::Eq(slot_hash, window_minimum.hash),
-                        hn::Ne(hn::LoadU(d, combined_ordinal.data() + candidate_slot), hn::Set(d, ordinal_sentinel))),
+                                hn::Eq(slot_hash, window_minimum.hash),
                                 hn::Ne(slot_raw, window_minimum.raw)));
                         const mask_type emit_tie = hn::Or(
                             special_match, expiry_match);
@@ -637,18 +620,14 @@ process_chronological_candidate_block(
                         expiry_tie_events += hn::CountTrue(d, expiry_match);
                         event_columns[column] = hn::IfThenElse(
                             emit_tie, slot_raw, v_max_raw);
-                        event_valid_columns[column] = hn::IfThenElse(emit_tie,
-                            hn::Set(d, std::uint64_t{1u}), hn::Zero(d));
                         event_hash_columns[column] = hn::IfThenElse(
                             emit_tie, slot_hash, v_max_hash);
                     } else {
                         event_columns[column] = v_max_raw;
-                        event_valid_columns[column] = hn::Zero(d);
                         event_hash_columns[column] = v_max_hash;
                     }
                 }
                 if (!transpose_u64_lane_matrix(d, event_columns.data())
-                    || !transpose_u64_lane_matrix(d, event_valid_columns.data())
                     || !transpose_u64_lane_matrix(d, event_hash_columns.data())) {
                     return reject_continuation(
                         state,
@@ -659,7 +638,6 @@ process_chronological_candidate_block(
                         row * row_stride + column_block;
                     hn::StoreU(
                         event_columns[row], d, event_raw.data() + event_offset);
-                    hn::StoreU(event_valid_columns[row], d, event_valid.data() + event_offset);
                     hn::StoreU(
                         event_hash_columns[row],
                         d,
@@ -680,7 +658,7 @@ process_chronological_candidate_block(
                 const vector_type event_positions = hn::LoadU(
                     d, event_raw.data() + offset);
                 const mask_type valid_events = hn::Ne(
-                    hn::LoadU(d, event_valid.data() + offset), hn::Zero(d));
+                    event_hashes, v_max_hash);
                 const std::size_t hash_count = hn::CompressStore(
                     event_hashes,
                     valid_events,
@@ -898,8 +876,10 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
         using storage_type = typename p_minimizer_type::storage_type;
         const auto current_raw = hn::Set(
             d, static_cast<std::uint64_t>(state.current_min.raw));
-        const auto current_valid = state.current_min.ordinal != (std::numeric_limits<std::uint64_t>::max)()
-            ? hn::FirstN(d, 1u) : hn::MaskFalse(d);
+        const auto raw_hash_mask = hn::Set(
+            d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask));
+        const auto current_valid = hn::Ne(
+            hn::And(current_raw, raw_hash_mask), raw_hash_mask);
         HWY_ALIGN std::array<storage_type, p_continuation_state::max_vector_lanes>
             final_raw{};
         final_count = hn::CompressStore(
@@ -918,8 +898,11 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
             d, static_cast<std::uint64_t>(state.current_min.hash));
         const auto current_position_strand = hn::Set(
             d, static_cast<std::uint64_t>(state.current_min.raw));
-        const auto current_valid = state.current_min.ordinal != (std::numeric_limits<std::uint64_t>::max)()
-            ? hn::FirstN(d, 1u) : hn::MaskFalse(d);
+        const auto maximum_hash = hn::Set(
+            d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask));
+        // Before the first candidate, the state retains UINT64_MAX even
+        // when this physical record has a narrower hash field.
+        const auto current_valid = hn::Lt(current_hash, maximum_hash);
         const auto final_mask = hn::And(current_valid, hn::FirstN(d, 1));
         HWY_ALIGN std::array<std::uint64_t, p_continuation_state::max_vector_lanes>
             final_hash{};

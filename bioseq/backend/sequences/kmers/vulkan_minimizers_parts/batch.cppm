@@ -263,16 +263,18 @@ collect_minimizers_vulkan_result_resident_impl(
             decline(vulkan_sketch_decline_reason::alphabet_unsupported);
             return std::nullopt;
         } else {
-            if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
+            if (!vulkan_minimizer_kmer_size_supported<traits>(
+                    kmer_size, minimizer_wire_traits<p_minimizer_type>::k_hash_bits)) {
                 decline(vulkan_sketch_decline_reason::kmer_size_unsupported);
                 return std::nullopt;
             }
-            if (!vulkan_minimizer_window_size_supported(window_size)) {
+            if (!vulkan_minimizer_window_size_supported(
+                    window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
                 decline(vulkan_sketch_decline_reason::window_size_unsupported);
                 return std::nullopt;
             }
             const sequence_upload_view upload = make_sequence_upload_view(seq);
-            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>();
+            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>(vulkan_minimizer_seed_policy_id<traits>(kmer_size));
             return sketch_uploaded_window_result<p_minimizer_type>(
                 upload,
                 rank_lut,
@@ -373,9 +375,10 @@ make_minimap_sketch_data_vulkan_upload_batch_admission_plan(
         throw vulkan_runtime_error{
             "Vulkan batch sketch has invalid host materialization mode"};
     }
-    if (kmer_size == 0u || kmer_size > 31u
-        || minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u
-        || !vulkan_minimizer_window_size_supported(window_size)) {
+    if (!vulkan_minimizer_kmer_size_supported(
+            rank_lut.exact_rank_bits, kmer_size, rank_lut.seed_policy_id,
+            minimizer_wire_traits<p_minimizer_type>::k_hash_bits)
+        || !vulkan_minimizer_window_size_supported(window_size, rank_lut.seed_policy_id)) {
         return std::nullopt;
     }
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
@@ -446,7 +449,7 @@ template <class p_minimizer_type>
         bioseq::common::saturating_add(
             plan.max_minimizers,
             estimate_vulkan_minimizer_capacity(
-                upload.bp_size, plan.window_size));
+                upload.bp_size, plan.window_size, plan.rank_lut.seed_policy_id));
     if (candidate_max_minimizers
         > static_cast<std::uint64_t>(
             (std::numeric_limits<std::uint32_t>::max)())) {

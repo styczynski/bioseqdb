@@ -82,6 +82,18 @@ TEST_CASE("physical batch type authentication follows every generated record coo
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<23u, 40u>>());
     STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 40u>>);
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 40u>>());
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<15u, 48u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<15u, 48u>>());
+    STATIC_REQUIRE(sizeof(minimizer_representation<15u, 48u>) == sizeof(std::uint64_t));
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<20u, 43u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<20u, 43u>>());
+    STATIC_REQUIRE(sizeof(minimizer_representation<20u, 43u>) == sizeof(std::uint64_t));
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<28u, 35u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<28u, 35u>>());
+    STATIC_REQUIRE(sizeof(minimizer_representation<28u, 35u>) == sizeof(std::uint64_t));
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<33u, 30u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<33u, 30u>>());
+    STATIC_REQUIRE(sizeof(minimizer_representation<33u, 30u>) == sizeof(std::uint64_t));
     STATIC_REQUIRE(generated_minimizer_physical_record<minimizer_representation<63u, 64u>>);
     STATIC_REQUIRE(physical_batch_entry_points_match_registry<minimizer_representation<63u, 64u>>());
 }

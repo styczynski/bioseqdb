@@ -437,10 +437,11 @@ std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_err
         const auto target_upload = alignment_packed_upload(target_payload, jobs[job_index], false, matrix);
         if (!query_upload) return std::unexpected(query_upload.error());
         if (!target_upload) return std::unexpected(target_upload.error());
+        // alignment_packed_upload has validated these immutable windows' ranks.
         const auto query_descriptor = place_packed_sequence_upload(*query_upload, query_cursor,
-            std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)}, packed_sequence_upload_is_valid);
+            std::span{static_cast<std::byte*>(query_buf.mapped), static_cast<std::size_t>(query_bytes)}, packed_sequence_upload_geometry_is_valid);
         const auto target_descriptor = place_packed_sequence_upload(*target_upload, target_cursor,
-            std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)}, packed_sequence_upload_is_valid);
+            std::span{static_cast<std::byte*>(target_buf.mapped), static_cast<std::size_t>(target_bytes)}, packed_sequence_upload_geometry_is_valid);
         if (!query_descriptor || !target_descriptor) return std::unexpected(bioseq::simd::alignment_contract_error::coordinates);
         const std::array descriptors{*query_descriptor, *target_descriptor};
         std::memcpy(static_cast<std::byte*>(descriptors_buf.mapped) + job_index * sizeof(descriptors), descriptors.data(), sizeof(descriptors));
@@ -804,9 +805,10 @@ std::expected<alignment_cigar_batch_result, bioseq::simd::alignment_contract_err
         ++final.committed_submission_count;
     };
 
-    // Models without the uniform upper-bound proof go directly to admitted traceback waves.
+    // Dense or ineligible uniform scoring goes directly to admitted traceback waves.
     if (!has_uniform_shortcuts) retry_indices = all_indices;
-    // Uniform scoring can first finish exact matches and simple gaps without traceback storage.
+    // Eligible uniform scoring first accepts valid, accurately scored heuristic scripts without
+    // traceback storage. These scripts may be suboptimal; unresolved jobs retry with traceback.
     for (std::size_t cursor = 0u; has_uniform_shortcuts && cursor < all_indices.size();) {
         std::size_t wave_size = all_indices.size() - cursor;
         wave_plan plan{};

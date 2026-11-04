@@ -363,7 +363,8 @@ class minimizer_fragment_generation_execution_receipt {
              algorithm_identity.runtime_window_size == window_size);
         return backend_bound && !saturated && target_length != 0u && window_size != 0u &&
                kmer_size != 0u && algorithm_identity_accepted &&
-               minimizer_scheme == minimizer_scheme_identity_for_backend(selected_backend);
+               minimizer_scheme == minimizer_scheme_identity_for_backend(
+                   selected_backend, algorithm_identity.alphabet_id, kmer_size);
     }
 
     /// Test whether the target is long enough to require a minimizer backend invocation.
@@ -747,7 +748,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         const std::uint64_t minimum_bases =
             static_cast<std::uint64_t>(window_size_) + kmer_size_ - 1u;
         const bioseq::gpu::vulkan::vulkan_rank_lut rank_lut =
-            bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>();
+            bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>(
+                bioseq::gpu::vulkan::vulkan_minimizer_seed_policy_id<typename upload_range::traits>(kmer_size_));
         if (fragment_bp == 0u || output_segment_span == 0u
             || segment_lo > segment_hi || segment_hi > target_length) {
             return std::unexpected(
@@ -1413,7 +1415,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
 
     /// Return the persisted minimizer scheme selected by this producer backend.
     [[nodiscard]] minimizer_scheme_identity scheme_identity() const noexcept {
-        return minimizer_scheme_identity_for_backend(backend_);
+        return minimizer_scheme_identity_for_backend(backend_, alphabet_code_, kmer_size_);
     }
 
     /// Return the persisted producer identity selected by this backend.
@@ -2227,6 +2229,35 @@ template <class p_storage> struct minimizers_per_fragment_index {
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_static_configuration,
                 "ordinary fragment build has an unknown backend"};
         }
+        if (backend == minimizer_sketch_backend::vulkan_segment &&
+            total_bp >= static_cast<sequence_size_t>(w + k - 1u)) {
+            // The registered writer already batches native Vulkan core uploads,
+            // owns their halo windows and serializes fragment-local pairs. Its
+            // identity describes a physical fragment; collection selects the
+            // larger transient record needed for the surrounding context.
+            if (execution_stats_out != nullptr) {
+                *execution_stats_out = {};
+            }
+            const auto identity = select_minimizer_generation_algorithm_identity<p_alphabet>(
+                *requested_algorithm,
+                k_minimizer_fragment_algorithm_position_extent_bp,
+                static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits),
+                k, w);
+            if (!identity) {
+                throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_representation,
+                    "minimizers_per_fragment Vulkan build"};
+            }
+            const auto built = build_registered(
+                storage, seq, backend, kernels, *identity, w, k, alphabet_code);
+            if (!built) {
+                throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state,
+                    "minimizers_per_fragment Vulkan build"};
+            }
+            if (execution_stats_out != nullptr) {
+                *execution_stats_out = *built;
+            }
+            return;
+        }
         const auto ordinary_layout = select_minimizer_generation_physical_layout<p_alphabet>(
             *requested_algorithm, std::min<std::uint64_t>(total_bp, frag_bp + 2u * k_context_span),
             static_cast<std::uint8_t>(std::numeric_limits<std::uint64_t>::digits), k, w);
@@ -2237,7 +2268,8 @@ template <class p_storage> struct minimizers_per_fragment_index {
         if (execution_stats_out != nullptr) {
             *execution_stats_out = {};
             execution_stats_out->selected_backend = backend;
-            execution_stats_out->minimizer_scheme = minimizer_scheme_identity_for_backend(backend);
+            execution_stats_out->minimizer_scheme = minimizer_scheme_identity_for_backend(
+                backend, alphabet_code, k);
             execution_stats_out->target_length = total_bp;
             execution_stats_out->window_size = w;
             execution_stats_out->kmer_size = k;

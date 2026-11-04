@@ -64,7 +64,7 @@ static_assert(std::is_standard_layout_v<generate_units_push>);
 
 /// @brief Chooses when a singleton sketch allocates its minimizer output.
 enum class vulkan_sketch_output_allocation : std::uint8_t {
-    proven_capacity, ///< Reserve the complete semantic bound before one submission.
+    preallocated, ///< Preallocate capacity; each scanned tile range is checked before writing.
     exact_count,     ///< Count first, admit the exact allocation, then emit.
 };
 
@@ -214,6 +214,11 @@ class device_query_sketch_authorization {
                   minimizer_count_,
                   static_cast<std::uint64_t>(minimizer_words32_per_record_) *
                       sizeof(std::uint32_t));
+        const bool typed_word_shape =
+            (minimizer_word_kind_ == 0u && minimizer_words32_per_record_ == 0u) ||
+            (minimizer_word_kind_ == 1u && minimizer_words32_per_record_ == 1u) ||
+            (minimizer_word_kind_ == 2u && minimizer_words32_per_record_ == 2u) ||
+            (minimizer_word_kind_ == 3u && minimizer_words32_per_record_ == 4u);
         const bool shape_valid =
             identity_ != 0u && runtime_ != nullptr && buffer_ != VK_NULL_HANDLE &&
             memory_identity_ != 0u && buffer_bytes_ != 0u && allocation_bytes_ >= buffer_bytes_ &&
@@ -222,7 +227,7 @@ class device_query_sketch_authorization {
             logical_minimizer_bytes_ <= buffer_bytes_ &&
             materialization_ == vulkan_sketch_host_materialization::device_only &&
             dispatch_stats_.is_internally_consistent() && window_size_ != 0u && kmer_size_ != 0u &&
-            minimizer_word_kind_ <= 3u && minimizer_words32_per_record_ != 0u &&
+            typed_word_shape &&
             hash_shift_ < 64u && pos_bits_ < 64u && !query_records_.empty() &&
             query_tile_counts_.size() == query_records_.size();
         if (!shape_valid)
@@ -370,8 +375,6 @@ struct seed_lookup_result {
     std::vector<std::byte> host_bytes;
     std::uint64_t count = 0;
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
-    std::uint64_t candidate_count = 0u;
-    std::uint64_t native_verification_vulkan_allocation_bytes = 0u;
     seed_anchor_canonical_order_audit anchor_order_audit{};
     std::uint64_t canonical_tie_normalization_runs = 0u;
     std::uint64_t canonical_tie_normalization_anchors = 0u;
@@ -392,9 +395,6 @@ struct seed_lookup_result {
 /// lookup. The caller keeps the target index buffers alive on the device
 /// throughout the call.
 struct runtime_seed_lookup_inputs {
-    gpu_native_sequence_upload native_query{};
-    gpu_native_sequence_upload native_target{};
-    const vulkan_rank_lut* native_rank_policy = nullptr;
     std::span<const std::byte> host_minimizer_bytes{}; ///< Host minimizer bytes uploaded once when absent on device.
     const buffer* device_minimizer_words = nullptr;    ///< Existing device minimizers, when the sketch ran on Vulkan.
     const buffer* slots = nullptr;                     ///< Target hash buckets or an open-addressed slot table.

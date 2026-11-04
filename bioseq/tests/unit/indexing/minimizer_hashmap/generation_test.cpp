@@ -330,15 +330,25 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
             .id = unbound_reader.producer_backend_id,
             .revision = unbound_reader.producer_identity_revision,
         }));
-    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(minimizer_sketch_backend::scalar) ==
+    constexpr auto alphabet_code = bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>();
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(minimizer_sketch_backend::scalar, alphabet_code, 15u) ==
                    k_minimap_scheme_identity);
-    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(minimizer_sketch_backend::exact_simd) ==
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(minimizer_sketch_backend::exact_simd, alphabet_code, 15u) ==
                    k_minimap_scheme_identity);
     STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
-                       minimizer_sketch_backend::vulkan_segment) == k_bounded_nthash_u32_r7_sum_scheme_identity);
+                       minimizer_sketch_backend::vulkan_segment, alphabet_code, 15u) == k_minimap_scheme_identity);
     STATIC_REQUIRE(
-        minimizer_scheme_identity_for_backend(minimizer_sketch_backend::bounded_nthash_simd) ==
+        minimizer_scheme_identity_for_backend(minimizer_sketch_backend::bounded_nthash_simd, alphabet_code, 15u) ==
         k_bounded_nthash_u32_r7_sum_scheme_identity);
+    constexpr auto protein_code = bioseq::minimizers::minimizer_profile_alphabet_id<seq::aa20>();
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
+        minimizer_sketch_backend::scalar, protein_code, 12u) == k_minimap_scheme_identity);
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
+        minimizer_sketch_backend::scalar, protein_code, 13u) == k_bounded_nthash_u32_r7_sum_scheme_identity);
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
+        minimizer_sketch_backend::vulkan_segment, protein_code, 12u) == k_minimap_scheme_identity);
+    STATIC_REQUIRE(minimizer_scheme_identity_for_backend(
+        minimizer_sketch_backend::vulkan_segment, protein_code, 13u) == k_bounded_nthash_u32_r7_sum_scheme_identity);
     STATIC_REQUIRE(
         minimizer_producer_backend_identity_for_backend(minimizer_sketch_backend::scalar).id ==
         minimizer_producer_backend::scalar);
@@ -454,8 +464,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
             minimizer_algorithm::two_stack_nthash);
         return value;
     }();
-    constexpr auto canonical_vulkan = [canonical_bounded] {
-        auto value = canonical_bounded;
+    constexpr auto canonical_vulkan = [canonical_minimap] {
+        auto value = canonical_minimap;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
         value.algorithm_identity = test_generation_algorithm_identity(
             minimizer_algorithm::vulkan_minimap_integer);
@@ -468,8 +478,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
             minimizer_algorithm::two_stack_nthash);
         return value;
     }();
-    constexpr auto vulkan_reader = [bounded_reader] {
-        auto value = bounded_reader;
+    constexpr auto vulkan_reader = [minimap_reader] {
+        auto value = minimap_reader;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
         value.algorithm_identity = test_generation_algorithm_identity(
             minimizer_algorithm::vulkan_minimap_integer);
@@ -520,7 +530,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
          {minimizer_sketch_backend::exact_simd, minimizer_sketch_backend::vulkan_segment}) {
         const auto backend_identity = minimizer_producer_backend_identity_for_backend(backend);
         vector_replay_minimizer_producer physical_producer{
-            minimizers, minimizer_scheme_identity_for_backend(backend), backend_identity};
+            minimizers, minimizer_scheme_identity_for_backend(backend,
+                bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>(), 15u), backend_identity};
         collecting_minimizer_row_sink physical_sink;
         const auto requested_algorithm = minimizer_algorithm_for_explicit_sketch_backend(backend);
         REQUIRE(requested_algorithm.has_value());

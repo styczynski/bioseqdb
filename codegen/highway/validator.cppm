@@ -995,7 +995,6 @@ inline void validate_minimizer_registry(
     std::set<std::tuple<std::string, std::uint16_t, std::uint16_t,
                         std::uint16_t, std::uint8_t, std::uint8_t,
                         std::string>> profile_keys;
-    std::set<std::string, std::less<>> referenced_exports;
     for (const minimizer_runtime_profile_spec& profile :
          registry.runtime_profiles) {
         const auto record = records.find(profile.record_key);
@@ -1027,7 +1026,7 @@ inline void validate_minimizer_registry(
             || profile.minimum_position_log2
                 > profile.maximum_position_log2
             || profile.maximum_position_log2
-                != record->second->position_log2
+                > record->second->position_log2
             || !profile_keys.emplace(
                     profile.requested_algorithm, profile.alphabet_id,
                     profile.runtime_kmer_size, profile.runtime_window_size,
@@ -1050,7 +1049,6 @@ inline void validate_minimizer_registry(
                 throw std::runtime_error(
                     "Highway minimizer profile has incompatible export ownership");
             }
-            referenced_exports.insert(profile.export_symbol);
         } else if (!profile.highway_owner_key.empty()
                    || !profile.export_symbol.empty()) {
             throw std::runtime_error(
@@ -1072,13 +1070,17 @@ inline void validate_minimizer_registry(
             }
         }
         const bool bounded =
-            profile.requested_algorithm == "bounded_nthash_simd" || profile.requested_algorithm == "vulkan_minimap_integer";
+            profile.requested_algorithm == "bounded_nthash_simd"
+            || ((profile.requested_algorithm == "vulkan_minimap_integer"
+                    || profile.requested_algorithm == "scalar")
+                && profile.runtime_kmer_size == 0u);
         const bool two_stack =
             profile.requested_algorithm == "two_stack_nthash";
         if (bounded
             && (profile.runtime_kmer_size != 0u
                 || profile.runtime_window_size != 0u
-                || capabilities.minimum_runtime_kmer_size != 1u
+                || (profile.requested_algorithm == "bounded_nthash_simd"
+                    && capabilities.minimum_runtime_kmer_size != 1u)
                 || capabilities.maximum_runtime_kmer_size != 31u
                 || capabilities.minimum_runtime_window_size != 1u
                 || capabilities.maximum_runtime_window_size != 64u)) {
@@ -1091,10 +1093,10 @@ inline void validate_minimizer_registry(
         }
 
     }
-    if (referenced_exports != declared_exports) {
-        throw std::runtime_error(
-            "minimizer profile/export closure must account for every export");
-    }
+    // Existing typed output routes remain supported even if a narrower exact
+    // capacity wins every automatic profile for that alphabet/record. Registry
+    // equality and the owner/export checks above validate this explicit surface;
+    // every exporting profile was separately checked against its declared owner.
 
 }
 

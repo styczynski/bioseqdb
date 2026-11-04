@@ -49,12 +49,14 @@ run_sneaky_snake_vulkan_batch(
     std::span<const prefilter_job> jobs,
     bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks)
 {
+    constexpr auto rank_bits = static_cast<std::uint32_t>(
+        bioseq::storage::lazy_sequence_view<p_alphabet>::traits::k_logical_bits_per_symbol);
     auto& vulkan_runtime = bioseq::gpu::vulkan::runtime::instance();
     bioseq::gpu::vulkan::require_hardware_device(vulkan_runtime, "Vulkan sneaky_snake prefilter");
     return bioseq::gpu::vulkan::with_prefilter_packed_windows(query, target, jobs,
-        [&vulkan_runtime, validate_ranks](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
+        [&vulkan_runtime, validate_ranks, rank_bits](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
             return vulkan_runtime.run_sneaky_snake_rank_batch_roundtrip(
-                queries, targets, rank_lut, local_jobs, validate_ranks);
+                queries, targets, rank_lut, local_jobs, validate_ranks, rank_bits);
         });
 }
 

@@ -35,6 +35,7 @@ import bioseq.common.logging;
 #endif
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.common.heap_allocation;
 import bioseq.storage.size;
 import bioseq.sequences.kmers.minimizer_layout_geometry;
@@ -869,8 +870,10 @@ class minimizer_physical_batch_owner {
         throw std::invalid_argument("minimizer physical record binding does not fit its positions");
     }
     using algorithm_type = ::bioseq::simd::minimizer_algorithm;
-    const auto family = algorithm == algorithm_type::bounded_nthash_simd ||
-            algorithm == algorithm_type::vulkan_minimap_integer
+    const bool uses_bounded_hash = algorithm == algorithm_type::bounded_nthash_simd ||
+        ((algorithm == algorithm_type::vulkan_minimap_integer || algorithm == algorithm_type::scalar)
+            && !exact_minimizer_shape_fits_for_alphabet_code(alphabet_id, runtime_kmer_size));
+    const auto family = uses_bounded_hash
         ? minimizer_physical_layout_family::fixed_u32_hash
         : profile->effective_algorithm == algorithm_type::scalar
             ? minimizer_physical_layout_family::minimap2_scalar_reference_exact_k

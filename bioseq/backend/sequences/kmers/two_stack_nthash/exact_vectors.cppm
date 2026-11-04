@@ -48,11 +48,11 @@ inline constexpr bool exact_k15_w10_b8_representation_v =
         } else {
             constexpr std::size_t exact_hash_bits =
                 15u * seqan3::detail::ceil_log2(seqan3::alphabet_size<seq::dna4>);
-            // This leaf's u32 scratch maximum lies strictly outside its 30-bit
-            // exact hash domain. No physical-record hash value is reserved.
+            // The existing candidate mask excludes the physical maximum, so
+            // equal-width exact domains can share this leaf's sentinel storage.
             return std::same_as<typename p_minimizer_type::storage_type, std::uint64_t>
                 && p_minimizer_type::k_position_shift == 1u
-                && p_minimizer_type::layout_type::k_hash_bits > exact_hash_bits
+                && p_minimizer_type::layout_type::k_hash_bits >= exact_hash_bits
                 && p_minimizer_type::layout_type::k_hash_bits <=
                     std::numeric_limits<std::uint32_t>::digits;
         }

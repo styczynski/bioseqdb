@@ -78,25 +78,60 @@ struct canonical_seed_batch {
 
 // Look up query minimizers in the target index to collect seed hits.
 
+/** Check a candidate's orientation and bounded k-span without reading source symbols. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] inline std::expected<void, alignment_contract_error>
+validate_seed_anchor_geometry(const anchor& candidate,
+                              const sequence_size_t query_len,
+                              const sequence_size_t target_len,
+                              const std::size_t seed_span) {
+    if (candidate.is_reverse > 1u)
+        return std::unexpected(alignment_contract_error::orientation);
+    if constexpr (!bioseq::storage::lazy_sequence_detail::complementable_sequence_alphabet<Alphabet>) {
+        if (candidate.is_reverse != 0u)
+            return std::unexpected(alignment_contract_error::orientation);
+    }
+    if (seed_span == 0u || seed_span > std::numeric_limits<decltype(anchor::query_span)>::max()
+        || candidate.query_span != seed_span
+        || candidate.query_position >= query_len || candidate.ref_position >= target_len
+        || seed_span - 1u > candidate.query_position || seed_span - 1u > candidate.ref_position)
+        return std::unexpected(alignment_contract_error::coordinates);
+    return {};
+}
+
 /**
- * Append anchors for one query minimizer's target hits. Decode each yarget
+ * Append hash candidates for one query minimizer's target hits. Decode each target
  * position and strand, then choose the matching query-strand coordinate.
  * Read 32-bit postings directly and widen each value only while building
  * its anchor, so, no temporary 64-bit position array is needed.
+ * The caller has checked that the nonzero span fits anchor::query_span and
+ * that both query end positions lie within the query and cover that span.
+ * query_strand_bit is the already decoded one-bit query orientation.
  */
-template <std::unsigned_integral p_stored_position, class Verifier>
+template <sequence_alphabet Alphabet, std::unsigned_integral p_stored_position>
 [[nodiscard]] inline std::expected<void, alignment_contract_error>
 append_seed_hits_from_position_span(std::span<const p_stored_position> target_hits,
                                     std::uint32_t query_strand_bit,
                                     sequence_size_t forward_query_pos,
                                     sequence_size_t reverse_query_pos,
                                     std::uint32_t query_span_value,
-                                    ::bioseq::chaining::arena_slab<anchor>& anchors_out,
-                                    Verifier verify) {
+                                    sequence_size_t target_len,
+                                    ::bioseq::chaining::arena_slab<anchor>& anchors_out) {
+    if constexpr (!bioseq::storage::lazy_sequence_detail::complementable_sequence_alphabet<Alphabet>) {
+        if (!target_hits.empty() && query_strand_bit != 0u)
+            return std::unexpected(alignment_contract_error::orientation);
+    }
+    const sequence_size_t first_seed_end = query_span_value - 1u;
     for (const p_stored_position stored_target_hit : target_hits) {
         const std::uint64_t target_hit = static_cast<std::uint64_t>(stored_target_hit);
         const sequence_size_t ref_position = static_cast<sequence_size_t>(target_hit >> 1u);
         const std::uint32_t target_strand_bit = static_cast<std::uint32_t>(target_hit & 1u);
+        if constexpr (!bioseq::storage::lazy_sequence_detail::complementable_sequence_alphabet<Alphabet>) {
+            if (target_strand_bit != 0u)
+                return std::unexpected(alignment_contract_error::orientation);
+        }
+        if (ref_position < first_seed_end || ref_position >= target_len)
+            return std::unexpected(alignment_contract_error::coordinates);
         const std::uint32_t is_reverse_bit = target_strand_bit ^ query_strand_bit;
         const sequence_size_t selected_query_pos =
             is_reverse_bit ? reverse_query_pos : forward_query_pos;
@@ -108,9 +143,7 @@ append_seed_hits_from_position_span(std::span<const p_stored_position> target_hi
         anchor.query_span = static_cast<std::uint8_t>(query_span_value);
         anchor.flags = 0;
         anchor.segment_id = 0;
-        const auto accepted = verify(anchor);
-        if (!accepted) return std::unexpected(accepted.error());
-        if (*accepted) anchors_out.push_back(anchor);
+        anchors_out.push_back(anchor);
     }
     return {};
 }

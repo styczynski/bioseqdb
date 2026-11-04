@@ -97,6 +97,13 @@ build_gpu_index_from_upload_on_device(
         }
     };
 
+    if (!vulkan_minimizer_kmer_size_supported(
+            rank_lut.exact_rank_bits, kmer_size, rank_lut.seed_policy_id,
+            minimizer_wire_traits<p_minimizer_type>::k_hash_bits)
+        || !vulkan_minimizer_window_size_supported(window_size, rank_lut.seed_policy_id)) {
+        decline(vulkan_sketch_decline_reason::minimizer_layout_unsupported);
+        return std::nullopt;
+    }
     if (upload.bp_size == 0u) {
         decline(vulkan_sketch_decline_reason::empty_sequence);
         return std::nullopt;
@@ -127,9 +134,9 @@ build_gpu_index_from_upload_on_device(
         target_index_build_mutex};
 
     const std::uint64_t max_minimizers = std::min(
-        estimate_vulkan_minimizer_capacity(upload.bp_size, window_size),
+        estimate_vulkan_minimizer_capacity(upload.bp_size, window_size, rank_lut.seed_policy_id),
         target_minimizer_count_upper_bound(
-            upload.bp_size, static_cast<std::uint32_t>(kmer_size)));
+            upload.bp_size, static_cast<std::uint32_t>(kmer_size), rank_lut.seed_policy_id));
     if (decline_out != nullptr) {
         decline_out->max_minimizers = max_minimizers;
     }
@@ -202,7 +209,7 @@ build_gpu_index_from_upload_on_device(
     // Prepare the target-index pipelines before reserving dispatch memory.
     // Their cached metadata lives for the process lifetime and needs its own
     // reservation, which is harder to obtain after large GPU buffers are mapped.
-    runtime.prepare_target_index_pipelines(sketch_params);
+    runtime.prepare_target_index_pipelines(rank_lut, sketch_params);
 
     auto& admission = memory_admission_controller::instance();
     bioseq::parallelism::memory_admission_failure admission_failure{};

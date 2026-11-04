@@ -117,7 +117,7 @@ validate_alignment_numeric_contract(
     return {};
 }
 
-/** Immutable substitution scores with synchronized byte lookup and wide gather tables. */
+/** Immutable substitution scores with synchronized forward and transposed byte tables. */
 template <sequence_alphabet p_alphabet, std::size_t p_alphabet_dimension>
 struct scoring_matrix_storage {
     using alphabet_type = p_alphabet;
@@ -135,7 +135,6 @@ struct scoring_matrix_storage {
 private:
     std::array<std::int8_t, k_entry_count> entries_{};
     alignas(64) std::array<std::int8_t, k_simd_rows * k_simd_columns> simd_scores_{};
-    alignas(64) std::array<std::int32_t, k_simd_rows * k_simd_rows> gather_scores_{};
     alignas(64) std::array<std::int8_t, k_simd_rows * k_simd_columns> transposed_scores_{};
     substitution_summary summary_{};
     substitution_kind kind_ = substitution_kind::dense;
@@ -164,8 +163,6 @@ public:
     [[nodiscard]] const std::int8_t* simd_row_pointer(std::size_t row, bool transposed = false) const noexcept {
         return (transposed ? transposed_scores_.data() : simd_scores_.data()) + row * k_simd_columns;
     }
-    /** Access the target-major table, including the inaccessible padding row/column. */
-    [[nodiscard]] const std::int32_t* gather_scores() const noexcept { return gather_scores_.data(); }
     /** Factories are the only writers; successful preparation proves both layouts. */
     [[nodiscard, gnu::always_inline]] bool is_block_layout_valid() const noexcept { return prepared_; }
     /** Hash alphabet rank characters and scores for prepared execution-plan identity. */
@@ -195,7 +192,6 @@ public:
         matrix.summary_.uniform_unknown = true;
         matrix.simd_scores_.fill(std::numeric_limits<std::int8_t>::min());
         matrix.transposed_scores_.fill(std::numeric_limits<std::int8_t>::min());
-        matrix.gather_scores_.fill(std::numeric_limits<std::int8_t>::min());
         constexpr std::size_t biological_ranks = p_alphabet_dimension - 1;
         for (std::size_t row = 0; row < p_alphabet_dimension; ++row) {
             for (std::size_t column = 0; column < p_alphabet_dimension; ++column) {
@@ -203,7 +199,6 @@ public:
                 if (value < -127 || value > 127) return std::unexpected(alignment_contract_error::score_range);
                 matrix.entries_[row * p_alphabet_dimension + column] = static_cast<std::int8_t>(value);
                 matrix.simd_scores_[row * k_simd_columns + column] = static_cast<std::int8_t>(value);
-                matrix.gather_scores_[row * k_simd_rows + column] = value;
                 matrix.transposed_scores_[column * k_simd_columns + row] = static_cast<std::int8_t>(value);
                 matrix.summary_.minimum = std::min(matrix.summary_.minimum, value);
                 matrix.summary_.maximum = std::max(matrix.summary_.maximum, value);
@@ -238,31 +233,6 @@ public:
 };
 
 /**
- * Fill only the selected DP interval through checked borrowed rank windows.
- * Biological orientation and DP traversal reversal are independent compile-time choices.
- */
-template<bool QueryReversed, bool WriteReversed, class Sequence>
-[[nodiscard, gnu::always_inline]] inline std::expected<void, alignment_contract_error> copy_checked_alignment_ranks(
-    const Sequence& sequence, std::span<std::uint8_t> destination,
-    std::size_t begin, std::size_t end) {
-    if (end < begin || end > sequence.bp_size() || destination.size() != end - begin)
-        return std::unexpected(alignment_contract_error::coordinates);
-    const auto source = sequence.template borrow_rank_source<QueryReversed>();
-    constexpr std::size_t chunk_capacity = sequence_rank_io_chunk_capacity;
-    std::array<std::uint8_t, chunk_capacity> scratch{};
-    for (std::size_t consumed = 0; consumed < destination.size();) {
-        const auto count = std::min(chunk_capacity, destination.size() - consumed);
-        const auto ranks = source.read_checked(begin + consumed, count, scratch);
-        if (!ranks) return std::unexpected(alignment_contract_error::source_read_failed);
-        if constexpr (WriteReversed)
-            std::reverse_copy(ranks->begin(), ranks->end(), destination.end() - consumed - count);
-        else std::copy(ranks->begin(), ranks->end(), destination.begin() + consumed);
-        consumed += count;
-    }
-    return {};
-}
-
-/**
  * @brief Selects score storage from an alphabet or compact-sequence source.
  *
  * @tparam p_source Alphabet or compatible compact-sequence source.
@@ -289,11 +259,11 @@ struct implicit_seed_alignment_summary {
 };
 
 /**
- * Replay a verified seed using bounded native-rank reads and the selected SIMD
+ * Replay a selected hash-candidate seed using bounded native-rank reads and the selected SIMD
  * equality kernel. Intervals use the selected query orientation and forward
  * target coordinates. The caller's counter validates ranks and reports equality;
- * a mismatch is a violated seed-verification contract, never an implicit match.
- * Dense matrices sum the actual diagonal; unequal tails use the cheaper affine
+ * mismatches remain ordinary substitutions within the implicit M run.
+ * Dense matrices score actual target-row/query-column pairs; unequal tails use the cheaper affine
  * gap pair. No whole-sequence rank copy or source-owned pointer survives a read.
  */
 template<bool p_query_reversed, class Query, class Target,
@@ -335,6 +305,7 @@ replay_implicit_seed_alignment(
     std::array<std::uint8_t, chunk_capacity> target_chunk;
     const std::size_t common_length = std::min(query_length, target_length);
     std::int64_t score = 0;
+    std::uint64_t edit_distance = 0;
     for (std::size_t consumed = 0; consumed < common_length;) {
         const std::size_t count = std::min(chunk_capacity, common_length - consumed);
         const auto query_ranks = query_source.read_checked(
@@ -349,14 +320,17 @@ replay_implicit_seed_alignment(
             target_start + consumed, count, target_chunk);
         if (!target_ranks) return std::unexpected(alignment_contract_error::source_read_failed);
         const auto compared = counter(query_chunk.data(), target_ranks->data(), count);
-        if (!compared.valid_ranks || compared.equal_symbols != count) {
+        if (!compared.valid_ranks || compared.equal_symbols > count) {
             return std::unexpected(alignment_contract_error::trace_accounting);
         }
-        if (matrix.summary().uniform_diagonal) {
-            score += static_cast<std::int64_t>(count) * matrix.summary().equal_score;
+        const auto mismatches = count - compared.equal_symbols;
+        edit_distance += mismatches;
+        if (matrix.summary().uniform_diagonal && matrix.summary().uniform_off_diagonal) {
+            score += static_cast<std::int64_t>(compared.equal_symbols) * matrix.summary().equal_score
+                + static_cast<std::int64_t>(mismatches) * matrix.summary().unequal_score;
         } else {
-            // Verified seed spans normally contain only runtime k ranks; this
-            // cold dense-table replay uses the same prepared matrix authority.
+            // The selected candidate can contain substitutions, including
+            // asymmetric target/query scores from the prepared matrix.
             for (std::size_t index = 0; index < count; ++index) {
                 score += matrix.at((*target_ranks)[index], query_chunk[index]);
             }
@@ -376,7 +350,7 @@ replay_implicit_seed_alignment(
         return std::unexpected(alignment_contract_error::score_accumulation);
     }
     return implicit_seed_alignment_summary{
-        .score = static_cast<std::int32_t>(score), .edit_distance = tail};
+        .score = static_cast<std::int32_t>(score), .edit_distance = edit_distance + tail};
 }
 
 }  // namespace bioseq::simd

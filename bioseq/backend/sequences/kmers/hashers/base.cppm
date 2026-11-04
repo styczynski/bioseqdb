@@ -13,6 +13,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <tuple>
 #include <type_traits>
@@ -44,6 +45,26 @@ inline constexpr std::size_t minimizer_exact_rank_bits =
         return std::nullopt;
     }
     return rank_widths[alphabet_code];
+}
+
+/** Check complete exact-key capacity before multiplying rank width and k. */
+[[nodiscard]] constexpr bool exact_minimizer_shape_fits(
+    const std::size_t rank_bits,
+    const std::size_t kmer_size,
+    const std::size_t output_hash_bits = std::numeric_limits<std::uint64_t>::digits) noexcept {
+    constexpr std::size_t rolling_bits = std::numeric_limits<std::uint64_t>::digits;
+    return rank_bits != 0u && rank_bits <= rolling_bits && kmer_size != 0u
+        && kmer_size <= rolling_bits / rank_bits
+        && kmer_size <= output_hash_bits / rank_bits;
+}
+
+/** Resolve the alphabet's exact-rank width and check its complete key capacity. */
+[[nodiscard]] constexpr bool exact_minimizer_shape_fits_for_alphabet_code(
+    const std::size_t alphabet_code,
+    const std::size_t kmer_size,
+    const std::size_t output_hash_bits = std::numeric_limits<std::uint64_t>::digits) noexcept {
+    const auto rank_bits = exact_rank_bits_for_alphabet_code(alphabet_code);
+    return rank_bits && exact_minimizer_shape_fits(*rank_bits, kmer_size, output_hash_bits);
 }
 
 } // namespace bioseq::minimizers

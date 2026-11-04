@@ -187,8 +187,8 @@ public:
     }
 
     /** Fill the first state arrays with one byte value. */
-    void fill_leading_arrays(int array_count, uint8_t value) noexcept {
-        std::memset(diff_up_base, value, static_cast<size_t>(array_count) * array_byte_count());
+    void fill_leading_arrays(std::size_t array_count, uint8_t value) noexcept {
+        std::memset(diff_up_base, value, array_count * array_byte_count());
     }
 
     /** Fill one state array with one byte value. */
@@ -196,7 +196,7 @@ public:
         std::memset(base, value, array_byte_count());
     }
 
-    /** Allocate and initialize all state and rank-tail lanes from the admitted plan. */
+    /** Allocate state from the admitted plan; the core initializes each row and rank halo once. */
     explicit ksw_dp_state(const ksw2_storage_plan& plan)
         : target_vec_count_(static_cast<int>(plan.target_vector_count))
         , query_vec_count_(static_cast<int>(plan.query_vector_count))
@@ -206,9 +206,6 @@ public:
         const size_t state_array_byte_count = plan.state_array_bytes;
         storage_ = context::current().alloc_align_array<ksw2_partial_score_type, 64>(
             plan.state_bytes);
-        // Initialize rank tails and every state/halo lane before any vector load.
-        // The dual caller overwrites its active gap arrays immediately afterwards.
-        std::memset(storage_.data(), 0, storage_.size_bytes());
         ksw2_partial_score_type* storage_base = storage_.data();
         diff_up_base      = storage_base;
         diff_left_base    = diff_up_base      + state_array_byte_count;

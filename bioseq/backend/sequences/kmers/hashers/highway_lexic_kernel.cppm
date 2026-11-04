@@ -24,6 +24,13 @@ namespace hn = hwy::HWY_NAMESPACE;
 template <sequence_alphabet p_alphabet>
 struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
   public:
+    /** Preserve lexicographic codes when transforming a SIMD candidate to its output hash. */
+    template<class D>
+    [[nodiscard]] static HWY_INLINE hn::Vec<D> scramble_simd(
+        D, hn::Vec<D> key, hn::Vec<D>) {
+        return key;
+    }
+
     /** @brief Keeps a forward  and reverse-complement k-mer code in each lane. */
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
@@ -119,6 +126,50 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
                              (kmer_length - 1u)) {
             if constexpr (traits::canonical_reverse_complement) {
                 reverse_complement_state_[0] = hn::Zero(simd_tag);
+            }
+        }
+
+        /**
+         * @brief Appends one rank while constructing a fresh k-mer in each lane.
+         * Places complemented ranks directly at their reverse-code positions.
+         * @param simd_tag Lane shape of the stored states.
+         * @param incoming In-range alphabet ranks, one per lane.
+         * @param position Zero-based rank index, smaller than kmer_length.
+         * @pre States are zero from construction or reset of every participating lane.
+         * Append exactly kmer_length ranks in ascending index order, then call
+         * finish_initial before reading strand masks or making rolling next calls.
+         * The complete rank bits must fit in the lane; no rolling eviction is needed.
+         */
+        HWY_INLINE void append_initial(
+            const typename traits::input_simd_tag_type& simd_tag,
+            typename traits::input_vector_type incoming,
+            std::size_t position) {
+            forward_state_ = hn::Or(
+                hn::ShiftLeft<traits::bits_per_char>(forward_state_), incoming);
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] = hn::Or(
+                    reverse_complement_state_[0],
+                    hn::ShiftLeftSame(apply_complement(simd_tag, incoming),
+                        static_cast<int>(position * traits::bits_per_char)));
+            }
+        }
+
+        /**
+         * @brief Completes a fresh k-mer and returns its canonical code per lane.
+         * Applies the exact-domain masks once after all initial ranks are appended.
+         * @pre append_initial supplied exactly kmer_length ranks since construction/reset.
+         * Call exactly once per fresh construction before reading masks or rolling.
+         * @return Smaller strand code, or the forward code for a forward-only alphabet.
+         * The stored states are now ready for ordinary rolling next calls and strand masks.
+         */
+        [[nodiscard]] HWY_INLINE typename traits::hasher_return_type finish_initial() {
+            forward_state_ = hn::And(forward_state_, mask_);
+            if constexpr (traits::canonical_reverse_complement) {
+                reverse_complement_state_[0] = hn::And(
+                    reverse_complement_state_[0], mask_);
+                return hn::Min(forward_state_, reverse_complement_state_[0]);
+            } else {
+                return forward_state_;
             }
         }
 

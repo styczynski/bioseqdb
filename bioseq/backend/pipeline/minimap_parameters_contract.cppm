@@ -1102,7 +1102,7 @@ struct minimap2_parameters {
         ::bioseq::simd::base_alignment_algorithm::block_aligner;
     /** Minimizer-extraction implementation selected for the request. */
     ::bioseq::simd::minimizer_algorithm minimizer_algorithm =
-        ::bioseq::simd::minimizer_algorithm::bounded_nthash_simd;
+        ::bioseq::simd::minimizer_algorithm::scalar;
 
     /** Collect optional execution timings and counters. */
     bool enable_profiling = false;

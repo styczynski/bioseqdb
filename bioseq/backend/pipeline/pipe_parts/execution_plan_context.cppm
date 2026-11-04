@@ -57,31 +57,6 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 
-// Genuine cycle: the raw factory and consuming handoff take this carrier,
-// while its private origin is accessible only to those existing functions.
-export namespace bioseq::simd::pipe {
-struct transient_target_index_release_authorization;
-struct post_seed_owned_lifetime;
-template<sequence_alphabet Alphabet> struct seed_hit_stage;
-}
-export namespace bioseq::simd {
-template<sequence_alphabet Alphabet> struct seed_anchor_verifier;
-}
-export namespace bioseq::simd::pipe_entry_detail {
-template<class Dispatch, class Minimizer, sequence_alphabet Alphabet>
-[[nodiscard]] auto minimap_port_with_repr_impl(
-    bioseq::storage::lazy_sequence_view<Alphabet>,
-    bioseq::storage::lazy_sequence_view<Alphabet>,
-    pipe::statement_execution_plan_owner) -> match_result_collection;
-template<class Dispatch, class Minimizer, sequence_alphabet Alphabet>
-[[nodiscard]] auto minimap2_port_impl(
-    bioseq::storage::lazy_sequence_view<Alphabet>,
-    bioseq::storage::lazy_sequence_view<Alphabet>,
-    pipe::minimizer_batch_view<Minimizer>, std::vector<Minimizer>,
-    pipe::statement_execution_plan_owner,
-    pipe::transient_target_index_release_authorization) -> match_result_collection;
-}
-
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 namespace bioseq::simd::pipe::detail {
 
@@ -689,8 +664,8 @@ export {
                     bioseq::indexing::gpu_resident_accounting_authority::retained_exact_permit &&
                 materialization.retained_permit_bytes == materialization.actual_allocation_bytes &&
                 materialization.reflected_footprint_bytes == 0u;
-            // Native verification may reject candidates, including every candidate.
-            // A dispatched lookup still owns and releases its permit after shrinking it to zero.
+            // A dispatched lookup can emit no anchors and still owns its reservation.
+            // Release that permit even when the output slab shrinks to zero.
             const bool seed_dispatched = seed_dispatches != 0u;
             const bool slab_exact =
                 slab_capacity_before == 0u && slab_actual_bytes <= slab_requested_bytes &&
@@ -895,72 +870,6 @@ export {
                     static_cast<bool>(*permit) &&
                         (!require_exact_permit_bytes || permit->bytes() == expected_permit_bytes));
         }
-
-      private:
-        // Origin is confined to the owned synchronous raw-input call chain.
-        // Public release fields and public default construction never mint it.
-        bioseq::storage::borrowed_rank_window_source exact_query_source_{};
-        bioseq::storage::borrowed_rank_window_source exact_target_source_{};
-        std::shared_ptr<const void> exact_query_owner_{};
-        const void* exact_query_data_ = nullptr;
-        std::size_t exact_query_count_ = 0u;
-        const void* pending_target_data_ = nullptr;
-        std::size_t pending_target_count_ = 0u;
-        std::size_t exact_seed_span_ = 0u;
-        bioseq::minimizers::minimizer_physical_record_id exact_record_id_ =
-            bioseq::minimizers::minimizer_physical_record_id::invalid;
-        const bioseq::indexing::minimizer_hashmap_fragment_index* exact_index_ = nullptr;
-
-        /** Compare complete live resident/source bindings; identity alone grants nothing. */
-        [[nodiscard]] static bool same_exact_source(
-            const bioseq::storage::borrowed_rank_window_source& expected,
-            const bioseq::storage::borrowed_rank_window_source& actual) noexcept {
-            if (!expected.worker_shareable || !actual.worker_shareable
-                || expected.context != actual.context || expected.read_at != actual.read_at
-                || expected.symbol_count != actual.symbol_count
-                || expected.alphabet_code != actual.alphabet_code
-                || expected.orientation != actual.orientation
-                || !expected.resident || !actual.resident) return false;
-            const auto& first = *expected.resident;
-            const auto& second = *actual.resident;
-            return first.units == second.units && first.unit_count == second.unit_count
-                && first.logical_length == second.logical_length
-                && first.storage_unit_width == second.storage_unit_width
-                && first.bits_per_symbol == second.bits_per_symbol
-                && first.leading_symbol_offset == second.leading_symbol_offset
-                && first.trailing_padding == second.trailing_padding
-                && first.bit_order == second.bit_order;
-        }
-
-        /** Drop same-call admission before releasing lookup storage. */
-        void clear_exact_origin() noexcept {
-            exact_query_source_ = {};
-            exact_target_source_ = {};
-            exact_query_owner_.reset();
-            exact_query_data_ = nullptr;
-            exact_query_count_ = 0u;
-            pending_target_data_ = nullptr;
-            pending_target_count_ = 0u;
-            exact_seed_span_ = 0u;
-            exact_record_id_ = bioseq::minimizers::minimizer_physical_record_id::invalid;
-            exact_index_ = nullptr;
-        }
-
-        template<class Dispatch, class Minimizer, sequence_alphabet Alphabet>
-        friend auto ::bioseq::simd::pipe_entry_detail::minimap_port_with_repr_impl(
-            bioseq::storage::lazy_sequence_view<Alphabet>,
-            bioseq::storage::lazy_sequence_view<Alphabet>,
-            statement_execution_plan_owner) -> match_result_collection;
-        template<class Dispatch, class Minimizer, sequence_alphabet Alphabet>
-        friend auto ::bioseq::simd::pipe_entry_detail::minimap2_port_impl(
-            bioseq::storage::lazy_sequence_view<Alphabet>,
-            bioseq::storage::lazy_sequence_view<Alphabet>,
-            minimizer_batch_view<Minimizer>, std::vector<Minimizer>,
-            statement_execution_plan_owner,
-            transient_target_index_release_authorization) -> match_result_collection;
-        template<sequence_alphabet Alphabet>
-        friend struct ::bioseq::simd::seed_anchor_verifier;
-        friend struct post_seed_owned_lifetime;
     };
 
     /// Release owned lookup storage after the last seed user finishes. Each user
@@ -1042,7 +951,6 @@ export {
             if (previous != 1u)
                 return {};
 
-            owned_cpu_index.clear_exact_origin();
             release_receipt stats{};
             if (operation_gpu_resident) {
                 // Shared persistent-cache ownership intentionally survives this operation.

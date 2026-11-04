@@ -28,6 +28,15 @@ struct gpu_sequence_view {
     uint alphabet_code;
     uint seed_policy_id;
 };
+// A positive constant is admitted only when every uploaded descriptor has that width.
+uint native_packed_rank_bits(gpu_sequence_view sequence) {
+    return compile_time_native_rank_bits == 0u
+        ? sequence.bits_per_char : compile_time_native_rank_bits;
+}
+uint native_packed_rank_mask(gpu_sequence_view sequence) {
+    return compile_time_native_rank_bits == 0u
+        ? sequence.char_mask : (1u << compile_time_native_rank_bits) - 1u;
+}
 uint packed_sequence_byte(uint64_t byte_index, bool query);
 // Native storage cursor: divide once, then advance through slots and unit padding.
 // Quotient/remainder precede the leading offset so UINT32_MAX positions cannot
@@ -65,13 +74,13 @@ native_packed_cursor native_packed_begin(gpu_sequence_view sequence, uint64_t po
 }
 uint native_packed_rank(gpu_sequence_view sequence, uint64_t position, bool query) {
     native_packed_cursor cursor = native_packed_begin(sequence, position);
-    uint bit_offset = cursor.slot * sequence.bits_per_char;
+    uint bit_offset = cursor.slot * native_packed_rank_bits(sequence);
     uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset / 8u);
     uint within_byte = bit_offset & 7u;
     uint rank = packed_sequence_byte(byte_index, query) >> within_byte;
-    if (within_byte + sequence.bits_per_char > 8u)
+    if (within_byte + native_packed_rank_bits(sequence) > 8u)
         rank |= packed_sequence_byte(byte_index + uint64_t(1), query) << (8u - within_byte);
-    return rank & sequence.char_mask;
+    return rank & native_packed_rank_mask(sequence);
 }
 )GLSL";
 
@@ -90,7 +99,7 @@ uint cached_native_packed_word(uint64_t word_index, inout native_packed_word_cac
     }
     return cache.word;
 }
-// Read one to four active rank fields wholly inside one native storage unit.
+// Read active rank fields occupying at most 32 bits inside one native unit.
 // The caller bounds first_slot/count; inactive slots and spare unit bits are masked.
 uint native_packed_chunk_bits(
     gpu_sequence_view sequence,
@@ -99,8 +108,8 @@ uint native_packed_chunk_bits(
     uint count,
     inout native_packed_word_cache cache)
 {
-    uint bit_offset = first_slot * sequence.bits_per_char;
-    uint bit_count = count * sequence.bits_per_char;
+    uint bit_offset = first_slot * native_packed_rank_bits(sequence);
+    uint bit_count = count * native_packed_rank_bits(sequence);
     uint64_t byte_index = cursor.unit_byte_index + uint64_t(bit_offset >> 3u);
     uint64_t word_index = byte_index >> 2u;
     uint word_shift = (uint(byte_index) & 3u) * 8u + (bit_offset & 7u);
@@ -175,10 +184,9 @@ bool prefilter_job_is_in_bounds(prefilter_job job) {
         return false;
     gpu_sequence_view query = query_records[job.query_record_index];
     gpu_sequence_view target = target_records[job.target_record_index];
-    return uint64_t(job.query_start) <= query.bp_count
-        && uint64_t(job.query_length) <= query.bp_count - uint64_t(job.query_start)
-        && uint64_t(job.target_start) <= target.bp_count
-        && uint64_t(job.target_length) <= target.bp_count - uint64_t(job.target_start)
+    // Both operands are uint32 fields, so each widened sum fits uint64.
+    return uint64_t(job.query_start) + uint64_t(job.query_length) <= query.bp_count
+        && uint64_t(job.target_start) + uint64_t(job.target_length) <= target.bp_count
         && (job.orientation == 0u || (job.orientation == 3u && canonical_reverse_complement != 0u));
 }
 // Normalize only a bounded register chunk when rank widths or orientation differ.
@@ -191,7 +199,7 @@ uint native_packed_chunk_rank_bytes(
     uint ranks = 0u;
     for (uint lane = 0u; lane < count; ++lane) {
         uint source_lane = reverse_complement ? count - 1u - lane : lane;
-        uint rank = (packed >> (source_lane * sequence.bits_per_char)) & sequence.char_mask;
+        uint rank = (packed >> (source_lane * native_packed_rank_bits(sequence))) & native_packed_rank_mask(sequence);
         if (reverse_complement) rank = rank_to_rc_code[rank];
         ranks |= rank << (lane * 8u);
     }
@@ -202,7 +210,7 @@ uint native_packed_chunk_rank_bytes(
 // Caller has already proved [position, position + 4) is inside this descriptor.
 uint native_packed_rank_quad(gpu_sequence_view sequence, uint64_t position) {
     native_packed_cursor cursor = native_packed_begin(sequence, position);
-    uint initial_bit = cursor.slot * sequence.bits_per_char;
+    uint initial_bit = cursor.slot * native_packed_rank_bits(sequence);
     uint64_t word_index =
         (cursor.unit_byte_index + uint64_t(initial_bit >> 3u)) >> 2u;
     native_packed_word_cache cache = native_packed_word_cache(word_index, packed_words[uint(word_index)]);

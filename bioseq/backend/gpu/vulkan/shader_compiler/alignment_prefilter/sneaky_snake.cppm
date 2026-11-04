@@ -43,7 +43,13 @@ uint matching_run(
     gpu_sequence_view target_sequence = target_records[job.target_record_index];
     bool reverse_query = job.orientation == 3u;
     bool compare_packed_bits = !reverse_query
-        && query_sequence.bits_per_char == target_sequence.bits_per_char;
+        && native_packed_rank_bits(query_sequence) == native_packed_rank_bits(target_sequence);
+    // Native units are at most 64 bits; halve their slot count only when
+    // a complete unit exceeds the existing 32-bit chunk reader's result.
+    // This avoids rank-width division on every shifted matching probe.
+    uint packed_chunk_limit = query_sequence.letters_per_unit
+        >> uint(query_sequence.unit_bits > 32u);
+    uint chunk_limit = compare_packed_bits ? packed_chunk_limit : 4u;
     uint64_t query_start = uint64_t(job.query_start) + uint64_t(query_cursor);
     if (reverse_query) query_start = query_sequence.bp_count - uint64_t(1) - query_start;
     native_packed_cursor query = native_packed_begin(query_sequence, query_start);
@@ -55,15 +61,15 @@ uint matching_run(
     while (run < run_limit) {
         uint query_slots = reverse_query ? query.slot + 1u
             : query_sequence.letters_per_unit - query.slot;
-        uint count = min(min(run_limit - run, 4u),
+        uint count = min(min(run_limit - run, chunk_limit),
             min(query_slots, target_sequence.letters_per_unit - target.slot));
         uint query_first_slot = reverse_query ? query.slot + 1u - count : query.slot;
         uint query_bits = native_packed_chunk_bits(
             query_sequence, query, query_first_slot, count, query_cache);
         uint target_bits = native_packed_chunk_bits(
             target_sequence, target, target.slot, count, target_cache);
-        uint rank_bits = query_sequence.bits_per_char;
-        uint rank_mask = query_sequence.char_mask;
+        uint rank_bits = native_packed_rank_bits(query_sequence);
+        uint rank_mask = native_packed_rank_mask(query_sequence);
         if (!compare_packed_bits) {
             query_bits = native_packed_chunk_rank_bytes(query_bits, query_sequence, count, reverse_query);
             target_bits = native_packed_chunk_rank_bytes(target_bits, target_sequence, count, false);
@@ -72,12 +78,16 @@ uint matching_run(
         }
         uint different = query_bits ^ target_bits;
         if (different != 0u) {
-            // The first unequal active rank is within this at-most-four-rank chunk.
-            // Avoid a dynamic divide by the rank width on every shifted probe.
-            while ((different & rank_mask) == 0u) {
+            // Preserve the direct return when the first active rank differs.
+            if ((different & rank_mask) != 0u) return run;
+            // A binary rank width converts the first set bit to its rank index.
+            if ((rank_bits & (rank_bits - 1u)) == 0u)
+                return run + (uint(findLSB(different)) >> uint(findLSB(rank_bits)));
+            // The first rank is already known equal; advance before checking again.
+            do {
                 different >>= rank_bits;
                 ++run;
-            }
+            } while ((different & rank_mask) == 0u);
             return run;
         }
         run += count;
@@ -207,7 +217,6 @@ void main() {
             sh_active[team] = 0u;
             if (team_has_job) {
                 prefilter_job job = jobs[job_index];
-                sh_job[team] = job;
                 if (!prefilter_job_is_in_bounds(job)
                     || job.max_edits > k_maximum_supported_edits
                     || compile_time_maximum_span == 0) {
@@ -224,6 +233,7 @@ void main() {
                 } else if (job.query_length == 0u) {
                     write_result(job_index, 0u, k_status_ok, true);
                 } else {
+                    sh_job[team] = job;
                     sh_position[team] = 0u;
                     sh_submaze_end[team] = min(
                         uint(compile_time_maximum_span), job.query_length);

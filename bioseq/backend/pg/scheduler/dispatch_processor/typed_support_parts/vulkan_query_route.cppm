@@ -418,7 +418,9 @@ void prepare_vulkan_query_route_rows(
     }
     if (!batch_query_uploads.empty()) {
         const auto rank_lut =
-            bioseq::gpu::vulkan::make_vulkan_rank_lut<compact_sequence_range<p_sequence>>();
+            bioseq::gpu::vulkan::make_vulkan_rank_lut<compact_sequence_range<p_sequence>>(
+                bioseq::gpu::vulkan::vulkan_minimizer_seed_policy_id<
+                    typename compact_sequence_range<p_sequence>::traits>(kmer_size));
         auto gpu_batch_sketch =
             bioseq::gpu::vulkan::collect_minimap_sketch_data_vulkan_upload_batch_result<
                 p_minimizer_type>(

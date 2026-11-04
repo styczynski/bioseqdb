@@ -28,8 +28,9 @@ enum class minimizer_word_kind : std::uint8_t {
     u64x2 = 3,
 };
 
-/** Native rank identities, complement ranks and shared rolling-hash seeds.
- * The byte-rank transport capacity is independent of any biological alphabet.
+/** Policy-specific rank codes, complement codes and native rolling-hash seeds.
+ * Exact nucleotide codes are normalized; proteins and bounded profiles retain
+ * native ranks. The byte-rank transport capacity is alphabet-independent.
  */
 struct vulkan_rank_lut {
     static constexpr std::size_t rank_capacity =
@@ -41,8 +42,9 @@ struct vulkan_rank_lut {
     std::uint32_t alphabet_code{};
     std::uint32_t seed_policy_id{};
     std::uint32_t canonical_reverse_complement{};
+    std::uint32_t exact_rank_bits{};
 };
-static_assert(sizeof(vulkan_rank_lut) == 3u * 256u * sizeof(std::uint32_t) + 16u);
+static_assert(sizeof(vulkan_rank_lut) == (3u * vulkan_rank_lut::rank_capacity + 5u) * sizeof(std::uint32_t));
 
 /** @brief Carries packed-sequence and minimizer parameters to sketch shaders. */
 struct vulkan_sketch_params {
@@ -170,20 +172,22 @@ struct gpu_target_index_host_scratch_plan {
 /**
  * @brief Bounds the number of minimizers a target sequence can emit.
  *
- * Each complete window can emit both equal-hash endpoints. The same position
- * can occur in successive windows, and there cannot be more complete windows
- * than candidate k-mer end positions. Query filtering only reduces this bound.
+ * Exact selection emits each candidate end at most once. Bounded selection can
+ * emit both equal-hash endpoints and repeat positions across windows. There cannot
+ * be more complete windows than candidate ends. Query filtering reduces this bound.
  * Returns zero for an invalid k-mer size or a sequence shorter than one k-mer;
  * multiplication saturates at uint64_t maximum. Output-ABI limits are checked
  * separately by the runtime.
  */
 [[nodiscard]] constexpr std::uint64_t
-target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_size) noexcept {
+target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_size,
+                                   std::uint32_t seed_policy_id) noexcept {
     if (kmer_size == 0u || bp_count < kmer_size) {
         return 0u;
     }
     return bioseq::common::saturating_mul(
-        bp_count - static_cast<std::uint64_t>(kmer_size) + 1u, std::uint64_t{2u});
+        bp_count - static_cast<std::uint64_t>(kmer_size) + 1u,
+        seed_policy_id == 0u ? std::uint64_t{1u} : std::uint64_t{2u});
 }
 
 /**

@@ -72,7 +72,6 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     constexpr std::size_t w = k_ordinary_minimizer_index_window_size;
         constexpr std::size_t k = ordinary_minimizer_index_kmer_size(
             bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>);
-    constexpr std::size_t lpu = 1u;
     constexpr std::size_t frag_bp = 32'768u;
     static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
     using detail::k_encoded_header_bytes;
@@ -135,12 +134,13 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     auto collect_core_range_pairs =
         [&seq, backend, kernels, alphabet_code](sequence_size_t core_lo,
                                                 sequence_size_t core_hi,
-                                                sketch_collector& collector,
                                                 std::vector<pair_t>& out,
                                                 direct_minimizer_bucket_build_stats* scalar_stats) {
             if (core_hi <= core_lo) {
                 return;
             }
+            // Ordinary backends emit pairs directly; the bounded-only collector stays empty.
+            sketch_collector collector;
             auto range = make_generation_collection_range(seq, core_lo, core_hi, w, k);
             if (!range || !collect_generation_core_run(seq,
                                                        alphabet_code,
@@ -160,26 +160,18 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
-    /** Reserve scrotch memory, collect a deferred range, then sort and spill its pairs. */
+    /** Reserve scratch memory, collect a deferred range, then sort and spill its pairs. */
     auto collect_sort_and_spill_backend_scratch =
-        [&storage,
+        [backend,
+         &storage,
          &make_core_range,
          &collect_core_range_pairs,
          &capture_scalar_build_stats,
          &scalar_build_stats](auto& self, segment_unit_range range) -> void {
         const std::uint64_t bp = static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
         const std::uint64_t maximum_output_pairs = bp;
-        const std::uint64_t pair_preallocation_bytes =
+        const std::uint64_t admission_bytes =
             detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-        const std::uint64_t maximum_collection_candidates = bioseq::common::saturating_mul(
-            static_cast<std::uint64_t>(range.ce_u - range.cs_u), static_cast<std::uint64_t>(lpu));
-        const std::uint64_t maximum_collector_sketches = maximum_collection_candidates;
-        const std::uint64_t collector_headroom_bytes =
-            detail::admitted_vector_preallocation_bytes<minimap_sketch_data>(
-                maximum_collector_sketches);
-        const std::uint64_t admission_bytes = bioseq::common::saturating_add(
-            pair_preallocation_bytes,
-            collector_headroom_bytes);
         auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
             admission_bytes);
         if (!permit) {
@@ -207,55 +199,22 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         scratch.permit = std::move(*permit);
         if (!detail::reserve_admitted_vector_run_capacity(
                 scratch,
-                maximum_output_pairs,
-                collector_headroom_bytes)) {
+                maximum_output_pairs)) {
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair capacity exceeded admission");
         }
-        {
-            // Destroy the collector before shrinking or releasing scratch's shared permit.
-            sketch_collector collector;
-            if (maximum_collector_sketches != 0u) {
-                if (maximum_collector_sketches >
-                    static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
-                    index_corruption_panic(
-                        "minimizers_per_sequence build: collector capacity overflow");
-                }
-                collector.reserve(static_cast<std::size_t>(maximum_collector_sketches));
-            }
-            const std::uint64_t exact_collector_bytes = bioseq::common::saturating_mul(
-                static_cast<std::uint64_t>(collector.extract_sketches_data().capacity()),
-                static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
-            const std::uint64_t live_before_collect = bioseq::common::saturating_add(
-                scratch.admitted_bytes,
-                exact_collector_bytes);
-            if (exact_collector_bytes > collector_headroom_bytes ||
-                live_before_collect > scratch.permit.bytes()) {
-                index_corruption_panic(
-                    "minimizers_per_sequence build: collector capacity exceeded admission");
-            }
-            scratch.permit.shrink_to(live_before_collect);
-            collect_core_range_pairs(range.core_lo_bp,
-                                     range.core_hi_bp,
-                                     collector,
-                                     scratch.pairs,
-                                     capture_scalar_build_stats ? &scalar_build_stats : nullptr);
-            const std::uint64_t live_after_collect = bioseq::common::saturating_add(
-                detail::admitted_vector_capacity_bytes(scratch.pairs),
-                bioseq::common::saturating_mul(
-                        static_cast<std::uint64_t>(collector.extract_sketches_data().capacity()),
-                        static_cast<std::uint64_t>(sizeof(minimap_sketch_data))));
-            if (live_after_collect > scratch.permit.bytes()) {
-                index_corruption_panic(
-                    "minimizers_per_sequence build: collection grew beyond admission");
-            }
-        }
-        // The collector has been freed. Keep  the reservation for the pair vector only.
+        collect_core_range_pairs(range.core_lo_bp,
+                                 range.core_hi_bp,
+                                 scratch.pairs,
+                                 capture_scalar_build_stats ? &scalar_build_stats : nullptr);
         if (!detail::finish_admitted_vector_run_transient(scratch)) {
             index_corruption_panic(
                 "minimizers_per_sequence build: scratch pair collection exceeded admission");
         }
-        detail::sort_pair_run(scratch.pairs);
+        // The Vulkan segment producer already sorts and deduplicates this single core.
+        if (backend != minimizer_sketch_backend::vulkan_segment) {
+            detail::sort_pair_run(scratch.pairs);
+        }
         storage.spill_sorted_run(
             std::span<const pair_t>(scratch.pairs.data(), scratch.pairs.size()));
         scratch.release_capacity_before_permit();
@@ -314,7 +273,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
 
     /** Collect a range, within its memory reservation, splitting or deferring it when space is short */
     auto collect_range_admitted =
-        [&storage,
+        [backend,
+         &storage,
          &make_core_range,
          &collect_core_range_pairs,
          &capture_scalar_build_stats](
@@ -326,18 +286,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             const std::uint64_t bp =
                 static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
             const std::uint64_t maximum_output_pairs = bp;
-            const std::uint64_t pair_preallocation_bytes =
+            const std::uint64_t admission_bytes =
                 detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-            const std::uint64_t maximum_collection_candidates =
-                bioseq::common::saturating_mul(static_cast<std::uint64_t>(range.ce_u - range.cs_u),
-                                               static_cast<std::uint64_t>(lpu));
-            const std::uint64_t maximum_collector_sketches = maximum_collection_candidates;
-            const std::uint64_t collector_headroom_bytes =
-                detail::admitted_vector_preallocation_bytes<minimap_sketch_data>(
-                    maximum_collector_sketches);
-            const std::uint64_t admission_bytes = bioseq::common::saturating_add(
-                pair_preallocation_bytes,
-                collector_headroom_bytes);
             auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
                 admission_bytes);
             if (!permit) {
@@ -362,56 +312,23 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             run.permit = std::move(*permit);
             if (!detail::reserve_admitted_vector_run_capacity(
                     run,
-                    maximum_output_pairs,
-                    collector_headroom_bytes)) {
+                    maximum_output_pairs)) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: worker pair capacity exceeded admission");
             }
-            {
-                sketch_collector collector;
-                if (maximum_collector_sketches != 0u) {
-                    if (maximum_collector_sketches >
-                        static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
-                        index_corruption_panic(
-                            "minimizers_per_sequence build: worker collector overflow");
-                    }
-                    collector.reserve(static_cast<std::size_t>(maximum_collector_sketches));
-                }
-                const std::uint64_t exact_collector_bytes = bioseq::common::saturating_mul(
-                    static_cast<std::uint64_t>(collector.extract_sketches_data().capacity()),
-                    static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
-                const std::uint64_t live_before_collect = bioseq::common::saturating_add(
-                    run.admitted_bytes,
-                    exact_collector_bytes);
-                if (exact_collector_bytes > collector_headroom_bytes ||
-                    live_before_collect > run.permit.bytes()) {
-                    index_corruption_panic(
-                        "minimizers_per_sequence build: worker collector exceeded admission");
-                }
-                run.permit.shrink_to(live_before_collect);
-                collect_core_range_pairs(range.core_lo_bp,
-                                         range.core_hi_bp,
-                                         collector,
-                                         run.pairs,
-                                         capture_scalar_build_stats ? &result.scalar_build_stats
-                                                                    : nullptr);
-                const std::uint64_t live_after_collect = bioseq::common::saturating_add(
-                    detail::admitted_vector_capacity_bytes(run.pairs),
-                    bioseq::common::saturating_mul(
-                            static_cast<std::uint64_t>(
-                                collector.extract_sketches_data().capacity()),
-                            static_cast<std::uint64_t>(sizeof(minimap_sketch_data))));
-                if (live_after_collect > run.permit.bytes()) {
-                    index_corruption_panic("minimizers_per_sequence build: worker collection "
-                                           "grew beyond admission");
-                }
-            }
-            // The collector has been freed. Keep only the pair vector's reservation.
+            collect_core_range_pairs(range.core_lo_bp,
+                                     range.core_hi_bp,
+                                     run.pairs,
+                                     capture_scalar_build_stats ? &result.scalar_build_stats
+                                                                : nullptr);
             if (!detail::finish_admitted_vector_run_transient(run)) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: worker pair collection exceeded admission");
             }
-            detail::sort_pair_run(run.pairs);
+            // The Vulkan segment producer already sorts and deduplicates this single core.
+            if (backend != minimizer_sketch_backend::vulkan_segment) {
+                detail::sort_pair_run(run.pairs);
+            }
             detail::compact_admitted_pair_run_after_sort(run);
             if (!detail::ensure_admitted_vector_run_capacity(result.runs,
                                                              result.runs.pairs.size() + 1u)) {

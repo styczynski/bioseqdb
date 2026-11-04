@@ -30,7 +30,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
     std::span<const gpu_packed_sequence_upload> targets,
     const vulkan_rank_lut& rank_lut,
     std::span<const bioseq::prefilter::prefilter_job> jobs,
-    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks,
+    std::uint32_t rank_bits) {
     std::lock_guard<std::mutex> guard(mu_);
     constexpr std::uint32_t k_sneaky_snake_parallel_threshold = 16u;
     bool use_parallel_teams = false;
@@ -55,7 +56,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
                                                   queries,
                                                   targets,
                                                   rank_lut,
-                                                  jobs, validate_ranks);
+                                                  jobs, validate_ranks, rank_bits);
     if (!jobs.empty()) {
         sneaky_snake_dispatch_count_.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -73,7 +74,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_ba
     const gatekeeper_rank_batch_route route = resolve_gatekeeper_rank_batch_route(jobs);
     std::vector<bioseq::prefilter::prefilter_result> results =
         run_rank_prefilter_batch_roundtrip_locked(
-            route.kind, 0u, route.replay_index, queries, targets, rank_lut, jobs, validate_ranks);
+            route.kind, 0u, route.replay_index, queries, targets, rank_lut, jobs, validate_ranks, 0u);
     if (!jobs.empty()) {
         gatekeeper_dispatch_count_.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -91,7 +92,8 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     std::span<const gpu_packed_sequence_upload> targets,
     const vulkan_rank_lut& rank_lut,
     std::span<const bioseq::prefilter::prefilter_job> jobs,
-    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks) {
+    bioseq::simd::sequence_packed_rank_validation_kernel validate_ranks,
+    std::uint32_t rank_bits) {
     const bool sneaky = kind == shader_kind::sneaky_snake_rank_batch;
     const bool gatekeeper = is_gatekeeper_rank_batch_kind(kind);
     const std::optional<std::size_t> expected_replay_index =
@@ -108,39 +110,36 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
     if (jobs.empty()) {
         return {};
     }
-    validate_prefilter_inputs(algorithm, queries, targets, rank_lut, jobs, validate_ranks);
+    constexpr std::uint32_t k_prefilter_local_size = 64u;
+    const shader_variant_key key = make_shader_key(
+        kind, 384u, k_prefilter_local_size,
+        sneaky ? rank_bits : k_gpu_gatekeeper_max_length);
+    if ((!sneaky && rank_bits != 0u) || !is_shader_variant_key_valid(key)) {
+        throw vulkan_runtime_error("invalid rank-prefilter width selector");
+    }
+    validate_prefilter_inputs(algorithm, queries, targets, rank_lut, jobs, validate_ranks, rank_bits);
     if (features_.max_workgroup_count_x == 0u) {
         throw vulkan_runtime_error(
             fmt::format("{} device reports zero max workgroup count", algorithm));
     }
 
-    constexpr std::uint32_t k_prefilter_local_size = 64u;
     constexpr std::uint64_t k_retained_workspace_bytes = 64u * 1024u * 1024u;
     const compute_pipeline pipe = get_compute_pipeline_locked(
-        kind,
-        k_prefilter_local_size,
-        sneaky ? k_gpu_sneaky_snake_submaze_length : k_gpu_gatekeeper_max_length);
+        kind, key.local_size, key.max_span);
 
-    std::vector<gpu_sequence_view_wire> query_records;
-    std::vector<gpu_sequence_view_wire> target_records;
-    query_records.reserve(queries.size());
-    target_records.reserve(targets.size());
     std::uint64_t packed_bytes = 0u;
-    const auto append_records = [&packed_bytes](auto uploads, auto& records) {
+    const auto count_packed_bytes = [&packed_bytes](auto uploads) {
         for (const auto& upload : uploads) {
-            auto descriptor = upload.sequence;
-            descriptor.seq_word_offset = packed_bytes / sizeof(std::uint32_t);
-            packed_bytes = bioseq::common::saturating_add(packed_bytes, descriptor.padded_byte_count);
-            records.push_back(descriptor);
+            packed_bytes = bioseq::common::saturating_add(packed_bytes, upload.sequence.padded_byte_count);
         }
     };
-    append_records(queries, query_records);
-    append_records(targets, target_records);
+    count_packed_bytes(queries);
+    count_packed_bytes(targets);
     const std::uint64_t packed_sequence_bytes = std::max<std::uint64_t>(packed_bytes, sizeof(std::uint32_t));
     const std::uint64_t query_record_bytes = std::max<std::uint64_t>(
-        query_records.size() * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
+        static_cast<std::uint64_t>(queries.size()) * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
     const std::uint64_t target_record_bytes = std::max<std::uint64_t>(
-        target_records.size() * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
+        static_cast<std::uint64_t>(targets.size()) * sizeof(gpu_sequence_view_wire), sizeof(gpu_sequence_view_wire));
     const std::uint64_t job_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(jobs.size()) * sizeof(bioseq::prefilter::prefilter_job),
         sizeof(std::uint32_t));
@@ -189,24 +188,28 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_bat
                             sneaky ? "sneaky_snake" : "gatekeeper"));
         }
 
-        // Each original packed window is copied directly into the admitted arena.
-        const auto upload_records = [this, packed_sequence_bytes](auto uploads, const auto& records) {
+        // Copy each packed window and its returned descriptor directly into admitted storage.
+        std::size_t packed_byte_offset = 0u;
+        const auto upload_records = [this, packed_sequence_bytes, &packed_byte_offset](
+            auto uploads, std::span<std::byte> record_destination) {
             const std::span<std::byte> destination{
                 static_cast<std::byte*>(prefilter_query_buffer_.mapped),
                 static_cast<std::size_t>(packed_sequence_bytes)};
             for (std::size_t index = 0u; index < uploads.size(); ++index) {
-                if (!place_packed_sequence_upload(uploads[index],
-                        static_cast<std::size_t>(records[index].seq_word_offset * sizeof(std::uint32_t)),
-                        destination, packed_sequence_upload_geometry_is_valid))
+                const auto descriptor = place_packed_sequence_upload(uploads[index],
+                    packed_byte_offset, destination, packed_sequence_upload_geometry_is_valid);
+                if (!descriptor)
                     throw vulkan_runtime_error("prefilter packed arena placement failed");
+                // The destination was sized from this upload count before workspace admission.
+                std::memcpy(record_destination.data() + index * sizeof(gpu_sequence_view_wire),
+                            &*descriptor, sizeof(gpu_sequence_view_wire));
+                packed_byte_offset += static_cast<std::size_t>(descriptor->padded_byte_count);
             }
         };
-        upload_records(queries, query_records);
-        upload_records(targets, target_records);
-        std::memcpy(prefilter_target_buffer_.mapped, query_records.data(),
-                    query_records.size() * sizeof(gpu_sequence_view_wire));
-        std::memcpy(prefilter_target_records_buffer_.mapped, target_records.data(),
-                    target_records.size() * sizeof(gpu_sequence_view_wire));
+        upload_records(queries, {static_cast<std::byte*>(prefilter_target_buffer_.mapped),
+                                static_cast<std::size_t>(query_record_bytes)});
+        upload_records(targets, {static_cast<std::byte*>(prefilter_target_records_buffer_.mapped),
+                                static_cast<std::size_t>(target_record_bytes)});
         std::memcpy(prefilter_rank_lut_buffer_.mapped, &rank_lut, sizeof(rank_lut));
         std::memcpy(prefilter_jobs_buffer_.mapped,
                     jobs.data(),

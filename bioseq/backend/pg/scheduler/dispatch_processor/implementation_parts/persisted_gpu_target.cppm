@@ -571,7 +571,8 @@ void batch_processor::prepare_gpu_persisted_mpf_target(
     minimizer_generation_read_stats read_stats =
         session.finish_mapped_minimizer_fragment_payload();
     const auto scheme =
-        bioseq::indexing::minimizer_scheme_identity_for_backend(*selected_backend);
+        bioseq::indexing::minimizer_scheme_identity_for_backend(
+            *selected_backend, source.alphabet_code, runtime_kmer_size);
     const auto producer_backend =
         bioseq::indexing::minimizer_producer_backend_identity_for_backend(*selected_backend);
     const std::uint64_t expected_metadata_rows = 2u + read_stats.directory_chunks_read;

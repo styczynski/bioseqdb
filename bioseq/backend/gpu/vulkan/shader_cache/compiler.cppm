@@ -248,23 +248,6 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
              0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u}))) {
         return std::unexpected("SPIR-V alignment CIGAR extension layout mismatch");
     }
-    if ((kind == shader_kind::seed_verify_count || kind == shader_kind::seed_verify_emit) &&
-        (!scan.has_binding_array_stride(0u, 0u, 24u) ||
-         !scan.has_binding_struct_offsets(0u, 0u, std::array<std::uint32_t, 4>{0u,8u,16u,20u}) ||
-         !scan.has_binding_array_stride(0u, 2u, 88u) ||
-         !scan.has_binding_struct_offsets(0u, 2u,
-             std::array<std::uint32_t,16>{0u,8u,16u,24u,32u,40u,48u,52u,56u,60u,64u,68u,72u,76u,80u,84u}) ||
-         !scan.has_binding_array_stride(0u, 6u, 24u) ||
-         !scan.has_push_constant_offsets(std::array<std::uint32_t,9>{0u,4u,8u,12u,16u,24u,28u,32u,36u}))) {
-        return std::unexpected("SPIR-V native seed verification ABI mismatch");
-    }
-    if (kind == shader_kind::seed_native_coverage &&
-        (!scan.has_binding_array_stride(0u, 0u, 24u) ||
-         !scan.has_binding_array_stride(0u, 1u, 16u) ||
-         !scan.has_binding_struct_offsets(0u, 1u, std::array<std::uint32_t,2>{0u,8u}) ||
-         !scan.has_push_constant_offsets(std::array<std::uint32_t,6>{0u,4u,8u,16u,24u,28u}))) {
-        return std::unexpected("SPIR-V native seed verification ABI mismatch");
-    }
     if ((kind == shader_kind::sneaky_snake_rank_batch || is_gatekeeper_rank_batch_kind(kind)) &&
         (!binding_scalar(0u, 4u) || !scan.has_binding_array_stride(0u, 1u, 88u) ||
          !scan.has_binding_array_stride(0u, 4u, 88u) || !scan.has_binding(5u) ||

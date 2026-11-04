@@ -755,7 +755,8 @@ build_and_publish_hash_major_minimizer_generation_pg(
     }
 
     const bioseq::indexing::minimizer_scheme_identity scheme =
-        bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+        bioseq::indexing::minimizer_scheme_identity_for_backend(
+            backend, algorithm_identity.alphabet_id, kmer_size);
 
     struct build_state {
         minimizer_generation_administration_identity identity{};

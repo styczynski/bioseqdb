@@ -41,7 +41,9 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 53);
+    // The other shader families retain their existing inventory.
+    constexpr std::size_t k_other_shader_variant_count = 53u;
+    REQUIRE(keys.size() == k_other_shader_variant_count + gv::k_sneaky_snake_rank_widths.size());
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
         return gv::cache_file_stem(left) < gv::cache_file_stem(right);
@@ -53,16 +55,11 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
         contains_key(keys, gv::make_shader_key(gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u)));
     CHECK(contains_key(
         keys, gv::make_shader_key(gv::shader_kind::seed_lookup_anchors, 384u, 128u, 256u)));
-    CHECK(contains_key(
-        keys, gv::make_shader_key(gv::shader_kind::seed_verify_count, 384u, 128u, 1u)));
-    CHECK(contains_key(
-        keys, gv::make_shader_key(gv::shader_kind::seed_verify_emit, 384u, 128u, 1u)));
-    CHECK(contains_key(
-        keys, gv::make_shader_key(gv::shader_kind::seed_native_coverage, 384u, 128u, 1u)));
     for (const std::uint32_t capacity : gv::k_ordered_sketch_window_capacities) {
-        CHECK(contains_key(keys,
-                           gv::make_shader_key(
-                               gv::shader_kind::ordered_sketch_tile, 384u, 64u, capacity)));
+        CHECK(contains_key(keys, gv::make_shader_key(
+            gv::shader_kind::ordered_sketch_tile, 384u, 64u, capacity)) == (capacity <= 64u));
+        CHECK(contains_key(keys, gv::make_shader_key(
+            gv::shader_kind::ordered_sketch_exact_tile, 384u, 64u, capacity)));
     }
     STATIC_REQUIRE(gv::choose_ordered_sketch_window_capacity(10u) == 10u);
     STATIC_REQUIRE(gv::choose_ordered_sketch_window_capacity(13u) == 16u);
@@ -99,8 +96,10 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
         keys, gv::make_shader_key(gv::shader_kind::align_extend_simple_cigar, 384u, 1u, 512u)));
     CHECK(contains_key(
         keys, gv::make_shader_key(gv::shader_kind::align_extend_simple_cigar, 384u, 64u, 512u)));
-    CHECK(contains_key(
-        keys, gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 512u)));
+    for (const auto rank_bits : gv::k_sneaky_snake_rank_widths) {
+        CHECK(contains_key(keys,
+            gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, rank_bits)));
+    }
     CHECK(contains_key(
         keys, gv::make_shader_key(gv::shader_kind::gatekeeper_rank_batch, 384u, 64u, 128u)));
     CHECK(contains_key(
@@ -326,9 +325,6 @@ make_grouped_soa_coordinate_hit_audit(const std::size_t problem_index,
     audit.direct_scan_dispatches = 3u;
     audit.direct_emit_dispatches = 1u;
     audit.anchor_count = 7u;
-    audit.seed_candidate_count = 9u;
-    audit.seed_verified_count = 7u;
-    audit.seed_emitted_count = 7u;
     audit.sort_operations = 1u;
     audit.range_build_dispatches = 1u;
     audit.range_count = 1u;
@@ -338,11 +334,8 @@ make_grouped_soa_coordinate_hit_audit(const std::size_t problem_index,
     const std::uint64_t receipt_base = 1'000u + problem_index * 10u;
     audit.count_submit_wait_identity = receipt_base + 1u;
     audit.emit_submit_wait_identity = receipt_base + 2u;
-    audit.sort_submit_wait_identity = receipt_base + 3u;
-    audit.seed_verify_count_submit_wait_identity = receipt_base + 4u;
-    audit.seed_verify_emit_submit_wait_identity = receipt_base + 5u;
-    audit.range_submit_wait_identity = receipt_base + 6u;
-    audit.chain_coordinate_submit_wait_identity = receipt_base + 7u;
+    audit.sort_range_submit_wait_identity = receipt_base + 3u;
+    audit.chain_coordinate_submit_wait_identity = receipt_base + 4u;
     audit.count_status_checks = 1u;
     audit.emit_status_checks = 1u;
     audit.result_readbacks = 1u;
@@ -558,13 +551,7 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
         audit.coordinate_dispatches = 0u;
         audit.count_submit_wait_identity = 0u;
         audit.emit_submit_wait_identity = 0u;
-        audit.sort_submit_wait_identity = 0u;
-        audit.seed_verify_count_submit_wait_identity = 0u;
-        audit.seed_verify_emit_submit_wait_identity = 0u;
-        audit.range_submit_wait_identity = 0u;
-        audit.seed_candidate_count = 0u;
-        audit.seed_verified_count = 0u;
-        audit.seed_emitted_count = 0u;
+        audit.sort_range_submit_wait_identity = 0u;
         audit.chain_coordinate_submit_wait_identity = 0u;
         audit.count_status_checks = 0u;
         audit.emit_status_checks = 0u;
@@ -717,13 +704,7 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
         no_anchor.chain_backtrack_dispatches = 0u;
         no_anchor.coordinate_dispatches = 0u;
         no_anchor.emit_submit_wait_identity = 0u;
-        no_anchor.sort_submit_wait_identity = 0u;
-        no_anchor.seed_verify_count_submit_wait_identity = 0u;
-        no_anchor.seed_verify_emit_submit_wait_identity = 0u;
-        no_anchor.range_submit_wait_identity = 0u;
-        no_anchor.seed_candidate_count = 0u;
-        no_anchor.seed_verified_count = 0u;
-        no_anchor.seed_emitted_count = 0u;
+        no_anchor.sort_range_submit_wait_identity = 0u;
         no_anchor.chain_coordinate_submit_wait_identity = 0u;
         no_anchor.emit_status_checks = 0u;
         no_anchor.result_readbacks = 0u;
@@ -890,45 +871,50 @@ TEST_CASE("SneakySnake rank batch has an exact provider ABI",
     STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, query_record_count) == 8u);
     STATIC_REQUIRE(offsetof(gv::gpu_prefilter_push, target_record_count) == 12u);
 
-    const auto key = gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 512u);
-    REQUIRE(gv::is_shader_variant_key_valid(key));
-    CHECK_FALSE(gv::is_shader_variant_key_valid(
-        gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 32u, 512u)));
-    CHECK_FALSE(gv::is_shader_variant_key_valid(
-        gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 511u)));
-    REQUIRE(gv::checked_shader_kind(key.kind) == gv::shader_kind::sneaky_snake_rank_batch);
-    REQUIRE(gv::descriptor_layout_for(key.to_request().kind) ==
-            gv::descriptor_layout_kind::packed_prefilter);
-    REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 6u);
-    REQUIRE(gv::push_constant_size(key.to_request().kind) == 16u);
-    REQUIRE(gv::expected_shader_workgroup_size(key) == (gv::shader_workgroup_size{64u, 1u, 1u}));
+    for (const auto rank_bits : gv::k_sneaky_snake_rank_widths) {
+        INFO("rank width selector: " << rank_bits);
+        const auto key = gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, rank_bits);
+        REQUIRE(gv::is_shader_variant_key_valid(key));
+        CHECK(key.to_request().max_span == gv::k_gpu_sneaky_snake_submaze_length);
+        CHECK(key.to_request().bits_per_char == rank_bits);
+        CHECK_FALSE(gv::is_shader_variant_key_valid(
+            gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 32u, rank_bits)));
+        CHECK_FALSE(gv::is_shader_variant_key_valid(
+            gv::make_shader_key(gv::shader_kind::sneaky_snake_rank_batch, 384u, 64u, 511u)));
+        REQUIRE(gv::checked_shader_kind(key.kind) == gv::shader_kind::sneaky_snake_rank_batch);
+        REQUIRE(gv::descriptor_layout_for(key.to_request().kind) ==
+                gv::descriptor_layout_kind::packed_prefilter);
+        REQUIRE(gv::descriptor_binding_count(gv::descriptor_layout_for(key.to_request().kind)) == 6u);
+        REQUIRE(gv::push_constant_size(key.to_request().kind) == 16u);
+        REQUIRE(gv::expected_shader_workgroup_size(key) == (gv::shader_workgroup_size{64u, 1u, 1u}));
 
-    const std::string body = gv::shader_body_for_digest(gv::shader_kind::sneaky_snake_rank_batch);
-    CHECK(body.find("k_maximum_supported_edits = 31u") != std::string::npos);
-    CHECK(body.find("uint query_record_count;") != std::string::npos);
-    CHECK(body.find("uint target_record_count;") != std::string::npos);
-    CHECK(body.find("prefilter_job_is_in_bounds(job)") != std::string::npos);
-    CHECK(body.find("subgroup") == std::string::npos);
-    CHECK(body.find("atomic") == std::string::npos);
+        const std::string body = gv::shader_body_for_digest(gv::shader_kind::sneaky_snake_rank_batch);
+        CHECK(body.find("k_maximum_supported_edits = 31u") != std::string::npos);
+        CHECK(body.find("uint query_record_count;") != std::string::npos);
+        CHECK(body.find("uint target_record_count;") != std::string::npos);
+        CHECK(body.find("prefilter_job_is_in_bounds(job)") != std::string::npos);
+        CHECK(body.find("subgroup") == std::string::npos);
+        CHECK(body.find("atomic") == std::string::npos);
 
-    const auto spirv = gv::compile_shader_spirv(key.to_request());
-    REQUIRE_FALSE(spirv.empty());
-    const auto scan = gv::scan_spirv_layout(spirv);
-    CHECK(scan.has_binding_array_stride(0u, 0u, 4u));
-    CHECK(scan.has_binding_array_stride(0u, 1u, 88u));
-    CHECK(scan.has_binding_array_stride(0u, 2u, 32u));
-    CHECK(scan.has_binding_struct_offsets(
-        0u, 2u, std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}));
-    CHECK(scan.has_binding_array_stride(0u, 3u, 16u));
-    CHECK(scan.has_binding_struct_offsets(0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
-    CHECK(scan.has_push_constant_offsets(std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
-    REQUIRE(gv::validate_spirv_layout(key, spirv));
+        const auto spirv = gv::compile_shader_spirv(key.to_request());
+        REQUIRE_FALSE(spirv.empty());
+        const auto scan = gv::scan_spirv_layout(spirv);
+        CHECK(scan.has_binding_array_stride(0u, 0u, 4u));
+        CHECK(scan.has_binding_array_stride(0u, 1u, 88u));
+        CHECK(scan.has_binding_array_stride(0u, 2u, 32u));
+        CHECK(scan.has_binding_struct_offsets(
+            0u, 2u, std::array<std::uint32_t, 8>{0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}));
+        CHECK(scan.has_binding_array_stride(0u, 3u, 16u));
+        CHECK(scan.has_binding_struct_offsets(0u, 3u, std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
+        CHECK(scan.has_push_constant_offsets(std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
+        REQUIRE(gv::validate_spirv_layout(key, spirv));
 
-    const auto msl = gv::spirv_to_msl(spirv, key, gv::msl_version{});
-    REQUIRE(msl);
-    CHECK(msl->wg_x == 64u);
-    CHECK(msl->wg_y == 1u);
-    CHECK(msl->wg_z == 1u);
+        const auto msl = gv::spirv_to_msl(spirv, key, gv::msl_version{});
+        REQUIRE(msl);
+        CHECK(msl->wg_x == 64u);
+        CHECK(msl->wg_y == 1u);
+        CHECK(msl->wg_z == 1u);
+    }
 }
 
 TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI",

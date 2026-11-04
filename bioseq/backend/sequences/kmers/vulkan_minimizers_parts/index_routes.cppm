@@ -96,23 +96,23 @@ template <class p_minimizer_type, class p_sequence>
         return std::nullopt;
     } else {
         using traits = typename bare::traits;
-        if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0 ||
-                      traits::bits_per_char > 32) {
+        if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
             decline(vulkan_sketch_decline_reason::alphabet_unsupported);
             return std::nullopt;
         } else {
-            if (kmer_size == 0 || kmer_size > 31 ||
-                minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
+            if (!vulkan_minimizer_kmer_size_supported<traits>(
+                    kmer_size, minimizer_wire_traits<p_minimizer_type>::k_hash_bits)) {
                 decline(vulkan_sketch_decline_reason::kmer_size_unsupported);
                 return std::nullopt;
             }
-            if (window_size == 0 || window_size > 256) {
+            if (!vulkan_minimizer_window_size_supported(
+                    window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
                 decline(vulkan_sketch_decline_reason::window_size_unsupported);
                 return std::nullopt;
             }
 
             const sequence_upload_view upload = make_sequence_upload_view(seq);
-            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>();
+            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>(vulkan_minimizer_seed_policy_id<traits>(kmer_size));
             return build_gpu_index_from_upload_on_device<p_minimizer_type>(
                 upload,
                 rank_lut,
@@ -176,17 +176,17 @@ template <class p_minimizer_type, class p_sequence>
         return std::nullopt;
     } else {
         using traits = typename bare::traits;
-        if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0 ||
-                      traits::bits_per_char > 32) {
+        if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
             decline(vulkan_sketch_decline_reason::alphabet_unsupported);
             return std::nullopt;
         } else {
-            if (kmer_size == 0 || kmer_size > 31 ||
-                minimizer_wire_traits<p_minimizer_type>::k_hash_bits < 32u) {
+            if (!vulkan_minimizer_kmer_size_supported<traits>(
+                    kmer_size, minimizer_wire_traits<p_minimizer_type>::k_hash_bits)) {
                 decline(vulkan_sketch_decline_reason::kmer_size_unsupported);
                 return std::nullopt;
             }
-            if (window_size == 0 || window_size > 256) {
+            if (!vulkan_minimizer_window_size_supported(
+                    window_size, vulkan_minimizer_seed_policy_id<traits>(kmer_size))) {
                 decline(vulkan_sketch_decline_reason::window_size_unsupported);
                 return std::nullopt;
             }
@@ -212,7 +212,7 @@ template <class p_minimizer_type, class p_sequence>
             const auto* base = seq.read_cptr(begin_iter);
             const sequence_upload_view upload =
                 make_upload_view_from_window<bare>(seq, base, descriptor);
-            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>();
+            const vulkan_rank_lut rank_lut = make_vulkan_rank_lut<bare>(vulkan_minimizer_seed_policy_id<traits>(kmer_size));
             return build_gpu_index_from_upload_on_device<p_minimizer_type>(
                 upload,
                 rank_lut,

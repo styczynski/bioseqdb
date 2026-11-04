@@ -839,7 +839,8 @@ read_minimizer_generation_full_payload_fixture_impl(
         session.consume_source_authorization(std::move(*state->source_authorization));
         state->source_authorization.reset();
         const auto requested_scheme =
-            bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+            bioseq::indexing::minimizer_scheme_identity_for_backend(
+                backend, source.alphabet_code, kmer_size);
         const auto requested_producer_backend =
             bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
         if (metadata.manifest.minimizer_scheme_id != requested_scheme.id ||

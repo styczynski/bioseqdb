@@ -171,7 +171,8 @@ class minimizer_sequence_generation_execution_receipt {
                 minimizer_producer_backend_identity_for_backend(selected_backend)) ||
             algorithm_identity.runtime_kmer_size != kmer_size ||
             algorithm_identity.runtime_window_size != window_size ||
-            minimizer_scheme != minimizer_scheme_identity_for_backend(selected_backend) ||
+            minimizer_scheme != minimizer_scheme_identity_for_backend(
+                selected_backend, algorithm_identity.alphabet_id, kmer_size) ||
             (spilled_event_count == 0) != (spill_run_count == 0) ||
             spill_qualification_scan_count != 1 ||
             spill_qualification_merge_count != (target_length == 0 ? 0u : 1u) ||
@@ -772,7 +773,8 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
         }
         const minimizer_producer_identity identity =
             minimizer_producer_backend_identity_for_backend(spill_receipt_.selected_backend);
-        return minimizer_scheme_identity_for_producer_backend(identity) == minimizer_scheme_
+        return minimizer_scheme_identity_for_producer_backend(identity,
+            algorithm_identity_.alphabet_id, algorithm_identity_.runtime_kmer_size) == minimizer_scheme_
                    ? identity
                    : minimizer_producer_identity{};
     }

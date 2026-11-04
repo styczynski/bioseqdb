@@ -55,7 +55,8 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     const std::array<vk::sequence_upload_view, 1> too_short_uploads{
         vk::make_sequence_upload_view(too_short_sequence),
     };
-    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(too_short_sequence)>();
+    const auto rank_lut = vk::make_vulkan_rank_lut<decltype(too_short_sequence)>(
+        bioseq::minimizers::k_bounded_nthash_scheme_id);
     auto nondispatchable = vk::collect_minimap_sketch_data_vulkan_upload_batch_result(
         std::span<const vk::sequence_upload_view>{too_short_uploads.data(),
                                                   too_short_uploads.size()},
@@ -65,7 +66,7 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
         vk::vulkan_sketch_host_materialization::device_only);
     REQUIRE_FALSE(nondispatchable.has_value());
 
-    // N is seedable. Dispatch a valid k-mer range that lacks a complete window.
+    // Explicit bounded policy seeds N, but this input lacks a complete window.
     std::vector<seq::dna5> all_n(kmer_size + window_size - 2u, 'N'_dna5);
     REQUIRE(all_n.size() >= kmer_size);
     REQUIRE(all_n.size() < kmer_size + window_size - 1u);
@@ -81,7 +82,7 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
                                   vk::runtime::instance().features().max_workgroup_count_x);
     REQUIRE(all_n_tile_plan.is_dispatchable);
     const std::uint64_t pessimistic_count =
-        vk::estimate_vulkan_minimizer_capacity(all_n.size(), window_size);
+        vk::estimate_vulkan_minimizer_capacity(all_n.size(), window_size, rank_lut.seed_policy_id);
     const auto allocation_requirements =
         vk::runtime::instance().sketch_batch_allocation_requirements(
             all_n_uploads[0].padded_byte_size,
@@ -219,12 +220,18 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     REQUIRE(vk::runtime::instance().reusable_gpu_arena().release_idle_capacity());
 
     // Reuse the same native N ranks with complete windows. A one-record
-    // capacity must be rejected before any output can be written or published.
+    // capacity must not allow out-of-bounds writes or publish a partial result.
     auto bounded_params = malformed_params;
     bounded_params.window_size = 3u;
     auto valid_layouts = malformed_layouts;
     valid_layouts[0].query_len = static_cast<std::uint32_t>(all_n.size());
-    REQUIRE(cpu_sketch<minimap_sketch_data>(all_n, bounded_params.window_size, kmer_size).size() > 1u);
+    basic_sketch_collector<minimap_sketch_data> bounded_reference;
+    collect_minimizers_view<minimap_int_hasher, minimap_sketch_data,
+        decltype(all_n_sequence), decltype(all_n_sequence.begin()), std::uint32_t,
+        decltype(bounded_reference), bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
+            bounded_reference, all_n_sequence, all_n_sequence.begin(), all_n_sequence.end(),
+            bounded_params.window_size, kmer_size);
+    REQUIRE(bounded_reference.extract_sketches_data().size() > 1u);
     const auto single_overflow = vk::runtime::instance().run_sketch_roundtrip(
         std::span<const std::byte>{packed_sequence.data(), packed_sequence.size()},
         rank_lut, bounded_params, 1u, {}, 0u);
@@ -232,8 +239,8 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     REQUIRE_FALSE(single_overflow.minimizer_words.is_valid());
     REQUIRE(single_overflow.arena_trimmed_before_return);
 
-    // A wide window emits nothing: count-first device output can still use
-    // capacity1, whereas one-submission host output must admit the safe bound.
+    // A wide window emits nothing and fits capacity1 in either mode. A real
+    // overflow must never publish output, including after guarded host emission.
     for (const std::uint32_t bounded_window : {24u, 3u}) {
         bounded_params.window_size = bounded_window;
         const bool emits_minimizers = bounded_window == 3u;
@@ -250,13 +257,14 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
                 1u,
                 materialization);
             const bool device_only = materialization == vk::vulkan_sketch_host_materialization::device_only;
-            const bool expects_overflow = !device_only || emits_minimizers;
-            const std::uint64_t expected_count_submissions = device_only ? 1u : 0u;
-            const std::uint64_t expected_emit_submissions = device_only && !emits_minimizers ? 1u : 0u;
+            const bool expects_overflow = emits_minimizers;
+            const std::uint64_t expected_count_submissions = 1u;
+            const std::uint64_t expected_emit_submissions = !device_only || !emits_minimizers ? 1u : 0u;
             REQUIRE(bounded_result.overflow == expects_overflow);
             REQUIRE(bounded_result.host_minimizer_bytes.empty());
             REQUIRE(bounded_result.minimizer_words.is_valid() == !expects_overflow);
-            REQUIRE(bounded_result.query_authority.does_cover_device_output() == !expects_overflow);
+            REQUIRE(bounded_result.query_authority.does_cover_device_output() ==
+                (device_only && !expects_overflow));
             if (!expects_overflow) {
                 REQUIRE(bounded_result.count == 0u);
                 REQUIRE(bounded_result.minimizer_words.bytes == sizeof(std::uint32_t));
@@ -266,7 +274,7 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
             REQUIRE(bounded_result.dispatch_stats.prefix_scan_dispatches() == 3u * expected_count_submissions);
             REQUIRE(bounded_result.dispatch_stats.emit_dispatches() == expected_emit_submissions);
             REQUIRE(bounded_result.dispatch_stats.completed_roundtrips() ==
-                    expected_count_submissions + expected_emit_submissions);
+                    (device_only ? expected_count_submissions + expected_emit_submissions : 1u));
             REQUIRE(vk::runtime::instance().reusable_gpu_arena().release_idle_capacity());
         }
     }

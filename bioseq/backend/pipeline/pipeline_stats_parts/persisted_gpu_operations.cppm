@@ -258,10 +258,6 @@ struct persisted_gpu_job_stats {
     std::uint64_t direct_count_dispatches = 0u;
     std::uint64_t direct_scan_dispatches = 0u;
     std::uint64_t anchor_count = 0u;
-    std::uint64_t seed_candidate_count = 0u;
-    std::uint64_t seed_verified_count = 0u;
-    std::uint64_t seed_emitted_count = 0u;
-    std::uint64_t seed_coverage_interval_count = 0u;
     std::uint64_t direct_emit_dispatches = 0u;
     std::uint64_t sort_operations = 0u;
     std::uint64_t range_build_dispatches = 0u;
@@ -269,8 +265,7 @@ struct persisted_gpu_job_stats {
     std::uint64_t chain_dispatches = 0u;
     std::uint64_t chain_backtrack_dispatches = 0u;
     std::uint64_t coordinate_dispatches = 0u;
-    std::array<persisted_gpu_submission_stats,
-               bioseq::gpu::vulkan::k_seed_coordinate_submission_phase_count> submissions{};
+    std::array<persisted_gpu_submission_stats, 4> submissions{};
     std::uint64_t count_status_checks = 0u;
     std::uint64_t emit_status_checks = 0u;
     std::uint32_t status_or = 0u;
@@ -296,11 +291,7 @@ struct persisted_gpu_job_stats {
             binding_window_count > k_sql_bigint_value_max ||
             direct_count_dispatches != binding_window_count ||
             direct_scan_dispatches != 3u || anchor_count == 0u ||
-            anchor_count > k_sql_bigint_value_max || seed_verified_count != anchor_count ||
-            seed_emitted_count != seed_verified_count || seed_verified_count > seed_candidate_count ||
-            seed_candidate_count > k_sql_bigint_value_max ||
-            (seed_coverage_interval_count != 0u && seed_coverage_interval_count != seed_candidate_count) ||
-            direct_emit_dispatches != binding_window_count ||
+            anchor_count > k_sql_bigint_value_max || direct_emit_dispatches != binding_window_count ||
             sort_operations != 1u || range_build_dispatches != 1u || range_count == 0u ||
             range_count > k_sql_bigint_value_max || chain_dispatches != 1u ||
             chain_backtrack_dispatches != 1u || coordinate_dispatches != 1u ||
@@ -311,14 +302,6 @@ struct persisted_gpu_job_stats {
             return false;
         }
         for (std::size_t i = 0u; i < submissions.size(); ++i) {
-            const bool skipped_coverage = seed_coverage_interval_count == 0u &&
-                i == static_cast<std::size_t>(bioseq::gpu::vulkan::seed_coordinate_submission_phase::native_coverage);
-            if (skipped_coverage) {
-                if (submissions[i].operation_identity != 0u || submissions[i].ordinal != 0u ||
-                    submissions[i].submit_wait_identity != 0u)
-                    return false;
-                continue;
-            }
             if (!submissions[i].is_internally_consistent() ||
                 submissions[i].operation_identity != shape_operation_identity) {
                 return false;
@@ -371,10 +354,8 @@ struct persisted_gpu_operation_stats {
         if (operation_identity == 0u ||
             !is_persisted_grouped_soa_coordinate_publication_consistent(publication) ||
             published_jobs != publication.expected_jobs || publication_commits != 1u ||
-            query_pipeline_receipt_count != 3u ||
-            (shape_pipeline_receipt_count != bioseq::gpu::vulkan::k_verified_coordinate_pipeline_count &&
-             shape_pipeline_receipt_count != bioseq::gpu::vulkan::k_verified_coordinate_pipeline_count + 1u) ||
-            alignment_pipeline_receipt_count > 1u ||
+            query_pipeline_receipt_count != 3u || shape_pipeline_receipt_count < 7u ||
+            shape_pipeline_receipt_count > 10u || alignment_pipeline_receipt_count > 1u ||
             ((alignment_pipeline_receipt_count == 0u) != (alignment_submission_count == 0u)) ||
             mapq_pipeline_receipt_count > 1u ||
             ((mapq_pipeline_receipt_count == 0u) != (mapq_submission_count == 0u)) ||
@@ -434,8 +415,6 @@ struct persisted_gpu_operation_stats {
             for (std::size_t submission_index = 0u; submission_index < job.submissions.size();
                  ++submission_index) {
                 const auto& submission = job.submissions[submission_index];
-                if (submission.ordinal == 0u)
-                    continue;
                 bool previously_seen = false;
                 for (std::size_t prior_job = 0u; prior_job <= job_index && !previously_seen;
                      ++prior_job) {

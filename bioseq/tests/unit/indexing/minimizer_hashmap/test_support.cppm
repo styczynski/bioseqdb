@@ -324,7 +324,7 @@ test_generation_options(
             .id = bioseq::indexing::minimizer_producer_backend_for_effective_algorithm(
                 algorithm_identity.effective_algorithm),
             .revision = bioseq::indexing::k_minimizer_producer_identity_revision,
-        });
+        }, alphabet_id, kmer_size);
     return {
         .layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
         .generation_id = 37,

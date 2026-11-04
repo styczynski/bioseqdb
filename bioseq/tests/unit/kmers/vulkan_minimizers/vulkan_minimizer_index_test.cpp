@@ -156,14 +156,16 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
         .char_mask = upload.char_mask,
         .padding_letters = upload.padding_letters,
     };
-    runtime.prepare_target_index_pipelines(target_index_params);
+    runtime.prepare_target_index_pipelines(
+        vk::make_vulkan_rank_lut<decltype(sequence)>(0u), target_index_params);
     const std::uint64_t target_index_pipeline_metadata =
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(target_index_pipeline_metadata >= cache_metadata_before);
-    runtime.prepare_target_index_pipelines(target_index_params);
+    runtime.prepare_target_index_pipelines(
+        vk::make_vulkan_rank_lut<decltype(sequence)>(0u), target_index_params);
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes() == target_index_pipeline_metadata);
     const std::uint64_t pessimistic_capacity =
-        vk::estimate_vulkan_minimizer_capacity(sequence.bp_size(), 10u);
+        vk::estimate_vulkan_minimizer_capacity(sequence.bp_size(), 10u, 0u);
     vk::vulkan_sketch_decline decline{};
     auto built =
         vk::build_gpu_index_on_device<minimap_sketch_data>(sequence_view, 10u, 15u, {}, &decline);
@@ -236,14 +238,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     // and position allocations for the next call.
     const auto query = cpu_sketch<minimap_sketch_data>(dna4_fixture, 10u, 15u);
     REQUIRE_FALSE(query.empty());
-    auto native_windows = std::optional{bioseq::seeding::prepare_native_query_seed_windows(
-        sequence_view, std::span<const minimap_sketch_data>{query}, 15u)};
-    const auto native_rank_policy = vk::make_vulkan_rank_lut<decltype(sequence)>();
     const std::uint64_t adopted_reservation = admission.reserved_bytes();
     const vk::gpu_seed_inputs inputs{
-        .native_query = native_windows->view(),
-        .native_target = native_windows->view(),
-        .native_rank_policy = &native_rank_policy,
         .host_minimizer_bytes =
             std::as_bytes(std::span<const minimap_sketch_data>{query.data(), query.size()}),
         .device_minimizer_words = nullptr,
@@ -287,7 +283,6 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes() == steady_cache_metadata);
     REQUIRE(admission.reserved_bytes() == steady_adopted_reservation);
 
-    native_windows.reset();
     resident.reset();
     REQUIRE(
         admission.reserved_bytes() ==
@@ -304,7 +299,7 @@ TEST_CASE("vulkan minimizer: ungated incomplete window publishes a validated emp
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
     constexpr std::size_t window_size = 10u;
     constexpr std::size_t kmer_size = 15u;
-    // N is seedable. Count on the GPU without a complete minimizer window.
+    // Exact DNA5 excludes N; the ungated GPU count must still publish an empty index.
     std::vector<seq::dna5> all_n(kmer_size + window_size - 2u, 'N'_dna5);
     auto sequence = compact_sequence_range<seq_type>(all_n);
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(sequence);
@@ -369,10 +364,10 @@ TEST_CASE("vulkan minimizer: gated empty target retains count-dominant pretrim p
                                             true};
 
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    std::vector<seq::dna5> all_n(256u);
-    for (auto& letter : all_n)
-        letter.assign_rank(4u);
-    compact_sequence_range<seq_type> sequence{all_n};
+    std::vector<seq::dna5> all_t(256u);
+    for (auto& letter : all_t)
+        seqan3::assign_char_to('T', letter);
+    compact_sequence_range<seq_type> sequence{all_t};
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(sequence);
     const auto sequence_view = bioseq::storage::make_lazy_sequence_view(sequence_owner);
     auto built = vk::build_gpu_index_on_device<minimap_sketch_data>(sequence_view, 10u, 15u, gate);
@@ -397,19 +392,21 @@ TEST_CASE("vulkan minimizer: tied endpoints exceed source length within the coun
     constexpr std::size_t dense_bp = 8'192u;
     constexpr std::size_t window_size = 10u;
     constexpr std::size_t kmer_size = 15u;
-    std::vector<seq::dna4> repeated_a(dense_bp);
+    std::vector<seq::aa27> repeated_a(dense_bp);
     for (auto& base : repeated_a) {
         base.assign_rank(0u);
     }
     const std::uint64_t hard_bound = vk::target_minimizer_count_upper_bound(
-        dense_bp, static_cast<std::uint32_t>(kmer_size));
+        dense_bp, static_cast<std::uint32_t>(kmer_size),
+        bioseq::minimizers::k_bounded_nthash_scheme_id);
     const std::uint64_t estimate = std::min(
-        vk::estimate_vulkan_minimizer_capacity(dense_bp, window_size), hard_bound);
+        vk::estimate_vulkan_minimizer_capacity(dense_bp, window_size,
+            bioseq::minimizers::k_bounded_nthash_scheme_id), hard_bound);
     const auto scalar = cpu_sketch<minimap_sketch_data>(repeated_a, window_size, kmer_size);
     REQUIRE(scalar.size() > dense_bp);
     REQUIRE(scalar.size() <= estimate);
 
-    using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using seq_type = sequence_custom_alphabet<seq::aa27, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(repeated_a);
     auto sequence_owner = bioseq::storage::make_resident_lazy_sequence(sequence);
     const auto sequence_view = bioseq::storage::make_lazy_sequence_view(sequence_owner);
@@ -433,6 +430,9 @@ TEST_CASE("vulkan minimizer: tied endpoints exceed source length within the coun
         .target_len = built->target_len,
         .table_size = built->occupied_slots,
         .position_count = built->position_count,
+        .alphabet_size = seqan3::alphabet_size<seq::aa27>,
+        .alphabet_code = supported_biological_alphabets::index_of<seq::aa27>(),
+        .seed_policy_id = bioseq::minimizers::k_bounded_nthash_scheme_id,
     };
     auto adopted = idx::adopt_gpu_built_index(vk::runtime::instance(), std::move(*built), key);
     REQUIRE(adopted.has_value());

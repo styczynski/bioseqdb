@@ -507,7 +507,10 @@ hash_major_minimizer_storage_profile_digest(
              value.producer_backend_identity == 4u);
         const bool bounded_scheme =
             selected->effective_algorithm == algorithm_type::bounded_nthash_simd
-            || selected->effective_algorithm == algorithm_type::vulkan_minimap_integer;
+            || ((selected->effective_algorithm == algorithm_type::vulkan_minimap_integer
+                    || selected->effective_algorithm == algorithm_type::scalar)
+                && !bioseq::minimizers::exact_minimizer_shape_fits_for_alphabet_code(
+                    value.alphabet_code, value.kmer_size));
         const bool scheme_matches =
             value.hash_scheme_identity == (bounded_scheme ? 1u : 0u) &&
             value.hash_scheme_revision == (bounded_scheme ? 2u : 0u);

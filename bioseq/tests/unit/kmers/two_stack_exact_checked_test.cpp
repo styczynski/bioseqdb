@@ -6,6 +6,7 @@
  * formats, position overflow, and rejected output buffers.
  */
 
+#include <hwy/highway.h> // TEMP resident two-wrap verification
 #include <catch2/catch_test_macros.hpp>
 
 import std;
@@ -14,6 +15,7 @@ import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
+import bioseq.sequences.simd_iteration_geometry; // TEMP resident two-wrap verification
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
@@ -578,8 +580,237 @@ TEST_CASE("two_stack_nthash checked table — packed22 adversarial cuts preserve
     require_success(result, expected);
 }
 
+// BEGIN TEMP native resident ring metadata verification; remove after validation.
+namespace manual_resident_ring_probe {
+namespace hn = hwy::HWY_NAMESPACE;
+using wide_record = minimizer_representation<63u, 64u>;
+
+template<class Alphabet, class Unit>
+using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, Unit>>;
+
+template<class Alphabet>
+using exact_alphabet = std::conditional_t<seqan3::nucleotide_alphabet<Alphabet>, seq::dna4, Alphabet>;
+
+template<class Alphabet, class Word>
+struct enumerated_kmer {
+    bool valid = false;
+    Word code = 0u;
+    Word order = 0u;
+    std::uint64_t strand = 0u;
+};
+
+// Enumerate symbols afresh: no rolling state, two-stack recurrence or packed metadata.
+template<class Alphabet, class Word>
+[[nodiscard]] enumerated_kmer<Alphabet, Word> enumerate(
+    const std::vector<Alphabet>& data, std::size_t end, std::size_t k)
+{
+    using hash_traits = typename range_type<exact_alphabet<Alphabet>, Word>::traits;
+    constexpr auto bits = hash_traits::bits_per_char;
+    constexpr auto digits = std::numeric_limits<Word>::digits;
+    constexpr Word order_mask = static_cast<Word>(~((Word{1u} << (digits / 2u)) - Word{1u}));
+    Word forward = 0u;
+    Word reverse = 0u;
+    for (std::size_t offset = 0u; offset < k; ++offset) {
+        const auto symbol = data[end + 1u - k + offset];
+        Word rank = static_cast<Word>(seqan3::to_rank(symbol));
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+            if (seqan3::to_char(symbol) == 'N') return {};
+            const auto dna = seqan3::assign_char_to(seqan3::to_char(symbol), seq::dna4{});
+            rank = static_cast<Word>(seqan3::to_rank(dna));
+            reverse |= static_cast<Word>(seqan3::to_rank(seqan3::complement(dna))) << (bits * offset);
+        }
+        forward = static_cast<Word>((forward << bits) | rank);
+    }
+    if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+        if (k % 2u == 0u && forward == reverse) return {};
+    }
+    const Word code = [&forward, &reverse] {
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>) return std::min(forward, reverse);
+        else return forward;
+    }();
+    return {true, code, static_cast<Word>((code * Word{0x9e3779b9u}) & order_mask),
+            seqan3::nucleotide_alphabet<Alphabet> && reverse < forward ? 1u : 0u};
+}
+
+template<class Alphabet, class Word>
+[[nodiscard]] std::vector<exact_record> oracle(
+    const std::vector<Alphabet>& data, std::size_t w, std::size_t k)
+{
+    using hash_traits = typename range_type<exact_alphabet<Alphabet>, Word>::traits;
+    constexpr auto digits = std::numeric_limits<Word>::digits;
+    const auto code_bits = k * hash_traits::bits_per_char;
+    REQUIRE(code_bits <= digits);
+    const Word mask = code_bits == digits ? std::numeric_limits<Word>::max()
+        : static_cast<Word>((Word{1u} << code_bits) - Word{1u});
+    std::vector<enumerated_kmer<Alphabet, Word>> kmers(data.size());
+    for (std::size_t end = k - 1u; end < data.size(); ++end)
+        kmers[end] = enumerate<Alphabet, Word>(data, end, k);
+    std::vector<exact_record> output;
+    std::size_t seedable_run = 0u;
+    for (std::size_t end = 0u; end < data.size(); ++end) {
+        bool seedable = true;
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>)
+            seedable = seqan3::to_char(data[end]) != 'N';
+        seedable_run = seedable ? seedable_run + 1u : 0u;
+        if (seedable_run < k + w - 1u) continue;
+        std::optional<std::size_t> chosen;
+        for (std::size_t position = end + 1u - w; position <= end; ++position) {
+            if (kmers[position].valid && (!chosen || kmers[position].order < kmers[*chosen].order))
+                chosen = position; // Strict less retains the earliest equal minimum.
+        }
+        if (!chosen) continue;
+        const auto& selected = kmers[*chosen];
+        exact_record record{
+            bioseq::simd::minimap_int_hasher<exact_alphabet<Alphabet>>::template scramble<Word>(selected.code, mask),
+            *chosen, selected.strand};
+        if (output.empty() || output.back() != record) output.push_back(record);
+    }
+    std::ranges::sort(output);
+    output.erase(std::ranges::unique(output).begin(), output.end());
+    return output;
+}
+
+template<class Alphabet>
+[[nodiscard]] std::vector<Alphabet> data(std::size_t size, std::uint32_t seed = 0x15a6b38du)
+{
+    std::vector<Alphabet> result(size);
+    for (auto& symbol : result) {
+        seed = seed * 1664525u + 1013904223u;
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+            auto dna = seqan3::assign_rank_to((seed >> 29u) & 3u, seq::dna4{});
+            seqan3::assign_char_to(seqan3::to_char(dna), symbol);
+        } else {
+            seqan3::assign_rank_to((seed >> 17u) % seqan3::alphabet_size<Alphabet>, symbol);
+        }
+    }
+    return result;
+}
+
+template<class Alphabet, class Unit, class Word>
+[[nodiscard]] auto check(const std::vector<Alphabet>& input, std::size_t w, std::size_t k)
+{
+    CAPTURE(static_cast<unsigned>(alphabet_code<Alphabet>()), sizeof(Unit), sizeof(Word), w, k, input.size());
+    constexpr auto letters = range_type<Alphabet, Unit>::traits::letters_per_unit;
+    REQUIRE(input.size() % letters == 0u); // Global-window oracle is for unpadded sources.
+    auto expected = oracle<Alphabet, Word>(input, w, k);
+    auto actual = run_resident<Alphabet, Unit, wide_record>(input, w, k, 0u,
+        two_stack_route::resident_vector_stream);
+    REQUIRE(actual.kernel.status == minimizer_kernel_status::ok);
+    REQUIRE(actual.sink_ok);
+    REQUIRE(actual.kernel.emitted == actual.records.size());
+    const auto& stats = actual.kernel.stats.two_stack;
+    REQUIRE(stats.is_internally_consistent(true));
+    REQUIRE(stats.resident_vector_stream_kernel_calls == 1u);
+    REQUIRE(stats.resident_vector_stream_single_calls + stats.resident_vector_stream_dual_calls == 1u);
+    REQUIRE(stats.resident_vector_stream_nonempty_work_calls == 1u);
+    REQUIRE(stats.resident_vector_stream_input_bp == input.size());
+    REQUIRE(stats.resident_vector_stream_minimizers_emitted == actual.records.size());
+    REQUIRE(stats.generic_u64_kernel_calls == 0u);
+    REQUIRE(stats.kmer_15_window_10_byte_8_uint32_hash_kernel_calls == 0u);
+    REQUIRE(stats.scalar_backend_branches == 0u);
+    std::ranges::sort(actual.records);
+    actual.records.erase(std::ranges::unique(actual.records).begin(), actual.records.end());
+    REQUIRE(actual.records == expected);
+    return actual;
+}
+
+/** Reuse the recovered oracle for one explicit resident traversal and two wraps per lane. */
+void run()
+{
+    const auto& binding = bioseq::simd_dispatch::highway_test_target_binding();
+    REQUIRE(std::addressof(fixed_table()) == binding.kernels);
+    REQUIRE(binding.target == HWY_TARGET);
+    using word_type = std::uint32_t;
+    const hn::ScalableTag<word_type> tag;
+    REQUIRE(hn::Lanes(tag) >= 2u);
+    constexpr std::size_t w = 10u;
+    constexpr std::size_t k = std::numeric_limits<word_type>::digits
+        / range_type<seq::dna4, word_type>::traits::bits_per_char;
+    constexpr auto letters = range_type<seq::dna4, word_type>::traits::letters_per_unit;
+    using hash_traits = bioseq::simd::minimap_int_hasher<seq::dna4>::scalar_hash<word_type>::traits;
+    constexpr auto strand_bits = static_cast<std::size_t>(hash_traits::canonical_reverse_complement);
+    constexpr auto position_bits = std::numeric_limits<word_type>::digits / 2u - strand_bits;
+    constexpr std::size_t position_max = (std::size_t{1u} << position_bits) - 1u;
+    constexpr std::size_t wrap_delta = position_max - w - 1u;
+    constexpr std::size_t first_wrap_step = wrap_delta + w;
+    constexpr std::size_t second_wrap_step = first_wrap_step + wrap_delta;
+    constexpr std::size_t context_units = (k + w - 2u) / letters + 1u;
+    constexpr std::size_t palindrome_radius = k + 2u * w;
+    // Keep a substantial valid tail after the second deliberately invalid boundary.
+    constexpr std::size_t tail_symbols = 64u * (k + w);
+    const auto lane_count = 2u * hn::Lanes(tag);
+    const auto per_lane_units =
+        (second_wrap_step + palindrome_radius + tail_symbols + letters - 1u) / letters;
+    const auto source_units = lane_count * per_lane_units + context_units;
+    const auto [actual_units_per_lane, offsets] =
+        bioseq::simd::iteration_geometry::calculate_iteration_offsets<
+            2u * hn::MaxLanes(hn::ScalableTag<word_type>{})>(
+                source_units, lane_count, context_units);
+    REQUIRE(actual_units_per_lane == per_lane_units);
+    REQUIRE(offsets[0] == 0u);
+    const auto steps_per_lane = (context_units + actual_units_per_lane) * letters;
+    REQUIRE(steps_per_lane > second_wrap_step + palindrome_radius + k + w);
+    for (std::size_t lane = 0u; lane < lane_count; ++lane)
+        REQUIRE(offsets[lane] + actual_units_per_lane + context_units <= source_units);
+    REQUIRE(offsets[lane_count - 1u] + actual_units_per_lane + context_units == source_units);
+
+    auto source = data<seq::dna4>(source_units * letters);
+    // Even-K alternating AT has valid native ranks but every complete k-mer is
+    // a canonical palindrome. Each entire selected window is invalid at both wraps.
+    for (std::size_t lane = 0u; lane < lane_count; ++lane) {
+        const auto lane_begin = offsets[lane] * letters;
+        for (const auto wrap_step : {first_wrap_step, second_wrap_step}) {
+            const auto boundary = lane_begin + wrap_step;
+            REQUIRE(boundary >= palindrome_radius);
+            REQUIRE(boundary + palindrome_radius <= source.size());
+            for (std::size_t position = boundary - palindrome_radius;
+                 position < boundary + palindrome_radius; ++position)
+                seqan3::assign_char_to(position % 2u == 0u ? 'A' : 'T', source[position]);
+        }
+    }
+    // Check fixture invalidity after all lane edits, so overlapping context cannot
+    // silently turn a required invalid boundary back into a valid candidate.
+    for (std::size_t lane = 0u; lane < lane_count; ++lane) {
+        for (const auto wrap_step : {first_wrap_step, second_wrap_step}) {
+            const auto boundary = offsets[lane] * letters + wrap_step;
+            for (std::size_t back = 1u; back <= w; ++back)
+                REQUIRE_FALSE((enumerate<seq::dna4, word_type>(source, boundary - back, k).valid));
+        }
+    }
+
+    // check() retains raw emitted/sink/route counters before normalizing complete
+    // hash/position/strand triples. It does not claim raw parallel emission ordering.
+    const auto wrapped = check<seq::dna4, word_type, word_type>(source, w, k);
+    REQUIRE(wrapped.kernel.stats.two_stack.resident_vector_stream_dual_calls == 1u);
+    REQUIRE_FALSE(wrapped.records.empty());
+    constexpr auto high_code_bit = word_type{1u}
+        << (std::numeric_limits<word_type>::digits - 1u);
+    for (std::size_t lane = 0u; lane < lane_count; ++lane) {
+        CAPTURE(lane);
+        const auto lane_begin = offsets[lane] * letters;
+        const auto post_begin = lane_begin + second_wrap_step + palindrome_radius + k + w;
+        const auto post_end = lane_begin + actual_units_per_lane * letters;
+        REQUIRE(post_begin < post_end);
+        REQUIRE(std::ranges::any_of(wrapped.records, [post_begin, post_end](const auto& record) {
+            return record.position >= post_begin && record.position < post_end && record.strand == 0u;
+        }));
+        REQUIRE(std::ranges::any_of(wrapped.records, [post_begin, post_end](const auto& record) {
+            return record.position >= post_begin && record.position < post_end && record.strand == 1u;
+        }));
+        REQUIRE(std::ranges::any_of(wrapped.records,
+            [&source, post_begin, post_end](const auto& record) {
+                if (record.position < post_begin || record.position >= post_end) return false;
+                const auto selected = enumerate<seq::dna4, word_type>(source, record.position, k);
+                return selected.valid && (selected.code & high_code_bit) != 0u;
+            }));
+    }
+}
+} // namespace manual_resident_ring_probe
+// END TEMP native resident ring metadata verification.
+
 TEST_CASE("two_stack_nthash checked table — resident vector-stream fingerprint matches the fixed value",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
+    manual_resident_ring_probe::run(); // TEMP two-wrap oracle; existing checks below unchanged.
     const auto data = fixture(4096u);
     auto result = run_resident<seq::dna4, std::uint32_t>(
         data, 10u, 15u, 0u, two_stack_route::resident_vector_stream);
@@ -660,11 +891,35 @@ TEST_CASE("two_stack_nthash checked table — maximum K15 hash remains a valid r
     REQUIRE(result.records.front().hash == 0x3fffffffu);
     REQUIRE(result.records.front().position == sentinel_kmer.size() - 1u);
     REQUIRE(result.records.front().strand == 0u);
+    // The mathematical K15 maximum remains data when the physical field is wider.
+    // Equal-width exact schemes exclude that same value before window selection.
+    using exact_width_representation = minimizer_representation<33u, 30u>;
+    STATIC_REQUIRE(sizeof(exact_width_representation) == sizeof(std::uint64_t));
+    const auto exact_width_result = run_resident<
+        seq::dna4, std::uint32_t, exact_width_representation>(data, 1u, 15u);
+    require_success(exact_width_result, dna4_oracle<exact_width_representation>(data, 1u, 15u));
+    REQUIRE(exact_width_result.records.empty());
+
+    // Retain chronological coverage and force the same excluded motif through
+    // the resident predicate; the helper name alone does not prove its route.
+    const auto resident_exact_width_result = run_resident<
+        seq::dna4, std::uint32_t, exact_width_representation>(
+            data, 1u, 15u, 0u, two_stack_route::resident_vector_stream);
+    require_success(resident_exact_width_result,
+        dna4_oracle<exact_width_representation>(data, 1u, 15u));
+    REQUIRE(resident_exact_width_result.records.empty());
+    const auto& resident_stats = resident_exact_width_result.kernel.stats.two_stack;
+    REQUIRE(resident_stats.resident_vector_stream_kernel_calls == 1u);
+    REQUIRE(resident_stats.resident_vector_stream_nonempty_work_calls == 1u);
+    REQUIRE(resident_stats.resident_vector_stream_input_bp == data.size());
+    REQUIRE(resident_stats.generic_u64_kernel_calls == 0u);
 }
 
 TEST_CASE("two_stack_nthash checked table — 33-bit emitted positions remain exact",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
-    using representation = minimizer_representation<63u, 32u>;
+    using representation = minimizer_representation<33u, 30u>;
+    STATIC_REQUIRE(sizeof(representation) == sizeof(std::uint64_t));
+    STATIC_REQUIRE(representation::layout_type::k_position_bits == 33u);
     constexpr std::size_t output_base = static_cast<std::size_t>(
         (std::numeric_limits<std::uint32_t>::max)()) + 8192u;
     const auto data = fixture(257u);

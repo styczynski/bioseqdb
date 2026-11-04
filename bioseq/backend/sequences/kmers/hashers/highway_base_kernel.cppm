@@ -71,7 +71,7 @@ struct simd_hasher_base : hasher_base<p_alphabet, p_input_type> {
     };
 };
 
-/** @brief Requires a SIMD hasher whose next method returns its declared vector type. */
+/** Require rolling SIMD hashes and their canonical-code-to-output transformation. */
 template <template <typename> typename p_hasher_template,
           typename p_alphabet,
           typename p_input_type = std::uint64_t,
@@ -84,6 +84,10 @@ concept supports_simd_hash =
         {
             hasher.next(simd_tag, std::move(incoming))
         } -> std::same_as<typename p_simd_hasher_type::traits::hasher_return_type>;
+        {
+            p_hasher_template<p_alphabet>::template scramble_simd<p_simd_tag>(
+                simd_tag, incoming, incoming)
+        } -> std::same_as<hn::Vec<p_simd_tag>>;
     };
 
 } // namespace target

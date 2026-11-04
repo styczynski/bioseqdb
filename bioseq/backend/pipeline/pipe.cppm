@@ -20,7 +20,6 @@ module;
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <chrono>
 #include <concepts>
@@ -858,7 +857,7 @@ export {
             pipe_entry_detail::dynamic_shape_pipeline_dispatch,
             p_minimizer,
             p_alphabet>(
-            query_seq, target_seq, query_minimizers, std::move(target_minimizers), execution_plan, {});
+            query_seq, target_seq, query_minimizers, std::move(target_minimizers), execution_plan);
     }
 
     namespace pipe_entry_detail {
@@ -1025,68 +1024,6 @@ export {
         const std::size_t window_len = static_cast<std::size_t>(params.window_size);
         const std::size_t kmer_len = static_cast<std::size_t>(params.kmer_size);
 
-        pipe::transient_target_index_release_authorization exact_origin{};
-        if constexpr (bioseq::minimizers::generated_minimizer_physical_record<p_minimizer>) {
-            using record_layout = typename p_minimizer::layout_type;
-            constexpr bool owned_dispatch =
-                std::same_as<p_pipeline_dispatch, dynamic_shape_pipeline_dispatch>
-                || std::same_as<p_pipeline_dispatch,
-                    pinned_shape_pipeline_dispatch<record_layout::k_position_bits,
-                                                   record_layout::k_hash_bits>>;
-            constexpr auto rank_bits = bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>;
-            constexpr bool lossless_normalization = [] {
-                if constexpr (!seqan3::nucleotide_alphabet<p_alphabet>) {
-                    return seqan3::aminoacid_alphabet<p_alphabet>;
-                } else {
-                    std::array<bool, seqan3::alphabet_size<seq::dna4>> used_codes{};
-                    for (std::size_t rank = 0u; rank < seqan3::alphabet_size<p_alphabet>; ++rank) {
-                        const auto code = k_nt4_lut<p_alphabet>[rank];
-                        if (code >= used_codes.size()) continue;
-                        if (used_codes[code]) return false;
-                        used_codes[code] = true;
-                        p_alphabet letter{};
-                        letter.assign_rank(static_cast<seqan3::alphabet_rank_t<p_alphabet>>(rank));
-                        const auto complemented = seqan3::complement(letter);
-                        seq::dna4 canonical_letter{};
-                        canonical_letter.assign_char(seqan3::to_char(letter));
-                        if (k_nt4_lut<p_alphabet>[seqan3::to_rank(complemented)]
-                            != char_to_nt4(seqan3::to_char(seqan3::complement(canonical_letter))))
-                            return false;
-                    }
-                    return true;
-                }
-            }();
-            if constexpr (owned_dispatch && rank_bits > 0u && lossless_normalization) {
-                // Only this registered exact producer is admitted. A larger record
-                // around rolling32, scalar/custom or Vulkan output grants no origin.
-                const auto target_bit = static_cast<std::uint64_t>(params.highway_executed_target);
-                if (params.minimizer_algorithm == minimizer_algorithm::two_stack_nthash
-                    && execution_plan->route == pipe::seed_chain_route::host_seed_host_chain
-                    && params.highway_kernels != nullptr && std::has_single_bit(target_bit)
-                    && (target_bit & static_cast<std::uint64_t>(
-                        bioseq::simd_dispatch::registered_highway_dispatch_plan().runnable_targets)) != 0u
-                    && bioseq::simd_dispatch::registered_highway_target_binding(
-                        params.highway_executed_target).kernels == params.highway_kernels
-                    && kmer_len > 0u
-                    && kmer_len <= std::numeric_limits<std::uint64_t>::digits / rank_bits
-                    && *bioseq::common::checked_low_bits_mask<std::uint64_t>(kmer_len * rank_bits)
-                        <= p_minimizer::k_hash_field_mask) {
-                    const auto query_source = query_seq.borrow_rank_source(true);
-                    const auto target_source = target_seq.borrow_rank_source(true);
-                    if (query_source.worker_shareable && target_source.worker_shareable
-                        && query_source.resident && target_source.resident
-                        && query_source.symbol_count != 0u && target_source.symbol_count != 0u
-                        && query_source.resident->leading_symbol_offset == 0u
-                        && target_source.resident->leading_symbol_offset == 0u
-                        && query_source.symbol_count - 1u <= p_minimizer::k_position_field_mask
-                        && target_source.symbol_count - 1u <= p_minimizer::k_position_field_mask) {
-                        exact_origin.exact_query_source_ = query_source;
-                        exact_origin.exact_target_source_ = target_source;
-                    }
-                }
-            }
-        }
-
         // A GPU target-index build sketches the target itself. Other routes
         // prepare the  target sketch here. The adopted Vulkan host buffer stays
         // accounted for through its measured memory usage or a matching reservation
@@ -1160,30 +1097,6 @@ export {
             std::abort();
         }
 
-        if constexpr (bioseq::minimizers::generated_minimizer_physical_record<p_minimizer>) {
-            if (!is_gpu_target_index_build && !fixed_target_zero_copy_route
-                && exact_origin.exact_query_source_.resident
-                && exact_origin.exact_target_source_.resident
-                && query_sketch_stats.exact_simd_available && target_sketch_stats.exact_simd_available
-                && query_sketch_stats.exact_simd.bp_consumed == query_seq.bp_size()
-                && target_sketch_stats.exact_simd.bp_consumed == target_seq.bp_size()
-                && query_sketch_stats.exact_simd.minimizers_emitted == query_owner->size()
-                && target_sketch_stats.exact_simd.minimizers_emitted == target_minimizers.size()
-                && !query_owner->empty() && !target_minimizers.empty()) {
-                // Retain the existing fresh const vector; no second payload allocation.
-                exact_origin.exact_query_owner_ = query_owner;
-                exact_origin.exact_query_data_ = query_owner->data();
-                exact_origin.exact_query_count_ = query_owner->size();
-                exact_origin.pending_target_data_ = target_minimizers.data();
-                exact_origin.pending_target_count_ = target_minimizers.size();
-                exact_origin.exact_seed_span_ = kmer_len;
-                exact_origin.exact_record_id_ =
-                    bioseq::minimizers::minimizer_physical_record_detail::record_id<p_minimizer>();
-            } else {
-                exact_origin.clear_exact_origin();
-            }
-        }
-
         auto owned_target_minimizers = std::move(target_minimizers);
         std::vector<p_minimizer>{}.swap(target_minimizers);
         match_result_collection result =
@@ -1201,8 +1114,7 @@ export {
                       target_seq,
                       query_minimizers,
                       std::move(owned_target_minimizers),
-                      execution_plan,
-                      std::move(exact_origin));
+                      execution_plan);
         result.record_query_sketch_host_time(query_sketch_host_wall_ns);
         record_minimizer_sketch_execution_stats(
             result, query_sketch_stats, minimizer_sketch_role::query);

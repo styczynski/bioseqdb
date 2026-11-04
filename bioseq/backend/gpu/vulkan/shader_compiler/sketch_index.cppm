@@ -19,7 +19,8 @@ namespace bioseq::gpu::vulkan {
 /// Mode 0 counts minimizers. Mode 1 writes them into prefix-sum ranges.
 /// Mode 2 appends hash-position pairs through a shared counter.
 // clang-format off
-inline constexpr std::string_view k_ordered_sketch_body = R"GLSL(
+/// Packed readers, output packing and publication shared by structural sketch modes.
+inline constexpr std::string_view k_ordered_sketch_common_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
 struct sketch_tile {
@@ -40,6 +41,7 @@ layout(std430, set = 0, binding = 1) readonly buffer rank_lookup_buffer {
     uint alphabet_code;
     uint seed_policy_id;
     uint canonical_reverse_complement;
+    uint exact_rank_bits;
 };
 layout(std430, set = 0, binding = 2) readonly buffer tiles_buffer { sketch_tile tiles[]; };
 layout(std430, set = 0, binding = 3) buffer tile_counts_buffer { uint tile_counts[]; };
@@ -70,8 +72,6 @@ layout(push_constant) uniform push_constants {
     uint query_gate_word_count;
 } pc;
 
-)GLSL"
-R"GLSL(
 uint read_u32_word(uint word_index) { return seq_words[word_index]; }
 uint read_storage_unit(uint unit_index, uint unit_bits, uint byte_offset_words) {
     if (unit_bits == 64u) {
@@ -134,20 +134,6 @@ bool sketch_geq(sketch a, sketch b) { return sketch_leq(b, a); }
 bool sketch_match_diff(sketch a, sketch b) {
     return a.is_max == 0u && b.is_max == 0u && a.hash == b.hash
         && (a.pos != b.pos || a.strand != b.strand);
-}
-
-struct minimum_pair { sketch left; sketch right; };
-minimum_pair combine_minima(minimum_pair first, minimum_pair second) {
-    if (first.left.is_max != 0u) return second;
-    if (second.left.is_max != 0u) return first;
-    if (second.left.hash < first.left.hash) return second;
-    if (first.left.hash < second.left.hash) return first;
-    return minimum_pair(first.left.pos <= second.left.pos ? first.left : second.left,
-                        first.right.pos >= second.right.pos ? first.right : second.right);
-}
-bool same_selection(sketch first, sketch second) {
-    return first.is_max == 0u && second.is_max == 0u && first.hash == second.hash
-        && first.pos == second.pos && first.strand == second.strand;
 }
 
 bool query_gate_accepts(uint64_t hash) {
@@ -261,39 +247,27 @@ void emit_one(sketch_tile t, sketch s, uint emit_pos) {
         }
     }
 }
+)GLSL";
 
-)GLSL"
-R"GLSL(
-// Rolling-hash ordered minimizer sketch. Each invocation owns one tile
-// and runs minimap2's ordered window-minimum state machine over [replay_lo,
-// loop_hi), emitting only for owned positions [tile_lo, tile_hi). The canonical
-// k-mer hash is maintained incrementally (forward/reverse rolled one base per
-// step), and every invocation runs the emit without lane-0 serialization.
-// Output is bit-identical to `collect_minimizers_view`:
-// `valid_since_reset` (forward-code validity) gates the state machine, while a
-// separate `valid_rc` counter
-// suppresses the candidate while a reverse-complement-invalid base sits in the
-// window (a no-op for dna4/dna5 where rc-invalid implies fwd-invalid).
-void process_tile(uint tile_id) {
-    sketch_tile t = tiles[tile_id];
-    g_seq_word_offset = t.seq_word_offset;
-    g_owned_lo = t.tile_lo;
-    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
-    uint loop_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : min(t.bp_count, t.tile_hi);
-    g_local_count = 0u;
-    g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
-    g_expected_count = 0u;
-    g_target_emit_failed = false;
-    if (pc.emit_mode == 1u && pc.emit_pairs == 1u) {
-        g_expected_count = tile_counts[tile_id];
-        uint64_t range_end =
-            uint64_t(g_out_base) + uint64_t(g_expected_count);
-        if ((g_expected_count & k_target_emit_complete) != 0u
-            || range_end > uint64_t(counters[1])) {
-            fail_target_emit(k_target_emit_status_capacity);
-        }
-    }
+/// Bounded native rolling hash and two-endpoint minimum selection.
+inline constexpr std::string_view k_bounded_sketch_selector = R"GLSL(
+struct minimum_pair { sketch left; sketch right; };
+minimum_pair combine_minima(minimum_pair first, minimum_pair second) {
+    if (first.left.is_max != 0u) return second;
+    if (second.left.is_max != 0u) return first;
+    if (second.left.hash < first.left.hash) return second;
+    if (first.left.hash < second.left.hash) return first;
+    return minimum_pair(first.left.pos <= second.left.pos ? first.left : second.left,
+                        first.right.pos >= second.right.pos ? first.right : second.right);
+}
+bool same_selection(sketch first, sketch second) {
+    return first.is_max == 0u && second.is_max == 0u && first.hash == second.hash
+        && first.pos == second.pos && first.strand == second.strand;
+}
 
+bool sketch_scheme_shape_valid() { return pc.window_size <= 64u; }
+
+void select_tile(sketch_tile t, uint loop_hi) {
     uint64_t hmask = hash_field_mask();
     uint forward = 0u;
     uint reverse = 0u;
@@ -365,6 +339,168 @@ void process_tile(uint tile_id) {
             last_selected = selected.right;
         }
     }
+}
+)GLSL";
+
+/// Exact packed hash and origin ordered minimum state; one ring, no bounded state.
+inline constexpr std::string_view k_exact_sketch_selector = R"GLSL(
+bool sketch_scheme_shape_valid() {
+    return exact_rank_bits != 0u && exact_rank_bits <= pc.bits_per_char
+        && pc.kmer_size <= 64u / exact_rank_bits
+        && pc.kmer_size <= pc.hash_bits / exact_rank_bits;
+}
+
+void select_tile(sketch_tile t, uint loop_hi) {
+    // Rolling canonical-kmer hash constants (constant per tile).
+    uint step_bits = exact_rank_bits;
+    uint roll_bits = pc.kmer_size * step_bits;
+    uint64_t roll_mask = roll_bits == 64u ? ~uint64_t(0)
+        : (uint64_t(1) << roll_bits) - uint64_t(1);
+    uint shift_rc = step_bits * (pc.kmer_size - 1u);
+    uint64_t hmask = hash_field_mask();
+
+    uint64_t forward = uint64_t(0);
+    uint64_t reverse = uint64_t(0);
+    uint valid_rc = 0u;
+
+    sketch ring[compile_time_maximum_span];
+    uint buf_pos = 0u;
+    uint valid_since_reset = 0u;
+    bool init_mode = (t.replay_lo == 0u);
+    sketch current_min = max_sketch();
+    uint current_min_pos = 0u;
+
+    for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
+        bool is_init = init_mode;
+
+        // --- rolling candidate ending at seq_pos (bit-exact with candidate_at) ---
+        uint rank_here = read_rank_at_bp(seq_pos, pc.bits_per_char, pc.letters_per_unit,
+                                         pc.unit_bits, g_seq_word_offset, pc.char_mask);
+        // Mode0 is the existing two-bit identity-ranked nucleotide contract:
+        // its packed mask covers every rank and complement is rank XOR that mask.
+        // Other modes retain checked LUT normalization, including ambiguity.
+        uint code = pc.alphabet_kind == 0u ? rank_here
+            : (rank_here < rank_count ? rank_to_code[rank_here] : 0xffffffffu);
+        bool base_valid = code != 0xffffffffu;
+        if (base_valid) {
+            forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
+        } else {
+            forward = uint64_t(0);
+        }
+        if (canonical_reverse_complement != 0u) {
+            uint rc = pc.alphabet_kind == 0u ? (rank_here ^ pc.char_mask)
+                : (rank_here < rank_count ? rank_to_rc_code[rank_here] : 0xffffffffu);
+            if (rc != 0xffffffffu) {
+                reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
+                valid_rc = valid_rc + 1u;
+            } else {
+                reverse = uint64_t(0);
+                valid_rc = 0u;
+            }
+        }
+        sketch cand = max_sketch();
+
+        sketch pushed = max_sketch();
+        if (!base_valid) {
+            valid_since_reset = 0u;
+        } else {
+            valid_since_reset = valid_since_reset + 1u;
+            if (valid_since_reset >= pc.kmer_size &&
+                (canonical_reverse_complement == 0u ||
+                    (valid_rc >= pc.kmer_size && forward != reverse))) {
+                bool use_reverse = canonical_reverse_complement != 0u && reverse < forward;
+                uint64_t canonical = use_reverse ? reverse : forward;
+                uint64_t h = minimap_scramble(canonical, roll_mask);
+                // Origin exact profiles exclude the physical field sentinel, not
+                // the exact-domain mask when the selected record has spare bits.
+                if (h != hmask) cand = sketch(h, seq_pos, use_reverse ? 1u : 0u, 0u);
+            }
+            if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
+        }
+        uint prev_pos = buf_pos;
+        ring[buf_pos] = pushed;
+        buf_pos = (buf_pos + 1u) % pc.window_size;
+
+        if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
+            && current_min.is_max == 0u) {
+            for (uint j = buf_pos; j < pc.window_size; ++j) {
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
+            }
+            for (uint j = 0u; j < buf_pos; ++j) {
+                if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
+            }
+        }
+
+        if (sketch_leq(pushed, current_min)) {
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size || !is_init)
+                && current_min.is_max == 0u) {
+                emit_one(t, current_min, seq_pos);
+            }
+            current_min_pos = prev_pos;
+            current_min = pushed;
+        } else if (prev_pos == current_min_pos) {
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
+                && current_min.is_max == 0u) {
+                emit_one(t, current_min, seq_pos);
+            }
+            current_min = max_sketch();
+            for (uint j = buf_pos; j < pc.window_size; ++j) {
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
+            }
+            for (uint j = 0u; j < buf_pos; ++j) {
+                if (sketch_geq(current_min, ring[j])) { current_min = ring[j]; current_min_pos = j; }
+            }
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
+                && current_min.is_max == 0u) {
+                for (uint j = buf_pos; j < pc.window_size; ++j) {
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
+                }
+                for (uint j = 0u; j < buf_pos; ++j) {
+                    if (sketch_match_diff(current_min, ring[j])) emit_one(t, ring[j], seq_pos);
+                }
+            }
+        }
+
+        if (init_mode && valid_since_reset >= pc.window_size + pc.kmer_size) init_mode = false;
+    }
+
+    // Final emit belongs to the sequence end; only the owning final tile does it.
+    if (loop_hi >= t.bp_count && current_min.is_max == 0u) {
+        emit_one(t, current_min, t.bp_count > 0u ? t.bp_count - 1u : 0u);
+    }
+}
+)GLSL";
+
+/// Shared tile ownership, count/emit completion and dispatch traversal.
+inline constexpr std::string_view k_ordered_sketch_process_body = R"GLSL(
+void process_tile(uint tile_id) {
+    sketch_tile t = tiles[tile_id];
+    g_seq_word_offset = t.seq_word_offset;
+    g_owned_lo = t.tile_lo;
+    g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
+    uint loop_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : min(t.bp_count, t.tile_hi);
+    g_local_count = 0u;
+    g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
+    g_expected_count = 0u;
+    g_target_emit_failed = false;
+    // Ordinary minimizer output is preallocated or counted exactly. Its scanned
+    // tile range must fit before any write; the host rejects the whole result on
+    // total overflow. Count words remain unchanged for that post-fence check.
+    if (pc.emit_mode == 1u && pc.emit_pairs == 0u
+        && uint64_t(g_out_base) + uint64_t(tile_counts[tile_id]) > uint64_t(counters[1])) {
+        return;
+    }
+    if (pc.emit_mode == 1u && pc.emit_pairs == 1u) {
+        g_expected_count = tile_counts[tile_id];
+        uint64_t range_end =
+            uint64_t(g_out_base) + uint64_t(g_expected_count);
+        if ((g_expected_count & k_target_emit_complete) != 0u
+            || range_end > uint64_t(counters[1])) {
+            fail_target_emit(k_target_emit_status_capacity);
+        }
+    }
+
+    select_tile(t, loop_hi);
 
     if (pc.emit_mode == 0u) {
         tile_counts[tile_id] = g_local_count;
@@ -383,7 +519,8 @@ void process_tile(uint tile_id) {
 }
 
 void main() {
-    if (pc.window_size == 0u || pc.window_size > compile_time_maximum_span || pc.kmer_size == 0u) return;
+    if (pc.window_size == 0u || pc.window_size > compile_time_maximum_span
+        || pc.kmer_size == 0u || !sketch_scheme_shape_valid()) return;
     // One invocation per tile, grid-strided so the dispatch workgroup count is
     // free to be ceil(tile_count / local_size) (every lane active) yet still
     // correct for any larger dispatch.
@@ -393,6 +530,7 @@ void main() {
     }
 }
 )GLSL";
+
 // clang-format on
 
 /// @brief Compute an exclusive prefix sum within each block and save its total.

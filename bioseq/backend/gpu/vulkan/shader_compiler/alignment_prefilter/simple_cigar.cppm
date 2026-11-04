@@ -9,7 +9,8 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 /// @brief Aligns sequence windows and writes packed CIGAR strings within each job's capacity.
-/// Tries simple alignments first, then uses dynamic programming and traceback.
+/// Uniform scoring first tries valid, accurately scored heuristic scripts, which may be suboptimal.
+/// Dense scoring and unresolved uniform jobs use dynamic programming and traceback.
 /// For large windows, it saves tile boundaries within the band and recomputes
 /// tiles during traceback to limit storage Reports unupported inputs and
 /// CIGAR overflow through the result status.
@@ -346,19 +347,6 @@ bool better_greedy_gap_candidate(
                 || (gap_len == best_len && op < best_op)));
 }
 
-// Every global path has at most min(Q,T) aligned pairs and pays at least the
-// cheapest affine cost for its net length difference. Reaching that upper bound
-// certifies this script independently of alphabet, gap placement, or tie shape.
-bool uniform_shortcut_is_optimal(alignment_cigar_job job, int score) {
-    if (substitution.model != 0u || pc.match_score < 0 || -pc.mismatch_penalty > pc.match_score)
-        return false;
-    uint length_delta = job.query_len > job.target_len
-        ? job.query_len - job.target_len : job.target_len - job.query_len;
-    int minimum_gap_cost = length_delta == 0u ? 0 : best_gap_cost_value(length_delta);
-    int upper_bound = int(min(job.query_len, job.target_len)) * pc.match_score - minimum_gap_cost;
-    return score == upper_bound;
-}
-
 bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
     uint query_pos = 0u;
     uint target_pos = 0u;
@@ -446,7 +434,6 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
     }
 
     int score = int(match_count) * pc.match_score - int(gap_cost);
-    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }
@@ -553,7 +540,6 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
     }
 
     int score = int(match_count) * pc.match_score - int(gap_cost);
-    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }
@@ -587,7 +573,6 @@ bool emit_simple_script_success(
     if (gap_count >= 2u) {
         score -= best_gap_cost_value(second_len);
     }
-    if (!uniform_shortcut_is_optimal(job, score)) return false;
     write_success(job_index, job, score, cigar_length);
     return true;
 }

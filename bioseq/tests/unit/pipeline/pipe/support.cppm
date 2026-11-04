@@ -20,6 +20,7 @@ export import bioseq.common.seqan_adapter;
 export import bioseq.sequences;
 export import bioseq.sequences.kmers;
 export import bioseq.sequences.kmers.hashers.minimap_int;
+export import bioseq.sequences.kmers.hashers.base;
 export import bioseq.sequences.kmers.minimap2_sketch_baseline;
 export import bioseq.sequences.kmers.vulkan_minimizers;
 export import bioseq.sequences.kmers.two_stack_minimizers;
@@ -829,6 +830,19 @@ void check_bounded_nthash_native_coordinates() {
         minimizer_sketch_backend::bounded_nthash_simd,
         resident_stats, /*require_nonempty_vector_work=*/true));
     REQUIRE_FALSE(resident_collector.extract_sketches_data().empty());
+    if constexpr (!bioseq::minimizers::exact_minimizer_shape_fits(
+        bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>, 15u)) {
+        // Default scalar execution retains native ranks and the full k=15 shape.
+        collector_type scalar_collector;
+        const auto scalar_stats = minimizer_dispatch_range<minimizer_type>(
+            scalar_collector, resident_view, 0u, resident_view.bp_size(), 10u, 15u,
+            minimizer_sketch_backend::scalar, exact_simd_range_route::require_continuation,
+            fixed_highway_kernels());
+        REQUIRE(scalar_stats.scalar_available);
+        REQUIRE_FALSE(scalar_stats.bounded_nthash_available);
+        REQUIRE(normalized_raw_minimizers(scalar_collector)
+                == normalized_raw_minimizers(resident_collector));
+    }
     constexpr auto resident_width = static_cast<std::uint8_t>(
         std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
     constexpr auto resident_letters = bioseq::storage::packed_letters_per_unit(
@@ -909,6 +923,44 @@ void check_bounded_nthash_native_coordinates() {
         }
     }
     REQUIRE(admission.reserved_bytes() == reserved_before);
+    if constexpr (std::same_as<p_alphabet, seq::aa27>
+                  && std::same_as<p_storage_unit, std::uint32_t>) {
+        // One existing native fixture covers the forward-only exact constructor.
+        // Derive k from this existing output record's real hash capacity.
+        constexpr std::size_t exact_kmer = std::min<std::size_t>(15u,
+            minimizer_type::layout_type::k_hash_bits
+                / bioseq::minimizers::minimizer_exact_rank_bits<p_alphabet>);
+        static_assert(exact_kmer > 0u);
+        constexpr std::size_t exact_window = 5u;
+        collector_type exact_collector;
+        const auto exact_stats = minimizer_dispatch_range<minimizer_type>(
+            exact_collector, resident_view, 0u, resident_view.bp_size(),
+            exact_window, exact_kmer, minimizer_sketch_backend::exact_simd,
+            exact_simd_range_route::require_continuation, fixed_highway_kernels());
+        REQUIRE(minimizer_range_stats_matches_backend(
+            minimizer_sketch_backend::exact_simd, exact_stats, true));
+        REQUIRE(exact_stats.exact_simd_available);
+        REQUIRE_FALSE(exact_stats.scalar_available);
+        REQUIRE_FALSE(exact_stats.bounded_nthash_available);
+        REQUIRE(exact_stats.exact_simd.generic_u64_kernel_calls > 0u);
+        REQUIRE(exact_stats.exact_simd.resident_vector_stream_kernel_calls == 0u);
+        collector_type exact_oracle;
+        const auto oracle_stats = minimizer_dispatch_range<minimizer_type>(
+            exact_oracle, resident_view, 0u, resident_view.bp_size(),
+            exact_window, exact_kmer, minimizer_sketch_backend::scalar,
+            exact_simd_range_route::require_continuation, fixed_highway_kernels());
+        REQUIRE(oracle_stats.scalar_available);
+        const auto& actual = exact_collector.extract_sketches_data();
+        const auto& expected = exact_oracle.extract_sketches_data();
+        REQUIRE_FALSE(actual.empty());
+        REQUIRE(actual.size() == expected.size());
+        for (std::size_t index = 0u; index < actual.size(); ++index) {
+            CAPTURE(index, exact_kmer);
+            REQUIRE(actual[index].raw_value() == expected[index].raw_value());
+            REQUIRE(actual[index].strand() == 0u);
+        }
+        REQUIRE(admission.reserved_bytes() == reserved_before);
+    }
 }
 
 enum class injected_scanner_leaf {

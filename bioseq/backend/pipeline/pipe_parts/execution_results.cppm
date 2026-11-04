@@ -502,12 +502,6 @@ export {
                 auto resident = std::move(*adopted);
                 vulkan_target_index_ownership = resident->ownership;
                 resident->target_len = target_len;
-                if (resident->position_count != 0u &&
-                    !bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
-                        gpu_rt, *resident, /*strict_prefix=*/false)) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "GPU-built native posting authority validation failed");
-                }
                 if (params.vulkan_index_cache_enabled) {
                     auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
                     if (!inserted) {
@@ -886,12 +880,6 @@ export {
                 auto resident = std::move(*adopted);
                 vulkan_target_index_ownership = resident->ownership;
                 resident->target_len = target_len;
-                if (resident->position_count != 0u &&
-                    !bioseq::indexing::authenticate_gpu_built_sorted_dense_prefix(
-                        gpu_rt, *resident, /*strict_prefix=*/false)) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "GPU-built native posting authority validation failed");
-                }
                 if (params.vulkan_index_cache_enabled) {
                     auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
                     if (!inserted) {
@@ -1039,17 +1027,7 @@ export {
                      device_span->count() == sketch_span.size())
                         ? device_span->words()
                         : nullptr;
-                const auto native_query = bioseq::seeding::prepare_native_query_seed_windows(
-                    query_seq, sketch_span, static_cast<std::uint32_t>(params.kmer_size));
-                const auto native_target = bioseq::seeding::prepare_native_target_seed_windows(
-                    target_seq, sketch_span, runtime, resident_index, params.max_occ,
-                    static_cast<std::uint32_t>(params.kmer_size));
-                const auto native_rank_policy = bioseq::gpu::vulkan::make_vulkan_rank_lut<
-                    compact_sequence_range<p_alphabet>>();
                 bioseq::gpu::vulkan::gpu_seed_inputs inputs{
-                    .native_query = native_query.view(),
-                    .native_target = native_target.view(),
-                    .native_rank_policy = &native_rank_policy,
                     .host_minimizer_bytes = device_words != nullptr ? std::span<const std::byte>{}
                                                                     : std::as_bytes(sketch_span),
                     .device_minimizer_words = device_words,

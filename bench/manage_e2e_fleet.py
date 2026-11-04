@@ -517,13 +517,6 @@ def main() -> None:
                 choices = [c for c in children if c["stable_key"] not in reserved
                            and "ksw2_batched" not in c["stable_key"]
                            and (name == "local" or "vulkan" not in c["stable_key"])]
-                if (s.get("template_profile") or replicas.get(name, {}).get("template_profile")) == "dna4_uint64":
-                    # Existing x64 binaries explicitly reject DNA5 typmods.
-                    # Continue useful DNA4 coverage with these binaries; DNA5
-                    # Bioseq cells remain unmeasured until an all-alphabet build.
-                    # External minimap2 has its own independent alphabet support.
-                    choices = [c for c in choices if c["execution_cell"]["identity"]["engine"] == "minimap2"
-                               or c["execution_cell"]["identity"]["alphabet"] == "dna4"]
                 if family(name) == "c7g":
                     # 8GiB hosts currently reject 4G input admission; spend
                     # available time collecting 2G cells, not repeating that failure.

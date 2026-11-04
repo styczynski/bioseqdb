@@ -656,7 +656,8 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
         const std::uint64_t manifest_storage_contract =
             bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                 result.manifest);
-        const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+        const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
+            backend, result.manifest.alphabet_code, k_kmer_size);
         const auto producer_backend =
             bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend);
         if (result.head.layout !=
@@ -735,10 +736,12 @@ struct minimizer_generation_fixture_producer {
     std::uint64_t target_length = 0;
     bioseq::minimizers::minimizer_sketch_backend backend =
         bioseq::minimizers::minimizer_sketch_backend::scalar;
+    std::uint16_t alphabet_code = 0u;
+    std::uint16_t kmer_size = 0u;
 
     /// Return the minimizer scheme assigned to this test backend.
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity scheme_identity() const noexcept {
-        return bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+        return bioseq::indexing::minimizer_scheme_identity_for_backend(backend, alphabet_code, kmer_size);
     }
 
     /// Return  the producer identity assigned to this test backend.
@@ -824,8 +827,6 @@ build_minimizer_generation_integration_fixture_impl(
         ready_minimizer_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
                                      "bioseq generation fixture requires the grouped-SoA layout");
     }
-    const auto requested_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
-
     const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
     const relation_identity rid = index_relation_identity(rel_oid);
     minimizer_generation_administration_identity identity{
@@ -861,6 +862,8 @@ build_minimizer_generation_integration_fixture_impl(
             identity, sequence_rowno, state->registered_snapshot));
         minimizer_generation_source_locator source =
             state->setup_authorization->source_for_diagnostics();
+        const auto requested_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
+            backend, source.alphabet_code, kmer_size);
         const std::uint64_t source_content_checksum =
             state->setup_authorization->source_content_checksum_for_diagnostics();
         result.table_name = format_seqidx_name(index_name,
@@ -954,7 +957,8 @@ build_minimizer_generation_integration_fixture_impl(
                               sequence_rowno,
                               result.generation_id,
                               /*write_batch_row_limit=*/2);
-        minimizer_generation_fixture_producer producer{target_length, backend};
+        minimizer_generation_fixture_producer producer{
+            target_length, backend, source.alphabet_code, kmer_size};
         const bioseq::indexing::grouped_soa_generation_options options{
             .layout = layout,
             .generation_id = result.generation_id,
