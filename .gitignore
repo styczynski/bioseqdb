@@ -1,7 +1,5 @@
 .mcp.json
 .codex/config.toml
-build_auto_scripts/
-build_auto_scripts
 .codex
 
 .DS_Store

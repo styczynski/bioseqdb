@@ -1,3 +1,6 @@
 [submodule "DOCS"]
 	path = DOCS
 	url = https://github.com/styczynski/bioseqdb-docs.git
+[submodule "build_auto_scripts"]
+	path = build_auto_scripts
+	url = https://github.com/styczynski/bioseqdb-auto.git
