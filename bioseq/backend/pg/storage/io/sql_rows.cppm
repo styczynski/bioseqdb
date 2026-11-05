@@ -35,4 +35,9 @@ struct [[bioseq_sql::type({
 
 static_assert(std::is_aggregate_v<column_mapping>);
 
+/** FASTQ quality codec; NULL uses the declared destination or phred42. */
+struct [[bioseq_sql::type({.schema = bioseq::sql::fixed_schema<"bioseq">})]] load_options {
+    std::optional<text*> phred_type;
+};
+
 }  // namespace bioseq::storage::load_pg::composite_rows

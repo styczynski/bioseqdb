@@ -12,10 +12,12 @@ struct SnapshotData;
 export module bioseq.postgres.table:custom_scan_scan_runtime_symbol_count_materialization_contracts;
 
 import :custom_scan_runtime_placeholder_contracts;
+import bioseq.postgres.storage.scanner.source_provider_contract;
 
 /** @brief Fills symbol_count results from stored counts or by reading the sequence. */
 export void populate_symbol_count_placeholders(placeholder_constants& consts,
                                                RelationData* main,
                                                std::int64_t rowno,
                                                SnapshotData* registered_snapshot,
-                                               bool read_sequence_index);
+                                               bool read_sequence_index,
+                                               bioseq::storage::pg_sequence_source_provider* source_provider);

@@ -140,6 +140,7 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/indexing/persisted_minimizer_image/validation_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/indexing/storage_concept_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/indexing/symbol_counts_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/indexing/quality_summary_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/io/file_kind_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/io/identifier_parser/formats_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/io/identifier_parser/identifier_parser_test.cpp"
@@ -441,9 +442,9 @@ foreach(_bioseq_test_support_contract_source IN LISTS
       "${_bioseq_test_support_contract_source}")
   endif()
 endforeach()
-if(NOT _bioseq_std_import_test_source_count EQUAL 167)
+if(NOT _bioseq_std_import_test_source_count EQUAL 168)
   message(FATAL_ERROR
-    "Test source inventory must have exactly 167 import-std units; got "
+    "Test source inventory must have exactly 168 import-std units; got "
     "${_bioseq_std_import_test_source_count}")
 endif()
 unset(_bioseq_catch_universal_header_count)

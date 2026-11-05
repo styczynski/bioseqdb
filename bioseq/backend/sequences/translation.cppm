@@ -271,7 +271,7 @@ template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
     const auto expected_orientation = options.frame < 0
         ? storage::sequence_transform::reverse_complement : storage::sequence_transform::identity;
     if (source.orientation != expected_orientation
-        || source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
+        || source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
     return translation_detail::translate_rank_windows<Source>(
         source, *geometry, options.frame < 0, writer, transform);
@@ -291,12 +291,12 @@ template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
     if (end - begin > std::numeric_limits<std::size_t>::max() / 3u)
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::size_overflow});
     if (source.orientation != storage::sequence_transform::identity
-        || source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
+        || source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
     return translation_detail::back_translate_rank_windows<Source>(source, begin, end, writer, transform);
 }
 
-/** Convert native biological ranks into caller-admitted packed storage.
+/** Convert native sequence ranks into caller-admitted packed storage.
  * Parallel work uses the existing pool only when the caller and source permit it.
  * The caller selects transform once; workers receive that function pointer by value.
  * Translation requires a nonnull kernel; same-family recoding ignores the parameter.
@@ -310,11 +310,19 @@ template<sequence_alphabet Source, supports_compact_sequence_range Instance>
     using destination = typename compact_sequence_range<Instance>::traits::alphabet_type;
     constexpr bool forward = seqan3::nucleotide_alphabet<Source> && seqan3::aminoacid_alphabet<destination>;
     constexpr bool backward = seqan3::aminoacid_alphabet<Source> && seqan3::nucleotide_alphabet<destination>;
-    static_assert((seqan3::nucleotide_alphabet<Source> || seqan3::aminoacid_alphabet<Source>)
-        && (seqan3::nucleotide_alphabet<destination> || seqan3::aminoacid_alphabet<destination>));
+    static_assert((seqan3::nucleotide_alphabet<Source> || seqan3::aminoacid_alphabet<Source> || quality_alphabet<Source>)
+        && (seqan3::nucleotide_alphabet<destination> || seqan3::aminoacid_alphabet<destination> || quality_alphabet<destination>));
+    // The empty output path does not invoke a worker, so reject incompatible
+    // quality families before handing any range to the generic output builder.
+    if constexpr (quality_alphabet<Source> != quality_alphabet<destination>)
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+    if constexpr (quality_alphabet<Source> && quality_alphabet<destination>) {
+        if constexpr (quality_alphabet_traits<Source>::legacy != quality_alphabet_traits<destination>::legacy)
+            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+    }
     if (begin > end || end > source.symbol_count)
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::invalid_interval});
-    if (source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
+    if (source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
     std::size_t output_count = end - begin;
     translation_geometry geometry{};

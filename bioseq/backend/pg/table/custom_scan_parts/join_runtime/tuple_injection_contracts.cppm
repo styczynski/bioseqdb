@@ -25,6 +25,7 @@ export struct var_injector_context {
     placeholder_constants* consts;
     const bioseq_stub_oids* oids;
     Relation current_relation;
+    Index scan_relation_index{};
     Index match_sequence_varno;
     AttrNumber match_sequence_attno;
     Node* match_target_recipe;

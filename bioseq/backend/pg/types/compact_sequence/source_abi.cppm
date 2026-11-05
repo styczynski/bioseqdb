@@ -9,6 +9,7 @@ module;
 #include <new>
 #include <memory>
 #include <optional>
+#include <expected>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -19,6 +20,7 @@ module;
 export module bioseq.postgres.types.compact_sequence:source_abi;
 
 import :flat_abi;
+import bioseq.sequences.quality_summary;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.common.context;
@@ -173,12 +175,21 @@ export struct pg_sequence_source_backend_ops {
         compact_sequence_stdc_type_params,
         std::uint64_t,
         std::span<std::uint8_t>){};
+    /** Optional exact interval summary, under this source's registered snapshot. */
+    std::expected<std::optional<bioseq::sequences::quality_summary>, bioseq::sequences::quality_error>
+        (*read_quality_summary)(void const*, pg_sequence_read_session&,
+            bioseq::storage::sequence_locator const&, compact_sequence_stdc_type_params,
+            std::optional<std::uint64_t>, std::uint64_t, std::uint64_t, bool){};
+    void (*remember_quality_summary)(void const*, bioseq::storage::sequence_locator const&,
+        std::uint64_t, std::uint64_t, bioseq::sequences::quality_summary const&){};
 };
 
 /// Source state, and callbacks. Copying this handle does not add a source reference.
 export struct pg_sequence_source_handle {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};
+    std::optional<std::uint64_t> indexed_row_number{};
+    bool read_quality_index{true};
 };
 
 static_assert(std::is_trivially_copyable_v<pg_sequence_source_handle>);
@@ -237,7 +248,25 @@ export struct pg_sequence_session_owner_entry {
 };
 
 /// Read-sessitn control state kept alive until normal or error cleanup finishes.
+export struct pg_quality_read_statistics {
+    std::uint64_t index_hits{};
+    std::uint64_t payload_validations{};
+    std::uint64_t source_symbols{};
+    std::uint64_t summary_extractions{};
+    std::uint64_t cache_hits{};
+    std::uint64_t fallbacks{};
+    void add(const pg_quality_read_statistics& other) noexcept {
+        index_hits += other.index_hits;
+        payload_validations += other.payload_validations;
+        source_symbols += other.source_symbols;
+        summary_extractions += other.summary_extractions;
+        cache_hits += other.cache_hits;
+        fallbacks += other.fallbacks;
+    }
+};
+
 export struct pg_sequence_read_session {
+    pg_quality_read_statistics quality_statistics{};
     /* Keep this small control object in TopMemoryContext so PG_CATCH can still
      * release it after the caller's context resets. Larger read buffers and
      * entry records live under payload_context and are freed with that context. */

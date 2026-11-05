@@ -745,6 +745,7 @@ bioseq_register_sql_owner(
   SOURCES
     backend/pg/types/compact_sequence/array_string.cppm
     backend/pg/types/compact_sequence/cigar.cppm
+    backend/pg/types/compact_sequence/quality.cppm
     backend/pg/types/compact_sequence/concat_reverse.cppm
     backend/pg/types/compact_sequence/content.cppm
     backend/pg/types/compact_sequence/conversion.cppm

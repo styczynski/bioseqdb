@@ -22,12 +22,15 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <expected>
+#include <optional>
 
 export module bioseq.postgres.storage.scanner.source_provider_contract;
 
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences.compact_sequence_typmod;
+import bioseq.sequences.quality_summary;
 
 export namespace bioseq::storage {
 
@@ -239,7 +242,24 @@ struct pg_sequence_source_domain {
     bool reclaimable_hint = false;
     /// A reference-count error occurred. Further reads are rejected.
     bool refcount_fault = false;
+    // One bounded executor-local entry shares repeated scalar calls for the
+    // current source interval. Domain identity already includes the snapshot,
+    // relation, attribute, physical alphabet and provider generation.
+    std::optional<bioseq::sequences::quality_summary> quality_cached_summary;
+    std::array<std::int64_t, 128> quality_cached_counts{};
+    bool quality_cached_counts_valid = false;
+    bool quality_histogram_requested = false;
+    std::uint64_t quality_cached_epoch = 0;
+    std::uint64_t quality_cached_from = 0;
+    std::uint64_t quality_cached_to = 0;
+    bool quality_cached_from_index = false;
 };
+
+/** Installed by the PostgreSQL index owner, preserving the scanner/index dependency direction. */
+using quality_source_summary_reader = std::expected<std::optional<bioseq::sequences::quality_summary>,
+    bioseq::sequences::quality_error> (*)(pg_sequence_source_domain&, pg_sequence_read_session&,
+        const sequence_locator&, compact_sequence_stdc_type_params, std::uint64_t);
+inline quality_source_summary_reader read_quality_source_index = nullptr;
 
 } // namespace sequence_source_detail
 } // namespace bioseq::storage

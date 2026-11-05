@@ -99,11 +99,11 @@ struct compact_sequence_range_base {
 
         /** @brief Complements valid ranks, preserving invalid ranks for checked consumers. */
         [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept
-            requires requires(alphabet_type symbol) { seqan3::complement(std::move(symbol)); } {
+            requires bioseq::sequences::sequence_complementable<alphabet_type> {
             if (letter >= alphabet_size) {
                 return letter;
             }
-            return seqan3::complement(std::move((typename traits::alphabet_type()).assign_rank(letter))).to_rank();
+            return bioseq::sequences::sequence_complement((typename traits::alphabet_type()).assign_rank(letter)).to_rank();
         };
 
         /** @brief Constructs an alphabet symbol from a masked rank. */

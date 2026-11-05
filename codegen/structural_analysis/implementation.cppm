@@ -5806,6 +5806,76 @@ class structural_visitor final
         return true;
     }
 
+    /** Collect the complete physical registry from resolved types and constexpr metadata.
+     * Capability projections retain these ordinals; biological kernel inventories stay separate. */
+    void collect_storage_alphabets(const clang::TypeAliasDecl& declaration) {
+        const auto* registry = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+            declaration.getUnderlyingType()->getAsCXXRecordDecl());
+        if (!registry || registry->getSpecializedTemplate()->getName() != "supported_alphabets")
+            throw std::runtime_error("storage registry must instantiate supported_alphabets");
+        std::vector<clang::QualType> entries;
+        for (const auto& argument : registry->getTemplateArgs().asArray()) {
+            if (argument.getKind() == clang::TemplateArgument::Pack) {
+                for (const auto& entry : argument.pack_elements()) entries.push_back(entry.getAsType());
+            } else entries.push_back(argument.getAsType());
+        }
+        auto& result = output_.storage_alphabets;
+        result.clear();
+        std::set<std::string> names, types;
+        for (const auto& type : entries) {
+            const auto* entry = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(type->getAsCXXRecordDecl());
+            if (!entry || !entry->getDefinition()) throw std::runtime_error("storage alphabet metadata is unresolved");
+            const auto value = [entry](std::string_view name) -> const clang::APValue& {
+                for (const auto* member : entry->getDefinition()->decls()) {
+                    const auto* variable = llvm::dyn_cast<clang::VarDecl>(member);
+                    if (variable && variable->getNameAsString() == name) {
+                        if (variable->getInit() == nullptr)
+                            throw std::runtime_error("uninstantiated storage alphabet metadata: " + std::string{name});
+                        if (const auto* resolved = variable->evaluateValue()) return *resolved;
+                    }
+                }
+                throw std::runtime_error("missing storage alphabet metadata: " + std::string{name});
+            };
+            const auto integer = [&value](std::string_view name) {
+                const auto& resolved = value(name);
+                if (!resolved.isInt() || resolved.getInt().isNegative() || resolved.getInt().getActiveBits() > 64)
+                    throw std::runtime_error("invalid storage alphabet constant");
+                return resolved.getInt().getZExtValue();
+            };
+            std::string name;
+            auto append = [&name](auto&& self, const clang::APValue& part) -> void {
+                if (part.isStruct()) {
+                    for (unsigned i = 0; i < part.getStructNumFields(); ++i) self(self, part.getStructField(i));
+                } else if (part.isArray()) {
+                    for (unsigned i = 0; i < part.getArrayInitializedElts(); ++i) self(self, part.getArrayInitializedElt(i));
+                } else if (part.isInt()) {
+                    const auto character = part.getInt().getZExtValue();
+                    if (character) name.push_back(static_cast<char>(character));
+                } else throw std::runtime_error("unresolved storage alphabet name");
+            };
+            append(append, value("alphabet_name"));
+            const auto alphabet = entry->getTemplateArgs().get(0).getAsType();
+            auto cpp_type = alphabet.getCanonicalType().getAsString(policy_);
+            if (!cpp_type.starts_with("::")) cpp_type.insert(0, "::");
+            const auto cardinality = integer("cardinality"), bits = integer("rank_bits");
+            if (cardinality < 2 || cardinality > 256 || bits != std::bit_width(cardinality - 1)
+                || name.empty() || !names.insert(name).second || !types.insert(cpp_type).second)
+                throw std::runtime_error("invalid complete storage alphabet registry");
+            const auto* definition = alphabet->getAsCXXRecordDecl();
+            if (definition == nullptr) throw std::runtime_error("storage alphabet has no record definition");
+            const auto definition_path = sources_.getFilename(sources_.getSpellingLoc(definition->getLocation())).str();
+            if (definition_path.empty()) throw std::runtime_error("storage alphabet definition lacks source identity");
+            result.push_back(alphabet_manifest_entry{
+                .qualified_cpp_type = std::move(cpp_type), .literal_name = std::move(name),
+                .ordinal = static_cast<std::uint16_t>(result.size()),
+                .cardinality = static_cast<std::uint16_t>(cardinality), .rank_bits = static_cast<std::uint8_t>(bits),
+                .is_amino_acid = integer("is_amino_acid") != 0,
+                .is_complementable = integer("is_complementable") != 0,
+                .is_quality = integer("is_quality") != 0, .is_rank_packed = integer("is_rank_packed") != 0,
+                .source_digest = bioseq::common::sha256_hex(output_.source_sha256 + "\n" + read_artifact_bytes(definition_path))});
+        }
+    }
+
     /// Resolve the registry through the instantiated entry declarations, never a name/cardinality map.
     void collect_biological_alphabets(const clang::TypeAliasDecl& declaration) {
         const auto* registry = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
@@ -5889,6 +5959,9 @@ class structural_visitor final
 
     bool VisitTypeAliasDecl(clang::TypeAliasDecl* declaration) {
         if (eligible(declaration)) {
+            if (declaration->getName() == "supported_storage_alphabets") {
+                collect_storage_alphabets(*declaration);
+            }
             if (declaration->getName() == "supported_biological_alphabets") {
                 collect_biological_alphabets(*declaration);
             }

@@ -359,9 +359,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # The CIGAR alphabet and RLE range partition are target-neutral sequence owners.
 # Native biological conversion is one additional target-neutral sequence owner.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 352)
+if(NOT _bioseq_nopg_module_count EQUAL 353)
   message(FATAL_ERROR
-        "Domain-neutral module inventory must contain exactly 352 authored units; "
+        "Domain-neutral module inventory must contain exactly 353 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)

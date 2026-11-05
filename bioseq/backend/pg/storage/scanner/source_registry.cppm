@@ -1028,8 +1028,9 @@ inline void ensure_callbacks_registered() {
         const sequence_locator& locator,
         compact_sequence_stdc_type_params stored_type,
         std::uint16_t last_padding_letters,
-        const sequence_source_version_row& row) noexcept {
-    return row.state == k_sequence_source_state_ready
+        const sequence_source_version_row& row,
+        std::int16_t required_state = k_sequence_source_state_ready) noexcept {
+    return row.state == required_state
         && row.source_epoch == locator.source_epoch
         && row.user_relid == registry.user_relid
         && row.database_oid == registry.database_oid
@@ -1068,8 +1069,8 @@ inline void ensure_callbacks_registered() {
     PG_TRY();
     {
         auto* domain = static_cast<pg_sequence_source_domain*>(
-            MemoryContextAllocZero(
-                TopMemoryContext, sizeof(pg_sequence_source_domain)));
+            MemoryContextAllocAligned(TopMemoryContext, sizeof(pg_sequence_source_domain),
+                alignof(pg_sequence_source_domain), MCXT_ALLOC_ZERO));
         pending = domain;
         ::new (static_cast<void*>(domain)) pg_sequence_source_domain{};
         domain->backend_thread = pg_sequence_backend_thread_token::capture();

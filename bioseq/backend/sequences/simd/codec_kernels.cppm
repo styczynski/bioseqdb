@@ -456,6 +456,18 @@ template<sequence_alphabet Alphabet, class Storage, std::size_t Bits, std::size_
 }
 
 /** Fused native byte lookup and bounded word packing for every registered alphabet. */
+template<class Alphabet, unknown_byte_policy Policy, class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> lookup_native_characters(D tag, hn::Vec<D> bytes,
+        const std::array<std::uint8_t, 256>& table, bool compact_lookup) {
+    if constexpr (bioseq::sequences::quality_alphabet<Alphabet>) {
+        using traits = bioseq::sequences::quality_alphabet_traits<Alphabet>;
+        const auto low = hn::Set(tag, traits::ascii_offset);
+        const auto high = hn::Set(tag, static_cast<std::uint8_t>(traits::ascii_offset + traits::cardinality - 1));
+        const auto invalid = hn::Or(hn::Lt(bytes, low), hn::Gt(bytes, high));
+        return hn::IfThenElse(invalid, hn::Set(tag, std::uint8_t{0xFF}), hn::Sub(bytes, low));
+    } else return lookup_byte_table(tag, bytes, table, compact_lookup);
+}
+
 template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
          class Storage, std::size_t Bits, std::size_t Letters>
 [[nodiscard]] HWY_INLINE sequence_encode_result encode_native_chunk(
@@ -476,7 +488,7 @@ template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
         const auto count = std::min(lanes, length - cursor);
         bool all_valid = false;
         if (count == lanes) {
-            const auto native = lookup_byte_table(
+            const auto native = lookup_native_characters<Alphabet, Policy>(
                 tag, hn::LoadU(tag, input + cursor), table, compact_lookup);
             if (hn::AllFalse(tag, hn::Eq(native, hn::Set(tag, std::uint8_t{0xFF})))) {
                 const auto status = append_native_rank_state(tag, native, count, state);
@@ -508,7 +520,7 @@ template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
             while (lane < count && packed_count < Letters) {
                 const auto rank = ranks[lane];
                 if (rank == std::uint8_t{0xFF}) {
-                    if constexpr (Policy == unknown_byte_policy::reject) break;
+                    if constexpr (Policy == unknown_byte_policy::reject || bioseq::sequences::quality_alphabet<Alphabet>) break;
                     ++lane;
                     continue;
                 }
@@ -529,7 +541,7 @@ template<class D, sequence_alphabet Alphabet, unknown_byte_policy Policy,
                         state.total_letters, packed_word, packed_count, write_unit);
                 DEBUG_ASSERT(appended, "validated native packing must fit its growing sink");
             }
-            if constexpr (Policy == unknown_byte_policy::reject) {
+            if constexpr (Policy == unknown_byte_policy::reject || bioseq::sequences::quality_alphabet<Alphabet>) {
                 if (lane < count && ranks[lane] == std::uint8_t{0xFF})
                     return {sequence_encode_status::invalid_character, cursor + lane,
                         state.total_letters - original_count, input[cursor + lane]};
@@ -557,7 +569,8 @@ template <sequence_alphabet p_alphabet,
     encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    return encode_native_chunk<hn::ScalableTag<std::uint8_t>, p_alphabet, p_policy>(
+    constexpr auto policy = bioseq::sequences::quality_alphabet<p_alphabet> ? unknown_byte_policy::reject : p_policy;
+    return encode_native_chunk<hn::ScalableTag<std::uint8_t>, p_alphabet, policy>(
         hn::ScalableTag<std::uint8_t>{}, state, body_bytes, body_size);
 }
 
@@ -597,7 +610,11 @@ HWY_INLINE void decode_native_words(D tag, const Storage* HWY_RESTRICT words,
             const auto native = hn::LoadU(tag, ranks.data());
             const auto characters = lookup_ranks_via_32byte_lut(tag,
                 hn::LoadDup128(tag, table.data()), hn::LoadDup128(tag, table.data() + 16u), native);
-            if constexpr (seqan3::alphabet_size<Alphabet> <= 32u)
+            if constexpr (bioseq::sequences::quality_alphabet<Alphabet>) {
+                const auto valid = hn::Lt(native, hn::Set(tag, static_cast<std::uint8_t>(seqan3::alphabet_size<Alphabet>)));
+                const auto ascii = hn::Add(native, hn::Set(tag, bioseq::sequences::quality_alphabet_traits<Alphabet>::ascii_offset));
+                hn::StoreU(hn::IfThenElse(valid, ascii, hn::Zero(tag)), tag, output + offset);
+            } else if constexpr (seqan3::alphabet_size<Alphabet> <= 32u)
                 hn::StoreU(characters, tag, output + offset);
             else hn::StoreU(lookup_byte_table(tag, native, table, false), tag, output + offset);
         } else for (std::size_t lane = 0; lane < take; ++lane) output[offset + lane] = table[ranks[lane]];

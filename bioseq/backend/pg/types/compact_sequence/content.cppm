@@ -277,7 +277,7 @@ template<bool p_match_order>
             left_input, right_input,
             [](auto left_view, auto right_view) -> int {
                 using alphabet = typename decltype(left_view)::alphabet_type;
-                if constexpr (alphabet_in_supported_set<pgseq_supported_biological_alphabets, alphabet>) {
+                if constexpr (!bioseq::cigar_operation_alphabet<alphabet>) {
                     return bioseq::storage::compare_lazy_sequences(
                         left_view, right_view);
                 } else {
@@ -664,7 +664,7 @@ Datum seq_larger(
             input,
             [prefixed](auto view) -> std::uint64_t {
                 using alphabet = typename decltype(view)::alphabet_type;
-                if constexpr (alphabet_in_supported_set<pgseq_supported_biological_alphabets, alphabet>) {
+                if constexpr (!bioseq::cigar_operation_alphabet<alphabet>) {
                     return bioseq::storage::hash_logical_sequence(
                         view, prefixed);
                 } else {

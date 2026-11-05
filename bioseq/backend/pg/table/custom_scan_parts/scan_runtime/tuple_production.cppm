@@ -277,6 +277,7 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
         injector_ctx.oids = &oids_snapshot;
         injector_ctx.current_relation =
             bioseq_scan_state->custom_scan_state.ss.ss_currentRelation;
+        injector_ctx.scan_relation_index = reinterpret_cast<CustomScan*>(ps.plan)->scan.scanrelid;
         injector_ctx.match_sequence_varno = runtime.match_sequence_varno;
         injector_ctx.match_sequence_attno = runtime.match_sequence_attno;
         injector_ctx.match_target_recipe = runtime.match_target_recipe;
@@ -530,7 +531,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                                                    node->ss_currentRelation,
                                                    next->sequence_rowno,
                                                    bioseq_scan_state->snapshot,
-                                                   runtime.aligner_state.read_sequence_index);
+                                                   runtime.aligner_state.read_sequence_index,
+                                                   runtime.lazy_source_provider);
 
                 /* Make sources readable for this projection, then put their original
                  * locators back. Another match from the same buffered row must survive
@@ -854,7 +856,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                             node->ss_currentRelation,
                             row_number,
                             bioseq_scan_state->snapshot,
-                            runtime.aligner_state.read_sequence_index);
+                            runtime.aligner_state.read_sequence_index,
+                            runtime.lazy_source_provider);
                     }
 
                     ProjectionInfo* proj = ExecBuildProjectionInfo(runtime.newtargetlist,

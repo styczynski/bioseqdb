@@ -16,6 +16,7 @@ module;
 #include <libassert/assert.hpp>
 #include <optional>
 #include <string_view>
+#include <stdexcept>
 export module bioseq.indexing.symbol_counts;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
@@ -23,6 +24,7 @@ import bioseq.indexing.traits;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.sequences;
+import bioseq.sequences.quality_summary;
 import bioseq.sequences.cigar;
 import bioseq.sequences.simd;
 import bioseq.simd.utils;
@@ -124,6 +126,71 @@ template <class p_storage>
 struct symbol_counts_index {
     static_assert(is_index_chunked_storage_for<
         p_storage, sequence_index_layout::sequence_inline>);
+
+    /** Build the tagged quality payload using the existing single-pass histogram. */
+    template<bioseq::sequences::quality_alphabet Alphabet>
+    static void build(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+            std::uint64_t source_epoch) {
+        using namespace bioseq::sequences;
+        const auto counts = tally_symbol_counts(sequence);
+        if (!counts) { storage.index_error("symbol_counts: invalid quality source"); return; }
+        const auto summary = summarize_quality_histogram<Alphabet>(*counts);
+        if (!summary) { storage.index_error("symbol_counts: invalid quality histogram"); return; }
+        const auto bytes = encode_quality_index(quality_index_payload<Alphabet>{*summary, source_epoch, *counts});
+        if (!bytes) { storage.index_error("symbol_counts: invalid quality source epoch or summary"); return; }
+        storage.resize(bytes->size());
+        storage.template write_to_each<std::int64_t>([&bytes](std::size_t chunk,
+                std::int64_t* output, std::size_t capacity) {
+            if (chunk != 0 || capacity * sizeof(std::int64_t) != bytes->size())
+                throw std::runtime_error("symbol_counts quality output geometry mismatch");
+            std::copy(bytes->begin(), bytes->end(), reinterpret_cast<std::byte*>(output));
+            return chunk;
+        });
+    }
+
+    /** Fixed-size quality records are replaced in full after validating the new source. */
+    template<bioseq::sequences::quality_alphabet Alphabet>
+    static void rebuild(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+            std::uint64_t source_epoch) {
+        build(storage, sequence, source_epoch);
+    }
+
+    template<bioseq::sequences::quality_alphabet Alphabet>
+    [[nodiscard]] static std::expected<std::optional<bioseq::sequences::quality_index_payload<Alphabet>>,
+        bioseq::sequences::quality_error> read_quality(p_storage& storage,
+            std::uint64_t epoch, std::uint64_t length) {
+        const auto bytes = storage.chunk_byte_size();
+        if (!bytes) return std::optional<bioseq::sequences::quality_index_payload<Alphabet>>{};
+        const auto* data = reinterpret_cast<const std::byte*>(storage.template read_chunk<std::int64_t>());
+        auto value = bioseq::sequences::decode_quality_index<Alphabet>({data, bytes}, epoch, length);
+        if (!value) {
+            if (value.error() == bioseq::sequences::quality_error::stale_source)
+                return std::optional<bioseq::sequences::quality_index_payload<Alphabet>>{};
+            return std::unexpected(value.error());
+        }
+        return std::optional{*value};
+    }
+
+    template<bioseq::sequences::quality_alphabet Alphabet>
+    [[nodiscard]] static auto read_summary(p_storage& storage, std::uint64_t epoch, std::uint64_t length)
+        -> std::expected<std::optional<bioseq::sequences::quality_summary>, bioseq::sequences::quality_error> {
+        const auto value = read_quality<Alphabet>(storage, epoch, length);
+        if (!value) return std::unexpected(value.error());
+        if (!*value) return std::nullopt;
+        return (**value).summary;
+    }
+
+    template<bioseq::sequences::quality_alphabet Alphabet>
+    [[nodiscard]] static auto read_count(p_storage& storage, std::size_t rank,
+            std::uint64_t epoch, std::uint64_t length)
+        -> std::expected<std::optional<std::int64_t>, bioseq::sequences::quality_error> {
+        if (rank >= seqan3::alphabet_size<Alphabet>)
+            return std::unexpected(bioseq::sequences::quality_error::invalid_rank);
+        const auto value = read_quality<Alphabet>(storage, epoch, length);
+        if (!value) return std::unexpected(value.error());
+        if (!*value) return std::nullopt;
+        return (**value).counts[rank];
+    }
     /// @brief Storage layout used by this index.
     static constexpr sequence_index_layout index_type = sequence_index_layout::sequence_inline;
     /// @brief Registry name of this index.
@@ -146,7 +213,7 @@ struct symbol_counts_index {
 
     /** Count ordinary positional sequences and write the existing inline histogram. */
     template<sequence_alphabet Alphabet>
-        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+        requires (!bioseq::cigar_operation_alphabet<Alphabet> && !bioseq::sequences::quality_alphabet<Alphabet>)
     static void build(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
         const auto counts = tally_symbol_counts(sequence);
         if (!counts) {
@@ -177,7 +244,7 @@ struct symbol_counts_index {
 
     /** Validate all native source counts before replacing the existing stored histogram. */
     template<sequence_alphabet Alphabet>
-        requires (!bioseq::cigar_operation_alphabet<Alphabet>)
+        requires (!bioseq::cigar_operation_alphabet<Alphabet> && !bioseq::sequences::quality_alphabet<Alphabet>)
     static void rebuild(p_storage& storage, bioseq::storage::lazy_sequence_view<Alphabet> sequence) {
         const auto counts = tally_symbol_counts(sequence);
         if (!counts) {
@@ -223,6 +290,13 @@ struct symbol_counts_index {
         }
         if (bytes % sizeof(std::int64_t) != 0) {
             storage.index_error("symbol_counts: stored chunk byte size is not int64-aligned");
+        }
+        // QSC1 has a header plus a power-of-two histogram. Its two sizes are
+        // disjoint from every legacy raw histogram; never reinterpret its header.
+        if (bytes == 64 + 8 * bioseq::sequences::quality_histogram_slots<seqan3::phred42>
+            || bytes == 64 + 8 * bioseq::sequences::quality_histogram_slots<seqan3::phred68solexa>) {
+            storage.index_error("symbol_counts: quality payload requires a typed source epoch and length");
+            return std::nullopt;
         }
         const std::size_t rank_count = bytes / sizeof(std::int64_t);
         if (rank >= rank_count) {

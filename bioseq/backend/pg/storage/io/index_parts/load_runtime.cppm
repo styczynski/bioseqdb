@@ -40,7 +40,8 @@ extern "C" {
 #include "utils/array.h"         // deconstruct_array, ARR_ELEMTYPE
 #include "utils/builtins.h"      // text_to_cstring, cstring_to_text_with_len, regtypein
 #include "utils/lsyscache.h"     // getTypeInputInfo, get_typtype, getBaseType
-#include "utils/rel.h"           // RelationGetDescr
+#include "utils/rel.h"
+#include "utils/acl.h"           // RelationGetDescr
 #include "utils/resowner.h"      // CurrentResourceOwner, TopTransactionResourceOwner
 #include "utils/snapmgr.h" // Snapshot stack operations.
 #include "utils/typcache.h" // lookup_rowtype_tupdesc
@@ -164,7 +165,10 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
                                     const char* path,
                                     bioseq::io::sequence_file_kind kind,
                                     idp::header_format requested_fmt,
-                                    std::span<const idp::user_column_mapping> user_maps) {
+                                    std::span<const idp::user_column_mapping> user_maps,
+                                    const std::string& quality_name, std::optional<std::string> phred_type) {
+    const bool fastq = kind.format == bioseq::io::sequence_file_format::fastq;
+    if (fastq) prepare_quality_destination(relid, quality_name, phred_type);
     load_context ctx{};
     ctx.main_relid = relid;
     const MemoryContext stable_context = CurrentMemoryContext;
@@ -179,12 +183,14 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
         ctx.parent_rel = bioseq::postgres::support::invoke_pg_as_cpp([relid, saved] {
             CurrentResourceOwner = TopTransactionResourceOwner;
             Relation result = table_open(relid, RowExclusiveLock);
+            const auto acl = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
+            if (acl != ACLCHECK_OK) aclcheck_error(acl, OBJECT_TABLE, RelationGetRelationName(result));
             CurrentResourceOwner = saved;
             return result;
         });
 
         ctx.parent_td = RelationGetDescr(ctx.parent_rel);
-        ctx.cols = resolve_load_columns(ctx.parent_rel);
+        ctx.cols = resolve_load_columns(ctx.parent_rel, quality_name, fastq);
         setup_typed_column_mapping(ctx, path, kind, requested_fmt, user_maps);
         ctx.db_oid = ctx.parent_rel->rd_locator.dbOid;
         ctx.spc_oid = ctx.parent_rel->rd_locator.spcOid;
@@ -224,7 +230,9 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
         ctx.writer_ref = idp::make_identifier_writer_reference(writer);
         n = dispatch_and_stream(ctx, writer, path, kind);
         teardown_load_executor(ctx, stable_context);
+        if (ctx.cols.quality_attno) inject_load_failure(4);
         flush_pending_load_writes(ctx);
+        if (ctx.cols.quality_attno) inject_load_failure(5);
         MemoryContextSwitchTo(stable_context);
         finish_load_write_states(ctx);
         build_indexes_if_enabled(ctx.main_relid);

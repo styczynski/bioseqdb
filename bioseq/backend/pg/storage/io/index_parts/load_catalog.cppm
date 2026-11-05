@@ -31,10 +31,14 @@ extern "C" {
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
 #include "catalog/namespace.h"
+#include "catalog/pg_class_d.h"
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
 #include "executor/tuptable.h"   // TupleTableSlot, MakeTupleTableSlot, TTSOpsVirtual, Exec*Tuple
+#include "executor/spi.h"
+#include "utils/acl.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"     // makeNode (ResultRelInfo)
 #include "optimizer/optimizer.h" // expression_planner
 #include "utils/array.h"         // deconstruct_array, ARR_ELEMTYPE
@@ -178,6 +182,86 @@ void finish_load_write_states(load_context& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
+/** Decode generated nullable load options without relying on composite layout. */
+[[nodiscard]] std::optional<std::string> parse_load_options(HeapTupleHeader header) {
+    using codec = bioseq::postgres::storage::io::sql_row_codecs::load_options_codec;
+    auto* descriptor = bioseq::postgres::support::invoke_pg_as_cpp([header] {
+        return lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId(header), HeapTupleHeaderGetTypMod(header));
+    });
+    try {
+        HeapTupleData tuple{};
+        tuple.t_len = HeapTupleHeaderGetDatumLength(header);
+        tuple.t_data = header;
+        const auto options = codec::deform(&tuple, descriptor, CurrentMemoryContext);
+        std::optional<std::string> name;
+        if (options.phred_type) {
+            name = bioseq::postgres::support::invoke_pg_as_cpp([value = *options.phred_type] {
+                return text_to_cstring(value);
+            });
+        }
+        bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { ReleaseTupleDesc(descriptor); });
+        return name;
+    } catch (...) {
+        bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { ReleaseTupleDesc(descriptor); });
+        throw;
+    }
+}
+
+/** Resolve and, if needed, add a FASTQ quality column before any live writer exists. */
+void prepare_quality_destination(Oid relid, const std::string& name,
+        std::optional<std::string> requested) {
+    if (name.empty() || name.size() >= NAMEDATALEN || name.find('\0') != std::string::npos)
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "invalid quality destination name");
+    if (requested && *requested == "phred") *requested = "phred42";
+    const auto code = requested ? pgseq_supported_alphabets::try_index_of_name(requested->c_str())
+                               : std::optional<pgseq_supported_alphabets::alphabet_code_t>{};
+    if (requested && (!code || !is_quality_alphabet_code(*code)))
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
+            "phred_type must be phred, phred42, phred63 or phred68-legacy");
+    // Recheck after acquiring the stronger lock; never hold row/fragment resources during DDL.
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &requested, &code] {
+        Relation relation = table_open(relid, RowExclusiveLock);
+        AttrNumber attno = get_attnum(relid, name.c_str());
+        if (attno == InvalidAttrNumber) {
+            table_close(relation, RowExclusiveLock);
+            relation = table_open(relid, AccessExclusiveLock);
+            attno = get_attnum(relid, name.c_str());
+            if (attno == InvalidAttrNumber) {
+                if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+                    ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                        errmsg("must be owner of table %s", RelationGetRelationName(relation)),
+                        errhint("Ask the table owner to predeclare quality column \"%s\" before loading FASTQ.", name.c_str())));
+                const auto* qualified = quote_qualified_identifier(
+                    get_namespace_name(RelationGetNamespace(relation)), RelationGetRelationName(relation));
+                const auto* quoted = quote_identifier(name.c_str());
+                const auto* alphabet = requested ? requested->c_str() : "phred42";
+                char* command = psprintf("ALTER TABLE %s ADD COLUMN %s bioseq.seq('%s')", qualified, quoted, alphabet);
+                if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "cannot connect SPI for quality column DDL");
+                const int status = SPI_execute(command, false, 0);
+                if (status != SPI_OK_UTILITY) elog(ERROR, "quality column DDL failed");
+                SPI_finish();
+                CommandCounterIncrement();
+                table_close(relation, NoLock);
+                relation = table_open(relid, NoLock);
+                attno = get_attnum(relid, name.c_str());
+            }
+        }
+        if (attno <= 0) ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION), errmsg("quality destination is missing")));
+        auto* attr = TupleDescAttr(RelationGetDescr(relation), attno - 1);
+        const auto type = compact_sequence_stdc_type_params::decode(attr->atttypmod < 0 ? 0 : attr->atttypmod);
+        if (attr->atttypid != load_seq_type_oid() || attr->atttypmod < 0
+            || !is_quality_alphabet_code(type.alphabet_code)
+            || !pgseq_supported_storage_unit_byte_widths::contains_runtime(type.storage_unit_byte_width)
+            || attr->attidentity || attr->attgenerated)
+            ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+                errmsg("quality destination \"%s\" must be a writable bound quality sequence", name.c_str())));
+        if (code && type.alphabet_code != *code)
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("phred_type disagrees with the declared quality destination")));
+        table_close(relation, NoLock);
+    });
+}
+
 // Map header fields to typed columns.
 
 /** @brief Column number and type information needed to convert header values. */
@@ -294,7 +378,7 @@ void setup_typed_column_mapping(load_context& ctx,
             continue;
         }
         const std::int16_t attno = static_cast<std::int16_t>(i + 1);
-        if (attno == seq_attno) {
+        if (attno == seq_attno || attno == ctx.cols.quality_attno) {
             continue;
         }
         if (attr->attidentity != '\0' || attr->attgenerated != '\0') {
@@ -303,6 +387,12 @@ void setup_typed_column_mapping(load_context& ctx,
                 fmt::format("column \"{}\" is an identity or generated column; "
                             "bioseq.load cannot populate identity/generated columns",
                             NameStr(attr->attname)));
+        }
+        if (attr->atttypid == load_seq_type_oid() && attr->atttypmod >= 0
+            && is_quality_alphabet_code(compact_sequence_stdc_type_params::decode(attr->atttypmod).alphabet_code)) {
+            if (attr->attnotnull && !attr->atthasdef)
+                raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION, "unmapped FASTA quality column requires NULL or a default");
+            continue;
         }
         const bool is_text = (attr->atttypid == TEXTOID || attr->atttypid == VARCHAROID ||
                               attr->atttypid == BPCHAROID);
@@ -324,8 +414,7 @@ void setup_typed_column_mapping(load_context& ctx,
         ctx.parser_active = false;
         ctx.effective_fmt = idp::header_format::plain;
         ctx.cols.header_attno = col_attrs[0].attno;
-        return;
-    }
+    } else {
     ctx.parser_active = true;
 
     // Sample headers to choose the format for  automatic parsing.
@@ -408,23 +497,23 @@ void setup_typed_column_mapping(load_context& ctx,
         });
     }
 
+    }
+
     // Prepare default expressions once, then evaluate them separately for each row.
     ctx.defaults.clear();
-    for (std::size_t i = 0; i < columns.size(); ++i) {
-        if (!columns[i].has_default) {
-            continue;
-        }
-        Node* const raw = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, &col_attrs, i] {
-            return build_column_default(ctx.parent_rel, col_attrs[i].attno);
+    for (int index = 0; index < td->natts; ++index) {
+        const auto* attr = TupleDescAttr(td, index);
+        if (attr->attisdropped || !attr->atthasdef || attr->attnum == seq_attno
+            || attr->attnum == ctx.cols.quality_attno) continue;
+        Node* raw = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, attr] {
+            return build_column_default(ctx.parent_rel, attr->attnum);
         });
-        if (raw == nullptr) {
-            continue;
-        }
-        Expr* const planned = bioseq::postgres::support::invoke_pg_as_cpp(
-            [raw] { return expression_planner(reinterpret_cast<Expr*>(raw)); });
-        ExprState* const state = bioseq::postgres::support::invoke_pg_as_cpp(
-            [planned] { return ExecInitExpr(planned, nullptr); });
-        ctx.defaults.push_back(default_col{col_attrs[i].attno, state});
+        if (!raw) continue;
+        auto* planned = bioseq::postgres::support::invoke_pg_as_cpp([raw] {
+            return expression_planner(reinterpret_cast<Expr*>(raw));
+        });
+        auto* state = bioseq::postgres::support::invoke_pg_as_cpp([planned] { return ExecInitExpr(planned, nullptr); });
+        ctx.defaults.push_back(default_col{attr->attnum, state});
     }
 
     // Create an executor only for defaults and table constraints. Loads that only

@@ -4,6 +4,8 @@
  */
 module;
 
+// Anchor Highway before imported codec templates instantiate byte-vector APIs.
+#include <hwy/highway.h>
 #include <bioseq/pg_compat.h>
 
 extern "C" {

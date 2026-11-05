@@ -22,6 +22,7 @@ export {
     struct symbol_count_call_site {
         Const* placeholder = nullptr;
         int rank = -1;
+        std::uint8_t quality_statistic = 0; // pg_quality_statistic; zero selects symbol_count
         char letter = '\0';
         std::int16_t column_attno = 0; // sequence column whose symbols are counted
         std::string column_name;  // column name used in rewrite diagnostics
@@ -57,5 +58,12 @@ export {
         Const* divergence_node = nullptr;
         Const* cigar_node = nullptr;
         std::vector<symbol_count_call_site> symbol_count_sites;
+        std::uint64_t quality_index_hits{};
+        std::uint64_t quality_cache_hits{};
+        std::uint64_t quality_fallbacks{};
+        std::uint64_t quality_validations{};
+        std::uint64_t quality_source_symbols{};
+        std::uint64_t quality_numeric_conversions{};
+        std::uint64_t quality_distinct_sources{};
     };
 }

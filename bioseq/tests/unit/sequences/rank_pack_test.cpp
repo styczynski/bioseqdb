@@ -25,7 +25,7 @@ namespace {
 template <class p_alphabet, class p_unit>
 using profile_stdc =
     compact_sequence_stdc<supported_alphabets<
-                              supported_biological_alphabets::entry_for<p_alphabet>>,
+                              supported_storage_alphabets::entry_for<p_alphabet>>,
                           std::uint32_t,
                           std::int32_t,
                           supported_storage_unit_byte_widths<sizeof(p_unit)>>;
@@ -529,7 +529,7 @@ TEST_CASE("rank packing covers all configured profiles independently of PostgreS
     // biological alphabets participate in the existing byte-level oracle.
     []<class... p_entries>(std::tuple<p_entries...>) {
         const auto visit_entry = []<class p_entry>() {
-            []<std::size_t... p_widths>(supported_storage_unit_byte_widths<p_widths...>) {
+            if constexpr (p_entry::is_rank_packed) []<std::size_t... p_widths>(supported_storage_unit_byte_widths<p_widths...>) {
                 using alphabet = typename p_entry::alphabet_type;
                 using header = compact_sequence_stdc<supported_alphabets<p_entry>>;
                 (require_exhaustive_profile<
@@ -540,9 +540,36 @@ TEST_CASE("rank packing covers all configured profiles independently of PostgreS
             }(all_storage_unit_byte_widths{});
         };
         (visit_entry.template operator()<p_entries>(), ...);
-    }(supported_biological_alphabets::alphabet_entries_tuple{});
+    }(supported_storage_alphabets::alphabet_entries_tuple{});
 #else
     // The reduced build retains its original DNA4/u64 profile.
     require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");
 #endif
+}
+
+TEST_CASE("quality character codecs reject every out-of-domain byte and preserve case", "[component:bioseq][layer:unit][feature:quality][resource:highway]") {
+    auto check = []<class Alphabet>() {
+        using config = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        const auto first = static_cast<unsigned char>(seqan3::to_char(Alphabet{}));
+        const auto size = seqan3::alphabet_size<Alphabet>;
+        for (unsigned byte = 0; byte < 256; ++byte) {
+            for (const auto prefix : {0u, 1u, 15u, 16u, 31u, 32u, 63u, 64u}) {
+                std::string input(prefix, static_cast<char>(first)); input.push_back(static_cast<char>(byte));
+                const auto scalar = bioseq::simd::active_target::encode_sequence_scalar<config>(input.data(), input.size());
+                const auto simd = bioseq::simd::active_target::encode_sequence_simd<config>(input.data(), input.size());
+                const bool valid = byte >= first && byte < first + size;
+                CAPTURE(byte, prefix, first, size);
+                REQUIRE(scalar.has_value() == valid); REQUIRE(simd.has_value() == valid);
+                if (valid) {
+                    REQUIRE(bioseq::simd::active_target::decode_sequence_simd(*simd) == input);
+                    REQUIRE(scalar->packed_units == simd->packed_units);
+                } else {
+                    REQUIRE(scalar.error().consumed_bytes == prefix);
+                    REQUIRE(simd.error().consumed_bytes == prefix);
+                    REQUIRE(simd.error().offending_byte == byte);
+                }
+            }
+        }
+    };
+    check.template operator()<seq::phred42>(); check.template operator()<seq::phred63>(); check.template operator()<seq::phred68solexa>();
 }

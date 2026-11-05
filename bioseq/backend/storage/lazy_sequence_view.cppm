@@ -25,7 +25,7 @@ namespace lazy_sequence_detail {
 /** Requires seqan3::complement for, an alphabet value. */
 template <class p_alphabet>
 concept complementable_sequence_alphabet =
-    requires(p_alphabet value) { seqan3::complement(std::move(value)); };
+    bioseq::sequences::sequence_complementable<p_alphabet>;
 
 static_assert(complementable_sequence_alphabet<seq::dna4>);
 static_assert(complementable_sequence_alphabet<seq::dna5>);
@@ -363,7 +363,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             .context = state_,
             .read_at = ops_->read_at[p_reverse_complement ? 2u : 0u],
             .symbol_count = bp_size(),
-            .alphabet_code = supported_biological_alphabets::index_of<p_alphabet>(),
+            .alphabet_code = supported_storage_alphabets::index_of<p_alphabet>(),
             .orientation = p_reverse_complement ? sequence_transform::reverse_complement
                                                : sequence_transform::identity,
             .worker_shareable = worker_shareable(),

@@ -28,6 +28,8 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.admin:rebuild_post_load;
 import bioseq.postgres.support;
+import bioseq.postgres.configuration.core;
+import :rebuild_core;
 import bioseq.indexing.type;
 import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.storage.indexing.admin.policy_catalog;
@@ -253,56 +255,24 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
  * @return The sum of the row counts returned by all index rebuilds.
  */
 [[nodiscard]] std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
-    const relation_identity rid = index_relation_identity(main_relid);
-    pg_supported_indexes idx;
-    idx.apply_table_defaults();
-
-    // Use the first sequence column's policy. The policy command writes the same
-    // settings for every sequence column, so this selects the table's indexes.
-    const std::string attno_sql =
-        fmt::format("SELECT a.attnum FROM pg_attribute a JOIN pg_type t "
-                    "ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
-                    "WHERE a.attrelid={}::oid AND t.typname='seq' "
-                    "AND n.nspname IN ('bioseq','bioseq_internal') "
-                    "AND a.attnum>0 AND NOT a.attisdropped "
-                    "ORDER BY a.attnum LIMIT 1",
-                    static_cast<unsigned>(main_relid));
-    const std::int16_t first_seq_attno = strict_spi_select_one(
-        attno_sql, /*read_only=*/true, "first sequence column", [](Datum value) noexcept {
-            return DatumGetInt16(value);
-        });
-    if (first_seq_attno <= 0) {
-        load_index_spi_error_as_cpp("first sequence column", "attribute number is not positive");
-    }
-    idx.merge_overrides(
-        load_table_policy_strict_for_post_load(main_relid, rid.relfilenode, first_seq_attno));
-
     constexpr auto k_index_types = pg_supported_indexes::list_types();
     std::int64_t total = 0;
     for (std::size_t i = 0; i < k_index_types.size(); ++i) {
-        if (!idx.enabled[i])
-            continue;
-        if (idx.policy[i] != bioseq::indexing::index_update_policy::update_on_insert)
-            continue;
-        // Run each rebuild in its own SPI executor frame so index-table changes
-        // and snapshot cleanup finish  before bioseq.load continues.
+        if (!index_allows_update_on_insert(k_index_types[i].first)) continue;
+        // The rebuild resolves each column's defaults and overrides independently.
         const std::string index_name{k_index_types[i].first};
-        const char* quoted_name = bioseq::postgres::support::invoke_pg_as_cpp(
-            [&index_name] { return quote_literal_cstr(index_name.c_str()); });
-        const std::string sql = fmt::format("SELECT bioseq.update_index({}::oid::regclass, {})",
-                                            static_cast<unsigned>(main_relid),
-                                            quoted_name);
-        const std::int64_t written =
-            strict_spi_select_one(sql,
-                                  /*read_only=*/false,
-                                  fmt::format("bioseq.update_index({})", index_name),
-                                  [](Datum value) noexcept { return DatumGetInt64(value); });
+        const std::int64_t written = update_index_impl<pg_supported_indexes>(
+            main_relid, index_name, /*filter_incompatible=*/true);
         if (written < 0 || written > (std::numeric_limits<std::int64_t>::max)() - total) {
             load_index_spi_error_as_cpp(
                 "bioseq.update_index result",
                 fmt::format("index={} count={} accumulated={}", index_name, written, total));
         }
         total += written;
+#if defined(BIOSEQ_TEST_INDEXES)
+        if (bioseq::settings::testing::load::failure_stage == 6)
+            load_index_spi_error_as_cpp("failure injection", "injected load failure at stage 6");
+#endif
     }
     return total;
 }

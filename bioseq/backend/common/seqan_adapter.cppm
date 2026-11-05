@@ -44,6 +44,9 @@ export {
 // Bioseq owns counted RLE runs and needs only the dependency's operation layer.
 #include <seqan3/alphabet/cigar/exposition_only/cigar_operation.hpp>
 #include <seqan3/alphabet/nucleotide/all.hpp>
+#include <seqan3/alphabet/quality/phred42.hpp>
+#include <seqan3/alphabet/quality/phred63.hpp>
+#include <seqan3/alphabet/quality/phred68solexa.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/math.hpp>
 }

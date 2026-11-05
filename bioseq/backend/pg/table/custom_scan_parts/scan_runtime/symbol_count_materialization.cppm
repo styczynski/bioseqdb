@@ -39,6 +39,7 @@ import bioseq.postgres.support.datums;
 import bioseq.postgres.table.io;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
+import bioseq.sequences.quality_summary;
 import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.layout;
@@ -154,7 +155,8 @@ export {
                                             Relation main,
                                             int64_t rowno,
                                             Snapshot registered_snapshot,
-                                            const bool read_sequence_index) {
+                                            const bool read_sequence_index,
+                                            bioseq::storage::pg_sequence_source_provider* source_provider) {
         if (consts.symbol_count_sites.empty()) {
             return;
         }
@@ -249,6 +251,11 @@ export {
             /* The row reader owns the values in vals. Keep it open until all
              * symbol-count calls have consumed their, sequence values. */
 
+            struct quality_row_value {
+                bioseq::sequences::quality_summary summary{};
+                std::array<std::int64_t, 128> counts{};
+            };
+            std::unordered_map<std::int16_t, quality_row_value> quality_values;
             for (auto& site : consts.symbol_count_sites) {
                 if (site.placeholder == nullptr)
                     continue;
@@ -271,6 +278,96 @@ export {
                 bioseq::storage::sequence_locator loc{};
                 if (stub)
                     loc = bioseq::storage::decode_locator_from_stub(hdr);
+
+                if (is_quality_alphabet_code(alpha)) {
+                    auto found = quality_values.find(site.column_attno);
+                    if (found == quality_values.end()) {
+                        ++consts.quality_distinct_sources;
+                        quality_row_value value{};
+                        bool indexed = false;
+                        bool counts_valid = false;
+                        const bool require_counts = std::ranges::any_of(consts.symbol_count_sites,
+                            [&site](const auto& request) {
+                                return request.column_attno == site.column_attno && request.quality_statistic == 0;
+                            });
+                        const bool cached = stub && bioseq::storage::cached_pg_quality_source_summary(
+                            source_provider, relid, registered_snapshot, site.column_attno, loc,
+                            compact_sequence_stdc_type_params{.alphabet_code = alpha, .storage_unit_byte_width = bw},
+                            read_sequence_index, require_counts, value.summary, value.counts, indexed, counts_valid);
+                        if (cached) ++consts.quality_cache_hits;
+                        if (!cached && read_sequence_index && stub) {
+                            auto store = bsi::open_sequence_storage(relid, rid.db_oid, rid.tablespace_oid,
+                                rid.relfilenode, site.column_attno, bioseq::indexing::k_symbol_counts_index_name,
+                                loc, static_cast<std::uint64_t>(rowno), resources->caches, resources->scratch);
+                            try {
+                                store.bind_read_snapshot(registered_snapshot);
+                                if (store.chunk_byte_size()) ++consts.quality_validations;
+                                pgseq_supported_quality_alphabets::dispatch_alphabet_by_code(alpha,
+                                    [&store, &value, &indexed, &counts_valid, loc]<class Alphabet>() {
+                                        const auto payload = bioseq::indexing::symbol_counts_index<bsi::sequence_index_storage>
+                                            ::read_quality<Alphabet>(store, loc.source_epoch, loc.logical_length);
+                                        if (!payload) pg_raise_quality_error(payload.error());
+                                        if (*payload) {
+                                            value.summary = (**payload).summary;
+                                            std::copy((**payload).counts.begin(), (**payload).counts.end(), value.counts.begin());
+                                            indexed = true;
+                                            counts_valid = true;
+                                        }
+                                    });
+                                store.close_checked();
+                            } catch (...) { store.abandon_after_pg_error_noexcept(); throw; }
+                        }
+                        if (indexed && !cached) ++consts.quality_index_hits;
+                        if (!indexed && !cached) {
+                            ++consts.quality_fallbacks;
+                            Datum source = PointerGetDatum(hdr);
+                            if (stub) {
+                                if (!resources->source_provider) {
+                                    resources->source_provider = bioseq::storage::create_standalone_pg_sequence_source_provider(
+                                        main, registered_snapshot);
+                                    resources->source_values = bioseq::postgres::support::invoke_pg_as_cpp([resources] {
+                                        return AllocSetContextCreate(resources->scratch, "bioseq_quality", ALLOCSET_SMALL_SIZES);
+                                    });
+                                }
+                                source = bioseq::storage::promote_pg_sequence_locator(resources->source_provider,
+                                    site.column_attno, source, resources->source_values);
+                            }
+                            with_pg_sequence_view<bool>(source, [&value, &consts](auto view) {
+                                using Alphabet = typename decltype(view)::alphabet_type;
+                                if constexpr (bioseq::sequences::quality_alphabet<Alphabet>) {
+                                    consts.quality_source_symbols += view.bp_size();
+                                    const auto counts = bioseq::indexing::tally_symbol_counts(view);
+                                    if (!counts) pg_raise_quality_error(bioseq::sequences::quality_error::source_read);
+                                    const auto summary = bioseq::sequences::summarize_quality_histogram<Alphabet>(*counts);
+                                    if (!summary) pg_raise_quality_error(summary.error());
+                                    value.summary = *summary;
+                                    std::copy(counts->begin(), counts->end(), value.counts.begin());
+                                }
+                                return true;
+                            });
+                            counts_valid = true;
+                        }
+                        if (stub && source_provider != nullptr)
+                            bioseq::storage::cache_pg_quality_source_summary(source_provider, relid,
+                                registered_snapshot, site.column_attno, loc,
+                                compact_sequence_stdc_type_params{.alphabet_code = alpha, .storage_unit_byte_width = bw},
+                                value.summary, indexed, counts_valid ? &value.counts : nullptr);
+                        found = quality_values.emplace(site.column_attno, value).first;
+                    }
+                    // Numeric/composite results belong to the caller's row context, not scratch.
+                    if (site.quality_statistic == static_cast<std::uint8_t>(pg_quality_statistic::total)
+                        || (site.quality_statistic == static_cast<std::uint8_t>(pg_quality_statistic::mean) && found->second.summary.length))
+                        ++consts.quality_numeric_conversions;
+                    else if (site.quality_statistic == static_cast<std::uint8_t>(pg_quality_statistic::all))
+                        consts.quality_numeric_conversions += 1 + (found->second.summary.length != 0);
+                    const auto output = site.quality_statistic
+                        ? pg_quality_statistic_value(found->second.summary,
+                            static_cast<pg_quality_statistic>(site.quality_statistic))
+                        : std::optional<Datum>{Int64GetDatum(found->second.counts.at(site.rank))};
+                    site.placeholder->constisnull = !output;
+                    if (output) site.placeholder->constvalue = *output;
+                    continue;
+                }
 
                 /* The index-read  setting controls only this stored-count lookup. */
                 std::optional<std::int64_t> stored;
@@ -339,7 +436,7 @@ export {
                     if (stub) bioseq::postgres::support::invoke_pg_as_cpp([resources] {
                         MemoryContextReset(resources->source_values);
                     });
-                } else pgseq_dispatch_biological_instance(
+                } else pgseq_dispatch_rank_packed_instance(
                     alpha,
                     bw,
                     [stub,

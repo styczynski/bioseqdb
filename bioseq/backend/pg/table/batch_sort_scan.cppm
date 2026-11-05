@@ -10,6 +10,9 @@ export module bioseq.postgres.table.batch_sort_scan;
 
 import bioseq.postgres.storage.scanner.source_provider_contract;
 
+/** Planner-only tag: the parent formats this exact mean from its retained key. */
+export inline constexpr int bioseq_deferred_quality_mean_magic = 0x514d5331;
+
 /** Let SliceProject add plans through the shared PostgreSQL upper-path hook. */
 export using slice_project_upper_path_provider =
     void (*)(PlannerInfo*, UpperRelationKind, RelOptInfo*, RelOptInfo*, void*);

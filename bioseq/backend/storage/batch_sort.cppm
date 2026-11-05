@@ -34,6 +34,7 @@ import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.cigar_alphabet;
 import bioseq.storage.lazy_sequence;
+import bioseq.sequences.quality_summary;
 import bioseq.storage.scanner;
 
 export namespace bioseq::storage {
@@ -78,6 +79,21 @@ template<std::ranges::sized_range Batch, class Compare>
         std::stable_sort(order.begin(), order.end(), less);
     }
     return order;
+}
+
+/** Exact mean keys are immutable plain data. No PostgreSQL or sequence access
+ * occurs inside comparison. Empty qualities share the SQL NULL sort class. */
+[[nodiscard]] inline std::vector<std::size_t> sort_quality_mean_batch(
+        std::span<const bioseq::sequences::quality_mean_key> keys,
+        const sequence_sort_options& options = {},
+        bioseq::parallelism::tracked_job_observer observer = {}) {
+    const bool null_less = options.nulls_first != options.descending;
+    return sort_batch_permutation(keys, options,
+        [null_less](const auto& a, const auto& b) {
+            if (a.valid() != b.valid()) return (a.valid() ? 1 : -1) * (null_less ? 1 : -1);
+            if (!a.valid()) return 0;
+            return bioseq::sequences::compare_quality_means(a, b);
+        }, true, observer);
 }
 
 
@@ -424,7 +440,7 @@ struct sequence_batch_sorter {
             });
         return sort_batch_permutation(batch, options,
             [](sequence_view_type left, sequence_view_type right) {
-                return compare_lazy_sequences(left, right);
+                return compare_lazy_sequences(left, right, true);
             }, worker_shareable, observer);
     }
 
@@ -439,9 +455,12 @@ struct sequence_batch_sorter {
             std::iota(order.begin(), order.end(), std::size_t{0u});
             return order;
         }
-        if (auto device_order =
-                batch_sort_detail::try_sort_on_gpu(batch, options)) {
-            return std::move(*device_order);
+        // Six/seven-bit quality layouts use the verified CPU comparator until
+        // the generic GPU sort has its own geometry and tail qualification.
+        if constexpr (!bioseq::sequences::quality_alphabet<p_alphabet>) {
+            if (auto device_order = batch_sort_detail::try_sort_on_gpu(batch, options)) {
+                return std::move(*device_order);
+            }
         }
         return sort_on_cpu(batch, options, observer);
     }

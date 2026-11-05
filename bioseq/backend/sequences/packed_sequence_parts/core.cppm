@@ -67,23 +67,61 @@ concept sequence_alphabet =
 
 namespace bioseq::sequences {
 
+/** Quality storage uses the dependency's native integer score, including Solexa negatives. */
+template<class Alphabet>
+concept quality_alphabet = std::same_as<Alphabet, seqan3::phred42>
+    || std::same_as<Alphabet, seqan3::phred63>
+    || std::same_as<Alphabet, seqan3::phred68solexa>;
+
+template<quality_alphabet Alphabet>
+struct quality_alphabet_traits {
+    static constexpr bool legacy = std::same_as<Alphabet, seqan3::phred68solexa>;
+    static constexpr std::int16_t score_offset = seqan3::to_phred(Alphabet{}.assign_rank(0));
+    static constexpr unsigned char ascii_offset = seqan3::to_char(Alphabet{}.assign_rank(0));
+    static constexpr std::size_t cardinality = seqan3::alphabet_size<Alphabet>;
+    static constexpr std::int16_t score_max = score_offset + cardinality - 1;
+    static_assert([] consteval {
+        for (std::size_t rank = 0; rank < cardinality; ++rank) {
+            const auto value = Alphabet{}.assign_rank(rank);
+            if (seqan3::to_rank(value) != rank
+                || seqan3::to_phred(value) != static_cast<int>(rank) + score_offset
+                || static_cast<unsigned char>(seqan3::to_char(value)) != rank + ascii_offset)
+                return false;
+        }
+        return true;
+    }(), "quality codec requires an affine native score and ASCII mapping");
+};
+
+/** Bioseq sequence complement includes positional quality identity; proteins remain unsupported. */
+template<class Alphabet>
+concept sequence_complementable = quality_alphabet<Alphabet>
+    || requires(Alphabet value) { seqan3::complement(value); };
+
+template<sequence_complementable Alphabet>
+[[nodiscard]] constexpr Alphabet sequence_complement(Alphabet value) noexcept {
+    if constexpr (quality_alphabet<Alphabet>) return value;
+    else return seqan3::complement(value);
+}
+
 /** A lexical character awaiting a concrete alphabet binding. */
 struct canonical_sequence_character { bool valid{}; char value{}; };
 
-/** Preserve uppercase lexical identity; alphabet reduction occurs only on binding. */
+/** Preserve printable lexical bytes exactly until an alphabet is selected. */
 [[nodiscard]] constexpr canonical_sequence_character
 canonical_unbound_character(unsigned char input) {
-    const auto upper = input >= 'a' && input <= 'z'
-        ? static_cast<unsigned char>(input - 'a' + 'A') : input;
-    return seqan3::char_is_valid_for<seqan3::aa27>(static_cast<char>(upper))
-        ? canonical_sequence_character{true, static_cast<char>(upper)}
+    return input >= 33u && input <= 126u
+        ? canonical_sequence_character{true, static_cast<char>(input)}
         : canonical_sequence_character{};
 }
 
 /** Validate lexical input before native assignment applies any lossy reduction. */
 template<seqan3::alphabet Alphabet>
 [[nodiscard]] constexpr bool source_character_is_valid(char input) {
-    if constexpr (seqan3::aminoacid_alphabet<Alphabet>)
+    if constexpr (quality_alphabet<Alphabet>) {
+        using traits = quality_alphabet_traits<Alphabet>;
+        const auto byte = static_cast<unsigned char>(input);
+        return byte >= traits::ascii_offset && byte < traits::ascii_offset + traits::cardinality;
+    } else if constexpr (seqan3::aminoacid_alphabet<Alphabet>)
         return seqan3::char_is_valid_for<seqan3::aa27>(input);
     else return seqan3::char_is_valid_for<Alphabet>(input);
 }
@@ -201,8 +239,8 @@ template <
         const auto rank = static_cast<p_storage_unit>(value & rank_mask);
         auto symbol = alphabet.assign_rank(rank);
         if (complement_symbols) {
-            if constexpr (requires { seqan3::complement(symbol); }) {
-                symbol = seqan3::complement(symbol);
+            if constexpr (bioseq::sequences::sequence_complementable<p_alphabet_type>) {
+                symbol = bioseq::sequences::sequence_complement(symbol);
             } else {
                 throw std::invalid_argument(
                     "sequence alphabet does not support complementation");
@@ -267,9 +305,9 @@ struct alphabet_entry {
     static constexpr std::size_t cardinality = seqan3::alphabet_size<p_alphabet>;
     static constexpr std::size_t rank_bits = std::bit_width(cardinality - 1u);
     static constexpr bool is_amino_acid = seqan3::aminoacid_alphabet<p_alphabet>;
-    static constexpr bool is_complementable = requires(p_alphabet value) {
-        seqan3::complement(value);
-    };
+    static constexpr bool is_quality = bioseq::sequences::quality_alphabet<p_alphabet>;
+    static constexpr bool is_rank_packed = !bioseq::cigar_operation_alphabet<p_alphabet>;
+    static constexpr bool is_complementable = bioseq::sequences::sequence_complementable<p_alphabet>;
     static constexpr bool is_valid_alphabet_entry = true;
 };
 
@@ -654,6 +692,66 @@ using supported_biological_alphabets = supported_alphabets<
     alphabet_entry<seq::aa10murphy, "aa10murphy">,
     alphabet_entry<seq::aa20, "aa20">,
     alphabet_entry<seq::aa27, "aa27">>;
+
+/** One physical registry: existing biological and CIGAR codes never move. */
+using supported_storage_alphabets = typename decltype(
+    []<class... Entries>(std::tuple<Entries...>) {
+        return std::type_identity<supported_alphabets<Entries...,
+            alphabet_entry<bioseq::cigar_symbol, "cigar">,
+            alphabet_entry<seq::phred42, "phred42">,
+            alphabet_entry<seq::phred63, "phred63">,
+            alphabet_entry<seq::phred68solexa, "phred68-legacy">>>{};
+    }(supported_biological_alphabets::alphabet_entries_tuple{}))::type;
+
+/** Filter dispatch by capability while retaining physical registry codes. */
+template<bool QualityOnly>
+struct storage_alphabet_view {
+    template<class Alphabet>
+    static constexpr bool admits = QualityOnly
+        ? bioseq::sequences::quality_alphabet<Alphabet>
+        : !bioseq::cigar_operation_alphabet<Alphabet>;
+
+    template<class Handler>
+    static constexpr void dispatch_alphabet_by_code(std::uint8_t code, Handler&& handler) {
+        supported_storage_alphabets::dispatch_alphabet_by_code(code,
+            [&handler]<class Alphabet>() {
+                if constexpr (admits<Alphabet>) handler.template operator()<Alphabet>();
+                else throw std::invalid_argument("alphabet is not in the requested storage capability view");
+            });
+    }
+    template<class Alphabet>
+    static consteval auto index_of() {
+        static_assert(admits<Alphabet>);
+        return supported_storage_alphabets::template index_of<Alphabet>();
+    }
+};
+using supported_rank_packed_alphabets = storage_alphabet_view<false>;
+using supported_quality_alphabets = storage_alphabet_view<true>;
+
+[[nodiscard]] constexpr bool is_quality_alphabet_code(std::uint8_t code) noexcept {
+    return code == supported_storage_alphabets::index_of<seq::phred42>()
+        || code == supported_storage_alphabets::index_of<seq::phred63>()
+        || code == supported_storage_alphabets::index_of<seq::phred68solexa>();
+}
+
+static_assert(supported_storage_alphabets::index_of<bioseq::cigar_symbol>() == 6);
+static_assert(supported_quality_alphabets::index_of<seq::phred42>() == 7);
+static_assert(supported_quality_alphabets::index_of<seq::phred63>() == 8);
+static_assert(supported_quality_alphabets::index_of<seq::phred68solexa>() == 9);
+
+// Force every capability initializer, including false-valued CIGAR/quality
+// members, before the compiler-backed registry visitor reads their APValues.
+static_assert([]<class... Entries>(std::tuple<Entries...>) consteval {
+    unsigned capabilities = 0;
+    ((capabilities += unsigned(Entries::is_amino_acid) + unsigned(Entries::is_complementable)
+        + unsigned(Entries::is_quality) + unsigned(Entries::is_rank_packed)), ...);
+    return capabilities > 0;
+}(supported_storage_alphabets::alphabet_entries_tuple{}));
+
+static_assert([]<class... Entries>(std::tuple<Entries...>) consteval {
+    return ((Entries::cardinality > 1u && Entries::rank_bits == std::bit_width(Entries::cardinality - 1u)
+        && (!Entries::is_quality || Entries::is_rank_packed)) && ...);
+}(supported_storage_alphabets::alphabet_entries_tuple{}));
 
 // Instantiate all registry metadata so compiler-backed generation sees resolved values.
 static_assert([]<class... Entries>(std::tuple<Entries...>) consteval {

@@ -13,7 +13,7 @@ export inline constexpr std::size_t pgseq_dispatch_profile_biological_alphabet_c
 
 /** @brief Storage alphabets include one counted CIGAR family after the biological entries. */
 export inline constexpr std::size_t pgseq_dispatch_profile_alphabet_count =
-    pgseq_dispatch_profile_biological_alphabet_count + 1u;
+    supported_storage_alphabets::alphabet_count;
 
 /** @brief Check whether this build supports a storage-unit width in bytes. */
 export [[nodiscard]] constexpr bool

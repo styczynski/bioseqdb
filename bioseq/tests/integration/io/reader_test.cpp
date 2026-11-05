@@ -23,6 +23,9 @@ import bioseq.io.reader;
 import bioseq.io.options;
 import bioseq.io.sources;
 import bioseq.io.compression.parallel_gzip_source;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 
 namespace {
 
@@ -778,4 +781,104 @@ TEST_CASE("bioseq_io: pgzip multi-thread vs zlib first divergence",
 
     ::gzclose(ref);
     INFO("compared " << total_compared << " bytes successfully");
+}
+
+TEST_CASE("FASTQ streams quality spans with strict boundaries", "[component:bioseq][layer:integration][feature:quality][resource:filesystem]") {
+    using namespace bioseq::io;
+    struct sink_type {
+        std::string quality;
+        std::size_t committed{}, chunks{}, largest{}, sequence_symbols{}, largest_sequence_chunk{};
+        void begin_record(std::string_view) { quality.clear(); }
+        void chunk(packed_sequence_chunk<std::uint64_t> chunk) {
+            sequence_symbols += chunk.logical_length;
+            largest_sequence_chunk = std::max(largest_sequence_chunk, static_cast<std::size_t>(chunk.logical_length));
+        }
+        void quality_chunk(std::span<const std::uint8_t> bytes, std::size_t offset) {
+            REQUIRE(offset == quality.size());
+            quality.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            ++chunks; largest = std::max(largest, bytes.size());
+        }
+        void end_record() { ++committed; }
+    };
+    for (std::size_t buffer = 1; buffer <= 33; ++buffer) {
+        const auto path = write_tmp_file("@r\r\nACGTACGT\r\n+\r\n!@+;\r\n~I?J\r\n");
+        sink_type sink;
+        auto options = default_reader_options;
+        options.io.initial_buffer_size = buffer;
+        options.io.prefer_mmap = false;
+        std::vector<std::string> errors;
+        const auto result = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
+            path.c_str(), sink, [&](std::string&& message) { errors.push_back(std::move(message)); }, options);
+        REQUIRE(errors.empty()); REQUIRE(result.has_value());
+        REQUIRE(sink.committed == 1); REQUIRE(sink.quality == "!@+;~I?J");
+        fs::remove(path);
+    }
+    for (const auto bad : std::vector<std::string>{"!!!", "!!!!!", "!! !!", "!!\t!", "!!\r!", "!!\x7f!", "!!\xff!"}) {
+        const auto path = write_tmp_file("@r\nACGT\n+\n" + bad + "\n");
+        sink_type sink;
+        const auto result = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
+            path.c_str(), sink, [](std::string&&) {});
+        REQUIRE_FALSE(result); REQUIRE(sink.committed == 0);
+        fs::remove(path);
+    }
+    const std::string long_quality(200003, 'I');
+    const auto path = write_tmp_file("@r\n" + std::string(long_quality.size(), 'A') + "\n+\n" + long_quality);
+    sink_type sink;
+    auto options = default_reader_options;
+    options.io.initial_buffer_size = 1024;
+    options.io.max_buffer_size = 1024;
+    const auto result = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
+        path.c_str(), sink, [](std::string&&) {}, options);
+    REQUIRE(result.has_value()); REQUIRE(sink.quality == long_quality);
+    REQUIRE(sink.largest <= 65536); REQUIRE(sink.chunks >= 4); REQUIRE(sink.committed == 1);
+    REQUIRE(sink.sequence_symbols == long_quality.size());
+    REQUIRE(sink.largest_sequence_chunk <= 1024 + 32);
+    fs::remove(path);
+}
+
+TEST_CASE("FASTQ gzip readers preserve raw quality bytes across decoder boundaries",
+          "[component:bioseq][layer:integration][feature:quality][resource:filesystem]") {
+    using namespace bioseq::io;
+    using batch_type = sequence_batch<sequence_custom_alphabet<seq::dna4, std::uint64_t>>;
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    struct restore_pool {
+        bioseq::parallelism::global_pool& pool;
+        bool active{pool.is_active()};
+        bioseq::parallelism::pool_config config{pool.maximum_concurrency(), pool.get_mode()};
+        ~restore_pool() { if (active) pool.configure(config); else pool.shutdown(); }
+    } restore{pool};
+    std::string quality;
+    for (std::size_t i = 0; i < 65539; ++i) quality.push_back(static_cast<char>(33 + i % 94));
+    quality[0] = '@'; quality[1] = '+';
+    const std::string sequence(quality.size(), 'A');
+    const auto path = write_tmp_gzip("@first\r\n" + sequence + "\r\n+\r\n" + quality +
+        "\r\n@second\n" + sequence + "\n+\n" + quality);
+    for (const unsigned concurrency : {0u, 1u, 5u}) {
+        if (concurrency == 0) pool.shutdown();
+        else pool.configure({concurrency, bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel});
+        auto options = default_reader_options;
+        options.io.parallel_gzip_enabled = true;
+        options.io.parallel_gzip_min_compressed_bytes = 1;
+        options.io.parallel_gzip_thread_count = 2;
+        options.io.parallel_gzip_chunk_bytes = 32768;
+        options.io.initial_buffer_size = 1024;
+        options.io.max_buffer_size = 1024;
+        options.concurrency.worker_count = 1;
+        options.concurrency.parser_count = 1;
+        reader_backend backend{};
+        std::vector<std::pair<std::string, std::string>> got;
+        const auto result = read_sequences_file<seq::dna4, sequence_file_format::fastq>(path,
+            [&](batch_type&& batch) {
+                for (std::size_t i = 0; i < batch.size(); ++i) {
+                    const auto bytes = batch.quality(i);
+                    got.emplace_back(decode_to_ascii(batch.sequence(i)),
+                        std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+                }
+            }, [](std::string&&) {}, options, &backend);
+        REQUIRE(result.has_value()); REQUIRE(*result == 2);
+        REQUIRE(backend == (concurrency == 1 ? reader_backend::gzip : reader_backend::parallel_gzip));
+        REQUIRE(got.size() == 2);
+        for (const auto& value : got) { REQUIRE(value.first == sequence); REQUIRE(value.second == quality); }
+    }
+    fs::remove(path);
 }

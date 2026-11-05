@@ -27,6 +27,57 @@ import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::simd {
 
+struct sequence_rank_summary {
+    std::uint64_t sum{};
+    std::uint8_t minimum{255}, maximum{};
+    bool valid{true};
+};
+/** Exact widened reduction of a bounded native-rank tile. */
+// Keep the Highway bodies in their owning module. Importing these helpers and
+// the codec module must not emit two copies of Highway's internal-linkage APIs.
+[[nodiscard]] sequence_rank_summary summarize_native_rank_chunk(
+        std::span<const std::uint8_t> input, std::uint8_t rank_limit) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint8_t> tag;
+    const hn::Repartition<std::uint64_t, decltype(tag)> sums_tag;
+    const auto lanes = hn::Lanes(tag);
+    const auto limit = hn::Set(tag, rank_limit);
+    sequence_rank_summary result{};
+    std::size_t offset = 0;
+    for (; input.size() - offset >= lanes; offset += lanes) {
+        const auto ranks = hn::LoadU(tag, input.data() + offset);
+        if (!hn::AllTrue(tag, hn::Lt(ranks, limit))) { result.valid = false; return result; }
+        result.sum += hn::ReduceSum(sums_tag, hn::SumsOf8(ranks));
+        result.minimum = std::min(result.minimum, hn::ReduceMin(tag, ranks));
+        result.maximum = std::max(result.maximum, hn::ReduceMax(tag, ranks));
+    }
+    for (; offset < input.size(); ++offset) {
+        const auto rank = input[offset];
+        if (rank >= rank_limit) { result.valid = false; return result; }
+        result.sum += rank;
+        result.minimum = std::min(result.minimum, rank); result.maximum = std::max(result.maximum, rank);
+    }
+    return result;
+}
+
+/** First unequal native rank in a bounded tile; returns length for equal tiles.
+ * Full Highway vectors never cross the admitted end. Short tails are scalar. */
+[[nodiscard]] std::size_t first_unequal_sequence_rank(
+        const std::uint8_t* left, const std::uint8_t* right, std::size_t length) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint8_t> descriptor;
+    const auto lanes = hn::Lanes(descriptor);
+    std::size_t offset = 0;
+    for (; length - offset >= lanes; offset += lanes) {
+        const auto difference = hn::Ne(hn::LoadU(descriptor, left + offset),
+                                      hn::LoadU(descriptor, right + offset));
+        const auto first = hn::FindFirstTrue(descriptor, difference);
+        if (first >= 0) return offset + static_cast<std::size_t>(first);
+    }
+    for (; offset < length; ++offset) if (left[offset] != right[offset]) return offset;
+    return length;
+}
+
 /** Derive a packed XOR complement only when it represents every valid rank. */
 template<class Traits, bool QueryReversed>
 [[nodiscard]] constexpr std::optional<typename Traits::storage_unit>

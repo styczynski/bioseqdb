@@ -4,6 +4,7 @@
  */
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/benchmark/catch_benchmark.hpp>
 
 import std;
 import bioseq.common.logging;
@@ -13,6 +14,7 @@ import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.scanner;
 import bioseq.storage.batch_sort;
+import bioseq.sequences.quality_summary;
 import bioseq.gpu.vulkan.runtime;
 
 namespace {
@@ -343,4 +345,86 @@ TEST_CASE("dna5 generic GPU sort permutation equals compare_sequences_scalar",
                           std::size_t{1000}}) {
         run_case<dna5_u64>("dna5/u64", n, 0x5E5E5E000ull + n, 5);
     }
+}
+
+TEST_CASE("quality batch sorting compares both bounded sources and all tails", "[component:bioseq][layer:unit][feature:quality]") {
+    auto check = []<class Alphabet>() {
+        using config = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        owned_batch<config> batch;
+        std::vector<std::vector<std::uint8_t>> oracle;
+        for (std::size_t index = 0; index < 70; ++index) {
+            std::vector<std::uint8_t> ranks(1024 + index, 20);
+            if (index % 3) ranks[1020 + index % 4] = static_cast<std::uint8_t>(index % seqan3::alphabet_size<Alphabet>);
+            oracle.push_back(ranks); batch.push(ranks);
+        }
+        std::vector<bioseq::storage::lazy_sequence_view<Alphabet>> views;
+        for (auto& lazy : batch.lazies) views.push_back(bioseq::storage::make_lazy_sequence_view(lazy));
+        owned_batch<sequence_custom_alphabet<Alphabet, std::uint8_t>> bytes;
+        owned_batch<sequence_custom_alphabet<Alphabet, std::uint16_t>> shorts;
+        owned_batch<sequence_custom_alphabet<Alphabet, std::uint32_t>> ints;
+        const auto originals = oracle;
+        const auto add_width = [&](auto& other) {
+            for (const auto& ranks : originals) { other.push(ranks); oracle.push_back(ranks); }
+            for (auto& lazy : other.lazies) views.push_back(bioseq::storage::make_lazy_sequence_view(lazy));
+        };
+        add_width(bytes); add_width(shorts); add_width(ints);
+        std::vector<std::size_t> expected(oracle.size()); std::iota(expected.begin(), expected.end(), 0);
+        std::stable_sort(expected.begin(), expected.end(), [&](auto a, auto b) { return oracle[a] < oracle[b]; });
+        const auto sorted = sequence_batch_sorter<Alphabet>::sort_on_cpu(std::span<const bioseq::storage::lazy_sequence_view<Alphabet>>{views}, {});
+        REQUIRE(sorted == expected);
+    };
+    check.template operator()<seq::phred42>(); check.template operator()<seq::phred63>(); check.template operator()<seq::phred68solexa>();
+}
+
+TEST_CASE("quality mean permutation preserves exact differences and NULL ordering", "[component:bioseq][layer:unit][feature:quality]") {
+    using namespace bioseq::sequences;
+    const auto n = quality_max_length;
+    const std::array keys{make_quality_mean_key({}), make_quality_mean_key({n, quality_sum{30}*n+1,30,31}),
+        make_quality_mean_key({n-1, quality_sum{30}*(n-1)+1,30,31}), make_quality_mean_key({3,-1,-1,0}),
+        make_quality_mean_key({2,-1,-1,0}), make_quality_mean_key({6,-2,-1,0})};
+    REQUIRE(bioseq::storage::sort_quality_mean_batch(keys) == std::vector<std::size_t>{4,3,5,1,2,0});
+    REQUIRE(bioseq::storage::sort_quality_mean_batch(keys, {.descending=true, .nulls_first=true})
+        == std::vector<std::size_t>{0,2,1,5,3,4});
+}
+
+TEST_CASE("quality comparison performance cohorts",
+          "[.quality_benchmark][component:bioseq][layer:unit][feature:quality]") {
+    auto measure = []<class Alphabet>(std::string_view alphabet) {
+        using config = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        for (const std::size_t length : {50u, 150u, 300u, 10000u}) {
+            for (const std::string_view shape : {"early", "prefix", "equal", "length"}) {
+                owned_batch<config> batch;
+                for (std::size_t row = 0; row < 128; ++row) {
+                    std::vector<std::uint8_t> left(length, 20), right(length, 20);
+                    if (shape == "early") { left[0] = row % 19; right[0] = 21 + row % 19; }
+                    if (shape == "prefix") { left.back() = row % 19; right.back() = 21 + row % 19; }
+                    if (shape == "length") right.push_back(20);
+                    batch.push(left); batch.push(right);
+                }
+                const auto views = batch.views();
+                const auto scalar = [&] {
+                    std::int64_t result = 0;
+                    for (std::size_t row = 0; row < batch.size(); row += 2) {
+                        const auto value = bioseq::simd::active_target::compare_sequences_scalar(
+                            batch[row].underlying(), batch[row+1].underlying());
+                        result += (value > 0) - (value < 0);
+                    }
+                    return result;
+                };
+                const auto simd = [&] {
+                    std::int64_t result = 0;
+                    for (std::size_t row = 0; row < views.size(); row += 2)
+                        result += bioseq::storage::compare_lazy_sequences(views[row], views[row+1], true);
+                    return result;
+                };
+                REQUIRE(scalar() == simd());
+                const auto label = std::string(alphabet) + "/" + std::to_string(length) + "/" + std::string(shape);
+                BENCHMARK(label + "/scalar_128_pairs") { return scalar(); };
+                BENCHMARK(label + "/highway_128_pairs") { return simd(); };
+            }
+        }
+    };
+    measure.template operator()<seq::phred42>("phred42");
+    measure.template operator()<seq::phred63>("phred63");
+    measure.template operator()<seq::phred68solexa>("phred68-legacy");
 }

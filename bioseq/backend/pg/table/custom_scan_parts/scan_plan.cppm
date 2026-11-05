@@ -28,6 +28,7 @@ import bioseq.postgres.configuration.core;
 import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
 import bioseq.postgres.support;
+import bioseq.postgres.table.batch_sort_scan;
 import bioseq.indexing.type;
 
 import :custom_scan_plan_abi_constants;
@@ -303,6 +304,16 @@ export {
          * function. Publish that helper as a whole child output so setrefs binds
          * its occurrence to this scan instead of executing its scalar stub. */
         List* requested_projections = list_copy(root->processed_tlist);
+        Node* deferred_quality_mean = nullptr;
+        for (Node* candidate : postgres_list<Node>(best_path->custom_private)) {
+            if (candidate == nullptr || !IsA(candidate, List)) continue;
+            auto* tag = reinterpret_cast<List*>(candidate);
+            if (list_length(tag) == 3 && IsA(reinterpret_cast<Node*>(linitial(tag)), Integer)
+                && intVal(linitial(tag)) == bioseq_deferred_quality_mean_magic
+                && IsA(reinterpret_cast<Node*>(lsecond(tag)), Integer)
+                && intVal(lsecond(tag)) == 1)
+                deferred_quality_mean = reinterpret_cast<Node*>(lthird(tag));
+        }
         for (Node* predicate : postgres_list<Node>(match_result_quals)) {
             /* Whole helper carriers reuse the existing ownership, setrefs and
              * feature-detection authorities. Never project the predicate itself. */
@@ -370,6 +381,8 @@ export {
         }
         if (!locator_passthrough_requested)
             for (auto n : postgres_list<TargetEntry>(requested_projections)) {
+                if (deferred_quality_mean != nullptr && equal(n->expr, deferred_quality_mean))
+                    continue;
                 if (FuncExpr* fe = try_cast_pg_node<FuncExpr>(to_pg_node(n->expr))) {
                     bool belongs_to_scan = false;
                     if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)) {
@@ -396,7 +409,8 @@ export {
                         } else {
                             belongs_to_scan = direct_scan_argument;
                         }
-                    } else if (fe->funcid == plan_stub_oids.symbol_count_oid) {
+                    } else if (fe->funcid == plan_stub_oids.symbol_count_oid
+                        || plan_stub_oids.quality_statistic_kind(fe->funcid) != 0) {
                         constexpr int pull_flags = PVC_RECURSE_AGGREGATES |
                                                    PVC_RECURSE_WINDOWFUNCS |
                                                    PVC_RECURSE_PLACEHOLDERS;

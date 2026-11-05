@@ -755,6 +755,17 @@ export {
             : explain_semantics_valid ? explain_frozen_semantics.index_read_requirement
                                       : bioseq::indexing::index_read_requirement::allow;
 
+        if (explain_runtime && explain_runtime->placeholder_consts.quality_distinct_sources) {
+            const auto& counts = explain_runtime->placeholder_consts;
+            ExplainPropertyInteger("Bioseq Quality Index Hits", nullptr, counts.quality_index_hits, es);
+            ExplainPropertyInteger("Bioseq Quality Summary Cache Hits", nullptr, counts.quality_cache_hits, es);
+            ExplainPropertyInteger("Bioseq Quality Missing or Stale Fallbacks", nullptr, counts.quality_fallbacks, es);
+            ExplainPropertyInteger("Bioseq Quality Payload Validations", nullptr, counts.quality_validations, es);
+            ExplainPropertyInteger("Bioseq Quality Source Symbols Read", nullptr, counts.quality_source_symbols, es);
+            ExplainPropertyInteger("Bioseq Quality Summary Extractions", nullptr, counts.quality_distinct_sources, es);
+            ExplainPropertyInteger("Bioseq Quality Numeric Conversions", nullptr, counts.quality_numeric_conversions, es);
+        }
+
         /* Read symbol_count calls from the plan so plain EXPLAIN lists their route
          * too. The executor fills symbol_count_sites only on its first scan. */
         {
@@ -768,6 +779,16 @@ export {
                     continue;
                 }
                 FuncExpr* fe = try_cast_pg_node<FuncExpr>(to_pg_node(tgt->expr));
+                if (fe && oids_snapshot.quality_statistic_kind(fe->funcid) && list_length(fe->args) == 1) {
+                    auto* column = try_cast_pg_node<Var>(reinterpret_cast<Node*>(linitial(fe->args)));
+                    if (column && column->vartypmod >= 0 && bms_is_empty(column->varnullingrels)
+                        && is_quality_alphabet_code(compact_sequence_stdc_type_params::decode(column->vartypmod).alphabet_code)) {
+                        ExplainPropertyText("Bioseq Quality Summary",
+                            explain_read_sequence_index ? "symbol_counts candidate; exact bounded fallback"
+                                                        : "exact bounded source reduction", es);
+                        ExplainPropertyText("Bioseq Quality Mean Order", "numeric with 40 fractional digits", es);
+                    }
+                }
                 if (fe == nullptr || fe->funcid != oids_snapshot.symbol_count_oid ||
                     list_length(fe->args) != 2) {
                     continue;

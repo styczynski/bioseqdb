@@ -18,7 +18,8 @@ foreach(suffix ${PostgreSQL_SUPPORTED_VERSIONS})
   endif()
   if(UNIX)
     list(APPEND PostgreSQL_CONFIG_HINTS
-      "/usr/lib/postgresql/${suffix}/bin")
+      "/usr/lib/postgresql/${suffix}/bin"
+      "/usr/pgsql-${suffix}/bin")
     if(APPLE)
       # Postgres.app ships per-version trees under /Applications/Postgres.app/Contents/Versions/<N>.
       # Homebrew installs versioned formulae under {/opt/homebrew,/usr/local}/opt/postgresql@<N>.
@@ -39,7 +40,7 @@ endif()
 # Configuration will be based on values gathered from `pg_config`. NO_DEFAULT_PATH
 # keeps us from silently picking a stray /usr/local/bin/pg_config (e.g. an older
 # Homebrew default `postgresql` formula) when one of our versioned hints applies.
-find_program(PostgreSQL_CONFIG pg_config REQUIRED
+find_program(PostgreSQL_CONFIG pg_config
   HINTS ${PostgreSQL_CONFIG_HINTS}
   PATH_SUFFIXES ${PostgreSQL_CONFIG_PATH_SUFFIXES}
   NO_DEFAULT_PATH

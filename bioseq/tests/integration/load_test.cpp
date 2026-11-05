@@ -7,6 +7,7 @@
  * header fields and defaults, and rollback when loading fails.
  */
 #include <cstdlib>
+#include <zlib.h>
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
 
@@ -903,4 +904,450 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
         REQUIRE(rows[0][1].value() == "A");                 // enum label
         REQUIRE(rows[0][2].value() == "2015-07-17");        // date parsed with MDY input
     }
+}
+
+TEST_CASE("quality SQL statistics and FASTQ publication", "[component:bioseq][layer:integration][feature:quality][resource:postgres][resource:filesystem]") {
+    it::connection_test_context ctx;
+    it::reset_extension(ctx, {std::string_view{"quality_load"}, std::string_view{"quality_named"}});
+    const auto basic = it::query_rows(ctx,
+        "SELECT bioseq.min(q)::text,bioseq.max(q)::text,bioseq.sum(q)::text,bioseq.avg(q)::text,"
+        "bioseq.reverse(q)::text,bioseq.reverse_complement(q)::text "
+        "FROM (VALUES ('!+5I'::bioseq.seq('phred'))) v(q)");
+    REQUIRE(basic.size() == 1);
+    REQUIRE(basic[0][0] == "0"); REQUIRE(basic[0][1] == "40");
+    REQUIRE(basic[0][2] == "70"); REQUIRE(basic[0][3] == "17.5");
+    REQUIRE(basic[0][4] == "I5+!"); REQUIRE(basic[0][5] == "I5+!");
+    const auto legacy = it::query_rows(ctx,
+        "SELECT bioseq.sum(';@~'::bioseq.seq('phred68-legacy'))::text,"
+        "bioseq.avg(';@~'::bioseq.seq('phred68-legacy'))::text,"
+        "bioseq.quality_score(';'::bioseq.letter('phred68-legacy'))::text");
+    REQUIRE(legacy[0][0] == "57"); REQUIRE(legacy[0][1] == "19"); REQUIRE(legacy[0][2] == "-5");
+    const auto empty = it::query_rows(ctx,
+        "SELECT bioseq.sum(''::bioseq.seq('phred42'))::text,bioseq.avg(''::bioseq.seq('phred42'))::text,"
+        "bioseq.min(NULL::bioseq.seq)::text");
+    REQUIRE(empty[0][0] == "0"); REQUIRE_FALSE(empty[0][1]); REQUIRE_FALSE(empty[0][2]);
+    REQUIRE(it::sql_error(ctx, "SELECT 'K'::bioseq.seq('phred42')").sqlstate == "22P02");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.avg('A'::bioseq.seq('dna4'))").sqlstate == "42804");
+    const auto raw = it::query_rows(ctx, "SELECT 'a~10M'::bioseq.seq::text");
+    REQUIRE(raw[0][0] == "a~10M");
+    const std::string path = "/tmp/bioseq_quality_load.fastq";
+    { std::ofstream file(path, std::ios::binary); file << "@a\r\nACGT\r\n+\r\n!+5I\r\n@b\nAAAA\n+\n!!!!\n"; }
+    it::exec_sql(ctx, "CREATE TABLE quality_load(header text, seq bioseq.seq('dna4')) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_load','" + path + "')") == 2);
+    const auto loaded = it::query_rows(ctx,
+        "SELECT header,quality::text,bioseq.avg(quality)::text,bioseq.sum(quality)::text,"
+        "bioseq.min(quality)::text,bioseq.max(quality)::text,bioseq.symbol_count(quality,'!')::text "
+        "FROM quality_load ORDER BY bioseq.avg(quality),header");
+    REQUIRE(loaded.size() == 2); REQUIRE(loaded[0][0] == "b"); REQUIRE(loaded[0][1] == "!!!!");
+    REQUIRE(loaded[1][0] == "a"); REQUIRE(loaded[1][2] == "17.5"); REQUIRE(loaded[1][3] == "70");
+    REQUIRE(loaded[1][4] == "0"); REQUIRE(loaded[1][5] == "40"); REQUIRE(loaded[1][6] == "1");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('quality_load','symbol_counts')") >= 2);
+    const auto indexed = it::query_rows(ctx,
+        "SELECT header,bioseq.avg(quality)::text,bioseq.avg(bioseq.reverse(quality))::text,"
+        "bioseq.avg(quality OPERATOR(bioseq.||) quality)::text FROM quality_load ORDER BY header");
+    REQUIRE(indexed[0][1] == indexed[0][2]); REQUIRE(indexed[0][1] == indexed[0][3]);
+    it::exec_sql(ctx, "CREATE TABLE quality_named(header text, seq bioseq.seq('dna4')) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_named','" + path +
+        "',columns=>ARRAY[ROW('scores','quality')::bioseq.column_mapping], options=>ROW('phred63')::bioseq.load_options)") == 2);
+    const auto named = it::query_rows(ctx, "SELECT scores::text FROM quality_named ORDER BY header");
+    REQUIRE(named[0][0] == "!+5I");
+    { std::ofstream file(path, std::ios::binary); file << "@bad\nAAAA\n+\nKKKK\n"; }
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_load','" + path + "')").sqlstate == "22P02");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_load") == 2);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("quality indexed summaries share extraction and respect source versions",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context({"quality_versions"});
+    it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    it::exec_sql(ctx, "CREATE TABLE quality_versions(id integer, q bioseq.seq('phred42')) USING bioseq");
+    it::exec_sql(ctx, "INSERT INTO quality_versions VALUES (1,repeat('!I',20000)::bioseq.seq('phred42'))");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('quality_versions','symbol_counts')") == 1);
+    const std::string stats = "SELECT bioseq.avg(q),bioseq.sum(q),bioseq.min(q),bioseq.max(q),"
+        "bioseq.symbol_count(q,'I') FROM quality_versions";
+    const auto expected = it::query_rows(ctx, stats);
+    REQUIRE(expected[0][0] == "20"); REQUIRE(expected[0][1] == "800000");
+    REQUIRE(expected[0][2] == "0"); REQUIRE(expected[0][3] == "40"); REQUIRE(expected[0][4] == "20000");
+    const auto indexed = it::explain_text<true>(ctx, stats);
+    REQUIRE(it::find_explain_property(indexed, "Bioseq Quality Index Hits") == "1");
+    REQUIRE(it::find_explain_property(indexed, "Bioseq Quality Summary Extractions") == "1");
+    REQUIRE(it::find_explain_property(indexed, "Bioseq Quality Source Symbols Read") == "0");
+    const auto filtered_indexed = it::explain_text<true>(ctx, stats + " WHERE bioseq.avg(q)>10");
+    REQUIRE(it::find_explain_property(filtered_indexed, "Bioseq Quality Summary Cache Hits") == "1");
+    REQUIRE(it::find_explain_property(filtered_indexed, "Bioseq Quality Index Hits") == "0");
+    REQUIRE(it::find_explain_property(filtered_indexed, "Bioseq Quality Source Symbols Read") == "0");
+    {
+        it::guc_scope reads(ctx, "bioseq.index.sequence_read.enabled", "off");
+        REQUIRE(it::query_rows(ctx, stats) == expected);
+        const auto computed = it::explain_text<true>(ctx, stats);
+        REQUIRE(it::find_explain_property(computed, "Bioseq Quality Index Hits") == "0");
+        REQUIRE(it::find_explain_property(computed, "Bioseq Quality Source Symbols Read") == "40000");
+        REQUIRE(it::query_rows(ctx, stats + " WHERE bioseq.avg(q)>10") == expected);
+        const auto filtered = it::explain_text<true>(ctx, stats + " WHERE bioseq.avg(q)>10");
+        REQUIRE(it::find_explain_property(filtered, "Bioseq Quality Summary Cache Hits") == "1");
+        REQUIRE(it::find_explain_property(filtered, "Bioseq Quality Index Hits") == "0");
+        REQUIRE(it::find_explain_property(filtered, "Bioseq Quality Source Symbols Read") == "0");
+    }
+    it::exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters()");
+    const auto whole = it::query_one(ctx,
+        "SELECT bioseq.avg(bioseq.reverse(q)),bioseq.sum(q OPERATOR(bioseq.||) q) FROM quality_versions");
+    REQUIRE(whole[0] == "20"); REQUIRE(whole[1] == "1600000");
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT (bioseq_internal.sequence_source_counters()).facade_source_stream_callbacks") == 0);
+    const auto lifetime = it::query_one(ctx,
+        "SELECT (c).registries_created=(c).registries_destroyed,"
+        "(c).domains_created=(c).domains_destroyed,(c).leases_acquired=(c).leases_released "
+        "FROM (SELECT bioseq_internal.sequence_source_counters() c) v");
+    REQUIRE(lifetime[0] == "t"); REQUIRE(lifetime[1] == "t"); REQUIRE(lifetime[2] == "t");
+    const auto lazy = it::query_rows(ctx,
+        "SELECT bioseq.avg(bioseq.reverse(q)),bioseq.sum(q OPERATOR(bioseq.||) q),"
+        "bioseq.avg((bioseq.reverse(q))[0:3]) FROM quality_versions");
+    REQUIRE(lazy[0][0] == "20"); REQUIRE(lazy[0][1] == "1600000");
+    REQUIRE(lazy[0][2] == "26.6666666666666666666666666666666666666667");
+    it::connection_test_context reader;
+    it::exec_sql(reader, "BEGIN ISOLATION LEVEL REPEATABLE READ");
+    REQUIRE(it::query_scalar_int(reader, "SELECT bioseq.avg(q)::bigint FROM quality_versions") == 20);
+    it::exec_sql(ctx, "UPDATE quality_versions SET q=repeat('J',40000)::bioseq.seq('phred42') WHERE id=1");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.avg(q)::bigint FROM quality_versions") == 41);
+    REQUIRE(it::query_scalar_int(reader, "SELECT bioseq.avg(q)::bigint FROM quality_versions") == 20);
+    it::exec_sql(reader, "COMMIT");
+    it::exec_sql(ctx, "PREPARE quality_parameter(integer) AS SELECT bioseq.avg(q) FROM quality_versions WHERE id=$1");
+    REQUIRE(it::query_scalar_int(ctx, "EXECUTE quality_parameter(1)") == 41);
+    it::exec_sql(ctx, "DEALLOCATE quality_parameter");
+    it::exec_sql(ctx, "BEGIN; DELETE FROM quality_versions; ROLLBACK");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.avg(q)::bigint FROM quality_versions") == 41);
+    it::exec_sql(ctx, "DELETE FROM quality_versions");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_versions") == 0);
+    it::exec_sql(ctx, "TRUNCATE quality_versions; INSERT INTO quality_versions VALUES (2,'I')");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('quality_versions','symbol_counts')") == 1);
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.avg(q)::bigint FROM quality_versions") == 40);
+}
+
+TEST_CASE("quality mean batch order agrees with numeric sort and spills under work_mem",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context({"quality_sort"});
+    it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    it::exec_sql(ctx, "CREATE TABLE quality_sort(id integer, q bioseq.seq('phred42')) USING bioseq");
+    it::exec_sql(ctx, "INSERT INTO quality_sort SELECT i,('!'||repeat('I',4096+i))::bioseq.seq('phred42') "
+        "FROM generate_series(1,2000) i");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('quality_sort','symbol_counts')") == 2000);
+    const std::string query = "SELECT id,bioseq.avg(q) FROM quality_sort ORDER BY bioseq.avg(q) DESC NULLS LAST";
+    it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=off");
+    const auto ordinary = it::query_rows(ctx, query);
+    REQUIRE(ordinary.size() == 2000); REQUIRE(ordinary.front()[0] == "2000");
+    it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=on");
+    it::exec_sql(ctx, "SET work_mem='64MB'");
+    REQUIRE(it::query_rows(ctx, query) == ordinary);
+    const auto native = it::explain_text<true>(ctx, query);
+    REQUIRE(it::find_explain_property(native, "Bioseq Sort Key") == "exact quality mean");
+    REQUIRE(it::find_explain_property(native, "Bioseq Sort Accelerator") == "exact quality mean CPU");
+    REQUIRE(it::find_explain_property(native, "Bioseq Mean Quality Index Hits") == "2000");
+    REQUIRE(it::find_explain_property(native, "Bioseq Mean Source Symbols Read") == "0");
+    const auto shared = it::explain_text<true>(ctx,
+        "SELECT id,bioseq.min(q),bioseq.avg(q) FROM quality_sort ORDER BY bioseq.avg(q)");
+    REQUIRE(it::find_explain_property(shared, "Bioseq Quality Index Hits") == "2000");
+    REQUIRE(it::find_explain_property(shared, "Bioseq Mean Quality Index Hits") == "0");
+    REQUIRE(it::find_explain_property(shared, "Bioseq Mean Summary Cache Hits") == "2000");
+    it::exec_sql(ctx, "SET work_mem='64kB'");
+    REQUIRE(it::query_rows(ctx, query) == ordinary);
+    const auto spill = it::explain_text<true>(ctx, query);
+    REQUIRE(it::find_explain_property(spill, "Bioseq Sort Accelerator") == "numeric tuplesort fallback");
+    REQUIRE(it::find_explain_property(spill, "Bioseq Mean Sort Spilled") == "true");
+    const auto limited = it::query_rows(ctx, query + " OFFSET 7 LIMIT 11");
+    REQUIRE(limited == decltype(limited)(ordinary.begin()+7, ordinary.begin()+18));
+    it::exec_sql(ctx, "INSERT INTO quality_sort VALUES (2001,NULL),(2002,''),(2003,'II'),(2004,'IIII')");
+    const auto ties = it::query_rows(ctx,
+        "SELECT id FROM quality_sort ORDER BY bioseq.avg(q) DESC NULLS LAST FETCH FIRST 1 ROW WITH TIES");
+    REQUIRE(ties.size() == 2);
+    it::exec_sql(ctx, "SET work_mem='64MB'");
+    for (const auto* direction : {"ASC", "DESC"}) {
+        for (const auto* nulls : {"FIRST", "LAST"}) {
+            const auto ordering = fmt::format(
+                "SELECT bioseq.avg(q) FROM quality_sort ORDER BY bioseq.avg(q) {} NULLS {}", direction, nulls);
+            it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=off");
+            const auto oracle = it::query_rows(ctx, ordering);
+            it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=on");
+            REQUIRE(it::query_rows(ctx, ordering) == oracle);
+        }
+    }
+    {
+        it::guc_scope reads(ctx, "bioseq.index.sequence_read.enabled", "off");
+        const auto plan = it::explain_text<true>(ctx, query);
+        REQUIRE(it::find_explain_property(plan, "Bioseq Mean Quality Index Hits") == "0");
+        REQUIRE(it::find_explain_property(plan, "Bioseq Mean Source Symbols Read") ==
+            std::to_string(it::query_scalar_int(ctx, "SELECT sum(bioseq.len(q)) FROM quality_sort")));
+    }
+    // Projected source values and transformed/multiple keys use the ordinary safe route.
+    const std::string fallback = "SELECT id,q::text,bioseq.avg(bioseq.reverse(q)) FROM quality_sort "
+        "ORDER BY bioseq.avg(bioseq.reverse(q)),id";
+    it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=off");
+    const auto fallback_oracle = it::query_rows(ctx, fallback);
+    it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=on");
+    REQUIRE(it::query_rows(ctx, fallback) == fallback_oracle);
+    it::exec_sql(ctx, "RESET work_mem; RESET bioseq.planner.sequence_sort_scan.enabled");
+}
+
+TEST_CASE("quality binding conversions and lazy identity operations are lossless",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context();
+    REQUIRE(it::query_one(ctx, "SELECT ('a~'::bioseq.seq)::bioseq.seq('phred68-legacy')::text")[0] == "a~");
+    REQUIRE(it::query_one(ctx, "SELECT ('!J'::bioseq.seq('phred42'))::bioseq.seq('phred63')::text")[0] == "!J");
+    REQUIRE(it::sql_error(ctx, "SELECT ('_'::bioseq.seq('phred63'))::bioseq.seq('phred42')").sqlstate == "22023");
+    REQUIRE(it::sql_error(ctx, "SELECT (''::bioseq.seq('phred42'))::bioseq.seq('phred68-legacy')").sqlstate == "42804");
+    REQUIRE(it::sql_error(ctx, "SELECT ('A'::bioseq.seq('dna4'))::bioseq.seq('phred42')").sqlstate == "42804");
+    const auto values = it::query_one(ctx,
+        "SELECT bioseq.reverse(bioseq.reverse_complement('a~'::bioseq.seq('phred68-legacy')))::text,"
+        "bioseq.reverse_complement('a~'::bioseq.seq('phred68-legacy'))::text,"
+        "(bioseq.quality_stats('!J'::bioseq.seq('phred42'))).mean");
+    REQUIRE(values[0] == "a~"); REQUIRE(values[1] == "~a"); REQUIRE(values[2] == "20.5");
+}
+
+TEST_CASE("quality letters preserve every score and legacy counts preserve case",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context({"quality_legacy_letters"});
+    for (const auto& [alphabet, first, last, offset] : {
+             std::tuple{"phred42", 33, 74, 33},
+             std::tuple{"phred63", 33, 95, 33},
+             std::tuple{"phred68-legacy", 59, 126, 64}}) {
+        CAPTURE(alphabet);
+        REQUIRE(it::query_scalar(ctx, fmt::format(
+            "SELECT bool_and(bioseq.quality_score(chr(i)::bioseq.letter('{}'))=i-{}) "
+            "FROM generate_series({},{}) AS g(i)", alphabet, offset, first, last)) == "t");
+    }
+    it::exec_sql(ctx, "CREATE TABLE quality_legacy_letters(q bioseq.seq('phred68-legacy')) USING bioseq;"
+        "INSERT INTO quality_legacy_letters VALUES ('AaaJj')");
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT bioseq.update_index('quality_legacy_letters','symbol_counts')") == 1);
+    const std::string query = "SELECT bioseq.symbol_count(q,'a'),bioseq.symbol_count(q,'A'),"
+        "bioseq.sum(q),bioseq.avg(q),q[-2:]::text,"
+        "bioseq.seq_hash(q)=bioseq.seq_hash(q[0:2] OPERATOR(bioseq.||) q[2:]),"
+        "bioseq.reverse(bioseq.reverse(q))::text FROM quality_legacy_letters";
+    for (const char* policy : {"on", "off"}) {
+        it::guc_scope reads(ctx, "bioseq.index.sequence_read.enabled", policy);
+        const auto row = it::query_one(ctx, query);
+        REQUIRE(row[0] == "2"); REQUIRE(row[1] == "1");
+        REQUIRE(row[2] == "119"); REQUIRE(row[3] == "23.8");
+        REQUIRE(row[4] == "Jj"); REQUIRE(row[5] == "t"); REQUIRE(row[6] == "AaaJj");
+    }
+    it::exec_sql(ctx, "UPDATE quality_legacy_letters SET q[1:3]=';~'");
+    REQUIRE(it::query_scalar(ctx, "SELECT q::text FROM quality_legacy_letters") == "A;~Jj");
+    it::exec_sql(ctx, "UPDATE quality_legacy_letters SET q[1:3]=''");
+    REQUIRE(it::query_scalar(ctx, "SELECT q::text FROM quality_legacy_letters") == "AJj");
+    REQUIRE(it::query_scalar(ctx, "SELECT ('a'::text OPERATOR(bioseq.||) q "
+        "OPERATOR(bioseq.||) '~'::text)::text FROM quality_legacy_letters") == "aAJj~");
+}
+
+TEST_CASE("quality sequence batch ordering agrees with native ASCII score order",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context({"quality_lex"});
+    it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    for (const auto* alphabet : {"phred42", "phred63", "phred68-legacy"}) {
+        INFO(alphabet);
+        const bool legacy = std::string_view{alphabet} == "phred68-legacy";
+        it::exec_sql(ctx, fmt::format("DROP TABLE IF EXISTS quality_lex; "
+            "CREATE TABLE quality_lex(q bioseq.seq('{}')) USING bioseq", alphabet));
+        it::exec_sql(ctx, fmt::format("INSERT INTO quality_lex SELECT "
+            "(repeat('{}',1024)||chr({}+i%{})||repeat('{}',i%7))::bioseq.seq('{}') "
+            "FROM generate_series(1,70) i; INSERT INTO quality_lex VALUES (''),(NULL)",
+            legacy ? "a" : "I", legacy ? 59 : 33, legacy ? 68 : 42,
+            legacy ? "a" : "I", alphabet));
+        const auto expected = it::query_rows(ctx, "SELECT q::text FROM quality_lex ORDER BY q::text COLLATE \"C\" NULLS FIRST");
+        it::exec_sql(ctx, "SET bioseq.planner.sequence_sort_scan.enabled=on");
+        REQUIRE(it::query_rows(ctx, "SELECT q::text FROM quality_lex ORDER BY q NULLS FIRST") == expected);
+        const auto plan = it::explain_text<true>(ctx, "SELECT q::text FROM quality_lex ORDER BY q NULLS FIRST");
+        REQUIRE(std::ranges::any_of(plan, [](const auto& line) { return line.contains("BioseqBatchSort"); }));
+        REQUIRE(it::query_rows(ctx, "SELECT q::text FROM quality_lex ORDER BY q DESC NULLS LAST") ==
+            decltype(expected)(expected.rbegin(), expected.rend()));
+    }
+    it::exec_sql(ctx, "RESET bioseq.planner.sequence_sort_scan.enabled");
+}
+
+TEST_CASE("quality ordinary SQL paths preserve values and outer join nulls",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres]") {
+    auto ctx = it::fresh_context({"quality_heap", "quality_join"});
+    it::exec_sql(ctx, "CREATE TABLE quality_heap(id integer, q bioseq.seq('phred68-legacy')); "
+        "INSERT INTO quality_heap VALUES (1,';@~'),(2,''),(3,NULL),(4,repeat('a~',40000)); "
+        "CREATE TABLE quality_join(id integer, q bioseq.seq('phred68-legacy')) USING bioseq; "
+        "INSERT INTO quality_join VALUES (1,';@~'),(2,''),(3,NULL)");
+    const auto heap = it::query_rows(ctx,
+        "SELECT id,bioseq.min(q),bioseq.max(q),bioseq.sum(q),bioseq.avg(q) FROM quality_heap ORDER BY id");
+    REQUIRE(heap[0][1] == "-5"); REQUIRE(heap[0][2] == "62");
+    REQUIRE(heap[0][3] == "57"); REQUIRE(heap[0][4] == "19");
+    REQUIRE_FALSE(heap[1][1]); REQUIRE(heap[1][3] == "0"); REQUIRE_FALSE(heap[1][4]);
+    REQUIRE_FALSE(heap[2][3]); REQUIRE(heap[3][4] == "47.5");
+    const auto joined = it::query_rows(ctx,
+        "SELECT h.id,bioseq.avg(j.q) FROM quality_heap h LEFT JOIN quality_join j ON h.id=j.id ORDER BY h.id");
+    REQUIRE(joined[0][1] == "19"); REQUIRE_FALSE(joined[1][1]);
+    REQUIRE_FALSE(joined[2][1]); REQUIRE_FALSE(joined[3][1]);
+    const auto filtered = it::query_rows(ctx,
+        "SELECT id,bioseq.sum(q) FROM quality_join WHERE bioseq.avg(q)>10 ORDER BY id");
+    REQUIRE(filtered.size() == 1); REQUIRE(filtered[0][0] == "1"); REQUIRE(filtered[0][1] == "57");
+    const auto rescanned = it::query_rows(ctx,
+        "SELECT v.ordinal,(SELECT bioseq.avg(q) FROM quality_join WHERE id=v.id OFFSET 0) "
+        "FROM (VALUES (1,1),(2,2),(3,1),(4,3)) v(ordinal,id) ORDER BY v.ordinal");
+    REQUIRE(rescanned[0][1] == "19"); REQUIRE_FALSE(rescanned[1][1]);
+    REQUIRE(rescanned[2][1] == "19"); REQUIRE_FALSE(rescanned[3][1]);
+    it::exec_sql(ctx, "SET search_path=pg_catalog,bioseq,public");
+    const auto scalar_and_aggregate = it::query_one(ctx,
+        "SELECT avg(';@~'::bioseq.seq('phred68-legacy')),"
+        "(SELECT sum(i) FROM generate_series(1,3) i),"
+        "(SELECT avg(i) FROM generate_series(1,3) i),"
+        "(SELECT bioseq.seq_min(q)::text FROM quality_heap)");
+    REQUIRE(scalar_and_aggregate[0] == "19"); REQUIRE(scalar_and_aggregate[1] == "6");
+    REQUIRE(scalar_and_aggregate[2] == "2.0000000000000000"); REQUIRE(scalar_and_aggregate[3] == "");
+    const auto materialized = it::query_rows(ctx,
+        "WITH x AS MATERIALIZED (SELECT id,bioseq.reverse(q) q FROM quality_heap) "
+        "SELECT id,bioseq.min(q),bioseq.max(q),bioseq.sum(q),bioseq.avg(q) FROM x ORDER BY id");
+    REQUIRE(materialized == heap);
+    it::exec_sql(ctx, "PREPARE quality_value(bioseq.seq) AS SELECT bioseq.avg($1),bioseq.sum($1)");
+    const auto parameter = it::query_one(ctx, "EXECUTE quality_value(';@~'::bioseq.seq('phred68-legacy'))");
+    REQUIRE(parameter[0] == "19"); REQUIRE(parameter[1] == "57");
+    it::exec_sql(ctx, "DEALLOCATE quality_value");
+    const auto arrays = it::query_one(ctx,
+        "SELECT array_to_string(bioseq.to_array(q),''),bioseq.quality_score(q[0]),"
+        "q[-2:]::text,bioseq.reverse(bioseq.reverse(q))::text "
+        "FROM (VALUES (';a~'::bioseq.seq('phred68-legacy'))) v(q)");
+    REQUIRE(arrays[0] == ";a~"); REQUIRE(arrays[1] == "-5");
+    REQUIRE(arrays[2] == "a~"); REQUIRE(arrays[3] == ";a~");
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT count(*) FROM pg_proc WHERE oid IN ('bioseq.min(bioseq.seq)'::regprocedure,"
+        "'bioseq.max(bioseq.seq)'::regprocedure,'bioseq.sum(bioseq.seq)'::regprocedure,"
+        "'bioseq.avg(bioseq.seq)'::regprocedure) AND prokind='f' AND proisstrict") == 4);
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.avg(''::bioseq.seq('dna4'))").sqlstate == "42804");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.avg('10M'::bioseq.seq('cigar'))").sqlstate == "42804");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.avg('!') OVER ()").sqlstate == "42809");
+    REQUIRE(it::query_one(ctx, "SELECT ('10M'::bioseq.seq)::bioseq.seq('phred63')::text")[0] == "10M");
+}
+
+TEST_CASE("FASTQ declared codecs and transactional quality setup",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres][resource:filesystem]") {
+    auto ctx = it::fresh_context({"quality_declared", "quality_ddl", "quality_bad_destination"});
+    it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    const std::string fastq = "/tmp/bioseq_quality_declared.fastq";
+    const std::string fasta = "/tmp/bioseq_quality_declared.fasta";
+    { std::ofstream file(fastq, std::ios::binary); file << "@legacy\nACG\n+\na@~\n"; }
+    write_fasta(fasta, {{"fasta", "ACG"}});
+    it::exec_sql(ctx, "CREATE TABLE quality_declared(header text,seq bioseq.seq('dna4'),"
+        "quality bioseq.seq('phred68-legacy'), CHECK (quality IS NULL OR bioseq.len(seq)=bioseq.len(quality))) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_declared','" + fastq + "')") == 1);
+    REQUIRE(it::query_one(ctx, "SELECT quality::text FROM quality_declared")[0] == "a@~");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fastq +
+        "',options=>ROW('phred63')::bioseq.load_options)").sqlstate == "22023");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_declared','" + fasta + "')") == 1);
+    REQUIRE_FALSE(it::query_one(ctx, "SELECT quality::text FROM quality_declared WHERE header='fasta'")[0]);
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fasta +
+        "',options=>ROW('phred42')::bioseq.load_options)").sqlstate == "22023");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fasta +
+        "',columns=>ARRAY[ROW('quality','quality')::bioseq.column_mapping])").sqlstate == "22023");
+    it::exec_sql(ctx, "CREATE TABLE quality_ddl(header text,seq bioseq.seq('dna4')) USING bioseq");
+    // The default phred42 rejects legacy high bytes after adding the column.
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_ddl','" + fastq + "')").sqlstate == "22P02");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM pg_attribute WHERE attrelid='quality_ddl'::regclass "
+        "AND attname='quality' AND NOT attisdropped") == 0);
+    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_ddl") == 0);
+    it::exec_sql(ctx, "CREATE TABLE quality_bad_destination(header text,seq bioseq.seq('dna4'),quality text) USING bioseq");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_bad_destination','" + fastq + "')").sqlstate == "42P16");
+    // A failed constraint sees both finished sources but publishes neither.
+    it::exec_sql(ctx, "ALTER TABLE quality_declared ADD CONSTRAINT forbid_again CHECK(header<>'again')");
+    { std::ofstream file(fastq, std::ios::binary); file << "@again\nACG\n+\na@~\n"; }
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fastq + "')").sqlstate == "23514");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_declared") == 2);
+    { std::ofstream file(fastq, std::ios::binary); file << "@permitted\nACG\n+\n!!!\n"; }
+    it::exec_sql(ctx, "DROP ROLE IF EXISTS bioseq_quality_test_importer; "
+        "CREATE ROLE bioseq_quality_test_importer NOLOGIN; "
+        "GRANT USAGE ON SCHEMA bioseq TO bioseq_quality_test_importer; "
+        "GRANT INSERT ON quality_ddl TO bioseq_quality_test_importer; "
+        "SET ROLE bioseq_quality_test_importer");
+    const auto ddl_permission = it::sql_error(ctx, "SELECT bioseq.load('quality_ddl','" + fastq + "')");
+    const auto insert_permission = it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fastq + "')");
+    it::exec_sql(ctx, "RESET ROLE; REVOKE INSERT ON quality_ddl FROM bioseq_quality_test_importer; "
+        "REVOKE USAGE ON SCHEMA bioseq FROM bioseq_quality_test_importer; DROP ROLE bioseq_quality_test_importer");
+    REQUIRE(ddl_permission.sqlstate == "42501");
+    REQUIRE(ddl_permission.contains("predeclare"));
+    REQUIRE(insert_permission.sqlstate == "42501");
+    std::filesystem::remove(fastq); std::filesystem::remove(fasta);
+}
+
+TEST_CASE("FASTQ dual-source publication rolls back at each ownership transition",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres][resource:filesystem]") {
+    auto ctx = it::fresh_context({"quality_atomic"});
+    it::exec_sql(ctx, "CREATE TABLE quality_atomic(header text,seq bioseq.seq('dna4'),"
+        "quality bioseq.seq('phred42')) USING bioseq");
+    const std::string path = "/tmp/bioseq_quality_atomic.fastq";
+    { std::ofstream file(path, std::ios::binary); file << "@atomic\n" << std::string(50000, 'A')
+        << "\n+\n" << std::string(50000, 'I') << '\n'; }
+    const auto sources_before = it::query_scalar_int(ctx, "SELECT count(*) FROM bioseq_internal.sequence_source_version");
+    for (int stage = 1; stage <= 6; ++stage) {
+        INFO("failure stage " << stage);
+        it::exec_sql(ctx, fmt::format("SELECT bioseq_internal.arm_load_failure({})", stage));
+        const auto error = it::sql_error(ctx, "SELECT bioseq.load('quality_atomic','" + path + "')");
+        REQUIRE(error.sqlstate == "XX000");
+        REQUIRE(error.contains("injected load failure"));
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_atomic") == 0);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM bioseq_internal.sequence_source_version") == sources_before);
+    }
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_atomic','" + path + "')") == 1);
+    const auto row = it::query_one(ctx, "SELECT bioseq.len(seq),bioseq.len(quality),bioseq.avg(quality) FROM quality_atomic");
+    REQUIRE(row[0] == "50000"); REQUIRE(row[1] == "50000"); REQUIRE(row[2] == "40");
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("quality load preserves defaults old rows and compressed digit qualities",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres][resource:filesystem]") {
+    auto ctx = it::fresh_context({"quality_defaults", "quality_old_rows", "quality_required"});
+    it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    const std::string gzip_path = "/tmp/bioseq_quality_options.fastq.gz";
+    const std::string fasta_path = "/tmp/bioseq_quality_options.fasta";
+    const std::string fastq = "@new\nACG\n+\n01I\n";
+    gzFile compressed = gzopen(gzip_path.c_str(), "wb");
+    REQUIRE(compressed != nullptr);
+    REQUIRE(gzwrite(compressed, fastq.data(), fastq.size()) == static_cast<int>(fastq.size()));
+    REQUIRE(gzclose(compressed) == Z_OK);
+    write_fasta(fasta_path, {{"fasta", "ACG"}});
+    it::exec_sql(ctx, "CREATE TABLE quality_defaults(header text,seq bioseq.seq('dna4'),"
+        "quality bioseq.seq('phred63') NOT NULL DEFAULT '_'::bioseq.seq('phred63')) USING bioseq; "
+        "CREATE TABLE quality_old_rows(header text,seq bioseq.seq('dna4')) USING bioseq; "
+        "INSERT INTO quality_old_rows VALUES ('old','ACG'); "
+        "CREATE TABLE quality_required(header text,seq bioseq.seq('dna4'),quality bioseq.seq('phred42') NOT NULL) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_defaults','" + gzip_path + "')") == 1);
+    REQUIRE(it::query_one(ctx, "SELECT quality::text,bioseq.sum(quality) FROM quality_defaults")[1] == "71");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_defaults','" + fasta_path + "')") == 1);
+    REQUIRE(it::query_one(ctx, "SELECT quality::text FROM quality_defaults WHERE header='fasta'")[0] == "_");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('quality_defaults','symbol_counts')") == 2);
+    const auto default_index = it::explain_text<true>(ctx, "SELECT bioseq.avg(quality) FROM quality_defaults");
+    REQUIRE(it::find_explain_property(default_index, "Bioseq Quality Index Hits") == "2");
+    REQUIRE(it::find_explain_property(default_index, "Bioseq Quality Source Symbols Read") == "0");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_old_rows','" + gzip_path + "')") == 1);
+    const auto rows = it::query_rows(ctx, "SELECT header,quality::text FROM quality_old_rows ORDER BY header");
+    REQUIRE(rows.size() == 2); REQUIRE(rows[0][1] == "01I"); REQUIRE_FALSE(rows[1][1]);
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_required','" + fasta_path + "')").sqlstate == "42P16");
+    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_defaults','" + gzip_path +
+        "',columns=>ARRAY[ROW('a','quality'),ROW('b','quality')]::bioseq.column_mapping[])").sqlstate == "22023");
+    std::filesystem::remove(gzip_path); std::filesystem::remove(fasta_path);
+}
+
+
+TEST_CASE("FASTQ CHECK expressions read both staged sources before publication",
+          "[component:bioseq][layer:integration][feature:quality][resource:postgres][resource:filesystem]") {
+    auto ctx = it::fresh_context({"quality_checks"});
+    it::exec_sql(ctx, "CREATE TABLE quality_checks(header text,seq bioseq.seq('dna4'),"
+        "quality bioseq.seq('phred42'), CHECK(seq::text='ACG' AND bioseq.avg(quality)>=30)) USING bioseq");
+    const std::string path = "/tmp/bioseq_quality_checks.fastq";
+    const auto write = [&](std::string_view sequence, std::string_view quality) {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file << "@check\n" << sequence << "\n+\n" << quality << '\n';
+    };
+    write("ACG", "III");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_checks','" + path + "')") == 1);
+    const auto sources = it::query_scalar_int(ctx, "SELECT count(*) FROM bioseq_internal.sequence_source_version");
+    for (const auto& values : {std::pair{"ACG", "!!!"}, std::pair{"AGC", "III"}}) {
+        write(values.first, values.second);
+        REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_checks','" + path + "')").sqlstate == "23514");
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM quality_checks") == 1);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM bioseq_internal.sequence_source_version") == sources);
+        const auto row = it::query_one(ctx, "SELECT seq::text,quality::text,bioseq.avg(quality) FROM quality_checks");
+        REQUIRE(row[0] == "ACG"); REQUIRE(row[1] == "III"); REQUIRE(row[2] == "40");
+    }
+    std::filesystem::remove(path);
 }

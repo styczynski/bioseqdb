@@ -477,7 +477,8 @@ void require_materialized_width(facade_t source,
                                 std::uint8_t width) {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t before = admission.reserved_bytes();
-    auto permit = admission.try_reserve(4096u);
+    auto permit = admission.try_reserve(
+        bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(expected.size(), width));
     REQUIRE(permit.has_value());
     {
         auto owner_attempt = bioseq::storage::materialize_packed_sequence(

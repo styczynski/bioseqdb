@@ -44,12 +44,17 @@ template<sequence_alphabet Source, bioseq::sequences::sequence_conversion_sink W
     using namespace bioseq::sequences;
     using Destination = typename Writer::traits::alphabet_type;
     if constexpr (!((seqan3::nucleotide_alphabet<Source> && seqan3::nucleotide_alphabet<Destination>)
-        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>))) {
+        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>)
+        || (quality_alphabet<Source> && quality_alphabet<Destination>))) {
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
     } else {
+        if constexpr (quality_alphabet<Source> && quality_alphabet<Destination>) {
+            if constexpr (quality_alphabet_traits<Source>::legacy != quality_alphabet_traits<Destination>::legacy)
+                return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+        }
         if (begin > end || end > source.symbol_count)
             return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::invalid_interval, begin});
-        if (source.alphabet_code != supported_biological_alphabets::template index_of<Source>())
+        if (source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
             return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
         static constexpr auto table = make_native_rank_recode_table<Source, Destination>();
         const hn::ScalableTag<std::uint8_t> tag;

@@ -1411,6 +1411,7 @@ function(bioseq_add_minimizer_registry_codegen)
       "${_pipeline_entries_module}"
       "${_manifest}"
       "${_stamp}"
+    BYPRODUCTS "${_manifest}.storage"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_output_root}"
     COMMAND "$<TARGET_FILE:bioseq_codegen>" highway minimizer-registry
       --profile "${ARG_PROFILE}"

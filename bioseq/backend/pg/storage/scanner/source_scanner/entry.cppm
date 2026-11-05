@@ -31,6 +31,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <expected>
+#include <optional>
 
 export module bioseq.postgres.storage.scanner:source_scanner_entry;
 
@@ -48,6 +49,7 @@ import bioseq.postgres.storage.physical;
 import bioseq.storage.size;
 import bioseq.postgres.storage.metadata;
 import bioseq.sequences;                 // Packed sequence types and alphabet traits.
+import bioseq.sequences.quality_summary;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
@@ -902,6 +904,105 @@ read_domain_storage_bytes(const void* opaque,
         });
 }
 
+[[nodiscard]] inline auto read_domain_quality_summary(const void* opaque,
+        pg_sequence_read_session& session, const sequence_locator& locator,
+        compact_sequence_stdc_type_params type, std::optional<std::uint64_t> row_number,
+        std::uint64_t from, std::uint64_t to, bool read_index)
+    -> std::expected<std::optional<bioseq::sequences::quality_summary>, bioseq::sequences::quality_error> {
+    auto* domain = const_cast<pg_sequence_source_domain*>(static_cast<const pg_sequence_source_domain*>(opaque));
+    if (!domain || !domain->backend_thread.is_current() || !session.backend_thread.is_current()
+        || domain->backend_thread.owner != session.backend_thread.owner) {
+#ifdef BIOSEQ_TEST_INDEXES
+        ++g_pg_sequence_source_stats.wrong_thread_rejections;
+#endif
+        return std::unexpected(bioseq::sequences::quality_error::source_read);
+    }
+    // A cached integer result still belongs to the live source domain. Apply
+    // the same lifetime and binding checks as a rank read before using it.
+    bioseq::postgres::support::invoke_pg_as_cpp([domain, locator, type, from, to] {
+        if (!domain_is_readable(*domain))
+            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("bioseq source transaction has ended"),
+                errhint("consume locator-backed values while their owning transaction is live")));
+        if (domain->stored_type != type || !is_quality_alphabet_code(type.alphabet_code)
+            || !locator_geometry_is_valid(locator, type, 0u, /*validate_padding=*/false)
+            || from > to || to > locator.logical_length)
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("quality summary request does not match its verified source binding")));
+    });
+    if (domain->quality_cached_summary && domain->quality_cached_epoch == locator.source_epoch
+        && domain->quality_cached_from == from && domain->quality_cached_to == to
+        && (read_index || !domain->quality_cached_from_index)
+        && (!domain->quality_histogram_requested || from != 0 || to != locator.logical_length
+            || domain->quality_cached_counts_valid)) {
+        ++session.quality_statistics.cache_hits;
+        return domain->quality_cached_summary;
+    }
+    if (from != 0 || to != locator.logical_length) return std::nullopt;
+    domain->quality_cached_counts_valid = false;
+    if (read_index && row_number && read_quality_source_index) {
+        auto result = read_quality_source_index(*domain, session, locator, type, *row_number);
+        if (!result) return result;
+        if (*result) {
+            ++session.quality_statistics.index_hits;
+            domain->quality_cached_summary = **result;
+            domain->quality_cached_epoch = locator.source_epoch;
+            domain->quality_cached_from = from;
+            domain->quality_cached_to = to;
+            domain->quality_cached_from_index = true;
+            return result;
+        }
+    }
+    if (!domain->quality_histogram_requested) return std::nullopt;
+    // When the statement also requests symbol_count, keep its histogram in
+    // the same bounded pass. Statistics-only expressions retain the SIMD reducer.
+    using namespace bioseq::sequences;
+    std::expected<quality_summary, quality_error> computed = std::unexpected(quality_error::invalid_summary);
+    domain->quality_cached_counts.fill(0);
+    pgseq_supported_quality_alphabets::dispatch_alphabet_by_code(type.alphabet_code,
+        [&]<class Alphabet>() {
+            std::array<std::uint8_t, 4096> scratch{};
+            for (std::uint64_t offset = 0; offset < to;) {
+                const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(scratch.size(), to - offset));
+                if (read_domain_ranks(domain, session, locator, type, sequence_transform::identity,
+                        offset, std::span{scratch}.first(count)) != pg_sequence_source_read_status::ok) {
+                    computed = std::unexpected(quality_error::source_read); return;
+                }
+                for (const auto rank : std::span{scratch}.first(count)) {
+                    if (rank >= seqan3::alphabet_size<Alphabet>) {
+                        computed = std::unexpected(quality_error::invalid_rank); return;
+                    }
+                    ++domain->quality_cached_counts[rank];
+                }
+                session.quality_statistics.source_symbols += count;
+                offset += count;
+            }
+            computed = summarize_quality_histogram<Alphabet>(
+                std::span{domain->quality_cached_counts}.first(quality_histogram_slots<Alphabet>));
+        });
+    if (!computed) return std::unexpected(computed.error());
+    ++session.quality_statistics.fallbacks;
+    domain->quality_cached_summary = *computed;
+    domain->quality_cached_counts_valid = true;
+    domain->quality_cached_epoch = locator.source_epoch;
+    domain->quality_cached_from = from;
+    domain->quality_cached_to = to;
+    domain->quality_cached_from_index = false;
+    return std::optional{*computed};
+}
+
+inline void remember_domain_quality_summary(const void* opaque, const sequence_locator& locator,
+        std::uint64_t from, std::uint64_t to, const bioseq::sequences::quality_summary& summary) {
+    auto* domain = const_cast<pg_sequence_source_domain*>(static_cast<const pg_sequence_source_domain*>(opaque));
+    if (domain == nullptr || !domain->backend_thread.is_current() || !domain_is_readable(*domain)) return;
+    domain->quality_cached_summary = summary;
+    domain->quality_cached_counts_valid = false;
+    domain->quality_cached_epoch = locator.source_epoch;
+    domain->quality_cached_from = from;
+    domain->quality_cached_to = to;
+    domain->quality_cached_from_index = false;
+}
+
 /// @return Shared callbacks for counting references and identifying and reading a domain.
 [[nodiscard]] inline const pg_sequence_source_backend_ops& source_backend_ops() noexcept {
     static const pg_sequence_source_backend_ops ops{
@@ -912,6 +1013,8 @@ read_domain_storage_bytes(const void* opaque,
         .read_ranks = read_domain_ranks,
         .read_packed_units = read_domain_storage_bytes<source_storage_read_kind::packed_units>,
         .read_encoded_bytes = read_domain_storage_bytes<source_storage_read_kind::encoded_bytes>,
+        .read_quality_summary = read_domain_quality_summary,
+        .remember_quality_summary = remember_domain_quality_summary,
     };
     return ops;
 }

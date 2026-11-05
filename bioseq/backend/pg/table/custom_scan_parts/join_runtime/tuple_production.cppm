@@ -188,6 +188,32 @@ export {
      *
      * @return The new BIGINT placeholder, or null to keep the scalar function call.
      */
+    /** Reuse row-bound placeholders only for exact scalar OIDs and non-null-extended columns. */
+    Const* try_rewrite_quality_statistic(FuncExpr* call, var_injector_context* ctx) {
+        if (!ctx || !ctx->consts || !ctx->oids || !call || list_length(call->args) != 1) return nullptr;
+        const auto kind = ctx->oids->quality_statistic_kind(call->funcid);
+        if (!kind) return nullptr;
+        auto* column = try_cast_pg_node<Var>(static_cast<Node*>(linitial(call->args)));
+        if (!column || column->varattno <= 0 || column->varlevelsup != 0
+            || ctx->current_relation == nullptr || ctx->scan_relation_index == 0
+            || column->varno != ctx->scan_relation_index
+            || column->varattno > RelationGetDescr(ctx->current_relation)->natts
+            || !bms_is_empty(column->varnullingrels)
+            || column->vartype != ctx->oids->bioseq_seq_type_oid || column->vartypmod < 0) return nullptr;
+        if (!is_quality_alphabet_code(compact_sequence_stdc_type_params::decode(column->vartypmod).alphabet_code))
+            return nullptr;
+        const bool small = kind <= 2;
+        auto* placeholder = makeConst(call->funcresulttype, -1, InvalidOid, small ? 2 : -1,
+            Datum{0}, true, small);
+        symbol_count_call_site site;
+        site.placeholder = placeholder;
+        site.rank = 0;
+        site.column_attno = column->varattno;
+        site.quality_statistic = static_cast<std::uint8_t>(kind);
+        ctx->consts->symbol_count_sites.push_back(std::move(site));
+        return placeholder;
+    }
+
     Const* try_rewrite_symbol_count(FuncExpr* fe, var_injector_context* ctx) {
         if (ctx == nullptr || fe == nullptr || ctx->consts == nullptr) {
             return nullptr;
@@ -322,6 +348,8 @@ export {
                         func_expr->funcid);
                     return pg_node_mutation::replace_with(to_pg_node(replacement));
                 }
+                if (auto* quality = try_rewrite_quality_statistic(func_expr, &injector_context))
+                    return pg_node_mutation::replace_with(to_pg_node(quality));
                 if (func_expr->funcid == injector_context.oids->symbol_count_oid) {
                     Const* symbol_placeholder =
                         try_rewrite_symbol_count(func_expr, &injector_context);

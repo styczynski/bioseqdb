@@ -139,12 +139,28 @@ struct sequence_index_storage {
     std::uint32_t shard_idx_ = 0;
     std::uint64_t query_key_ = 0;
     MemoryContext own_mctx_ = nullptr;
+    Snapshot read_snapshot_ = nullptr; // borrowed registered query snapshot; writer paths leave unset
     mutable Oid index_relid_ = InvalidOid;
     mutable std::int64_t* decoded_ = nullptr;
     mutable std::size_t decoded_units_ = 0;
     mutable std::size_t decoded_bytes_ = 0;
     mutable bool decoded_valid_ = false;
     std::size_t planned_bytes_ = std::numeric_limits<std::size_t>::max();
+
+    /** Borrow a registered MVCC query snapshot; the caller owns its lifetime. */
+    void bind_read_snapshot(Snapshot snapshot) {
+        bioseq::postgres::support::invoke_pg_as_cpp([snapshot] {
+            if (!snapshot || snapshot->snapshot_type != SNAPSHOT_MVCC || snapshot->regd_count == 0)
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("quality index read requires a registered MVCC snapshot")));
+        });
+        if (decoded_valid_ && read_snapshot_ != snapshot)
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("cannot change an active quality index read snapshot")));
+            });
+        read_snapshot_ = snapshot;
+    }
 
     sequence_index_storage() = default;
     sequence_index_storage(const sequence_index_storage&) = delete;
@@ -170,6 +186,7 @@ struct sequence_index_storage {
         shard_idx_ = o.shard_idx_;
         query_key_ = o.query_key_;
         own_mctx_ = o.own_mctx_;
+        read_snapshot_ = std::exchange(o.read_snapshot_, nullptr);
         index_relid_ = o.index_relid_;
         decoded_ = o.decoded_;
         decoded_units_ = o.decoded_units_;
@@ -188,10 +205,12 @@ struct sequence_index_storage {
             own_mctx_ == nullptr,
             "sequence_index_storage must be close_checked or abandoned before destruction");
         own_mctx_ = nullptr;
+        read_snapshot_ = nullptr;
         decoded_ = nullptr;
     }
     /// Delete the buffer memory context, converting PostgreSQL errors to C++ exceptions.
     void close_checked() {
+        read_snapshot_ = nullptr;
         if (own_mctx_ != nullptr) {
             MemoryContext finished_context = std::exchange(own_mctx_, nullptr);
             decoded_ = nullptr;
@@ -202,6 +221,7 @@ struct sequence_index_storage {
     /// Clear handles after a PostgreSQL error and leave memory release  to, transaction cleanup
     void abandon_after_pg_error_noexcept() noexcept {
         own_mctx_ = nullptr;
+        read_snapshot_ = nullptr;
         decoded_ = nullptr;
         decoded_units_ = 0;
         decoded_bytes_ = 0;
@@ -331,8 +351,8 @@ struct sequence_index_storage {
         bioseq::postgres::support::invoke_pg_as_cpp([&key, query_key] {
             ScanKeyInit(&key, 1, BTEqualStrategyNumber, F_INT8EQ, query_key);
         });
-        SysScanDesc scan = bioseq::postgres::support::invoke_pg_as_cpp([rel, pk, &key] {
-            return systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, &key);
+        SysScanDesc scan = bioseq::postgres::support::invoke_pg_as_cpp([rel, pk, &key, snapshot = read_snapshot_] {
+            return systable_beginscan(rel, pk, OidIsValid(pk), snapshot, 1, &key);
         });
         HeapTuple tuple = bioseq::postgres::support::invoke_pg_as_cpp([scan] {
             inject_inline_sequence_pg_leaf_failure(inline_sequence_pg_leaf_failure::tuple_read);
@@ -467,6 +487,7 @@ struct sequence_index_storage {
     void clear(std::string_view name);
     /// Rebind this handle to one sequence row without reallocating its context.
     void reset_entity(const sequence_locator& loc, std::uint64_t sequence_rowno) {
+        read_snapshot_ = nullptr;
         bucket_idx_ = static_cast<std::uint8_t>(loc.bucket_index);
         shard_idx_ = loc.shard_index;
         query_key_ = sequence_rowno;

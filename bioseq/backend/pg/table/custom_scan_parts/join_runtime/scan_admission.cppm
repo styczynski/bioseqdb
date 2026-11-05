@@ -995,6 +995,10 @@ export {
             }
             const auto match_target_type =
                 compact_sequence_stdc_type_params::decode(runtime.match_target_typmod);
+            if (is_quality_alphabet_code(match_target_type.alphabet_code)) {
+                ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("mmsearch is not defined for quality sequences")));
+            }
             if (!is_supported_alphabet_code(match_target_type.alphabet_code)) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),

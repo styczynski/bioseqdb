@@ -38,6 +38,7 @@ export module bioseq.postgres.storage.indexing.admin:rebuild_core;
 import bioseq.common.logging;
 import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.support;
+import bioseq.postgres.storage.indexing.admin.policy_catalog;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
@@ -408,7 +409,7 @@ verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
  * @return Rows with a non-null sequence value, or the table row count for a table index.
  */
 template <class p_supported_indexes>
-inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
+inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name, bool filter_incompatible = false) {
     if (!registered_index_name<p_supported_indexes>(name)) {
         bioseq::postgres::support::invoke_pg_as_cpp([name] {
             ereport(ERROR,
@@ -430,6 +431,122 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     }
     const relation_identity rid = index_relation_identity(rel_oid);
     const sequence_index_layout layout = registered_index_layout<p_supported_indexes>(name);
+    // Include every sequence column because mmsearch can target any of them.
+    std::vector<std::int16_t> seq_attnos;
+    const std::string seq_attno_sql =
+        fmt::format("SELECT a.attnum, a.atttypmod FROM pg_attribute a JOIN pg_type t "
+                    "ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
+                    "WHERE a.attrelid={}::oid AND t.typname='seq' "
+                    "AND n.nspname IN ('bioseq','bioseq_internal') "
+                    "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+                    static_cast<unsigned>(rel_oid));
+    struct sequence_attribute_number_spi_state {
+        int connect_status = 0;
+        int execute_status = 0;
+        int finish_status = 0;
+        std::uint64_t row_count = 0;
+        std::uint64_t null_row = (std::numeric_limits<std::uint64_t>::max)();
+        bool table_present = false;
+        bool overflow = false;
+        std::array<std::int16_t, MaxTupleAttributeNumber> values{};
+        std::array<std::int32_t, MaxTupleAttributeNumber> typmods{};
+    } state{};
+    const char* seq_attno_sql_data = seq_attno_sql.c_str();
+    bioseq::postgres::support::invoke_pg_as_cpp([&state, seq_attno_sql_data] noexcept {
+        state.connect_status = SPI_connect();
+        if (state.connect_status != SPI_OK_CONNECT)
+            return;
+        state.execute_status = SPI_execute(seq_attno_sql_data, true, 0);
+        state.row_count = SPI_processed;
+        state.table_present = SPI_tuptable != nullptr;
+        state.overflow = state.row_count > state.values.size();
+        if (state.execute_status == SPI_OK_SELECT && state.table_present && !state.overflow) {
+            for (std::uint64_t row = 0; row < state.row_count; ++row) {
+                bool is_null = false;
+                const Datum value =
+                    SPI_getbinval(SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1, &is_null);
+                if (is_null) {
+                    state.null_row = row;
+                    break;
+                }
+                state.values[static_cast<std::size_t>(row)] = DatumGetInt16(value);
+                const Datum typmod = SPI_getbinval(
+                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 2, &is_null);
+                if (is_null) { state.null_row = row; break; }
+                state.typmods[static_cast<std::size_t>(row)] = DatumGetInt32(typmod);
+            }
+        }
+        state.finish_status = SPI_finish();
+    });
+    if (state.connect_status != SPI_OK_CONNECT || state.execute_status != SPI_OK_SELECT ||
+        !state.table_present || state.overflow ||
+        state.null_row != (std::numeric_limits<std::uint64_t>::max)() ||
+        state.finish_status != SPI_OK_FINISH) {
+        bioseq::postgres::support::invoke_pg_as_cpp([&state] {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("bioseq.update_index sequence-column query failed"),
+                     errdetail("SPI_connect_status=%d SPI_execute_status=%d "
+                               "rows=%llu tuptable=%s overflow=%s null_row=%llu "
+                               "SPI_finish_status=%d",
+                               state.connect_status,
+                               state.execute_status,
+                               static_cast<unsigned long long>(state.row_count),
+                               state.table_present ? "present" : "null",
+                               state.overflow ? "true" : "false",
+                               static_cast<unsigned long long>(state.null_row),
+                               state.finish_status)));
+        });
+        pg_unreachable();
+    }
+    seq_attnos.assign(state.values.begin(),
+                      state.values.begin() + static_cast<std::ptrdiff_t>(state.row_count));
+    if (seq_attnos.empty()) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("bioseq.update_index relation has no bioseq.seq column")));
+        });
+        pg_unreachable();
+    }
+
+    // Generic table callbacks remain alphabet-independent. Reject unsupported
+    // per-sequence CIGAR indexes before kernel binding or GPU initialization.
+    if (name != bioseq::indexing::k_symbol_counts_index_name &&
+        layout != sequence_index_layout::table_chunks) {
+        for (std::size_t index = 0; index < state.row_count; ++index) {
+            const auto typmod = state.typmods[index];
+            if (typmod >= 0 && (pgseq_is_cigar_alphabet(
+                    compact_sequence_stdc_type_params::decode(typmod).alphabet_code)
+                    || is_quality_alphabet_code(compact_sequence_stdc_type_params::decode(typmod).alphabet_code))) {
+                if (filter_incompatible) {
+                    std::erase(seq_attnos, state.values[index]);
+                    continue;
+                }
+                bioseq::postgres::support::invoke_pg_as_cpp([name] {
+                    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("index %.*s is incompatible with CIGAR or quality sequences",
+                            static_cast<int>(name.size()), name.data()),
+                        errhint("CIGAR and quality sequences support the symbol_counts index.")));
+                });
+                pg_unreachable();
+            }
+        }
+    }
+    if (filter_incompatible) {
+        std::erase_if(seq_attnos, [&](std::int16_t attno) {
+            p_supported_indexes policy;
+            policy.apply_table_defaults();
+            policy.merge_overrides(load_table_policy(rel_oid, rid.relfilenode, attno));
+            const auto types = p_supported_indexes::list_types();
+            for (std::size_t i = 0; i < types.size(); ++i)
+                if (types[i].first == name)
+                    return !policy.enabled[i] || policy.policy[i] != bioseq::indexing::index_update_policy::update_on_insert;
+            return true;
+        });
+    }
+    if (seq_attnos.empty()) return 0;
+
     const auto frozen_minimizer_algorithm =
         static_cast<bioseq::simd::minimizer_algorithm>(
             static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()));
@@ -529,103 +646,6 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         static_cast<int>(frozen_minimizer_algorithm),
         use_grouped_soa_generation);
 
-    // Include every sequence column because mmsearch can target any of them.
-    std::vector<std::int16_t> seq_attnos;
-    const std::string seq_attno_sql =
-        fmt::format("SELECT a.attnum, a.atttypmod FROM pg_attribute a JOIN pg_type t "
-                    "ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
-                    "WHERE a.attrelid={}::oid AND t.typname='seq' "
-                    "AND n.nspname IN ('bioseq','bioseq_internal') "
-                    "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
-                    static_cast<unsigned>(rel_oid));
-    struct sequence_attribute_number_spi_state {
-        int connect_status = 0;
-        int execute_status = 0;
-        int finish_status = 0;
-        std::uint64_t row_count = 0;
-        std::uint64_t null_row = (std::numeric_limits<std::uint64_t>::max)();
-        bool table_present = false;
-        bool overflow = false;
-        std::array<std::int16_t, MaxTupleAttributeNumber> values{};
-        std::array<std::int32_t, MaxTupleAttributeNumber> typmods{};
-    } state{};
-    const char* seq_attno_sql_data = seq_attno_sql.c_str();
-    bioseq::postgres::support::invoke_pg_as_cpp([&state, seq_attno_sql_data] noexcept {
-        state.connect_status = SPI_connect();
-        if (state.connect_status != SPI_OK_CONNECT)
-            return;
-        state.execute_status = SPI_execute(seq_attno_sql_data, true, 0);
-        state.row_count = SPI_processed;
-        state.table_present = SPI_tuptable != nullptr;
-        state.overflow = state.row_count > state.values.size();
-        if (state.execute_status == SPI_OK_SELECT && state.table_present && !state.overflow) {
-            for (std::uint64_t row = 0; row < state.row_count; ++row) {
-                bool is_null = false;
-                const Datum value =
-                    SPI_getbinval(SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1, &is_null);
-                if (is_null) {
-                    state.null_row = row;
-                    break;
-                }
-                state.values[static_cast<std::size_t>(row)] = DatumGetInt16(value);
-                const Datum typmod = SPI_getbinval(
-                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 2, &is_null);
-                if (is_null) { state.null_row = row; break; }
-                state.typmods[static_cast<std::size_t>(row)] = DatumGetInt32(typmod);
-            }
-        }
-        state.finish_status = SPI_finish();
-    });
-    if (state.connect_status != SPI_OK_CONNECT || state.execute_status != SPI_OK_SELECT ||
-        !state.table_present || state.overflow ||
-        state.null_row != (std::numeric_limits<std::uint64_t>::max)() ||
-        state.finish_status != SPI_OK_FINISH) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&state] {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("bioseq.update_index sequence-column query failed"),
-                     errdetail("SPI_connect_status=%d SPI_execute_status=%d "
-                               "rows=%llu tuptable=%s overflow=%s null_row=%llu "
-                               "SPI_finish_status=%d",
-                               state.connect_status,
-                               state.execute_status,
-                               static_cast<unsigned long long>(state.row_count),
-                               state.table_present ? "present" : "null",
-                               state.overflow ? "true" : "false",
-                               static_cast<unsigned long long>(state.null_row),
-                               state.finish_status)));
-        });
-        pg_unreachable();
-    }
-    seq_attnos.assign(state.values.begin(),
-                      state.values.begin() + static_cast<std::ptrdiff_t>(state.row_count));
-    if (seq_attnos.empty()) {
-        bioseq::postgres::support::invoke_pg_as_cpp([] {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("bioseq.update_index relation has no bioseq.seq column")));
-        });
-        pg_unreachable();
-    }
-
-    // Generic table callbacks remain alphabet-independent. Reject unsupported
-    // per-sequence CIGAR indexes before kernel binding or GPU initialization.
-    if (name != bioseq::indexing::k_symbol_counts_index_name &&
-        layout != sequence_index_layout::table_chunks) {
-        for (std::size_t index = 0; index < state.row_count; ++index) {
-            const auto typmod = state.typmods[index];
-            if (typmod >= 0 && pgseq_is_cigar_alphabet(
-                    compact_sequence_stdc_type_params::decode(typmod).alphabet_code)) {
-                bioseq::postgres::support::invoke_pg_as_cpp([name] {
-                    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                        errmsg("index %.*s is incompatible with CIGAR sequences",
-                            static_cast<int>(name.size()), name.data()),
-                        errhint("CIGAR sequences support the symbol_counts index.")));
-                });
-                pg_unreachable();
-            }
-        }
-    }
     const MemoryContext parent_context = CurrentMemoryContext;
     MemoryContext work = bioseq::postgres::support::invoke_pg_as_cpp([parent_context] {
         return AllocSetContextCreate(parent_context, "bioseq_update_index", ALLOCSET_DEFAULT_SIZES);
@@ -801,11 +821,36 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     });
                 const std::uint8_t alpha = hdr->alphabet_code;
                 const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
+                if (is_quality_alphabet_code(alpha)) {
+                    if (name != bioseq::indexing::k_symbol_counts_index_name)
+                        bioseq::postgres::support::invoke_pg_as_cpp([] {
+                            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                errmsg("quality sequences support only symbol_counts sequence indexes")));
+                        });
+                    if (!is_locator_stub(hdr)) continue; // Only immutable persisted sources have an epoch.
+                    const auto quality_locator = decode_locator_from_stub(hdr);
+                    const auto quality_datum = bioseq::storage::promote_pg_sequence_locator(
+                        source_provider, seq_attno, PointerGetDatum(hdr), inner);
+                    auto store = open_sequence_storage_handle(rel_oid, rid.db_oid,
+                        rid.tablespace_oid, rid.relfilenode, seq_attno, name,
+                        quality_locator, rowno, caches, work);
+                    run_pg_index_build_with_cleanup(store, [&store, quality_datum, quality_locator] {
+                        with_pg_sequence_view<bool>(quality_datum, [&store, quality_locator](auto view) {
+                            using alphabet = typename decltype(view)::alphabet_type;
+                            if constexpr (bioseq::sequences::quality_alphabet<alphabet>)
+                                bioseq::indexing::symbol_counts_index<sequence_index_storage>::build(
+                                    store, view, quality_locator.source_epoch);
+                            return true;
+                        });
+                    });
+                    any_col = true;
+                    continue;
+                }
                 if (pgseq_is_cigar_alphabet(alpha)) {
                     if (name != bioseq::indexing::k_symbol_counts_index_name) {
                         bioseq::postgres::support::invoke_pg_as_cpp([name] {
                             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                                errmsg("index %.*s is incompatible with CIGAR sequences",
+                                errmsg("index %.*s is incompatible with CIGAR or quality sequences",
                                     static_cast<int>(name.size()), name.data())));
                         });
                         pg_unreachable();

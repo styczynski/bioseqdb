@@ -18,6 +18,7 @@ module;
 #include <libassert/assert.hpp>
 #include <limits>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -62,7 +63,8 @@ import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
 import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
 import bioseq.common.templating.value_sequence;
-import bioseq.sequences;                       // Sequence alphabets and packed storage types.
+import bioseq.sequences;
+import bioseq.sequences.simd;                       // Sequence alphabets and packed storage types.
 
 import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and supported alphabets.
 import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
@@ -85,6 +87,62 @@ import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
 
 // Load records one packed chunk at a time.
+
+/** One quality codec axis, independent of the biological parser templates. */
+struct load_quality_encoder {
+    virtual ~load_quality_encoder() = default;
+    virtual void reset() = 0;
+    virtual void append(std::span<const std::uint8_t>, std::size_t, std::string_view,
+        bioseq::storage::sequence_stream_writer&) = 0;
+    virtual std::uint16_t finish(std::uint64_t, bioseq::storage::sequence_stream_writer&) = 0;
+};
+
+template<class Alphabet, std::size_t Width>
+struct typed_load_quality_encoder final : load_quality_encoder {
+    static constexpr auto alphabet_name = pgseq_supported_alphabets::template name_of<Alphabet>();
+    using unit = typename boost::uint_t<Width * 8>::least;
+    using traits = typename compact_sequence_range<sequence_custom_alphabet<Alphabet, unit>>::traits;
+    std::vector<unit> words;
+    bioseq::simd::active_target::encode_state<unit, traits::bits_per_char, traits::letters_per_unit> state;
+    void reset() override { words.clear(); state.output_storage = &words; state.reset(); }
+    void append(std::span<const std::uint8_t> bytes, std::size_t offset, std::string_view header,
+            bioseq::storage::sequence_stream_writer& writer) override {
+        const auto encoded = bioseq::simd::active_target::encode_body_chunk<Alphabet,
+            bioseq::simd::active_target::unknown_byte_policy::reject>(state, bytes.data(), bytes.size());
+        if (!encoded) {
+            raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
+                fmt::format("invalid {} quality byte {} at field offset {} in record '{}'; select phred63 explicitly for scores above phred42",
+                    alphabet_name.view(), encoded.offending_byte,
+                    offset + encoded.consumed_bytes, header));
+        }
+        if (!words.empty()) writer.append_packed_bytes(
+            {reinterpret_cast<const std::uint8_t*>(words.data()), words.size() * sizeof(unit)},
+            words.size() * traits::letters_per_unit);
+        words.clear();
+    }
+    std::uint16_t finish(std::uint64_t expected, bioseq::storage::sequence_stream_writer& writer) override {
+        if (state.total_letters != expected)
+            raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "sequence and quality lengths disagree");
+        const auto remainder = state.partial_letters;
+        const auto [units, padding] = bioseq::simd::active_target::finalize_encode_state<unit,
+            traits::bits_per_char, traits::letters_per_unit>(state);
+        if (!words.empty()) writer.append_packed_bytes(
+            {reinterpret_cast<const std::uint8_t*>(words.data()), words.size() * sizeof(unit)}, remainder);
+        words.clear();
+        return static_cast<std::uint16_t>(padding);
+    }
+};
+
+[[nodiscard]] std::unique_ptr<load_quality_encoder> make_load_quality_encoder(const load_columns& columns) {
+    std::unique_ptr<load_quality_encoder> result;
+    if (!columns.quality_attno) return result;
+    pgseq_supported_quality_alphabets::dispatch_alphabet_by_code(columns.quality_alphabet_code,
+        [&result, &columns]<class Alphabet>() {
+            pgseq_supported_storage_unit_byte_widths::dispatch(columns.quality_byte_width,
+                [&result]<std::size_t Width>() { result = std::make_unique<typed_load_quality_encoder<Alphabet, Width>>(); });
+        });
+    return result;
+}
 
 /** @brief Write sequence chunks as fragments, then store each record's parent row. */
 /// @tparam p_alphabet Logical sequence alphabet.
@@ -113,11 +171,14 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     sequence_size_t total_bp = 0;
     /// Writer that stores fragments as this record arrives.
     bioseq::storage::sequence_stream_writer writer;
+    bioseq::storage::sequence_stream_writer quality_writer;
+    std::unique_ptr<load_quality_encoder> quality_encoder = make_load_quality_encoder(ctx.cols);
 
     /// Discard local provisional data on every exit. PostgreSQL error rollback
     /// removes fragment rows; only end_record publishes a parent/source locator.
     ~load_stream_sink() {
         writer.abort();
+        quality_writer.abort();
     }
 
     /// Copy the header and start storing a new sequence version.
@@ -141,6 +202,17 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                      static_cast<std::uint8_t>(p_column_byte_width),
                      ctx.cap_bytes,
                      ctx.caches);
+        if (quality_encoder) {
+            quality_encoder->reset();
+            quality_writer.begin(ctx.main_relid, ctx.db_oid, ctx.spc_oid, ctx.main_relfilenode,
+                ctx.main_storage_id, ctx.cols.quality_attno, ctx.parent_td,
+                ctx.cols.quality_alphabet_code, ctx.cols.quality_byte_width, ctx.cap_bytes, ctx.caches);
+        }
+    }
+
+    void quality_chunk(std::span<const std::uint8_t> bytes, std::size_t offset) {
+        if (!quality_encoder) raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION, "FASTQ requires a quality destination");
+        quality_encoder->append(bytes, offset, header, quality_writer);
     }
 
     /// Append packed sequence data to the fragment writer.
@@ -163,6 +235,13 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                             : static_cast<std::uint16_t>(
                                   ((total_bp + col_lpu - 1) / col_lpu) * col_lpu - total_bp);
         auto pending_source = writer.finish(total_bp, last_pad);
+        std::optional<bioseq::storage::pending_sequence_source> pending_quality;
+        std::uint16_t quality_padding = 0;
+        if (quality_encoder) {
+            inject_load_failure(1);
+            quality_padding = quality_encoder->finish(total_bp, quality_writer);
+            pending_quality.emplace(quality_writer.finish(total_bp, quality_padding));
+        }
         write_parent_row(ctx,
                          tuple_writer,
                          header,
@@ -170,7 +249,7 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                          static_cast<std::uint8_t>(p_column_byte_width),
                          last_pad,
                          total_bp,
-                         std::move(pending_source));
+                         std::move(pending_source), pending_quality ? &*pending_quality : nullptr, quality_padding);
         ++records;
     }
 };
@@ -184,6 +263,7 @@ template <typename p_storage_unit> struct queued_load_event {
         begin_record,
         /// Append `words` representing `bp_count` logical letters.
         chunk,
+        quality_chunk,
         /// Finish the active record.
         end_record,
     };
@@ -194,6 +274,8 @@ template <typename p_storage_unit> struct queued_load_event {
     std::string header{};
     /// Owning packed units for `chunk`.
     std::vector<p_storage_unit> words{};
+    std::vector<std::uint8_t> quality{};
+    std::size_t quality_offset{};
     /// Logical letters represented by `words`.
     std::uint64_t bp_count = 0;
     /// Whether the reader marked tqis as the final chunk of a record
@@ -216,10 +298,14 @@ template <typename p_storage_unit> class load_event_queue {
     /// @return False if the queue closes before the event can be added.
     bool push(queued_load_event<p_storage_unit>&& event) {
         std::unique_lock<std::mutex> lock(mu_);
-        not_full_.wait(lock, [this] { return closed_ || queue_.size() < capacity_; });
+        const auto bytes = event.header.size() + event.words.size() * sizeof(p_storage_unit) + event.quality.size();
+        if (bytes > byte_capacity_) throw std::length_error("load queue event exceeds its byte budget");
+        not_full_.wait(lock, [this, bytes] { return closed_ ||
+            (queue_.size() < capacity_ && bytes <= byte_capacity_ - queued_bytes_); });
         if (closed_) {
             return false;
         }
+        queued_bytes_ += bytes;
         queue_.push_back(std::move(event));
         not_empty_.notify_one();
         return true;
@@ -234,6 +320,8 @@ template <typename p_storage_unit> class load_event_queue {
         if (queue_.empty()) {
             return false;
         }
+        queued_bytes_ -= queue_.front().header.size() + queue_.front().words.size() * sizeof(p_storage_unit)
+            + queue_.front().quality.size();
         event = std::move(queue_.front());
         queue_.pop_front();
         not_full_.notify_one();
@@ -254,6 +342,8 @@ template <typename p_storage_unit> class load_event_queue {
 
   private:
     const std::size_t capacity_;
+    static constexpr std::size_t byte_capacity_ = 16u * 1024u * 1024u;
+    std::size_t queued_bytes_{};
     std::mutex mu_;
     std::condition_variable not_empty_;
     std::condition_variable not_full_;
@@ -328,6 +418,14 @@ struct queued_load_stream_sink {
         event.words = std::move(words);
         event.bp_count = bp_count;
         event.end_of_record = end_of_record;
+        push_or_closed(std::move(event));
+    }
+
+    void quality_chunk(std::span<const std::uint8_t> bytes, std::size_t offset) {
+        queued_load_event<col_unit_t> event;
+        event.kind = queued_load_event<col_unit_t>::kind_t::quality_chunk;
+        event.quality.assign(bytes.begin(), bytes.end());
+        event.quality_offset = offset;
         push_or_closed(std::move(event));
     }
 
@@ -417,6 +515,9 @@ template <sequence_alphabet p_alphabet,
                     std::span<const col_unit_t>(event.words.data(), event.words.size()),
                     event.bp_count,
                     event.end_of_record});
+                break;
+            case queued_load_event<col_unit_t>::kind_t::quality_chunk:
+                sink.quality_chunk(event.quality, event.quality_offset);
                 break;
             case queued_load_event<col_unit_t>::kind_t::end_record:
                 sink.end_record();

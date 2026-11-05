@@ -33,6 +33,7 @@ extern "C" {
 module bioseq.postgres.extension;
 
 import bioseq.postgres.column;
+import bioseq.postgres.storage.indexing.handles;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.pipeline.stats;
@@ -170,6 +171,7 @@ void initialize_extension()
 #else
 	bioseq::sql::generated::production::register_gucs();
 #endif
+	bioseq::storage::indexing::install_quality_source_summary_reader();
 	configure_logging();
 	bioseq_log<logging_level::debug, logging_target::postgres>(
 		"[bioseq] pg: _PG_init() entered");

@@ -9,6 +9,7 @@ module;
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
 #include <climits>
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -90,6 +91,20 @@ import :load_runtime;
 
 export namespace bioseq::storage::load_pg::sql_routines {
 
+/** Arm one test-only import failure; zero clears it. Stages 1..6 cover the two
+ * finishes, parent write, two publications, flush boundaries and index maintenance. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+void arm_load_failure(std::int32_t stage) {
+    arm_load_failure_for_test(stage);
+}
+
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -124,7 +139,11 @@ export namespace bioseq::storage::load_pg::sql_routines {
                                 [[bioseq_sql::param({
                                     .sql_type = bioseq::sql::custom_type<"bioseq.column_mapping[]">,
                                     .default_value = bioseq::sql::checked_sql{"NULL"},
-                                })]] std::optional<ArrayType*> columns) {
+                                })]] std::optional<ArrayType*> columns,
+                                [[bioseq_sql::param({
+                                    .sql_type = bioseq::sql::custom_type<"bioseq.load_options">,
+                                    .default_value = bioseq::sql::checked_sql{"NULL"},
+                                })]] std::optional<Datum> options) {
     if (!target_table.has_value() || !file_path.has_value()) {
         raise_load_error_as_cpp(ERRCODE_NULL_VALUE_NOT_ALLOWED,
                                 "target_table and file_path must not be NULL");
@@ -153,8 +172,28 @@ export namespace bioseq::storage::load_pg::sql_routines {
         user_maps = parse_column_mapping_array(*columns);
     }
 
-    // Stream the records and finish the table and index writes.
-    const std::int64_t n = run_load(relid, path, kind, requested_fmt, user_maps);
+    std::optional<std::string> phred_type = options ? parse_load_options(
+        bioseq::postgres::support::invoke_pg_as_cpp([options] {
+            return DatumGetHeapTupleHeader(*options);
+        })) : std::nullopt;
+    std::string quality_name = "quality";
+    bool mapped_quality = false;
+    std::vector<bioseq::io::identifier_parser::user_column_mapping> header_maps;
+    std::vector<std::string_view> destinations;
+    for (const auto& mapping : user_maps) {
+        if (std::find(destinations.begin(), destinations.end(), mapping.column_name) != destinations.end())
+            raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "duplicate column mapping destination");
+        destinations.push_back(mapping.column_name);
+        if (mapping.data_source == "quality") {
+            if (mapped_quality || mapping.column_name.empty())
+                raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "quality source must have exactly one nonempty destination");
+            quality_name = mapping.column_name;
+            mapped_quality = true;
+        } else header_maps.push_back(mapping);
+    }
+    if (kind.format != bioseq::io::sequence_file_format::fastq && (mapped_quality || phred_type))
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "quality mapping and phred_type require FASTQ input");
+    const std::int64_t n = run_load(relid, path, kind, requested_fmt, header_maps, quality_name, phred_type);
     bioseq_log<logging_level::debug>(
         "[bioseq] load: '{}' -> relid={} loaded {} records", path, relid, n);
     return n;

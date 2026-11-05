@@ -15,6 +15,10 @@ extern "C" {
 #include "catalog/pg_am_d.h"
 #include "commands/defrem.h"
 #include "utils/expandeddatum.h"
+#include "utils/tuplesort.h"
+#include "utils/guc.h"
+#include "parser/parse_func.h"
+#include "optimizer/cost.h"
 }
 
 #include <algorithm>
@@ -49,6 +53,7 @@ import bioseq.storage.scanner;                 // sequence_access_requirement
 import bioseq.storage.size;                    // sequence_size_t
 import bioseq.postgres.storage.manager;        // is_locator_stub
 import bioseq.sequences;                       // compact_sequence_range
+import bioseq.sequences.quality_summary;
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
@@ -73,6 +78,10 @@ enum class batch_sort_private_field : int {
     source_relation_oid,
     source_attribute_number,
     alphabet_code,
+    version,
+    key_kind,
+    mean_output,
+    tuple_bound,
     count,
 };
 
@@ -103,6 +112,8 @@ constexpr int k_batch_sort_private_field_count =
 
 /** Buffered rows, sequence readers, and sorting state owned by one  scan. */
 struct bioseq_batch_sort_runtime {
+    // Declared before buffers so destruction returns their storage first.
+    std::optional<bioseq::parallelism::memory_permit> mean_memory;
     bool sorted = false;                           ///< Whether the child has been fully read and sorted.
     std::size_t emit_idx = 0;                      ///< Next position to emit from order.
     AttrNumber seq_attno = 0;                      ///< One-based sequence-column position in the scan tuple.
@@ -132,7 +143,29 @@ struct bioseq_batch_sort_runtime {
     bool runtime_callback_registered = false;
     bool route_callback_registered = false;
     bool child_initialized = false;
+    bool quality_mean = false;
+    AttrNumber mean_attno = InvalidAttrNumber;
+    std::vector<bioseq::sequences::quality_mean_key> mean_keys;
+    Tuplesortstate* numeric_sort = nullptr;
+    std::uint64_t native_memory_limit = 0;
+    std::uint64_t retained_tuple_bytes = 0;
+    std::uint64_t numeric_conversions = 0;
+    std::uint64_t native_key_bytes = 0;
+    bool spilled = false;
+    std::int64_t tuple_bound = -1;
+    pg_quality_read_statistics mean_quality_statistics{};
 };
+
+/** Leave shared admission available for the child and per-row summary readers.
+ * work_mem limits retained sort data; it must not consume the entire shared
+ * budget before the first source summary has been resolved. */
+void reserve_quality_mean_memory(bioseq_batch_sort_runtime& runtime) {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto work_bytes = static_cast<std::uint64_t>(work_mem) * 1024;
+    runtime.native_memory_limit = std::min(work_bytes, admission.allocatable_after_reservations() / 2);
+    if (runtime.native_memory_limit >= 8192)
+        runtime.mean_memory = admission.try_reserve(runtime.native_memory_limit);
+}
 
 /** State passed across PostgreSQL's C ABI with `CustomScanState` first. */
 struct bioseq_batch_sort_state {
@@ -501,7 +534,7 @@ struct batch_cigar_scratch_provider {
                 value_order = sort_cigar_batch(*rt, *session, datums, descriptors,
                     scratch, async_observer);
             } else {
-            pgseq_dispatch_biological_instance(
+            pgseq_dispatch_rank_packed_instance(
                 alphabet,
                 width,
                 [rt,
@@ -694,12 +727,27 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
                  errmsg("BioseqBatchSort alphabet capability is invalid")));
     }
     rt->expected_alphabet = static_cast<std::uint8_t>(expected_alphabet);
+    if (private_integer(batch_sort_private_field::version) != 2)
+        batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED, "BioseqBatchSort plan version is invalid");
+    const int key_kind = private_integer(batch_sort_private_field::key_kind);
+    if (key_kind != 0 && key_kind != 1)
+        batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED, "BioseqBatchSort key kind is invalid");
+    rt->quality_mean = key_kind == 1;
+    rt->mean_attno = static_cast<AttrNumber>(private_integer(batch_sort_private_field::mean_output));
+    auto* bound = reinterpret_cast<Node*>(list_nth(cscan->custom_private,
+        private_field_index(batch_sort_private_field::tuple_bound)));
+    if (bound == nullptr || !IsA(bound, String))
+        batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED, "BioseqBatchSort tuple bound is invalid");
+    rt->tuple_bound = pg_strtoint64(strVal(bound));
+    if (rt->tuple_bound < -1)
+        batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED, "BioseqBatchSort tuple bound is negative");
     if (rt->seq_attno <= 0 || (OidIsValid(rt->source_relation_oid) != (rt->source_attno > 0))) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("BioseqBatchSort private plan ABI is invalid")));
     }
-    rt->spec.vulkan_enabled = bioseq::aligner::settings::vulkan::enabled;
+    rt->spec.vulkan_enabled = bioseq::aligner::settings::vulkan::enabled
+        && !is_quality_alphabet_code(rt->expected_alphabet);
 
     /* Initialize the child, after registering its parent's cleanup callbacks. */
     auto* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
@@ -726,6 +774,13 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
     rt->deformslot = ExecInitExtraTupleSlot(estate, descriptor, &TTSOpsMinimalTuple);
     rt->sortslot = ExecInitExtraTupleSlot(estate, descriptor, &TTSOpsVirtual);
     rt->staging_slot = ExecInitExtraTupleSlot(estate, descriptor, &TTSOpsVirtual);
+    if (rt->quality_mean) {
+        if (!is_quality_alphabet_code(rt->expected_alphabet) || rt->mean_attno <= 0
+            || rt->mean_attno > descriptor->natts
+            || TupleDescAttr(descriptor, rt->mean_attno - 1)->atttypid != NUMERICOID)
+            batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED, "BioseqBatchSort mean output is invalid");
+        reserve_quality_mean_memory(*rt);
+    }
 }
 
 /** Initialize the sort scan and report C++ failures as PostgreSQL errors. */
@@ -790,9 +845,150 @@ void begin_batch_sort_scan(CustomScanState* node, EState* estate, int eflags) {
     }
 }
 
+/** Copy values into a virtual slot without flattening the hidden quality source. */
+void copy_mean_row(TupleTableSlot* destination, TupleTableSlot* source) {
+    ExecClearTuple(destination);
+    slot_getallattrs(source);
+    const auto count = static_cast<std::size_t>(source->tts_tupleDescriptor->natts);
+    std::memcpy(destination->tts_values, source->tts_values, count * sizeof(Datum));
+    std::memcpy(destination->tts_isnull, source->tts_isnull, count * sizeof(bool));
+    destination->tts_nvalid = static_cast<int>(count);
+    ExecStoreVirtualTuple(destination);
+}
+
+/** Format only when a row is emitted or handed to PostgreSQL's external sorter. */
+void set_mean_output(bioseq_batch_sort_runtime& rt, TupleTableSlot* slot,
+                     const bioseq::sequences::quality_mean_key& key) {
+    const auto value = pg_quality_statistic_value(key.summary, pg_quality_statistic::mean);
+    slot->tts_values[rt.mean_attno - 1] = value.value_or(Datum{0});
+    slot->tts_isnull[rt.mean_attno - 1] = !value.has_value();
+    if (value) ++rt.numeric_conversions;
+}
+
+/** Transfer already evaluated rows once. The child is never restarted. */
+void start_mean_numeric_sort(bioseq_batch_sort_runtime& rt) {
+    bioseq::postgres::support::invoke_pg_as_cpp([&rt] {
+        const auto previous = MemoryContextSwitchTo(MemoryContextGetParent(rt.tuple_cxt));
+        Oid less = InvalidOid, greater = InvalidOid;
+        get_sort_group_operators(NUMERICOID, true, false, true, &less, nullptr, &greater, nullptr);
+        Oid ordering = rt.spec.descending ? greater : less;
+        Oid collation = InvalidOid;
+        rt.numeric_sort = tuplesort_begin_heap(rt.sortslot->tts_tupleDescriptor, 1,
+            &rt.mean_attno, &ordering, &collation, &rt.spec.nulls_first, work_mem, nullptr,
+            rt.tuple_bound >= 0 ? TUPLESORT_ALLOWBOUNDED : 0);
+        if (rt.tuple_bound >= 0) tuplesort_set_bound(rt.numeric_sort, rt.tuple_bound);
+        MemoryContextSwitchTo(previous);
+    });
+    ++rt.admission_fallbacks;
+    for (std::size_t row = 0; row < rt.tuples.size(); ++row) {
+        ExecStoreMinimalTuple(rt.tuples[row], rt.deformslot, false);
+        copy_mean_row(rt.sortslot, rt.deformslot);
+        set_mean_output(rt, rt.sortslot, rt.mean_keys[row]);
+        bioseq::postgres::support::invoke_pg_as_cpp([&rt] {
+            tuplesort_puttupleslot(rt.numeric_sort, rt.sortslot);
+        });
+        if (!rt.sortslot->tts_isnull[rt.mean_attno - 1])
+            pfree(DatumGetPointer(rt.sortslot->tts_values[rt.mean_attno - 1]));
+    }
+    ExecClearTuple(rt.deformslot);
+    ExecClearTuple(rt.sortslot);
+    std::vector<MinimalTuple>{}.swap(rt.tuples);
+    std::vector<bioseq::sequences::quality_mean_key>{}.swap(rt.mean_keys);
+    std::vector<std::size_t>{}.swap(rt.order);
+    MemoryContextReset(rt.tuple_cxt);
+    rt.mean_memory.reset();
+}
+
+/** Bounded native keys, with a runtime handoff to ordinary numeric tuplesort. */
+TupleTableSlot* execute_quality_mean_sort(CustomScanState* node, bioseq_batch_sort_runtime& rt) {
+    ExprContext* context = node->ss.ps.ps_ExprContext;
+    if (!rt.sorted) {
+        const auto started = std::chrono::steady_clock::now();
+        for (;;) {
+            TupleTableSlot* input = ExecProcNode(outerPlanState(node));
+            if (TupIsNull(input)) break;
+            ResetExprContext(context);
+            const auto previous = MemoryContextSwitchTo(context->ecxt_per_tuple_memory);
+            slot_getallattrs(input);
+            bioseq::sequences::quality_mean_key key{};
+            if (!input->tts_isnull[rt.seq_attno - 1]) {
+                Datum value = input->tts_values[rt.seq_attno - 1];
+                auto descriptor = classify_and_describe_sequence_header(value);
+                if (descriptor.kind == pg_sequence_datum_kind::locator) {
+                    if (!rt.source_routes_acquired)
+                        batch_sort_raise_as_cpp(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                            "quality mean source has no owning scan route");
+                    value = bioseq::storage::promote_pg_sequence_locator(rt.source_routes,
+                        rt.source_relation_oid, rt.source_attno, value, context->ecxt_per_tuple_memory);
+                }
+                if (descriptor.alphabet_code != rt.expected_alphabet)
+                    batch_sort_raise_as_cpp(ERRCODE_DATATYPE_MISMATCH,
+                        "quality mean source does not match its proven alphabet");
+                key = bioseq::sequences::make_quality_mean_key(pg_quality_summary(value, &rt.mean_quality_statistics));
+            }
+            copy_mean_row(rt.staging_slot, input);
+            rt.staging_slot->tts_values[rt.seq_attno - 1] = Datum{0};
+            rt.staging_slot->tts_isnull[rt.seq_attno - 1] = true;
+            const auto tuple_bytes = static_cast<std::uint64_t>(heap_compute_data_size(
+                rt.staging_slot->tts_tupleDescriptor, rt.staging_slot->tts_values,
+                rt.staging_slot->tts_isnull)) + MINIMAL_TUPLE_DATA_OFFSET + 128;
+            const auto native_bytes = 3 * (rt.tuples.size() + 1)
+                * (sizeof(bioseq::sequences::quality_mean_key) + sizeof(MinimalTuple) + 64);
+            if (rt.numeric_sort == nullptr && (!rt.mean_memory.has_value()
+                || tuple_bytes + rt.retained_tuple_bytes + native_bytes + 8192 > rt.native_memory_limit))
+                start_mean_numeric_sort(rt);
+            if (rt.numeric_sort != nullptr) {
+                set_mean_output(rt, rt.staging_slot, key);
+                bioseq::postgres::support::invoke_pg_as_cpp([&rt] {
+                    tuplesort_puttupleslot(rt.numeric_sort, rt.staging_slot);
+                });
+            } else {
+                const auto old = MemoryContextSwitchTo(rt.tuple_cxt);
+                rt.tuples.push_back(ExecCopySlotMinimalTuple(rt.staging_slot));
+                MemoryContextSwitchTo(old);
+                rt.mean_keys.push_back(key);
+                rt.retained_tuple_bytes = MemoryContextMemAllocated(rt.tuple_cxt, true);
+                rt.native_key_bytes = rt.mean_keys.capacity() * sizeof(key);
+            }
+            ++rt.sorted_rows;
+            MemoryContextSwitchTo(previous);
+        }
+        if (rt.numeric_sort != nullptr) {
+            bioseq::postgres::support::invoke_pg_as_cpp([&rt] { tuplesort_performsort(rt.numeric_sort); });
+            TuplesortInstrumentation stats{};
+            tuplesort_get_stats(rt.numeric_sort, &stats);
+            rt.spilled = stats.spaceType == SORT_SPACE_TYPE_DISK;
+            rt.accelerator = "numeric tuplesort fallback";
+        } else {
+            rt.order = bioseq::storage::sort_quality_mean_batch(rt.mean_keys, rt.spec);
+            rt.accelerator = "exact quality mean CPU";
+        }
+        rt.sort_runtime_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count());
+        rt.sorted = true;
+    }
+    ResetExprContext(context);
+    if (rt.numeric_sort != nullptr) {
+        if (!tuplesort_gettupleslot(rt.numeric_sort, true, false, rt.deformslot, nullptr))
+            return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+        copy_mean_row(rt.sortslot, rt.deformslot);
+    } else {
+        if (rt.emit_idx == rt.order.size()) return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+        const auto row = rt.order[rt.emit_idx++];
+        ExecStoreMinimalTuple(rt.tuples[row], rt.deformslot, false);
+        copy_mean_row(rt.sortslot, rt.deformslot);
+        const auto previous = MemoryContextSwitchTo(context->ecxt_per_tuple_memory);
+        set_mean_output(rt, rt.sortslot, rt.mean_keys[row]);
+        MemoryContextSwitchTo(previous);
+    }
+    context->ecxt_scantuple = rt.sortslot;
+    return node->ss.ps.ps_ProjInfo != nullptr ? ExecProject(node->ss.ps.ps_ProjInfo) : rt.sortslot;
+}
+
 /** Buffer and sort the child on first use, then return one sorted row per call. */
 TupleTableSlot* execute_batch_sort_scan_impl(CustomScanState* node) {
     auto* rt = runtime_of(node);
+    if (rt->quality_mean) return execute_quality_mean_sort(node, *rt);
     ExprContext* econtext = node->ss.ps.ps_ExprContext;
 
     if (!rt->sorted) {
@@ -960,6 +1156,10 @@ void end_batch_sort_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_batch_sort_state*>(node);
     if (state->runtime != nullptr) {
         auto* runtime = static_cast<bioseq_batch_sort_runtime*>(state->runtime);
+        if (runtime->numeric_sort != nullptr) {
+            tuplesort_end(runtime->numeric_sort);
+            runtime->numeric_sort = nullptr;
+        }
         if (runtime->source_routes_acquired) {
             bioseq::storage::release_pg_sequence_source_routes(runtime->source_routes, true);
             runtime->source_routes_acquired = false;
@@ -979,6 +1179,16 @@ void rescan_batch_sort_scan(CustomScanState* node) {
     rt->tuples.clear();
     rt->retained_sequences.clear();
     rt->order.clear();
+    rt->mean_keys.clear();
+    if (rt->numeric_sort != nullptr) {
+        tuplesort_end(rt->numeric_sort);
+        rt->numeric_sort = nullptr;
+    }
+    rt->retained_tuple_bytes = 0;
+    rt->numeric_conversions = 0;
+    rt->native_key_bytes = 0;
+    rt->spilled = false;
+    rt->mean_quality_statistics = {};
     rt->accelerator = "not executed";
     rt->sorted_rows = 0;
     rt->gpu_dispatch_delta = 0;
@@ -991,6 +1201,13 @@ void rescan_batch_sort_scan(CustomScanState* node) {
     rt->admission_fallbacks = 0;
     if (rt->tuple_cxt != nullptr) {
         MemoryContextReset(rt->tuple_cxt);
+    }
+    if (rt->quality_mean) {
+        std::vector<MinimalTuple>{}.swap(rt->tuples);
+        std::vector<bioseq::sequences::quality_mean_key>{}.swap(rt->mean_keys);
+        std::vector<std::size_t>{}.swap(rt->order);
+        rt->mean_memory.reset();
+        reserve_quality_mean_memory(*rt);
     }
     if (PlanState* child = outerPlanState(node)) {
         ExecReScan(child);
@@ -1018,6 +1235,17 @@ void explain_batch_sort_scan(CustomScanState* node, List* ancestors, ExplainStat
         return;
     }
     ExplainPropertyText("Bioseq Sort Accelerator", rt->accelerator, es);
+    ExplainPropertyText("Bioseq Sort Key", rt->quality_mean ? "exact quality mean" : "lexicographic ranks", es);
+    if (rt->quality_mean) {
+        ExplainPropertyInteger("Bioseq Mean Quality Index Hits", nullptr, rt->mean_quality_statistics.index_hits, es);
+        ExplainPropertyInteger("Bioseq Mean Source Symbols Read", nullptr, rt->mean_quality_statistics.source_symbols, es);
+        ExplainPropertyInteger("Bioseq Mean Summary Extractions", nullptr, rt->mean_quality_statistics.summary_extractions, es);
+        ExplainPropertyInteger("Bioseq Mean Summary Cache Hits", nullptr, rt->mean_quality_statistics.cache_hits, es);
+        ExplainPropertyInteger("Bioseq Mean Key Bytes", "bytes", rt->native_key_bytes, es);
+        ExplainPropertyInteger("Bioseq Mean Tuple Bytes", "bytes", rt->retained_tuple_bytes, es);
+        ExplainPropertyInteger("Bioseq Mean Numeric Conversions", nullptr, rt->numeric_conversions, es);
+        ExplainPropertyBool("Bioseq Mean Sort Spilled", rt->spilled, es);
+    }
     ExplainPropertyInteger("Bioseq Sort Rows", nullptr, static_cast<int64>(rt->sorted_rows), es);
     ExplainPropertyInteger(
         "Bioseq Sort Runtime Ns", nullptr, static_cast<int64>(rt->sort_runtime_ns), es);
@@ -1109,11 +1337,23 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
     const int source_relation_oid = path_integer(batch_sort_private_field::source_relation_oid);
     const int source_attno = path_integer(batch_sort_private_field::source_attribute_number);
     const int alphabet_code = path_integer(batch_sort_private_field::alphabet_code);
+    const int version = path_integer(batch_sort_private_field::version);
+    const int key_kind = path_integer(batch_sort_private_field::key_kind);
+    const int mean_output = path_integer(batch_sort_private_field::mean_output);
+    if (version != 2 || (key_kind != 0 && key_kind != 1))
+        batch_sort_raise_as_cpp(ERRCODE_INTERNAL_ERROR, "BioseqBatchSort path version is invalid");
+    Node* source_expression = sort_expression;
+    if (key_kind == 1) {
+        if (sort_expression == nullptr || !IsA(sort_expression, FuncExpr)
+            || list_length(reinterpret_cast<FuncExpr*>(sort_expression)->args) != 1)
+            batch_sort_raise_as_cpp(ERRCODE_INTERNAL_ERROR, "BioseqBatchSort mean expression is invalid");
+        source_expression = reinterpret_cast<Node*>(linitial(reinterpret_cast<FuncExpr*>(sort_expression)->args));
+    }
     auto* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
     AttrNumber sequence_resno = InvalidAttrNumber;
     for (TargetEntry* entry :
          bioseq::postgres::support::postgres_list<TargetEntry>(child_plan->targetlist)) {
-        if (entry != nullptr && equal(entry->expr, sort_expression)) {
+        if (entry != nullptr && equal(entry->expr, source_expression)) {
             if (sequence_resno != InvalidAttrNumber) {
                 ereport(ERROR,
                         (errcode(ERRCODE_AMBIGUOUS_COLUMN),
@@ -1123,7 +1363,7 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
         }
     }
     if (sort_expression == nullptr ||
-        exprType(sort_expression) != bioseq_seq_type_oid_missing_ok() || sequence_resno <= 0 ||
+        exprType(source_expression) != bioseq_seq_type_oid_missing_ok() || sequence_resno <= 0 ||
         (OidIsValid(static_cast<Oid>(source_relation_oid)) != (source_attno > 0))) {
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
@@ -1143,6 +1383,11 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
                                        makeInteger(source_relation_oid),
                                        makeInteger(source_attno));
     cscan->custom_private = lappend(cscan->custom_private, makeInteger(alphabet_code));
+    cscan->custom_private = lappend(cscan->custom_private, makeInteger(version));
+    cscan->custom_private = lappend(cscan->custom_private, makeInteger(key_kind));
+    cscan->custom_private = lappend(cscan->custom_private, makeInteger(mean_output));
+    cscan->custom_private = lappend(cscan->custom_private, copyObject(list_nth(
+        best_path->custom_private, private_field_index(batch_sort_private_field::tuple_bound))));
     cscan->custom_plans = custom_plans;
 
     /* Preserve the child's output columns. custom_scan_tlist describes that
@@ -1150,6 +1395,15 @@ Plan* plan_batch_sort_path(PlannerInfo* root,
      * those columns through INDEX_VAR. */
     cscan->scan.plan.targetlist = tlist;
     cscan->custom_scan_tlist = static_cast<List*>(copyObject(child_plan->targetlist));
+    if (key_kind == 1) {
+        if (mean_output <= 0 || mean_output > list_length(cscan->custom_scan_tlist))
+            batch_sort_raise_as_cpp(ERRCODE_INTERNAL_ERROR, "BioseqBatchSort mean projection is missing");
+        auto* entry = reinterpret_cast<TargetEntry*>(list_nth(cscan->custom_scan_tlist, mean_output - 1));
+        if (!IsA(entry->expr, Const) || exprType(reinterpret_cast<Node*>(entry->expr)) != NUMERICOID)
+            batch_sort_raise_as_cpp(ERRCODE_INTERNAL_ERROR, "BioseqBatchSort mean projection was not deferred");
+        entry->expr = reinterpret_cast<Expr*>(copyObject(sort_expression));
+        reinterpret_cast<TargetEntry*>(list_nth(cscan->custom_scan_tlist, sequence_resno - 1))->resjunk = true;
+    }
     cscan->custom_relids = bms_copy(rel->relids);
 
     return reinterpret_cast<Plan*>(cscan);
@@ -1175,10 +1429,14 @@ slice_project_upper_path_provider slice_project_upper_path_provider_callback = n
 struct bioseq_sequence_sort_key {
     PathKey* pathkey = nullptr;
     Node* expression = nullptr;
+    bool quality_mean = false;
 };
 
 /** Find the first ORDER BY pathkey whose expression has type `bioseq.seq`. */
 [[nodiscard]] bioseq_sequence_sort_key sort_sequence_pathkey(PlannerInfo* root, Oid seq_oid) {
+    Oid argument_type = seq_oid;
+    const Oid mean_oid = LookupFuncName(list_make2(makeString(pstrdup("bioseq")),
+        makeString(pstrdup("avg"))), 1, &argument_type, true);
     ListCell* pk_cell;
     foreach (pk_cell, root->sort_pathkeys) {
         auto* pathkey = reinterpret_cast<PathKey*>(lfirst(pk_cell));
@@ -1191,6 +1449,13 @@ struct bioseq_sequence_sort_key {
             }
             if (exprType(reinterpret_cast<Node*>(member->em_expr)) == seq_oid) {
                 return {pathkey, reinterpret_cast<Node*>(member->em_expr)};
+            }
+            if (OidIsValid(mean_oid) && IsA(member->em_expr, FuncExpr)) {
+                auto* call = reinterpret_cast<FuncExpr*>(member->em_expr);
+                if (call->funcid == mean_oid && call->funcresulttype == NUMERICOID
+                    && !call->funcretset && list_length(call->args) == 1
+                    && IsA(reinterpret_cast<Node*>(linitial(call->args)), Var))
+                    return {pathkey, reinterpret_cast<Node*>(call), true};
             }
         }
     }
@@ -1244,12 +1509,17 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     // A seq OID alone proves neither one alphabet family nor this ordering.
     // Erased/mixed expressions and alternate ORDER BY USING families retain
     // PostgreSQL's ordinary Sort and its semantic comparison function.
-    const int key_typmod = exprTypmod(sort_key.expression);
+    Node* source_expression = sort_key.quality_mean
+        ? reinterpret_cast<Node*>(linitial(reinterpret_cast<FuncExpr*>(sort_key.expression)->args))
+        : sort_key.expression;
+    const int key_typmod = exprTypmod(source_expression);
     if (key_typmod < 0 || (key_typmod & 0xff) > 3) return;
     const auto key_params = compact_sequence_stdc_type_params::decode(key_typmod);
     if (!is_supported_alphabet_code(key_params.alphabet_code)) return;
+    if (sort_key.quality_mean && !is_quality_alphabet_code(key_params.alphabet_code)) return;
     const Oid sequence_family = get_opfamily_oid(BTREE_AM_OID,
-        list_make2(makeString(pstrdup("bioseq")), makeString(pstrdup("seq_ops"))), /*missing_ok=*/true);
+        list_make2(makeString(pstrdup(sort_key.quality_mean ? "pg_catalog" : "bioseq")),
+            makeString(pstrdup(sort_key.quality_mean ? "numeric_ops" : "seq_ops"))), /*missing_ok=*/true);
     if (!OidIsValid(sequence_family) || sort_key.pathkey->pk_opfamily != sequence_family) return;
 
     /* Save the requested direction and null order for execution. */
@@ -1259,7 +1529,7 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     Oid source_relation_oid = InvalidOid;
     AttrNumber source_attno = InvalidAttrNumber;
     Var* source_var =
-        IsA(sort_key.expression, Var) ? reinterpret_cast<Var*>(sort_key.expression) : nullptr;
+        IsA(source_expression, Var) ? reinterpret_cast<Var*>(source_expression) : nullptr;
     if (source_var != nullptr && source_var->varno > 0 && source_var->varattno > 0 &&
         source_var->varlevelsup == 0 && bms_is_empty(source_var->varnullingrels) &&
         root->parse != nullptr &&
@@ -1273,14 +1543,66 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     }
 
     Path* owned_input_path = input_path;
+    int mean_output = 0;
+    PathTarget* logical_target = input_path->pathtarget;
+    if (sort_key.quality_mean) {
+        // BioseqScan does not advertise arbitrary projection to PostgreSQL.
+        // apply_projection_to_path therefore normally wraps a scalar target
+        // in ProjectionPath before UPPERREL_ORDERED. Absorb only that simple
+        // projection into our private scan copy; never change the shared path.
+        Path* source_path = input_path;
+        if (IsA(source_path, ProjectionPath))
+            source_path = reinterpret_cast<ProjectionPath*>(source_path)->subpath;
+        // Initial coverage is one owning base scan with no projected sequence.
+        // Other source/projection shapes retain ordinary numeric Sort.
+        if (!OidIsValid(source_relation_oid) || source_path == nullptr || !IsA(source_path, CustomPath)
+            || source_path->parent == nullptr || source_path->parent->relid != source_var->varno
+            || input_path->parallel_aware || input_path->param_info != nullptr
+            || source_path->parallel_aware || source_path->param_info != nullptr
+            || batch_sort_source_path_provider_callback == nullptr) return;
+        auto* original = reinterpret_cast<CustomPath*>(source_path);
+        if (original->methods == nullptr || original->methods->CustomName == nullptr
+            || std::strcmp(original->methods->CustomName, "BioseqScan") != 0
+            || original->custom_paths != NIL) return;
+        int position = 0;
+        for (Node* expression : bioseq::postgres::support::postgres_list<Node>(logical_target->exprs)) {
+            ++position;
+            if (exprType(expression) == seq_oid || expression_returns_set(expression)) return;
+            if (equal(expression, sort_key.expression)) {
+                if (mean_output != 0) return;
+                mean_output = position;
+            }
+        }
+        if (mean_output == 0) return;
+        auto* owned = makeNode(CustomPath);
+        *owned = *original;
+        owned->path.parallel_safe = false;
+        owned->path.pathtarget = copy_pathtarget(logical_target);
+        owned->path.pathtarget->exprs = list_copy(logical_target->exprs);
+        list_nth_cell(owned->path.pathtarget->exprs, mean_output - 1)->ptr_value =
+            makeNullConst(NUMERICOID, -1, InvalidOid);
+        add_column_to_pathtarget(owned->path.pathtarget,
+            reinterpret_cast<Expr*>(copyObject(source_expression)), 0);
+        set_pathtarget_cost_width(root, owned->path.pathtarget);
+        const auto startup_delta = owned->path.pathtarget->cost.startup - logical_target->cost.startup;
+        owned->path.startup_cost = std::max<Cost>(0, input_path->startup_cost + startup_delta);
+        owned->path.total_cost = std::max(owned->path.startup_cost,
+            input_path->total_cost + startup_delta + owned->path.rows *
+            (owned->path.pathtarget->cost.per_tuple - logical_target->cost.per_tuple));
+        owned->custom_private = list_copy(original->custom_private);
+        owned->custom_private = lappend(owned->custom_private, list_make3(
+            makeInteger(bioseq_deferred_quality_mean_magic), makeInteger(1), copyObject(sort_key.expression)));
+        owned_input_path = reinterpret_cast<Path*>(owned);
+    }
     if (OidIsValid(source_relation_oid) && batch_sort_source_path_provider_callback != nullptr) {
         bool tagged = false;
         Path* tagged_path =
-            batch_sort_source_path_provider_callback(input_path, sort_key.expression, &tagged);
+            batch_sort_source_path_provider_callback(owned_input_path, source_expression, &tagged);
         if (tagged_path == nullptr)
             return;
         if (tagged)
             owned_input_path = tagged_path;
+        else if (sort_key.quality_mean) return;
     }
 
     bioseq_log<logging_level::debug>("[bioseq] pg: BioseqBatchSort engaging for sequence ORDER BY "
@@ -1291,7 +1613,7 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
     CustomPath* cpath = makeNode(CustomPath);
     cpath->path.pathtype = T_CustomScan;
     cpath->path.parent = output_rel;
-    cpath->path.pathtarget = owned_input_path->pathtarget; /* passthrough */
+    cpath->path.pathtarget = sort_key.quality_mean ? logical_target : owned_input_path->pathtarget;
     cpath->path.param_info = nullptr;
     cpath->path.parallel_aware = false;
     cpath->path.parallel_safe = false; /* serial execution */
@@ -1301,6 +1623,18 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
      * charge for that input and omit the sort work. */
     cpath->path.startup_cost = owned_input_path->total_cost;
     cpath->path.total_cost = owned_input_path->total_cost;
+    if (sort_key.quality_mean) {
+        // Charge extraction once per row and ordinary sort/memory costs. Keep
+        // PostgreSQL's alternatives: enabling this path is not a promise it wins.
+        cost_sort(&cpath->path, root, root->sort_pathkeys,
+#if PG_VERSION_NUM >= 180000
+            owned_input_path->disabled_nodes,
+#endif
+            owned_input_path->total_cost + cpu_operator_cost * 8 * owned_input_path->rows,
+            owned_input_path->rows,
+            logical_target->width + sizeof(bioseq::sequences::quality_mean_key),
+            0, work_mem, -1);
+    }
     cpath->path.pathkeys = root->sort_pathkeys; /* requested output  order */
     cpath->flags = 0;
     cpath->custom_paths = list_make1(owned_input_path);
@@ -1313,18 +1647,29 @@ void create_batch_sort_upper_paths(PlannerInfo* root,
                                        makeInteger(static_cast<int>(source_attno)));
     cpath->custom_private = lappend(cpath->custom_private,
         makeInteger(static_cast<int>(key_params.alphabet_code)));
+    cpath->custom_private = lappend(cpath->custom_private, makeInteger(2));
+    cpath->custom_private = lappend(cpath->custom_private, makeInteger(sort_key.quality_mean ? 1 : 0));
+    cpath->custom_private = lappend(cpath->custom_private, makeInteger(mean_output));
+    // A fixed LIMIT/OFFSET may bound tuplesort. WITH TIES must see every equal key.
+    const bool bounded = root->parse != nullptr && root->parse->limitOption != LIMIT_OPTION_WITH_TIES
+        && root->limit_tuples >= 0 && root->limit_tuples < 9223372036854775808.0;
+    cpath->custom_private = lappend(cpath->custom_private,
+        makeString(bounded ? psprintf("%.0f", root->limit_tuples) : pstrdup("-1")));
     cpath->custom_restrictinfo = NIL;
     cpath->methods = &batch_sort_path_methods();
 
-    /* Force eligible ORDER BY queries to use this sorter while it is enabled. */
-    output_rel->pathlist = NIL;
-    output_rel->partial_pathlist = NIL;
-    output_rel->cheapest_startup_path = nullptr;
-    output_rel->cheapest_total_path = nullptr;
+    /* Preserve the existing experimental sequence-sort override. Exact-mean
+     * paths compete with ordinary numeric Sort using the cost above. */
+    if (!sort_key.quality_mean) {
+        output_rel->pathlist = NIL;
+        output_rel->partial_pathlist = NIL;
+        output_rel->cheapest_startup_path = nullptr;
+        output_rel->cheapest_total_path = nullptr;
 #if PG_VERSION_NUM < 190000
-    output_rel->cheapest_unique_path = nullptr;
+        output_rel->cheapest_unique_path = nullptr;
 #endif
-    output_rel->cheapest_parameterized_paths = NIL;
+        output_rel->cheapest_parameterized_paths = NIL;
+    }
     add_path(output_rel, reinterpret_cast<Path*>(cpath));
     set_cheapest(output_rel);
 }

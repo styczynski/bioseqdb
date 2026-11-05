@@ -108,6 +108,29 @@ void index_build_on_insert(Oid user_relid,
         }
         return;
     }
+    if (is_quality_alphabet_code(hdr->alphabet_code)) {
+        constexpr auto index_types = pg_supported_indexes::list_types();
+        for (std::size_t index = 0; index < index_types.size(); ++index) {
+            if (index_types[index].first != bioseq::indexing::k_symbol_counts_index_name
+                || !idx.enabled[index] || idx.policy[index] != bioseq::indexing::index_update_policy::update_on_insert)
+                continue;
+            const auto name = index_types[index].first;
+            acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
+            auto storage = open_sequence_storage_handle(user_relid, rid.db_oid,
+                rid.tablespace_oid, rid.relfilenode, attno, name, loc, rowno, nullptr, mctx);
+            try {
+                with_pg_sequence_view<bool>(PointerGetDatum(hdr), [&storage, &loc](auto view) {
+                    using alphabet = typename decltype(view)::alphabet_type;
+                    if constexpr (bioseq::sequences::quality_alphabet<alphabet>)
+                        bioseq::indexing::symbol_counts_index<sequence_index_storage>::build(storage, view, loc.source_epoch);
+                    return true;
+                });
+                storage.close_checked();
+            } catch (...) { storage.abandon_after_pg_error_noexcept(); throw; }
+            note_successful_write(user_relid, rid.relfilenode, attno, name);
+        }
+        return;
+    }
     reset_last_minimizer_sequence_build_stats();
     if (bioseq::aligner::settings::grouped_soa_generation::enabled) {
         constexpr auto k_index_types = pg_supported_indexes::list_types();

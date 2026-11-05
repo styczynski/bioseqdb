@@ -623,6 +623,64 @@ SELECT bioseq.load('imported',
   '/tmp/bioseq-walkthrough.fasta');
 ```
 
+### Quality sequences and FASTQ
+
+Quality strings use `bioseq.seq('phred42')` (`'phred'` is an alias),
+`bioseq.seq('phred63')`, or `bioseq.seq('phred68-legacy')`. Input is byte-exact:
+phred42 accepts ASCII 33–74, phred63 accepts 33–95, and the legacy alphabet
+accepts 59–126 with native scores −5–62. Select phred63 explicitly for modern
+scores above 41. The legacy codec exposes native Solexa log-odds scores;
+they are not converted to modern Phred implicitly.
+
+```sql
+SELECT bioseq.min(q), bioseq.max(q), bioseq.sum(q), bioseq.avg(q),
+       bioseq.quality_stats(q)
+FROM (VALUES ('!+5I'::bioseq.seq('phred'))) AS reads(q);
+-- minimum 0, maximum 40, sum 70, average 17.5
+```
+
+These functions summarize each string. Empty strings have sum zero and NULL
+minimum, maximum, and average. Means are `numeric` rounded to 40 fractional
+digits; their order preserves exact rational mean order within the supported
+length limit. `symbol_counts` stores the exact histogram and summary, and can
+serve repeated statistic projections without reading sequence payloads.
+`bioseq.quality_score(letter)` returns one native integer score.
+
+The versioned index retains a full histogram: its uncompressed payload is 576
+bytes per modern quality string or 1,088 bytes per legacy string, before row
+overhead. For short reads this can exceed the packed sequence size. Existing
+index policies control maintenance, and `bioseq.index.sequence_read.enabled`
+controls use of persisted summaries.
+
+Single-key `ORDER BY bioseq.avg(q)` can use the existing sequence batch-sort
+switch for eligible Bioseq base scans. It compares exact sum/length keys and
+hands oversized batches to PostgreSQL's numeric tuplesort under `work_mem`.
+Other query shapes use ordinary numeric sorting. Quality lexicographic sorting
+uses the CPU path; GPU quality layouts are not enabled.
+
+Quality sequences support the existing slicing, concatenation, replacement,
+comparison, hashing, and reverse operations. Complement is the identity;
+reverse-complement is reverse. Biological search and translation reject quality
+alphabets. Row aggregates selecting whole sequences are named `bioseq.seq_min`
+and `bioseq.seq_max`; `bioseq.min/max` are the scalar quality functions.
+
+`bioseq.load` automatically adds a nullable quality column when loading FASTQ.
+An existing bound quality column determines the codec unless options specify it;
+conflicting options are rejected. The final optional argument is
+`bioseq.load_options`, and mappings still specify the destination first:
+
+```sql
+CREATE TABLE reads (header text, seq bioseq.seq('dna4')) USING bioseq;
+SELECT bioseq.load('reads', '/server/reads.fastq',
+    columns => ARRAY[ROW('scores', 'quality')::bioseq.column_mapping],
+    options => ROW('phred63')::bioseq.load_options);
+SELECT header, bioseq.avg(scores) FROM reads ORDER BY bioseq.avg(scores), header;
+```
+
+Loading FASTA does not add quality data. New unbound `seq` and `letter` inputs
+preserve printable ASCII exactly until a concrete alphabet is chosen; type a
+CIGAR string explicitly with `::bioseq.seq('cigar')`.
+
 ### 14. Slices
 
 The first query returns three headers, lengths and 16bp slices and

@@ -38,11 +38,10 @@ export using pgseq_supported_biological_alphabets =
     supported_biological_alphabets;
 
 /// Storage alphabets, derived from the biological registry without duplicating it.
-export using pgseq_supported_alphabets = typename decltype(
-    []<class... p_entries>(std::tuple<p_entries...>) {
-        return std::type_identity<supported_alphabets<
-            p_entries..., alphabet_entry<bioseq::cigar_symbol, "cigar">>>{};
-    }(typename pgseq_supported_biological_alphabets::alphabet_entries_tuple{}))::type;
+export using pgseq_supported_alphabets = supported_storage_alphabets;
+export using pgseq_supported_rank_packed_alphabets = supported_rank_packed_alphabets;
+export using pgseq_supported_quality_alphabets = supported_quality_alphabets;
+export using ::is_quality_alphabet_code;
 
 /// Physical CIGAR family code; projection spaces do not add alphabet types.
 export inline constexpr std::uint8_t pgseq_cigar_alphabet_code =
@@ -111,7 +110,7 @@ static_assert(pgseq_supported_storage_unit_byte_widths::contains<sizeof(bioseq::
 
 }  // namespace bioseq::pg_types
 
-/** Dispatch rank-packed alphabets without instantiating CIGAR numeric kernels. */
+/** Dispatch biological algorithms without instantiating quality or CIGAR kernels. */
 export template<class p_handler>
 constexpr void pgseq_dispatch_biological_instance(
     std::uint8_t alphabet_code,
@@ -126,6 +125,21 @@ constexpr void pgseq_dispatch_biological_instance(
                 [&handler]<std::size_t p_width>() {
                     handler.template operator()<compact_sequence_stdc_instance<
                         bioseq::pg_types::seq, p_alphabet, p_width>>();
+                });
+        });
+}
+
+/** Dispatch ordinary packed storage, retaining the gap occupied by CIGAR. */
+export template<class Handler>
+constexpr void pgseq_dispatch_rank_packed_instance(
+    std::uint8_t alphabet_code, std::uint8_t byte_width, Handler&& handler)
+{
+    pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(alphabet_code,
+        [byte_width, &handler]<class Alphabet>() {
+            pgseq_supported_storage_unit_byte_widths::dispatch(byte_width,
+                [&handler]<std::size_t Width>() {
+                    handler.template operator()<compact_sequence_stdc_instance<
+                        bioseq::pg_types::seq, Alphabet, Width>>();
                 });
         });
 }

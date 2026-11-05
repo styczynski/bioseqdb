@@ -240,6 +240,11 @@ export {
         result.divergence_oid = resolve("bioseq.divergence(anyelement)");
         result.cigar_oid = resolve("bioseq.cigar(anyelement)");
         result.symbol_count_oid = resolve("bioseq.symbol_count(bioseq.seq, text)");
+        result.quality_min_oid = resolve("bioseq.min(bioseq.seq)");
+        result.quality_max_oid = resolve("bioseq.max(bioseq.seq)");
+        result.quality_sum_oid = resolve("bioseq.sum(bioseq.seq)");
+        result.quality_avg_oid = resolve("bioseq.avg(bioseq.seq)");
+        result.quality_stats_oid = resolve("bioseq.quality_stats(bioseq.seq)");
         result.seq_concat_oid = resolve("bioseq.seq_concat(bioseq.seq,bioseq.seq)");
         result.seq_concat_text_oid = resolve("bioseq.seq_concat_text(bioseq.seq,text)");
         result.text_concat_seq_oid = resolve("bioseq.text_concat_seq(text,bioseq.seq)");
@@ -342,6 +347,8 @@ export {
             o.divergence_oid,
             o.cigar_oid,
             o.symbol_count_oid,
+            o.quality_min_oid, o.quality_max_oid, o.quality_sum_oid,
+            o.quality_avg_oid, o.quality_stats_oid,
             o.seq_concat_oid,
             o.seq_concat_text_oid,
             o.text_concat_seq_oid,

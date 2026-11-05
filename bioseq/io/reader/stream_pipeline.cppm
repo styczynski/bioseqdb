@@ -241,6 +241,21 @@ template <sequence_alphabet p_alphabet,
     } else {
         fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
         parser_state.retain_quality = false;
+        auto deliver_quality = [&sink, &record_open, &header_scratch](
+                std::span<const std::uint8_t> bytes, std::size_t offset) {
+            if constexpr (requires { sink.quality_chunk(bytes, offset); }) {
+                if (!record_open) {
+                    sink.begin_record(std::string_view(header_scratch.data(), header_scratch.size()));
+                    record_open = true;
+                }
+                sink.quality_chunk(bytes, offset);
+            }
+            return true;
+        };
+        parser_state.quality_sink_state = &deliver_quality;
+        parser_state.quality_sink = [](void* state, std::span<const std::uint8_t> bytes, std::size_t offset) {
+            return (*static_cast<decltype(deliver_quality)*>(state))(bytes, offset);
+        };
         // Capture the completed FASTQ header and final-word padding.
         auto emit_fastq = [&capture_completion](std::size_t header_start,
                                                 std::size_t header_size,

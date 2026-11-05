@@ -24,8 +24,10 @@ extern "C" {
 #undef vsnprintf
 
 #include <cstdint>
+#include <array>
 #include <limits>
 #include <new>
+#include <optional>
 
 export module bioseq.postgres.storage.scanner:source_scanner_promotion;
 
@@ -43,6 +45,7 @@ import bioseq.postgres.storage.physical;
 import bioseq.storage.size;
 import bioseq.postgres.storage.metadata;
 import bioseq.sequences;
+import bioseq.sequences.quality_summary;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
@@ -52,6 +55,68 @@ import :source_registry;
 export import :source_scanner_routes;
 
 export namespace bioseq::storage {
+/** A scalar filter can satisfy a later symbol_count projection in the same
+ * reduction. This request belongs to the existing statement source domain. */
+inline void request_pg_quality_source_histogram(pg_sequence_source_provider* provider,
+        AttrNumber column, compact_sequence_stdc_type_params type) {
+    using namespace sequence_source_detail;
+    if (provider == nullptr || !provider->open || !registry_lease_is_live(provider->lease))
+        return;
+    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        find_or_create_domain(*provider->lease.registry, column, type)->quality_histogram_requested = true;
+    });
+}
+
+/** Share a validated row summary with lazy projections and the parent sorter.
+ * The row materializer and provider must use the same owning scan snapshot. */
+inline void cache_pg_quality_source_summary(pg_sequence_source_provider* provider,
+        Oid relation, Snapshot snapshot, AttrNumber column, const sequence_locator& locator,
+        compact_sequence_stdc_type_params type, const bioseq::sequences::quality_summary& summary,
+        bool from_index, const std::array<std::int64_t, 128>* counts = nullptr) {
+    using namespace sequence_source_detail;
+    if (provider == nullptr) return;
+    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        if (!provider->open || !registry_lease_is_live(provider->lease)
+            || provider->lease.registry->user_relid != relation
+            || provider->lease.registry->authoritative_snapshot != snapshot)
+            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("quality summary has no matching statement source provider")));
+        auto* domain = find_or_create_domain(*provider->lease.registry, column, type);
+        domain->quality_cached_summary = summary;
+        domain->quality_cached_counts_valid = counts != nullptr;
+        if (counts) domain->quality_cached_counts = *counts;
+        domain->quality_cached_epoch = locator.source_epoch;
+        domain->quality_cached_from = 0;
+        domain->quality_cached_to = locator.logical_length;
+        domain->quality_cached_from_index = from_index;
+    });
+}
+
+/** Reuse a filter's summary/histogram for the same row's projection or sort. */
+[[nodiscard]] inline bool cached_pg_quality_source_summary(pg_sequence_source_provider* provider,
+        Oid relation, Snapshot snapshot, AttrNumber column, const sequence_locator& locator,
+        compact_sequence_stdc_type_params type, bool read_index, bool require_counts,
+        bioseq::sequences::quality_summary& summary, std::array<std::int64_t, 128>& counts,
+        bool& from_index, bool& counts_valid) noexcept {
+    using namespace sequence_source_detail;
+    if (provider == nullptr || !provider->open || !registry_lease_is_live(provider->lease)
+        || provider->lease.registry->user_relid != relation
+        || provider->lease.registry->authoritative_snapshot != snapshot) return false;
+    for (auto* domain = provider->lease.registry->domains; domain; domain = domain->next) {
+        if (!domain_key_matches(*domain, column, type) || !domain_is_readable(*domain)
+            || !domain->quality_cached_summary || domain->quality_cached_epoch != locator.source_epoch
+            || domain->quality_cached_from != 0 || domain->quality_cached_to != locator.logical_length
+            || (!read_index && domain->quality_cached_from_index)
+            || (require_counts && !domain->quality_cached_counts_valid)) continue;
+        summary = *domain->quality_cached_summary;
+        from_index = domain->quality_cached_from_index;
+        counts_valid = domain->quality_cached_counts_valid;
+        if (counts_valid) counts = domain->quality_cached_counts;
+        return true;
+    }
+    return false;
+}
+
 /// @return Whether this reference points to a registry on the current thread
 /// This checks the thrxad only, not whether  the reference is still live.
 /// @param lease Reference whose backend thread is checked.
@@ -118,7 +183,10 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                                  Datum locator_datum,
                                  MemoryContext result_context,
                                  slice_trace_attachment* trace = nullptr,
-                                 std::uint32_t producer_value_id = 0u) {
+                                 std::uint32_t producer_value_id = 0u,
+                            std::optional<std::uint64_t> indexed_row_number = std::nullopt,
+                            bool read_quality_index = true,
+                            const pending_sequence_source* pending_authority = nullptr) {
     using namespace sequence_source_detail;
     if (!registry_lease_is_live(lease) || column_attno <= 0 || result_context == nullptr) {
         ereport(ERROR,
@@ -155,16 +223,22 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator geometry does not match its sequence representation")));
     }
+    if (pending_authority != nullptr && (!pending_authority->pending()
+        || !same_locator(pending_authority->locator(), locator))) {
+        ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            errmsg("constraint source does not match its pending publication token")));
+    }
     const auto source_row = bioseq::postgres::support::invoke_pg_as_cpp(
         [source_epoch = locator.source_epoch,
-         authoritative_snapshot = registry.authoritative_snapshot] {
+         authoritative_snapshot = registry.authoritative_snapshot, pending_authority] {
             return sequence_source_version_manager::lookup(source_epoch,
                                                            authoritative_snapshot,
-                                                           /*require_ready=*/true);
+                                                           /*require_ready=*/pending_authority == nullptr);
         });
     if (!source_row.has_value() ||
         !source_row_matches_registry(
-            registry, column_attno, locator, stored_type, last_padding_letters, *source_row)) {
+            registry, column_attno, locator, stored_type, last_padding_letters, *source_row,
+            pending_authority ? k_sequence_source_state_unpublished : k_sequence_source_state_ready)) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("bioseq locator no longer matches its immutable source"),
@@ -176,6 +250,8 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
     const pg_sequence_source_handle handle{
         .state = domain,
         .ops = &source_backend_ops(),
+        .indexed_row_number = indexed_row_number,
+        .read_quality_index = read_quality_index,
     };
     return bioseq::postgres::support::invoke_pg_as_cpp([handle,
                                                         locator,
@@ -190,6 +266,21 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
     });
 }
 
+/** Read a staged immutable source only while its writer owns the unconsumed
+ * publication token. The loader supplies a registered snapshot after flushing
+ * fragments; ordinary scan promotion continues requiring a published source. */
+[[nodiscard]] inline Datum promote_pending_pg_sequence_source(
+        pg_sequence_source_provider* provider, AttrNumber column, Datum locator,
+        const pending_sequence_source& pending, MemoryContext result_context) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        if (provider == nullptr || !provider->open)
+            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("pending source constraint read has no owning provider")));
+        return promote_pg_sequence_locator_impl(provider->lease, column, locator,
+            result_context, nullptr, 0u, std::nullopt, false, &pending);
+    });
+}
+
 /// Create a sequence value from a locator using a counted registry reference
 /// @return Expanded value owned by `result_context`.
 /// @throws C++ exception if validation or creation fails.
@@ -199,11 +290,13 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                             Datum locator_datum,
                             MemoryContext result_context,
                             slice_trace_attachment* trace = nullptr,
-                            std::uint32_t producer_value_id = 0u) {
+                            std::uint32_t producer_value_id = 0u,
+                            std::optional<std::uint64_t> indexed_row_number = std::nullopt,
+                            bool read_quality_index = true) {
     return bioseq::postgres::support::invoke_pg_as_cpp(
-        [&lease, column_attno, locator_datum, result_context, trace, producer_value_id] {
+        [&lease, column_attno, locator_datum, result_context, trace, producer_value_id, indexed_row_number, read_quality_index] {
             return promote_pg_sequence_locator_impl(
-                lease, column_attno, locator_datum, result_context, trace, producer_value_id);
+                lease, column_attno, locator_datum, result_context, trace, producer_value_id, indexed_row_number, read_quality_index);
         });
 }
 
@@ -216,9 +309,11 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                                                        Datum locator_datum,
                                                        MemoryContext result_context,
                                                        slice_trace_attachment* trace = nullptr,
-                                                       std::uint32_t producer_value_id = 0u) {
+                                                       std::uint32_t producer_value_id = 0u,
+                            std::optional<std::uint64_t> indexed_row_number = std::nullopt,
+                            bool read_quality_index = true) {
     return bioseq::postgres::support::invoke_pg_as_cpp(
-        [provider, column_attno, locator_datum, result_context, trace, producer_value_id] {
+        [provider, column_attno, locator_datum, result_context, trace, producer_value_id, indexed_row_number, read_quality_index] {
             if (provider == nullptr || !provider->open) {
                 ereport(ERROR,
                         (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -229,7 +324,7 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                                                locator_datum,
                                                result_context,
                                                trace,
-                                               producer_value_id);
+                                               producer_value_id, indexed_row_number, read_quality_index);
         });
 }
 

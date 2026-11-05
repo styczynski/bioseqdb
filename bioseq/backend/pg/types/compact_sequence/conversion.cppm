@@ -103,6 +103,19 @@ namespace {
         || pgseq_is_cigar_alphabet(destination.alphabet_code))
         pg_raise_sequence_conversion_error({sequence_conversion_error_code::incompatible_alphabets});
 
+    if ((is_quality_alphabet_code(header.alphabet_code)
+            || is_quality_alphabet_code(destination.alphabet_code))
+        && direction != conversion_direction::automatic)
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+            errmsg("biological translation is not defined for quality sequences")));
+    if (is_quality_alphabet_code(header.alphabet_code)
+        != is_quality_alphabet_code(destination.alphabet_code))
+        pg_raise_sequence_conversion_error({sequence_conversion_error_code::incompatible_alphabets});
+    if (is_quality_alphabet_code(header.alphabet_code)
+        && (header.alphabet_code == pgseq_supported_alphabets::index_of<seq::phred68solexa>())
+            != (destination.alphabet_code == pgseq_supported_alphabets::index_of<seq::phred68solexa>()))
+        pg_raise_sequence_conversion_error({sequence_conversion_error_code::incompatible_alphabets});
+
     Datum dispatch = input;
     bioseq::pg_types::seq* detoasted{};
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
@@ -114,9 +127,9 @@ namespace {
         [dispatch, descriptor, destination, direction, options](pg_sequence_read_session& session) {
         conversion_result converted = std::unexpected(sequence_conversion_error{
             sequence_conversion_error_code::incompatible_alphabets});
-        pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(descriptor.alphabet_code,
+        pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(descriptor.alphabet_code,
             [dispatch, descriptor, destination, direction, options, &session, &converted]<class Source>() {
-            pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(destination.alphabet_code,
+            pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(destination.alphabet_code,
                 [dispatch, descriptor, destination, direction, options, &session, &converted]<class Destination>() {
                 constexpr bool forward = seqan3::nucleotide_alphabet<Source>
                     && seqan3::aminoacid_alphabet<Destination>;

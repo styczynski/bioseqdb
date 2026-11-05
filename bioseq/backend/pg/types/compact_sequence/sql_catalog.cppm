@@ -143,7 +143,7 @@ inline constexpr bioseq::sql::opclass_tag seq_hash_ops{};
     .sort_operator = bioseq::pg_types::sql_routines::seq_lt,
     .parallel = bioseq::sql::parallel_safety::safe,
 })]]
-inline constexpr bioseq::sql::aggregate_tag min{};
+inline constexpr bioseq::sql::aggregate_tag seq_min{};
 
 /**
  * @brief Register ordinary MAX without converting sequences to text.
@@ -156,6 +156,6 @@ inline constexpr bioseq::sql::aggregate_tag min{};
     .sort_operator = bioseq::pg_types::sql_routines::seq_gt,
     .parallel = bioseq::sql::parallel_safety::safe,
 })]]
-inline constexpr bioseq::sql::aggregate_tag max{};
+inline constexpr bioseq::sql::aggregate_tag seq_max{};
 
 }  // namespace bioseq::pg_types::sql_catalog

@@ -27,6 +27,7 @@ export import :custom_scan_scan_runtime_source_lifecycle_contracts;
 
 import std;
 import bioseq.postgres.support;
+import bioseq.postgres.column;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.storage.scanner;
 import bioseq.postgres.table.scan_state;
@@ -167,13 +168,25 @@ export {
                          errmsg("BioseqSliceProject locator lost its physical column"),
                          errdetail("result_attribute=%d", static_cast<int>(resno))));
             }
+            if (is_quality_alphabet_code(value->alphabet_code)
+                && std::ranges::any_of(runtime.placeholder_consts.symbol_count_sites,
+                    [column_attno](const auto& request) {
+                        return request.column_attno == column_attno && request.quality_statistic == 0;
+                    })) {
+                bioseq::storage::request_pg_quality_source_histogram(runtime.lazy_source_provider,
+                    column_attno, compact_sequence_stdc_type_params{
+                        .alphabet_code = value->alphabet_code,
+                        .storage_unit_byte_width = bioseq::storage::logical_storage_unit_byte_width(value)});
+            }
             slot->tts_values[index] =
                 bioseq::storage::promote_pg_sequence_locator(runtime.lazy_source_provider,
                                                              column_attno,
                                                              source,
                                                              result_context,
                                                              runtime.lazy_trace_attachment,
-                                                             producer_id);
+                                                             producer_id,
+                                                             ItemPointerIsValid(&slot->tts_tid) ? std::optional<std::uint64_t>{tid_to_row_number(slot->tts_tid)} : std::nullopt,
+                                                             runtime.aligner_state.read_sequence_index);
         }
     }
 
@@ -407,7 +420,9 @@ export {
                                                              PointerGetDatum(flat),
                                                              output_context,
                                                              trace_attachment,
-                                                             producer_id);
+                                                             producer_id,
+                                                             ItemPointerIsValid(&slot->tts_tid) ? std::optional<std::uint64_t>{tid_to_row_number(slot->tts_tid)} : std::nullopt,
+                                                             runtime.aligner_state.read_sequence_index);
             ++promoted_count;
         }
         return promoted_count;

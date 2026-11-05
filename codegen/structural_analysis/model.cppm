@@ -370,6 +370,8 @@ struct alphabet_manifest_entry {
     std::uint8_t exact_seed_rank_bits{};
     bool is_amino_acid{};
     bool is_complementable{};
+    bool is_quality{};
+    bool is_rank_packed{true};
     std::string source_digest;
 
     [[nodiscard]] bool operator==(const alphabet_manifest_entry&) const = default;
@@ -387,6 +389,7 @@ struct translation_unit {
     std::vector<declaration_record> declarations;
     std::vector<aggregate_record> aggregate_records;
     std::vector<alphabet_manifest_entry> biological_alphabets;
+    std::vector<alphabet_manifest_entry> storage_alphabets;
     std::vector<std::uint8_t> minimizer_exact_rank_widths;
     std::vector<marked_namespace_record> marked_namespaces;
     collection_mode mode{collection_mode::lexical_scan};

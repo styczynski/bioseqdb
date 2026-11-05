@@ -15,4 +15,5 @@ export import :packed_output;
 export import :conversion;
 export import :io;
 export import :letter;
+export import :quality;
 export import :cigar;

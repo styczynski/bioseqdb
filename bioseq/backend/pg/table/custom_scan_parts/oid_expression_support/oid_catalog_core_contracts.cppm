@@ -38,6 +38,20 @@ export struct bioseq_stub_oids {
     Oid divergence_oid;
     Oid cigar_oid;
     Oid symbol_count_oid;
+    Oid quality_min_oid;
+    Oid quality_max_oid;
+    Oid quality_sum_oid;
+    Oid quality_avg_oid;
+    Oid quality_stats_oid;
+    [[nodiscard]] unsigned quality_statistic_kind(Oid oid) const noexcept {
+        if (!oid) return 0;
+        if (oid == quality_min_oid) return 1;
+        if (oid == quality_max_oid) return 2;
+        if (oid == quality_sum_oid) return 3;
+        if (oid == quality_avg_oid) return 4;
+        if (oid == quality_stats_oid) return 5;
+        return 0;
+    }
     Oid seq_concat_oid;
     Oid seq_concat_text_oid;
     Oid text_concat_seq_oid;

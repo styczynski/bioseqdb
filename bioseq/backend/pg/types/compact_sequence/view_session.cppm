@@ -20,6 +20,7 @@ module;
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <tuple>
 
 #include <bioseq/pg_compat.h>
 extern "C" {
@@ -37,6 +38,7 @@ import :tree_ops;
 import bioseq.common.checked_arithmetic;
 import bioseq.sequences.cigar_alphabet;
 import bioseq.sequences;
+import bioseq.sequences.quality_summary;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
@@ -185,7 +187,7 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
         return;
     }
     bool valid = false;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         static_cast<std::uint8_t>(value.alphabet_code),
         static_cast<std::uint8_t>(value.storage_unit_byte_width),
         [&valid, &value]<class p_instance>() {
@@ -422,7 +424,7 @@ classify_and_describe_sequence_header(Datum input)
                     && raw_size >= bioseq::pg_types::seq::header_bytes()
                         + sizeof(bioseq::cigar_payload_header)
                     && raw_size % alignof(std::uint64_t) == 0u;
-            } else pgseq_dispatch_biological_instance(
+            } else pgseq_dispatch_rank_packed_instance(
                 static_cast<std::uint8_t>(header->alphabet_code),
                 static_cast<std::uint8_t>(header->storage_unit_byte_width),
                 [header, raw_size, &metadata_ok]<class p_instance>() {
@@ -753,7 +755,7 @@ template<class p_alphabet>
 /** Returns the complement rank for @p rank in alphabet @p p_alphabet. */
 [[nodiscard]] inline std::uint8_t complement_rank(std::uint8_t rank)
 {
-    if constexpr (requires(p_alphabet symbol) { seqan3::complement(symbol); }) {
+    if constexpr (bioseq::sequences::sequence_complementable<p_alphabet>) {
         return static_cast<std::uint8_t>(
             bioseq::storage::lazy_sequence_traits<p_alphabet>::letter_complement(rank));
     } else {
@@ -799,7 +801,7 @@ template<class p_alphabet>
         return false;
     }
     bool ok = false;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         literal.stored_type_params.alphabet_code,
         literal.stored_type_params.storage_unit_byte_width,
         [&ok, &literal, edge, from, to, output]<class p_instance>() {
@@ -915,7 +917,7 @@ template<class p_alphabet>
         return written == output.size();
     }
     bool ok = false;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         static_cast<std::uint8_t>(flat.alphabet_code),
         static_cast<std::uint8_t>(flat.storage_unit_byte_width),
         [&ok, &flat, from, to, output]<class p_instance>() {
@@ -1574,6 +1576,79 @@ make_pg_sequence_call_owner(
     return result;
 }
 
+/** Keep tree-reader template instantiation in its owning module. */
+export [[nodiscard]] bool read_pg_quality_leaf_ranks(std::uint8_t alphabet,
+        pg_sequence_read_session& session, piece_edge edge, std::uint64_t from,
+        std::uint64_t to, std::span<std::uint8_t> output) {
+    bool read = false;
+    pgseq_supported_quality_alphabets::dispatch_alphabet_by_code(alphabet,
+        [&]<class Alphabet>() { read = emit_tree_range<Alphabet>(session, edge, from, to, output); });
+    return read;
+}
+
+/** Visit the existing immutable DAG. Full-node summaries are orientation invariant. */
+export template<bioseq::sequences::quality_alphabet Alphabet>
+[[nodiscard]] std::expected<bioseq::sequences::quality_summary, bioseq::sequences::quality_error>
+summarize_pg_quality_tree(pg_sequence_read_session& session, piece_edge root) {
+    using namespace bioseq::sequences;
+    using key = std::tuple<std::uintptr_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t>;
+    return summarize_quality_dag<Alphabet>(static_cast<const piece_node*>(root.node),
+        [](const piece_node* node) -> key {
+            if (node->node_kind == piece_node::kind::source) {
+                const auto& source = node->payload.source;
+                const auto identity = source.source.ops->identity(source.source.state);
+                return {identity.control_address, identity.generation, source.locator.source_epoch,
+                    source.from, source.to};
+            }
+            return {reinterpret_cast<std::uintptr_t>(node), 0, 0, 0, 0};
+        },
+        [](const piece_node* node) -> std::optional<std::pair<const piece_node*, const piece_node*>> {
+            if (node->node_kind != piece_node::kind::branch) return std::nullopt;
+            return std::pair{node->payload.branch.left.node, node->payload.branch.right.node};
+        },
+        [&session](const piece_node* node) -> std::expected<quality_summary, quality_error> {
+            ++session.quality_statistics.summary_extractions;
+            quality_summary result{};
+            const piece_edge edge{.node = node};
+            bool known = false;
+            if (node->node_kind == piece_node::kind::source) {
+                const auto& source = node->payload.source;
+                if (source.source.ops->read_quality_summary) {
+                    auto stored = source.source.ops->read_quality_summary(source.source.state, session,
+                        source.locator, source.stored_type_params, source.source.indexed_row_number,
+                        source.from, source.to, source.source.read_quality_index);
+                    if (!stored) return std::unexpected(stored.error());
+                    if (*stored) { result = **stored; known = true; }
+                }
+            }
+            if (!known) {
+                ++session.quality_statistics.fallbacks;
+                std::array<std::uint8_t, 4096> scratch{};
+                for (std::uint64_t offset = 0; offset < node->bp_length;) {
+                    const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(
+                        scratch.size(), node->bp_length - offset));
+                    if (!read_pg_quality_leaf_ranks(supported_quality_alphabets::index_of<Alphabet>(),
+                            session, edge, offset, offset + count,
+                            std::span{scratch}.first(count))) return std::unexpected(quality_error::source_read);
+                    session.quality_statistics.source_symbols += count;
+                    const auto part = summarize_quality_ranks<Alphabet>(std::span{scratch}.first(count));
+                    if (!part) return std::unexpected(part.error());
+                    const auto merged = merge_quality_summaries<Alphabet>(result, *part);
+                    if (!merged) return merged;
+                    result = *merged;
+                    offset += count;
+                }
+                if (node->node_kind == piece_node::kind::source) {
+                    const auto& source = node->payload.source;
+                    if (source.source.ops->remember_quality_summary)
+                        source.source.ops->remember_quality_summary(source.source.state, source.locator,
+                            source.from, source.to, result);
+                }
+            }
+            return result;
+        });
+}
+
 #ifdef BIOSEQ_TEST_INDEXES
 /* Compare all four read orientations for fkat and tree-backed views.
  * The input must include a real sequence source. Flatten a separate copy
@@ -1632,7 +1707,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     auto* local_session = begin_pg_sequence_read_session(CurrentMemoryContext);
     session = local_session;
     try {
-      pgseq_dispatch_biological_instance(
+      pgseq_dispatch_rank_packed_instance(
           source_descriptor.alphabet_code,
           source_descriptor.storage_unit_byte_width,
           [local_session, input, source_descriptor, flat_datum,
@@ -1745,7 +1820,7 @@ p_result with_pg_sequence_view(
                 auto* owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
                     *local_session, dispatch_datum, descriptor);
                 result.emplace(std::forward<p_function>(view_callback)(owner->view()));
-            } else pgseq_dispatch_biological_instance(
+            } else pgseq_dispatch_rank_packed_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, &view_callback, dispatch_datum, descriptor,
@@ -1835,7 +1910,7 @@ p_result with_pg_sequence_views(
                 auto* right_owner = make_pg_sequence_call_owner<bioseq::cigar_symbol>(
                     *local_session, dispatch[1], right);
                 result.emplace(std::forward<p_function>(callback)(left_owner->view(), right_owner->view()));
-            } else pgseq_dispatch_biological_instance(
+            } else pgseq_dispatch_rank_packed_instance(
                 left.alphabet_code,
                 left.storage_unit_byte_width,
                 [&result, &callback, local_session,
@@ -1966,7 +2041,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             result.rank = static_cast<std::uint8_t>(seqan3::to_rank(operation->operation));
             return result;
         }
-        pgseq_dispatch_biological_instance(
+        pgseq_dispatch_rank_packed_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [input, index, &result]<class p_instance>() {
@@ -2058,7 +2133,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                 std::array<std::uint8_t, 1> scratch{};
                 owner->view().template copy_ranks<false, false>(scratch, index, index + 1u);
                 result.rank = scratch[0];
-            } else pgseq_dispatch_biological_instance(
+            } else pgseq_dispatch_rank_packed_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, dispatch, descriptor, index,

@@ -354,7 +354,8 @@ export {
             if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
                 if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids) ||
                     is_mmsearch_funcid(fe->funcid, *data.stub_oids) ||
-                    fe->funcid == data.stub_oids->symbol_count_oid) {
+                    fe->funcid == data.stub_oids->symbol_count_oid
+                    || data.stub_oids->quality_statistic_kind(fe->funcid) != 0) {
                     data.found = true;
                     return pg_walk_step::stop;
                 }

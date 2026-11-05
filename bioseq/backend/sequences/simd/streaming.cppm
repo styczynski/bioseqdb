@@ -76,7 +76,8 @@ struct native_rank_recode_table {
 template<seqan3::alphabet Source, seqan3::alphabet Destination>
 [[nodiscard]] consteval auto make_native_rank_recode_table() {
     static_assert((seqan3::nucleotide_alphabet<Source> && seqan3::nucleotide_alphabet<Destination>)
-        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>));
+        || (seqan3::aminoacid_alphabet<Source> && seqan3::aminoacid_alphabet<Destination>)
+        || (quality_alphabet<Source> && quality_alphabet<Destination>));
     static_assert(seqan3::alphabet_size<Destination> <= 256u);
     native_rank_recode_table<seqan3::alphabet_size<Source>> table{};
     for (std::size_t rank = 0; rank < table.destination_ranks.size(); ++rank) {
@@ -86,7 +87,12 @@ template<seqan3::alphabet Source, seqan3::alphabet Destination>
         table.destination_ranks[rank] = static_cast<std::uint8_t>(seqan3::to_rank(destination));
         if constexpr (seqan3::nucleotide_alphabet<Source>)
             table.valid[rank] = static_cast<std::uint8_t>(seqan3::to_char(destination) == character);
-        else table.valid[rank] = 1u;
+        else if constexpr (quality_alphabet<Source>) {
+            table.valid[rank] = quality_alphabet_traits<Source>::legacy
+                == quality_alphabet_traits<Destination>::legacy
+                && source_character_is_valid<Destination>(character)
+                && seqan3::to_phred(destination) == seqan3::to_phred(Source{}.assign_rank(rank));
+        } else table.valid[rank] = 1u;
     }
     return table;
 }
@@ -197,7 +203,7 @@ build_letter_to_rank_lut() {
     for (std::size_t byte = 0; byte < lut.size(); ++byte) {
         const auto character = static_cast<char>(static_cast<unsigned char>(byte));
         const bool valid = bioseq::sequences::source_character_is_valid<p_alphabet>(character);
-        if constexpr (p_policy == unknown_byte_policy::map_to_default)
+        if constexpr (p_policy == unknown_byte_policy::map_to_default && !bioseq::sequences::quality_alphabet<p_alphabet>)
             lut[byte] = static_cast<std::uint8_t>(seqan3::to_rank(
                 seqan3::assign_char_to(character, p_alphabet{})));
         else lut[byte] = valid ? static_cast<std::uint8_t>(seqan3::to_rank(
@@ -350,12 +356,13 @@ template <sequence_alphabet p_alphabet,
     encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* __restrict__ body_bytes,
     std::size_t body_size) {
-    constexpr auto lookup = build_letter_to_rank_lut<p_alphabet, p_policy>();
+    constexpr auto policy = bioseq::sequences::quality_alphabet<p_alphabet> ? unknown_byte_policy::reject : p_policy;
+    constexpr auto lookup = build_letter_to_rank_lut<p_alphabet, policy>();
     const auto initial_count = state.total_letters;
     for (std::size_t cursor = 0; cursor < body_size; ++cursor) {
         const auto rank = lookup[body_bytes[cursor]];
         if (rank == std::uint8_t{0xFF}) {
-            if constexpr (p_policy == unknown_byte_policy::reject)
+            if constexpr (p_policy == unknown_byte_policy::reject || bioseq::sequences::quality_alphabet<p_alphabet>)
                 return {sequence_encode_status::invalid_character, cursor,
                     state.total_letters - initial_count, body_bytes[cursor]};
             continue;

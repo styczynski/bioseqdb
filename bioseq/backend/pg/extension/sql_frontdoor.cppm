@@ -345,6 +345,21 @@ std::int64_t symbol_count(
         }
         return static_cast<std::int64_t>(*counted);
     }
+    if (descriptor.alphabet_bound && is_quality_alphabet_code(descriptor.alphabet_code)) {
+        if (sym.size() != 1) bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+            {.message = "symbol_count requires exactly one quality byte"});
+        const int rank = bioseq::storage::indexing::letter_to_rank(descriptor.alphabet_code, sym.front());
+        if (rank < 0) bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+            {.message = "symbol_count byte is outside the quality alphabet"});
+        return with_pg_sequence_view<std::int64_t>(el, [rank](auto view) -> std::int64_t {
+            using Alphabet = typename decltype(view)::alphabet_type;
+            if constexpr (bioseq::sequences::quality_alphabet<Alphabet>) {
+                const auto counts = bioseq::indexing::tally_symbol_counts(view);
+                if (!counts) pg_raise_sequence_conversion_error(counts.error());
+                return (*counts)[static_cast<std::size_t>(rank)];
+            } else return 0;
+        });
+    }
     auto* const sequence_header = bioseq::postgres::support::invoke_pg_as_cpp(
         [el] { return reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(el)); });
     if (sym.size() != 1) {
@@ -394,7 +409,7 @@ std::int64_t symbol_count(
 
 	std::int64_t symbol_count_result = 0;
 	std::optional<bioseq::sequences::sequence_conversion_error> tally_failure;
-	pgseq_dispatch_biological_instance(
+	pgseq_dispatch_rank_packed_instance(
 		sequence_header->alphabet_code,
 		sequence_header->storage_unit_byte_width,
 		[sequence_header, symbol_rank, &symbol_count_result, &tally_failure]
@@ -462,6 +477,15 @@ struct first_var_visitor final {
 		return nullptr;
 	}
 	PlannerInfo* const planner_root = simplify_request->root;
+	// Quality statistics reuse this support hook. Move only a direct, owning
+	// column; transformed or null-extended expressions keep ordinary evaluation.
+	if (list_length(simplify_request->fcall->args) == 1) {
+		auto* argument = reinterpret_cast<Node*>(linitial(simplify_request->fcall->args));
+		if (argument == nullptr || !IsA(argument, Var)) return nullptr;
+		auto* column = reinterpret_cast<Var*>(argument);
+		if (column->varlevelsup != 0 || column->varattno <= 0
+			|| !bms_is_empty(column->varnullingrels)) return nullptr;
+	}
 	const bool has_joins = planner_root->hasJoinRTEs;
 	const bool has_aggregates =
 		planner_root->parse != nullptr && planner_root->parse->hasAggs;

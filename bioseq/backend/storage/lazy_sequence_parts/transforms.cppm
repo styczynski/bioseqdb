@@ -12,6 +12,7 @@ import bioseq.storage.scanner;
 import bioseq.storage.size;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
+import bioseq.simd.utils;
 
 export namespace bioseq::storage {
 
@@ -26,6 +27,11 @@ stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
                          std::uint64_t from,
                          std::uint64_t to,
                          p_output_writer& output) {
+    if constexpr (bioseq::sequences::quality_alphabet<p_alphabet> && is_complemented(p_transform)) {
+        constexpr auto normalized = is_reversed(p_transform)
+            ? sequence_transform::reversed : sequence_transform::identity;
+        return stream_transformed_ranks<normalized>(view, from, to, output);
+    }
     if (from > to || to > view.bp_size() ||
         to > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
         return std::unexpected(rank_window_read_failure::invalid_range);
@@ -76,41 +82,59 @@ stream_transformed_ranks(lazy_sequence_view<p_alphabet> view,
 /** Compares sequences by rank, using length to order equal prefixes. Returns -1, 0, or 1. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] int compare_lazy_sequences(lazy_sequence_view<p_alphabet> left,
-                                         lazy_sequence_view<p_alphabet> right) {
-    struct comparison_writer {
-        typename lazy_sequence_view<p_alphabet>::rank_iterator cursor;
-        typename lazy_sequence_view<p_alphabet>::rank_iterator end;
-        int result{};
-
-        bool append_ranks(std::span<const std::uint8_t> ranks) {
-            if (result != 0) {
-                return false;
+                                         lazy_sequence_view<p_alphabet> right,
+                                         bool include_resident = false) {
+    constexpr std::size_t capacity = bioseq::simd::sequence_rank_io_chunk_capacity;
+    std::array<std::uint8_t, capacity> left_scratch{}, right_scratch{};
+    // Streaming callers need not support resident probes. Batch sorting can
+    // explicitly allow them when borrowing packed words is part of its policy.
+    const auto left_source = left.template borrow_rank_source<false>(include_resident);
+    const auto right_source = right.template borrow_rank_source<false>(include_resident);
+    const auto common = std::min(left.bp_size(), right.bp_size());
+    std::uint64_t offset = 0;
+    // A resident borrow guarantees immutable words with the same logical ranks.
+    // Skip equal complete native words; never use packed byte order as rank order.
+    // A padding difference merely declines the shortcut and uses rank comparison.
+    if (left_source.resident && right_source.resident) {
+        const auto& a = *left_source.resident;
+        const auto& b = *right_source.resident;
+        if (a.storage_unit_width == b.storage_unit_width && a.bits_per_symbol == b.bits_per_symbol
+            && a.leading_symbol_offset == 0 && b.leading_symbol_offset == 0) {
+            const auto width = a.storage_unit_width;
+            const auto symbols = width * 8u / a.bits_per_symbol;
+            const auto words = common / symbols;
+            const auto* first = static_cast<const std::uint8_t*>(a.units);
+            const auto* second = static_cast<const std::uint8_t*>(b.units);
+            std::uint64_t word = 0;
+            while (word < words) {
+                const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(256, words - word));
+                if (std::memcmp(first + word * width, second + word * width, count * width) != 0) {
+                    while (word < words && std::memcmp(first + word * width, second + word * width, width) == 0)
+                        ++word;
+                    break;
+                }
+                word += count;
             }
-            for (const std::uint8_t rank : ranks) {
-                if (cursor == end) {
-                    result = 1;
-                    return false;
-                }
-                const std::uint8_t other = *cursor;
-                if (rank < other) {
-                    result = -1;
-                    return false;
-                }
-                if (rank > other) {
-                    result = 1;
-                    return false;
-                }
-                ++cursor;
-            }
-            return true;
+            offset = word * symbols;
         }
-    } writer{right.begin(), right.end(), 0};
-    const auto streamed = stream_transformed_ranks<sequence_transform::identity>(left, 0u, left.bp_size(), writer);
-    if (!streamed) throw std::runtime_error("lazy sequence comparison source read failed");
-    if (writer.result != 0) {
-        return writer.result;
     }
-    return writer.cursor == writer.end ? 0 : -1;
+    // Most comparisons differ near the first rank (or the first unequal
+    // resident word). Probe a short bounded tile before decoding a full tile.
+    std::size_t tile_capacity = std::min<std::size_t>(16, capacity);
+    for (; offset < common;) {
+        const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(tile_capacity, common - offset));
+        const auto a = left_source.read_checked(offset, count, left_scratch);
+        if (!a) throw std::runtime_error("lazy sequence comparison source read failed");
+        // The readers can share an evictable fragment cache. Preserve the first window.
+        if (a->data() != left_scratch.data()) std::copy(a->begin(), a->end(), left_scratch.begin());
+        const auto b = right_source.read_checked(offset, count, right_scratch);
+        if (!b) throw std::runtime_error("lazy sequence comparison source read failed");
+        const auto first = bioseq::simd::first_unequal_sequence_rank(left_scratch.data(), b->data(), count);
+        if (first != count) return left_scratch[first] < (*b)[first] ? -1 : 1;
+        offset += count;
+        tile_capacity = capacity;
+    }
+    return (left.bp_size() > right.bp_size()) - (left.bp_size() < right.bp_size());
 }
 
 namespace lazy_sequence_detail {

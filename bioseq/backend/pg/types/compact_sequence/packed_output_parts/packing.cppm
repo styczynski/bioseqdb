@@ -251,7 +251,7 @@ template<class Result, class Function>
             bioseq::pg_types::seq::header_bytes(), "flat CIGAR");
     }
     Size size = 0u;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         value.type_params.alphabet_code,
         value.type_params.storage_unit_byte_width,
         [&size, &value]<class p_instance>() {
@@ -524,7 +524,7 @@ export inline void pg_sequence_flatten_into(
             CurrentMemoryContext);
         session = local_session;
         try {
-            pgseq_dispatch_biological_instance(
+            pgseq_dispatch_rank_packed_instance(
                 value.type_params.alphabet_code,
                 value.type_params.storage_unit_byte_width,
                 [&destination, &value, local_session, header,
@@ -1202,6 +1202,12 @@ export [[nodiscard]] Datum transform_pg_sequence(
 {
     auto acquired = acquire_writable_pg_sequence(input);
     if (acquired.value->alphabet_bound
+        && is_quality_alphabet_code(acquired.value->type_params.alphabet_code)) {
+        transform = bioseq::storage::is_reversed(transform)
+            ? bioseq::storage::sequence_transform::reversed
+            : bioseq::storage::sequence_transform::identity;
+    }
+    if (acquired.value->alphabet_bound
         && pgseq_is_cigar_alphabet(acquired.value->type_params.alphabet_code)
         && bioseq::storage::is_complemented(transform)) {
         pg_raise_cigar_error({bioseq::cigar_error_code::incompatible_alphabet});
@@ -1229,6 +1235,7 @@ export [[nodiscard]] Datum transform_pg_sequence(
 export [[nodiscard]] bool alphabet_has_complete_complement(
     std::uint8_t alphabet_code)
 {
+    if (is_quality_alphabet_code(alphabet_code)) return true;
     if (pgseq_is_cigar_alphabet(alphabet_code)) return false;
     bool complete = false;
     pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
@@ -1450,7 +1457,7 @@ public:
         if (destination_type.alphabet_code != pgseq_supported_alphabets::template index_of<Alphabet>())
             ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
                 errmsg("generated bioseq alphabet does not match its backend")));
-        pgseq_dispatch_biological_instance(destination_type.alphabet_code, destination_type.storage_unit_byte_width,
+        pgseq_dispatch_rank_packed_instance(destination_type.alphabet_code, destination_type.storage_unit_byte_width,
             [this, count, destination_type, &producer, &output]<class Instance>() {
                 if constexpr (std::same_as<typename Instance::alphabet_type, Alphabet>) {
                     using traits = typename compact_sequence_range<Instance>::traits;

@@ -128,7 +128,7 @@ namespace {
     }
 
     piece_edge merged{};
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         left.stored_type_params.alphabet_code,
         left.stored_type_params.storage_unit_byte_width,
         [&destination, &physical_first, &physical_second, &left,
@@ -841,7 +841,7 @@ namespace {
         if (!ensure_piece_edge_cleanup_capacity(*ledger, 1u)) return {};
     }
     tracked_piece_edge bound_edge{};
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         result_type.alphabet_code,
         result_type.storage_unit_byte_width,
         [&destination, &bound_edge, result_type,

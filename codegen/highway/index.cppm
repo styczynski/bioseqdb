@@ -421,9 +421,11 @@ parse_minimizer_registry_command_line(
     const auto structural = structural_analysis::scan_translation_units_from_database(
         {command.registry_source, command.seed_policy_source}, compile_database, "production", command.pcm_root);
     std::vector<structural_analysis::alphabet_manifest_entry> alphabets;
+    std::vector<structural_analysis::alphabet_manifest_entry> storage_alphabets;
     std::vector<std::uint8_t> exact_widths;
     std::string seed_policy_digest;
     for (const auto& unit : structural.translation_units) {
+        if (!unit.storage_alphabets.empty()) storage_alphabets = unit.storage_alphabets;
         if (!unit.biological_alphabets.empty()) {
             if (!alphabets.empty()) throw std::runtime_error("duplicate biological registry source");
             alphabets = unit.biological_alphabets;
@@ -461,6 +463,15 @@ parse_minimizer_registry_command_line(
     publish_artifact_if_changed(command.visitor_output, visitor);
     publish_artifact_if_changed(command.pipeline_entries_output, pipeline_entries);
     publish_artifact_if_changed(command.manifest_output, manifest);
+    std::ostringstream storage_manifest;
+    storage_manifest << "bioseq-storage-alphabet-registry\nrevision\t1\n";
+    for (const auto& entry : storage_alphabets) {
+        storage_manifest << "alphabet\t" << entry.qualified_cpp_type << '\t' << entry.literal_name
+            << '\t' << entry.ordinal << '\t' << entry.cardinality << '\t' << unsigned(entry.rank_bits)
+            << '\t' << entry.is_amino_acid << '\t' << entry.is_complementable
+            << '\t' << entry.is_quality << '\t' << entry.is_rank_packed << '\t' << entry.source_digest << '\n';
+    }
+    publish_artifact_if_changed(command.manifest_output.string() + ".storage", storage_manifest.str());
     publish_artifact_if_changed(
         command.stamp,
         "bioseq_minimizer_registry_stamp\n"
@@ -468,6 +479,7 @@ parse_minimizer_registry_command_line(
         "profile=" + std::string{minimizer_registry_profile_name(command.profile)}
             + "\nmanifest_identity=" + identity
             + "\nrecords_sha256=" + bioseq::common::sha256_hex(records)
+            + "\nstorage_registry_sha256=" + bioseq::common::sha256_hex(storage_manifest.str())
             + "\nvisitor_sha256=" + bioseq::common::sha256_hex(visitor) + "\n");
     mark_artifact_complete(command.stamp);
     return 0;

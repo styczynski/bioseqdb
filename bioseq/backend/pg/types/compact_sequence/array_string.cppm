@@ -440,7 +440,7 @@ inline void validate_bridge_array_shape(
         return cigar_from_letter_values(elements, array, space);
     }
     bioseq::pg_types::seq* result = nullptr;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         target.alphabet_code,
         target.storage_unit_byte_width,
         [&result, target, elements, array,

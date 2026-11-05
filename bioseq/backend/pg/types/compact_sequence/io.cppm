@@ -100,7 +100,7 @@ export [[nodiscard]] std::uint8_t parse_alphabet_name_checked(
         return pgseq_cigar_alphabet_code;
     }
     const auto code =
-        pgseq_supported_alphabets::try_index_of_name(alphabet_name);
+        pgseq_supported_alphabets::try_index_of_name(std::string_view{alphabet_name} == "phred" ? "phred42" : alphabet_name);
     if (!code.has_value()) {
         constexpr auto valid =
             pgseq_supported_alphabets::valid_alphabet_names_csv();
@@ -223,31 +223,10 @@ namespace {
     return result;
 }
 
-/** Probe numeric prefixes for complete CIGAR grammar; preserve ordinary alphabet diagnostics. */
+/** Unbound text remains lexical until an explicit alphabet is selected. */
 [[nodiscard]] inline bioseq::pg_types::seq* allocate_sequence_text(
-    char const* input,
-    std::size_t length,
-    bool require_already_canonical)
+    char const* input, std::size_t length, bool require_already_canonical)
 {
-    if (length != 0u && input[0] >= '0' && input[0] <= '9') {
-        const std::string_view text{input, length};
-        const auto measured = bioseq::measure_cigar_text(text);
-        if (measured) {
-            return make_pg_cigar_from_text(text, bioseq::cigar_space::compatibility,
-                ERRCODE_INVALID_TEXT_REPRESENTATION, *measured);
-        }
-        bool ordinary_spelling = true;
-        for (std::size_t index = 0u; index < length; ++index) {
-            if (!pgseq_canonical_unbound_symbol(
-                    static_cast<unsigned char>(input[index])).valid) {
-                ordinary_spelling = false;
-                break;
-            }
-        }
-        if (!ordinary_spelling) {
-            pg_raise_cigar_error(measured.error());
-        }
-    }
     return allocate_unbound_ascii(input, length, require_already_canonical);
 }
 
@@ -272,14 +251,14 @@ namespace {
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to pack")));
     }
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         target.alphabet_code, target.storage_unit_byte_width,
         [length]<class p_instance>() {
             (void) bound_flat_size<p_instance>(length);
         });
     bioseq::pg_types::seq* result = nullptr;
     std::optional<bioseq::sequences::sequence_encode_result> failure;
-    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(
         target.alphabet_code,
         [&result, &failure, target, length, ascii]<class p_alphabet>() {
             const auto encoded = ::bioseq::simd::active_target::
@@ -1212,7 +1191,7 @@ text* seq_send(
         std::uint64_t unit_count = 0u;
         std::uint16_t padding = 0u;
         if (descriptor.alphabet_bound) {
-            pgseq_dispatch_biological_instance(
+            pgseq_dispatch_rank_packed_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [descriptor, &unit_count, &padding]<class p_instance>() {
@@ -1284,7 +1263,7 @@ text* seq_send(
             with_pg_sequence_view<std::monostate>(
                 input,
                 [&buffer, descriptor, unit_count](auto view) {
-                    pgseq_dispatch_biological_instance(
+                    pgseq_dispatch_rank_packed_instance(
                         descriptor.alphabet_code,
                         descriptor.storage_unit_byte_width,
                         [&view, &buffer, descriptor,
@@ -1536,7 +1515,7 @@ bioseq::pg_types::seq* seq_recv(
                  errmsg("invalid or oversized bound bioseq wire payload")));
     }
     bool metadata_ok = false;
-    pgseq_dispatch_biological_instance(
+    pgseq_dispatch_rank_packed_instance(
         alphabet, width,
         [&metadata_ok, unit_count, padding, bp_size]<class p_instance>() {
         using traits = typename compact_sequence_range<p_instance>::traits;
@@ -1554,7 +1533,7 @@ bioseq::pg_types::seq* seq_recv(
                  errmsg("inconsistent bound bioseq wire length/padding")));
     }
     bioseq::pg_types::seq* result = nullptr;
-    pgseq_supported_biological_alphabets::dispatch_alphabet_by_code(
+    pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(
         alphabet,
         [&result, width, padding, bp_size, unit_count,
          buffer]<class p_alphabet>() {
@@ -1570,7 +1549,7 @@ bioseq::pg_types::seq* seq_recv(
     result->encoding = bioseq::sequence_encoding::rank_packed;
     result->space = bioseq::cigar_space::compatibility;
     std::optional<bioseq::sequences::packed_rank_validation_error> payload_failure;
-    pgseq_dispatch_biological_instance(alphabet, width,
+    pgseq_dispatch_rank_packed_instance(alphabet, width,
         [result, unit_count, bp_size, padding, &payload_failure]<class Instance>() {
             using traits = typename compact_sequence_range<Instance>::traits;
             const auto words = std::span<const typename traits::storage_unit>{
@@ -1665,7 +1644,7 @@ std::int64_t unit_len(
     }
     std::uint64_t units = descriptor.bp_length;
     if (descriptor.alphabet_bound) {
-        pgseq_dispatch_biological_instance(
+        pgseq_dispatch_rank_packed_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [&units, descriptor]<class p_instance>() {

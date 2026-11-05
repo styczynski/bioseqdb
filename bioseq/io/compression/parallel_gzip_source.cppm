@@ -22,6 +22,8 @@ export module bioseq.io.compression.parallel_gzip_source;
 import bioseq.io.sources;
 import bioseq.io.options;
 import bioseq.io.compression.parallel_gzip_decoder;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 
 export namespace bioseq::io {
@@ -75,6 +77,25 @@ class parallel_gzip_source {
             const unsigned hardware = bioseq::parallelism::default_concurrency_limit();
             worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 8) : 1;
         }
+
+        // Both the producer and the caller can wait for queued work. A pool
+        // with only its reserved caller slot cannot start the producer at all.
+        // Keep an existing scheduler's limit; the reader will use ordinary gzip
+        // when that limit cannot support the background decoder.
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        if (!pool.is_active()) {
+            pool.configure(bioseq::parallelism::pool_config{
+                .maximum_concurrency = static_cast<unsigned>(std::min<std::size_t>(worker_count, 12) + 3),
+                .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
+            });
+        }
+        const auto concurrency = pool.maximum_concurrency();
+        if (concurrency < 3) {
+            return std::unexpected(std::string{"parallel gzip requires at least three pool participants"});
+        }
+        // Reserve slots for the caller, a reader running on a worker, and the
+        // producer's ordered drain. One decoder uses the producer directly.
+        worker_count = std::min(worker_count, std::max<std::size_t>(1, concurrency - 3));
 
         source._impl->decoder = std::make_unique<compression::parallel_gzip_decoder>(
             compressed_view, worker_count, chunk_bytes, options.io.parallel_gzip_verify_crc);
