@@ -131,20 +131,21 @@ template<quality_alphabet Alphabet, class Source>
  * source windows as well as nodes. Orientation does not affect native quality scores.
  * Explicit frames avoid recursion on deeply nested concatenations. Every retained
  * node/frame is covered by the shared memory-admission controller. */
-template<quality_alphabet Alphabet, class Node, class Identity, class Children, class Leaf>
+template<quality_alphabet Alphabet, class Node, class Identity, class Children, class Leaf,
+         class Hash = std::hash<std::invoke_result_t<Identity, Node>>>
 [[nodiscard]] std::expected<quality_summary, quality_error> summarize_quality_dag(
-        Node root, Identity identity, Children children, Leaf leaf) {
+        Node root, Identity identity, Children children, Leaf leaf, Hash hash = {}) {
     if (!root) return quality_summary{};
     using key_type = decltype(identity(root));
     struct frame { Node node; bool reduce; };
     auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(4096);
     if (!permit) return std::unexpected(quality_error::memory_limit);
     // Destroy all retained storage before returning its reservation.
-    std::map<key_type, quality_summary> memo;
+    std::unordered_map<key_type, quality_summary, Hash> memo(0, std::move(hash));
     std::vector<frame> stack;
     stack.push_back({root, false});
     while (!stack.empty()) {
-        // std::map node overhead and vector growth are conservatively charged.
+        // Hash nodes/buckets (including rehash) and vector growth are conservatively charged.
         const auto entries = memo.size() + stack.size() + 4;
         constexpr auto charge = 4 * (sizeof(key_type) + sizeof(quality_summary) + sizeof(frame) + 64);
         if (entries > std::numeric_limits<std::uint64_t>::max() / charge
@@ -225,21 +226,34 @@ struct quality_mean_key {
                                     : static_cast<quality_unsigned_sum>(value.sum);
     auto integral = magnitude / value.length;
     auto remainder = magnitude % value.length;
-    std::array<char, 40> digits{};
-    // Each remainder is < 2^63; multiplying by ten cannot overflow 128 bits.
-    for (auto& digit : digits) {
-        remainder *= 10;
-        digit = static_cast<char>('0' + remainder / value.length);
-        remainder %= value.length;
+    if (!remainder) return quality_sum_decimal(negative
+        ? -static_cast<quality_sum>(integral) : static_cast<quality_sum>(integral));
+    constexpr std::uint64_t radix = 10'000'000'000ULL;
+    std::array<std::uint64_t, 4> blocks{};
+    // r < 2^63, so r * 10^10 < 2^97. Four wide divisions produce all
+    // forty places; the numerator itself is never scaled by 10^40.
+    for (auto& block : blocks) {
+        remainder *= radix;
+        block = static_cast<std::uint64_t>(remainder / value.length);
+        remainder -= quality_unsigned_sum{block} * value.length;
+        if (!remainder) break;
     }
     if (remainder * 2 >= value.length) {
         bool carry = true;
-        for (std::size_t i = digits.size(); i && carry;) {
-            auto& digit = digits[--i];
-            if (digit == '9') digit = '0';
-            else { ++digit; carry = false; }
+        for (std::size_t i = blocks.size(); i && carry;) {
+            auto& block = blocks[--i];
+            if (++block == radix) block = 0;
+            else carry = false;
         }
         if (carry) ++integral;
+    }
+    std::array<char, 40> digits{};
+    for (std::size_t block = 0; block < blocks.size(); ++block) {
+        auto block_value = blocks[block];
+        for (std::size_t digit = 10; digit;) {
+            digits[block * 10 + --digit] = static_cast<char>('0' + block_value % 10);
+            block_value /= 10;
+        }
     }
     auto result = quality_sum_decimal(static_cast<quality_sum>(integral));
     auto used = digits.size();
@@ -342,8 +356,12 @@ template<quality_alphabet Alphabet>
     const auto reduced = summarize_quality_histogram<Alphabet>(result.counts);
     if (!reduced || *reduced != result.summary)
         return std::unexpected(quality_error::invalid_payload);
-    if (result.source_epoch != expected_epoch || result.summary.length != expected_length)
+    if (result.source_epoch != expected_epoch)
         return std::unexpected(quality_error::stale_source);
+    // An immutable source cannot change length without a new epoch. Do not
+    // conceal a recognized, same-version inconsistency as a missing index.
+    if (result.summary.length != expected_length)
+        return std::unexpected(quality_error::invalid_payload);
     return result;
 }
 

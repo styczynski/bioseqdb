@@ -12,7 +12,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <hwy/highway.h>
 #include <libassert/assert.hpp>
 #include <string>
 #include <span>
@@ -177,6 +176,18 @@ template <sequence_alphabet p_alphabet,
         return parse_outcome::abort;
     };
 
+    const auto reject_quality_byte = [&](unsigned byte, std::size_t field_offset,
+                                         std::size_t failure_cursor,
+                                         std::size_t file_position) -> record_parse_result {
+        const std::string header(state.header_storage->data() + state.header_start_offset,
+            state.header_storage->size() - state.header_start_offset);
+        state.rollback_current_record();
+        emit_failure(failure_fn, input_failure_kind::invalid_quality_byte,
+            "invalid FASTQ quality byte {} at quality offset {} in record '{}' (file position {})",
+            byte, field_offset, header, file_position);
+        return {parse_outcome::abort, failure_cursor};
+    };
+
     // A FASTQ record starts with '@'.
     if (state.progress == fastq_parser_progress::at_header_sigil) {
         if (parse_cursor >= slab_size) {
@@ -313,9 +324,8 @@ template <sequence_alphabet p_alphabet,
         if (state.quality_pending_cr) {
             if (parse_cursor == slab_size && !is_eof) return need_more();
             if (parse_cursor == slab_size || slab_data[parse_cursor] != '\n') {
-                state.rollback_current_record();
-                emit_failure(failure_fn, "standalone CR in FASTQ quality at file position {}", global_offset + parse_cursor);
-                return {parse_outcome::abort, parse_cursor};
+                return reject_quality_byte('\r', state.quality_byte_count, parse_cursor,
+                    global_offset + parse_cursor - 1);
             }
             state.quality_pending_cr = false;
         }
@@ -333,10 +343,8 @@ template <sequence_alphabet p_alphabet,
             && slab_data[parse_cursor + line_size] != '\r') {
             const auto byte = slab_data[parse_cursor + line_size];
             if (strict_fastq && (byte < 33 || byte > 126)) {
-                const auto offset = state.quality_byte_count + line_size;
-                state.rollback_current_record();
-                emit_failure(failure_fn, "invalid FASTQ quality byte {} at quality offset {}", byte, offset);
-                return {parse_outcome::abort, parse_cursor + line_size};
+                return reject_quality_byte(byte, state.quality_byte_count + line_size,
+                    parse_cursor + line_size, global_offset + parse_cursor + line_size);
             }
             ++line_size;
         }

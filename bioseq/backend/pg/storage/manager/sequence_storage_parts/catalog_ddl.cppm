@@ -246,7 +246,8 @@ void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
 /// @param commit Apply pending shard-byte counts before closing write-side entries.
 ///
 /// The transaction write-state cache keeps ownership of shard writers. Release
-/// each cached relation with this cache's lock_mode and clear the entries.
+/// read-side relation with this cache's lock_mode and clear the entries. Write
+/// locks remain with the transaction until all deferred shard writers finish.
 void seq_caches::close_all(bool commit) noexcept {
     ErrorData* exact_error = nullptr;
     bool cpp_error = false;
@@ -302,10 +303,10 @@ void seq_caches::close_all(bool commit) noexcept {
                     if (side == access_side::write) {
                         const ResourceOwner saved_owner = CurrentResourceOwner;
                         bioseq::postgres::support::invoke_pg_as_cpp(
-                            [relation, saved_owner, this] {
+                            [relation, saved_owner] {
                                 CurrentResourceOwner =
                                     TopTransactionResourceOwner;
-                                relation_close(relation, lock_mode);
+                                relation_close(relation, NoLock);
                                 CurrentResourceOwner = saved_owner;
                             });
                     } else if (read_resource_owner != nullptr) {

@@ -85,7 +85,9 @@ template <sequence_alphabet p_alphabet>
                                          lazy_sequence_view<p_alphabet> right,
                                          bool include_resident = false) {
     constexpr std::size_t capacity = bioseq::simd::sequence_rank_io_chunk_capacity;
-    std::array<std::uint8_t, capacity> left_scratch{}, right_scratch{};
+    // Each checked reader supplies the complete requested window. Unused tail
+    // bytes are never compared, so short prefixes need no full-tile clearing.
+    std::array<std::uint8_t, capacity> left_scratch, right_scratch;
     // Streaming callers need not support resident probes. Batch sorting can
     // explicitly allow them when borrowing packed words is part of its policy.
     const auto left_source = left.template borrow_rank_source<false>(include_resident);

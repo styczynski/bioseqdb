@@ -23,10 +23,11 @@ std::uint64_t allocated_bytes = 0;
 List* chunk_groups_in_use = NIL;
 column_cache_statistics cache_statistics{};
 
-/** One cached column buffer and its list link. Keep `list_node` first. */
+/** One cached column buffer. Keep `list_node` first; key by persistent storage
+ * identity because relation OIDs survive rewrite and TRUNCATE. */
 struct column_cache_entry {
     dlist_node list_node{};
-    std::uint64_t relation_id = 0;
+    std::uint64_t storage_id = 0;
     std::uint64_t stripe_id = 0;
     std::uint64_t chunk_id = 0;
     std::uint64_t read_count = 0;
@@ -35,9 +36,10 @@ struct column_cache_entry {
     std::uint32_t column_id = 0;
 };
 
-/** One relation's chunk group protected from eviction while a scan uses it. */
+/** One relation's current storage generation and chunk protected from eviction. */
 struct active_chunk_group {
     std::uint64_t relation_id = 0;
+    std::uint64_t storage_id = 0;
     std::uint64_t stripe_id = 0;
     std::uint64_t chunk_id = 0;
 };
@@ -51,7 +53,7 @@ struct active_chunk_group {
 /** @brief Check whether a reader still needs this cached chunk group. */
 [[nodiscard]] bool entry_is_in_use(const column_cache_entry& entry) {
     for (const auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
-        if (active->relation_id == entry.relation_id
+        if (active->storage_id == entry.storage_id
             && active->stripe_id == entry.stripe_id
             && active->chunk_id == entry.chunk_id) {
             return true;
@@ -71,7 +73,7 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
 
 /** Find a column buffer and count this lookup if it is present. */
 [[nodiscard]] column_cache_entry* find_column_cache_entry(
-        std::uint64_t relation_id,
+        std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint64_t chunk_id,
         std::uint32_t column_id) noexcept {
@@ -83,7 +85,7 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
     dlist_foreach(iterator, cache_entries) {
         auto* entry = dlist_container(
             column_cache_entry, list_node, iterator.cur);
-        if (entry->relation_id == relation_id
+        if (entry->storage_id == storage_id
             && entry->stripe_id == stripe_id
             && entry->chunk_id == chunk_id
             && entry->column_id == column_id) {
@@ -189,10 +191,12 @@ export void reset_column_cache() noexcept {
 /**
  * @brief Protect this relation's current  chunk group from eviction.
  *
- * Advancing a reader replaces the previously protected group for that relation.
+ * Advancing a reader replaces the previously protected group for that relation,
+ * including after TRUNCATE gives it a new persistent storage identity.
  */
 export void mark_chunk_group_in_use(
         std::uint64_t relation_id,
+        std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint32_t chunk_id) {
     bool found_relation = false;
@@ -201,6 +205,7 @@ export void mark_chunk_group_in_use(
 
     for (auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
         if (active->relation_id == relation_id) {
+            active->storage_id = storage_id;
             active->stripe_id = stripe_id;
             active->chunk_id = chunk_id;
             found_relation = true;
@@ -209,6 +214,7 @@ export void mark_chunk_group_in_use(
     if (!found_relation) {
         auto* active = bioseq::postgres::support::allocate_zeroed_object<active_chunk_group>();
         active->relation_id = relation_id;
+        active->storage_id = storage_id;
         active->stripe_id = stripe_id;
         active->chunk_id = chunk_id;
         chunk_groups_in_use = lappend(chunk_groups_in_use, active);
@@ -223,7 +229,7 @@ export void mark_chunk_group_in_use(
  * this function leaves ownership with the caller.
  */
 export void add_column_cache_entry(
-        std::uint64_t relation_id,
+        std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint64_t chunk_id,
         std::uint32_t column_id,
@@ -239,13 +245,13 @@ export void add_column_cache_entry(
     }
 
     column_cache_entry* entry = find_column_cache_entry(
-        relation_id, stripe_id, chunk_id, column_id);
+        storage_id, stripe_id, chunk_id, column_id);
     if (entry != nullptr) {
         release_entry_storage(*entry);
         allocated_bytes -= entry->length;
     } else {
         entry = bioseq::postgres::support::allocate_zeroed_object<column_cache_entry>();
-        entry->relation_id = relation_id;
+        entry->storage_id = storage_id;
         entry->stripe_id = stripe_id;
         entry->chunk_id = chunk_id;
         entry->column_id = column_id;
@@ -277,7 +283,7 @@ export void add_column_cache_entry(
  * Keep the chunk group marked in use while reading its borrowed values.
  */
 export [[nodiscard]] void* retrieve_column_cache_entry(
-        std::uint64_t relation_id,
+        std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint64_t chunk_id,
         std::uint32_t column_id) noexcept {
@@ -286,7 +292,7 @@ export [[nodiscard]] void* retrieve_column_cache_entry(
     }
 
     column_cache_entry* entry = find_column_cache_entry(
-        relation_id, stripe_id, chunk_id, column_id);
+        storage_id, stripe_id, chunk_id, column_id);
     if (entry == nullptr) {
         ++cache_statistics.misses;
         return nullptr;

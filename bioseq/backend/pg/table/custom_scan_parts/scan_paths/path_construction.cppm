@@ -592,11 +592,31 @@ export {
         walk_pg_expression_including_root(reinterpret_cast<Node*>(path->pathtarget->exprs),
                                           base_operand_sources,
                                           register_scalar_conversion);
+        // Scalar consumers in predicates execute before projection placeholders
+        // are filled. Bind text conversion inputs as well as statistics so a
+        // predicate-only column never exposes a raw locator to either consumer.
+        const auto register_qual_source = [&register_scalar_conversion](
+                pg_expression_walk_cursor cursor, pg_node_view node,
+                slice_project_ir_builder& builder) {
+            if (FuncExpr* function = node.try_cast<FuncExpr>(); function != nullptr &&
+                (builder.oids->quality_statistic_kind(function->funcid) != 0 ||
+                 function->funcid == builder.oids->seq_to_text_oid) &&
+                list_length(function->args) == 1 &&
+                per_row_function_signature_is_exact(function)) {
+                if (!contain_volatile_functions(node.get())) {
+                    Node* source = reinterpret_cast<Node*>(linitial(function->args));
+                    const auto producer = slice_project_build_ir_node(builder, source);
+                    slice_project_note_source_binding(builder, source, producer);
+                }
+                return pg_walk_step::skip_subtree;
+            }
+            return register_scalar_conversion(cursor, node, builder);
+        };
         for (RestrictInfo* restriction : postgres_list<RestrictInfo>(clause_references.get())) {
             if (restriction != nullptr && restriction->clause != nullptr) {
                 walk_pg_expression_including_root(reinterpret_cast<Node*>(restriction->clause),
                                                   base_operand_sources,
-                                                  register_scalar_conversion);
+                                                  register_qual_source);
             }
         }
         const bool needs_scalar_source_bindings = !base_operand_sources.source_bindings.empty();

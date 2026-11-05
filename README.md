@@ -661,8 +661,8 @@ uses the CPU path; GPU quality layouts are not enabled.
 Quality sequences support the existing slicing, concatenation, replacement,
 comparison, hashing, and reverse operations. Complement is the identity;
 reverse-complement is reverse. Biological search and translation reject quality
-alphabets. Row aggregates selecting whole sequences are named `bioseq.seq_min`
-and `bioseq.seq_max`; `bioseq.min/max` are the scalar quality functions.
+alphabets. Row aggregates selecting whole sequences are named `seq_min`
+and `seq_max`; `bioseq.min/max` are the scalar quality functions.
 
 `bioseq.load` automatically adds a nullable quality column when loading FASTQ.
 An existing bound quality column determines the codec unless options specify it;
@@ -676,6 +676,10 @@ SELECT bioseq.load('reads', '/server/reads.fastq',
     options => ROW('phred63')::bioseq.load_options);
 SELECT header, bioseq.avg(scores) FROM reads ORDER BY bioseq.avg(scores), header;
 ```
+
+Enabled post-load index maintenance uses the existing table rebuild path,
+including an additional pass over quality values to build `symbol_counts`.
+The existing `bioseq.index.insert_maintenance.enabled` setting controls this work.
 
 Loading FASTA does not add quality data. New unbound `seq` and `letter` inputs
 preserve printable ASCII exactly until a concrete alphabet is chosen; type a

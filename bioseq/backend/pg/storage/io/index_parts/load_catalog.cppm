@@ -236,12 +236,16 @@ void prepare_quality_destination(Oid relid, const std::string& name,
                 const auto* quoted = quote_identifier(name.c_str());
                 const auto* alphabet = requested ? requested->c_str() : "phred42";
                 char* command = psprintf("ALTER TABLE %s ADD COLUMN %s bioseq.seq('%s')", qualified, quoted, alphabet);
+                // ALTER TABLE rejects a relation with another live relcache
+                // reference. Keep our exclusive lock, but release the descriptor
+                // before entering utility execution and reopen its new shape.
+                table_close(relation, NoLock);
+                relation = nullptr;
                 if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "cannot connect SPI for quality column DDL");
                 const int status = SPI_execute(command, false, 0);
                 if (status != SPI_OK_UTILITY) elog(ERROR, "quality column DDL failed");
                 SPI_finish();
                 CommandCounterIncrement();
-                table_close(relation, NoLock);
                 relation = table_open(relid, NoLock);
                 attno = get_attnum(relid, name.c_str());
             }

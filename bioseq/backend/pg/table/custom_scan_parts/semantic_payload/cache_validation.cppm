@@ -355,6 +355,7 @@ export {
                 if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids) ||
                     is_mmsearch_funcid(fe->funcid, *data.stub_oids) ||
                     fe->funcid == data.stub_oids->symbol_count_oid
+                    || fe->funcid == data.stub_oids->seq_to_text_oid
                     || data.stub_oids->quality_statistic_kind(fe->funcid) != 0) {
                     data.found = true;
                     return pg_walk_step::stop;
@@ -365,7 +366,7 @@ export {
     };
 
     /**
-     * @brief Finds match helpers, mmsearch and symbol_count calls in an expression.
+     * @brief Finds scalar sequence consumers, including text and quality statistics.
      *
      * The aggregate planner uses this check to keep inputs that need scalar scan
      * results out of VectorAgg. That node expects vector slots, so feeding it a

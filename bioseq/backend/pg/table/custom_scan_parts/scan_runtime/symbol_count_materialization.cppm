@@ -3,6 +3,7 @@
  * @brief Reads or recomputes symbol counts and cleans up their temporary readers.
  */
 module;
+#include <new>
 #include <bioseq/pg_compat.h>
 
 extern "C" {
@@ -27,6 +28,7 @@ export import :custom_scan_scan_runtime_symbol_count_materialization_contracts;
 
 import std;
 import bioseq.indexing.symbol_counts;
+import bioseq.indexing.type;
 import bioseq.sequences.cigar;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.handles;
@@ -332,20 +334,27 @@ export {
                                 source = bioseq::storage::promote_pg_sequence_locator(resources->source_provider,
                                     site.column_attno, source, resources->source_values);
                             }
-                            with_pg_sequence_view<bool>(source, [&value, &consts](auto view) {
+                            with_pg_sequence_view<bool>(source, [&value, &consts, require_counts](auto view) {
                                 using Alphabet = typename decltype(view)::alphabet_type;
                                 if constexpr (bioseq::sequences::quality_alphabet<Alphabet>) {
                                     consts.quality_source_symbols += view.bp_size();
-                                    const auto counts = bioseq::indexing::tally_symbol_counts(view);
-                                    if (!counts) pg_raise_quality_error(bioseq::sequences::quality_error::source_read);
-                                    const auto summary = bioseq::sequences::summarize_quality_histogram<Alphabet>(*counts);
-                                    if (!summary) pg_raise_quality_error(summary.error());
-                                    value.summary = *summary;
-                                    std::copy(counts->begin(), counts->end(), value.counts.begin());
+                                    if (require_counts) {
+                                        const auto counts = bioseq::indexing::tally_symbol_counts(view);
+                                        if (!counts) pg_raise_quality_error(bioseq::sequences::quality_error::source_read);
+                                        const auto summary = bioseq::sequences::summarize_quality_histogram<Alphabet>(*counts);
+                                        if (!summary) pg_raise_quality_error(summary.error());
+                                        value.summary = *summary;
+                                        std::copy(counts->begin(), counts->end(), value.counts.begin());
+                                    } else {
+                                        const auto summary = bioseq::sequences::summarize_quality_source<Alphabet>(
+                                            view.template borrow_rank_source<false>(), 0, view.bp_size());
+                                        if (!summary) pg_raise_quality_error(summary.error());
+                                        value.summary = *summary;
+                                    }
                                 }
                                 return true;
                             });
-                            counts_valid = true;
+                            counts_valid = require_counts;
                         }
                         if (stub && source_provider != nullptr)
                             bioseq::storage::cache_pg_quality_source_summary(source_provider, relid,

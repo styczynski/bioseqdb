@@ -4,30 +4,16 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <limits>
-#include <memory>
-#include <new>
-#include <optional>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <type_traits>
-#include <utility>
-#include <tuple>
-
 #include <bioseq/pg_compat.h>
 extern "C" {
+#include "nodes/memnodes.h"
 #include "utils/expandeddatum.h"
+#include "utils/memutils.h"
 }
 
 export module bioseq.postgres.types.compact_sequence:view_session;
+
+import std;
 
 import bioseq.postgres.support;
 
@@ -39,6 +25,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.sequences.cigar_alphabet;
 import bioseq.sequences;
 import bioseq.sequences.quality_summary;
+import bioseq.parallelism.memory_admission;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
@@ -1586,6 +1573,91 @@ export [[nodiscard]] bool read_pg_quality_leaf_ranks(std::uint8_t alphabet,
     return read;
 }
 
+/** Owned materialized bytes and generation-qualified literal windows have disjoint keys. */
+export enum class pg_quality_summary_identity : std::uint8_t { materialized, literal_window };
+
+namespace {
+struct quality_summary_cache_entry {
+    std::vector<std::byte> identity;
+    bioseq::sequences::quality_summary summary{};
+    std::size_t charge{};
+    pg_quality_summary_identity kind{};
+};
+struct quality_summary_cache {
+    MemoryContextCallback reset_callback{};
+    bioseq::parallelism::memory_permit permit;
+    std::array<quality_summary_cache_entry, 8> entries{};
+    std::size_t next{};
+};
+void reset_quality_summary_cache(void* opaque) noexcept {
+    std::destroy_at(static_cast<quality_summary_cache*>(opaque));
+}
+
+// The reset-callback chain is owned by this exact executor/function memory context.
+// No process-global lookup or borrowed Datum pointer survives a context reset.
+quality_summary_cache* acquire_quality_summary_cache(MemoryContext owner) {
+    for (auto* callback = owner->reset_cbs; callback; callback = callback->next)
+        if (callback->func == reset_quality_summary_cache)
+            return static_cast<quality_summary_cache*>(callback->arg);
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
+        .try_reserve(sizeof(quality_summary_cache) + 2 * alignof(quality_summary_cache));
+    if (!permit) return nullptr; // Optional memoization may decline admission.
+    auto* storage = bioseq::postgres::support::invoke_pg_as_cpp([owner] {
+        // PostgreSQL's ordinary allocation alignment can be 8 bytes, while
+        // the exact signed-128 summaries require 16-byte C++ alignment.
+        return static_cast<quality_summary_cache*>(MemoryContextAllocAligned(owner,
+            sizeof(quality_summary_cache), alignof(quality_summary_cache), 0));
+    });
+    auto* cache = std::construct_at(storage);
+    cache->permit = std::move(*permit);
+    cache->reset_callback = {reset_quality_summary_cache, cache, nullptr};
+    try {
+        bioseq::postgres::support::invoke_pg_as_cpp([owner, cache] {
+            MemoryContextRegisterResetCallback(owner, &cache->reset_callback);
+        });
+    } catch (...) {
+        std::destroy_at(cache);
+        bioseq::postgres::support::invoke_pg_as_cpp([storage] { pfree(storage); });
+        throw;
+    }
+    return cache;
+}
+
+} // namespace
+
+/** The memo belongs to the current executor/expression context, never to borrowed pointers. */
+export [[nodiscard]] std::optional<bioseq::sequences::quality_summary>
+find_pg_quality_summary(pg_quality_summary_identity kind, std::span<const std::byte> identity) {
+    if (identity.empty() || identity.size() > 64 * 1024
+        || CurrentMemoryContext == TopMemoryContext || CurrentMemoryContext == CacheMemoryContext)
+        return std::nullopt;
+    auto* cache = acquire_quality_summary_cache(CurrentMemoryContext);
+    if (!cache) return std::nullopt;
+    for (const auto& entry : cache->entries)
+        if (entry.kind == kind && entry.identity.size() == identity.size()
+            && std::memcmp(entry.identity.data(), identity.data(), identity.size()) == 0)
+            return entry.summary;
+    return std::nullopt;
+}
+
+/** Publish only a successfully validated reduction; declining optional admission is harmless. */
+export void remember_pg_quality_summary(pg_quality_summary_identity kind,
+        std::span<const std::byte> identity, const bioseq::sequences::quality_summary& summary) {
+    if (identity.empty() || identity.size() > 64 * 1024
+        || CurrentMemoryContext == TopMemoryContext || CurrentMemoryContext == CacheMemoryContext) return;
+    auto* cache = acquire_quality_summary_cache(CurrentMemoryContext);
+    if (!cache) return;
+    auto& entry = cache->entries[cache->next];
+    const auto desired_charge = std::max(entry.charge, 2 * identity.size());
+    if (!cache->permit.grow_to(cache->permit.bytes() + desired_charge - entry.charge)) return;
+    entry.identity.reserve(identity.size());
+    entry.identity.assign(identity.begin(), identity.end());
+    entry.summary = summary;
+    entry.kind = kind;
+    entry.charge = desired_charge;
+    cache->next = (cache->next + 1) % cache->entries.size();
+}
+
 /** Visit the existing immutable DAG. Full-node summaries are orientation invariant. */
 export template<bioseq::sequences::quality_alphabet Alphabet>
 [[nodiscard]] std::expected<bioseq::sequences::quality_summary, bioseq::sequences::quality_error>
@@ -1607,6 +1679,25 @@ summarize_pg_quality_tree(pg_sequence_read_session& session, piece_edge root) {
             return std::pair{node->payload.branch.left.node, node->payload.branch.right.node};
         },
         [&session](const piece_node* node) -> std::expected<quality_summary, quality_error> {
+            // The live tree owns this arena. Its monotonic generation prevents an
+            // address reused by a later literal from matching an earlier summary.
+            // Orientation is irrelevant to quality scores; the exact window is not.
+            std::array<std::uint64_t, 6> literal_identity{};
+            const bool literal = node->node_kind == piece_node::kind::literal;
+            if (literal) {
+                const auto& piece = node->payload.literal;
+                if (!piece.storage_arena) return std::unexpected(quality_error::invalid_summary);
+                literal_identity = {reinterpret_cast<std::uintptr_t>(piece.bytes),
+                    piece.storage_arena->generation, piece.symbol_from, piece.symbol_to,
+                    static_cast<std::uint64_t>(piece.stored_type_params.encode())
+                        | (std::uint64_t{supported_quality_alphabets::index_of<Alphabet>()} << 32),
+                    piece.encoded_logical_length};
+                if (const auto cached = find_pg_quality_summary(pg_quality_summary_identity::literal_window,
+                        std::as_bytes(std::span{literal_identity}))) {
+                    ++session.quality_statistics.cache_hits;
+                    return *cached;
+                }
+            }
             ++session.quality_statistics.summary_extractions;
             quality_summary result{};
             const piece_edge edge{.node = node};
@@ -1645,7 +1736,16 @@ summarize_pg_quality_tree(pg_sequence_read_session& session, piece_edge root) {
                             source.from, source.to, result);
                 }
             }
+            if (literal) remember_pg_quality_summary(pg_quality_summary_identity::literal_window,
+                std::as_bytes(std::span{literal_identity}), result);
             return result;
+        }, [](const key& identity) noexcept {
+            std::size_t value{};
+            std::apply([&value](auto... fields) {
+                ((value ^= std::hash<decltype(fields)>{}(fields) + 0x9e3779b97f4a7c15ULL
+                    + (value << 6) + (value >> 2)), ...);
+            }, identity);
+            return value;
         });
 }
 

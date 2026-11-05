@@ -33,7 +33,7 @@ extern "C" {
 module bioseq.postgres.extension;
 
 import bioseq.postgres.column;
-import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.quality_summary_reader;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.pipeline.stats;

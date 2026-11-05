@@ -19,6 +19,7 @@ extern "C" {
 #include "utils/syscache.h"
 
 #include "rewrite/rewriteManip.h"
+#include "utils/ruleutils.h"
 }
 
 export module bioseq.postgres.table:custom_scan_slice_execution_explain_callbacks;
@@ -36,12 +37,12 @@ using namespace bioseq::postgres::support;
 export {
     /** @brief Formats a saved expression for EXPLAIN, or returns "<omitted>" for an invalid index. */
     [[nodiscard]] char*
-    slice_project_deparse_expression(CustomScan* scan, int expression_index, ExplainState* es) {
+    slice_project_deparse_expression(CustomScan* scan, int expression_index, List* context) {
         if (expression_index < 0 || expression_index >= list_length(scan->custom_exprs)) {
             return pstrdup("<omitted>");
         }
         Node* expression = reinterpret_cast<Node*>(list_nth(scan->custom_exprs, expression_index));
-        return deparse_expression(expression, es->deparse_cxt, true, false);
+        return deparse_expression(expression, context, true, false);
     }
 
     /** @brief Returns the EXPLAIN label for a sequence operation, or "invalid" for an unknown opcode. */
@@ -179,6 +180,7 @@ export {
                                     List* header,
                                     List* nodes,
                                     List* records,
+                                    List* context,
                                     ExplainState* es) {
         appendStringInfoSpaces(es->str, es->indent * 2);
         appendStringInfoString(es->str, "Slice Recipe:\n");
@@ -193,7 +195,7 @@ export {
                              "value_%d [%s] = %s\n",
                              stable_id,
                              slice_project_opcode_name(opcode),
-                             slice_project_deparse_expression(scan, expression_index, es));
+                             slice_project_deparse_expression(scan, expression_index, context));
             List* dependencies = slice_project_node_dependency_names(node);
             appendStringInfoSpaces(es->str, (es->indent + 2) * 2);
             appendStringInfoString(es->str, "Depends On: ");
@@ -216,8 +218,8 @@ export {
                 appendStringInfo(
                     es->str,
                     "Bounds: lower=%s upper=%s\n",
-                    lower < 0 ? "omitted" : slice_project_deparse_expression(scan, lower, es),
-                    upper < 0 ? "omitted" : slice_project_deparse_expression(scan, upper, es));
+                    lower < 0 ? "omitted" : slice_project_deparse_expression(scan, lower, context),
+                    upper < 0 ? "omitted" : slice_project_deparse_expression(scan, upper, context));
             }
         }
         appendStringInfoSpaces(es->str, es->indent * 2);
@@ -239,7 +241,7 @@ export {
                 intVal(list_nth(record, k_slice_record_mechanism)));
             const auto reason = static_cast<materialization_reason>(
                 intVal(list_nth(record, k_slice_record_reason)));
-            char* expression = slice_project_deparse_expression(scan, expression_index, es);
+            char* expression = slice_project_deparse_expression(scan, expression_index, context);
             appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
             appendStringInfo(es->str, "var_%d = %s\n", boundary_id, expression);
             /** Writes one indented nested property line under the current materialization record. */
@@ -341,6 +343,7 @@ export {
                                           CustomScan* scan,
                                           List* nodes,
                                           List* records,
+                                          List* context,
                                           ExplainState* es) {
         ExplainOpenGroup("Slice Recipe", "Slice Recipe", false, es);
         for (Node* raw_node : postgres_list<Node>(nodes)) {
@@ -354,17 +357,17 @@ export {
                 "Stable ID", nullptr, static_cast<std::uint64_t>(stable_id), es);
             ExplainPropertyText("Opcode", slice_project_opcode_name(opcode), es);
             ExplainPropertyText(
-                "Expression", slice_project_deparse_expression(scan, expression_index, es), es);
+                "Expression", slice_project_deparse_expression(scan, expression_index, context), es);
             ExplainPropertyList("Depends On", slice_project_node_dependency_names(node), es);
             const int lower = intVal(list_nth(node, k_slice_node_lower_expression_index));
             const int upper = intVal(list_nth(node, k_slice_node_upper_expression_index));
             if (lower >= 0) {
                 ExplainPropertyText(
-                    "Lower Bound", slice_project_deparse_expression(scan, lower, es), es);
+                    "Lower Bound", slice_project_deparse_expression(scan, lower, context), es);
             }
             if (upper >= 0) {
                 ExplainPropertyText(
-                    "Upper Bound", slice_project_deparse_expression(scan, upper, es), es);
+                    "Upper Bound", slice_project_deparse_expression(scan, upper, context), es);
             }
             ExplainCloseGroup("Recipe Node", nullptr, true, es);
         }
@@ -390,7 +393,7 @@ export {
             ExplainOpenGroup("Materialization", nullptr, true, es);
             ExplainPropertyText("Variable", variable.data(), es);
             ExplainPropertyText(
-                "Expression", slice_project_deparse_expression(scan, expression_index, es), es);
+                "Expression", slice_project_deparse_expression(scan, expression_index, context), es);
             ExplainPropertyText("Mechanism", slice_project_mechanism_name(mechanism), es);
             ExplainPropertyText("Reason", slice_project_reason_name(reason), es);
             ExplainPropertyList("Depends On", slice_project_dependency_names(record), es);
@@ -401,7 +404,7 @@ export {
                 ExplainPropertyUInteger(
                     "Producer Value", nullptr, static_cast<std::uint64_t>(producer_id), es);
                 ExplainPropertyText("Source Provenance",
-                                    slice_project_deparse_expression(scan, expression_index, es),
+                                    slice_project_deparse_expression(scan, expression_index, context),
                                     es);
             }
             if (es->costs) {
@@ -441,7 +444,7 @@ export {
     }
 
     /** @brief Prints the saved SliceProject plan and, for ANALYZE, its runtime counters. */
-    void slice_project_explain(CustomScanState* custom, List*, ExplainState* es) {
+    void slice_project_explain(CustomScanState* custom, List* ancestors, ExplainState* es) {
         if (es->analyze)
             slice_project_ensure_trace_initialized(custom);
 #ifdef BIOSEQ_TEST_INDEXES
@@ -450,6 +453,9 @@ export {
         }
 #endif
         auto* scan = reinterpret_cast<CustomScan*>(custom->ss.ps.plan);
+        // setrefs rewrites saved expressions to INDEX_VAR/OUTER_VAR. Resolve
+        // those through this node's target list, including ancestor parameters.
+        List* context = set_deparse_context_plan(es->deparse_cxt, custom->ss.ps.plan, ancestors);
         List* header = slice_project_plan_header(scan);
         List* nodes = slice_project_plan_nodes(scan);
         List* records = slice_project_plan_records(scan);
@@ -458,7 +464,7 @@ export {
         slice_project_explain_dsm_test_fixture(state, es);
 #endif
         if (es->format == EXPLAIN_FORMAT_TEXT) {
-            slice_project_explain_text(state, scan, header, nodes, records, es);
+            slice_project_explain_text(state, scan, header, nodes, records, context, es);
             return;
         }
         ExplainPropertyText("Projection Mode", "source-backed lazy", es);
@@ -474,7 +480,7 @@ export {
                                 es);
         ExplainPropertyText(
             "Fallback Reason", strVal(list_nth(header, k_slice_header_fallback_reason)), es);
-        slice_project_explain_structured(state, scan, nodes, records, es);
+        slice_project_explain_structured(state, scan, nodes, records, context, es);
     }
 
     /** @brief Stops the SliceProject asynchronous owner when it has been initialized. */

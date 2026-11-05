@@ -59,10 +59,11 @@ template <sequence_alphabet p_alphabet,
     std::size_t global_offset_base = 0;
 
     // Save and report only the first terminal pipeline, error.
-    auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
+    auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg,
+            input_failure_kind kind = input_failure_kind::other) {
         if (!aborted) {
             captured_error = msg;
-            failure_fn(std::move(msg));
+            report_failure(failure_fn, std::move(msg), kind);
         }
         aborted = true;
     };

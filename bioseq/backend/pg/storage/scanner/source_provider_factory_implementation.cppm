@@ -33,4 +33,20 @@ void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
     }
 }
 
+namespace source_routes {
+bool add(pg_sequence_source_route_set& routes,
+         const pg_sequence_source_provider* provider) {
+    return add_pg_sequence_source_route(routes, provider);
+}
+
+bool merge(pg_sequence_source_route_set& destination,
+           const pg_sequence_source_route_set& source) {
+    return merge_pg_sequence_source_routes(destination, source);
+}
+
+void release_noexcept(pg_sequence_source_route_set& routes) noexcept {
+    release_pg_sequence_source_routes_noexcept(routes);
+}
+}
+
 } // namespace bioseq::storage

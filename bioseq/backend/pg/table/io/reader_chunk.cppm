@@ -254,6 +254,10 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 					 List *projected_columns, stripe_read_state *state, uint64_t stripe_id)
 {
 	int column_index = 0;
+	// Stripe IDs restart after TRUNCATE. Use the metapage generation so retained
+	// buffers cannot return locators or values from the relation's old storage.
+	const uint64_t cache_storage_id = bioseq::settings::column_cache::enabled
+		? column_storage_id(state->relation, false) : 0;
 	bool *column_mask = build_projected_column_mask(tuple_descriptor->natts, projected_columns);
 
 	chunk_data *pending_chunk = allocate_chunk_data(tuple_descriptor->natts, column_mask,
@@ -279,7 +283,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 
 			if (should_cache)
 			{
-				mark_chunk_group_in_use(state->relation->rd_id, stripe_id, chunk_index);
+				mark_chunk_group_in_use(state->relation->rd_id, cache_storage_id, stripe_id, chunk_index);
 			}
 
 			/* Reuse cached values or decode the stored chunk  below. */
@@ -289,7 +293,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 			if (should_cache)
 			{
 				value_buffer = static_cast<StringInfo>(retrieve_column_cache_entry(
-					state->relation->rd_id, stripe_id, chunk_index, column_index));
+					cache_storage_id, stripe_id, chunk_index, column_index));
 			}
 
 			if (value_buffer == NULL)
@@ -319,7 +323,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 					{
 						reinterpret_cast<cached_string_info *>(value_buffer)->cached = true;
 
-						add_column_cache_entry(state->relation->rd_id, stripe_id, chunk_index,
+						add_column_cache_entry(cache_storage_id, stripe_id, chunk_index,
 												  column_index, value_buffer);
 						MemoryContextSwitchTo(old_memory_context);
 					}

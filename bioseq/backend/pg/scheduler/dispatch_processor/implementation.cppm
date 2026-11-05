@@ -1,10 +1,11 @@
 /**
  * @file implementation.cppm
- * @brief Import the CPU preparation and typed dispatch implementations.
+ * @brief Import Highway registration and CPU preparation implementations.
  */
 
 module bioseq.postgres.scheduler.dispatch_processor;
 
 import :highway_registry;
 import :cpu_preparation;
-import :typed_flat_selector;
+// dispatch_entry owns the selector import. Combining its generated template
+// graph with CPU preparation here exceeds Clang's source-location address space.

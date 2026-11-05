@@ -46,7 +46,7 @@ export module bioseq.postgres.table:custom_scan_slice_execution_resource_lifecyc
 import std;
 
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.source_provider_factory;
 import bioseq.postgres.support;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
@@ -100,7 +100,7 @@ export {
         auto& runtime = state->runtime;
         /* Attachment may fail after adding some source routes. Release the entries
          * already in the container even if source_routes_acquired was never set. */
-        bioseq::storage::release_pg_sequence_source_routes_noexcept(runtime.source_routes);
+        bioseq::storage::source_routes::release_noexcept(runtime.source_routes);
         runtime.source_routes_acquired = false;
     }
 
@@ -218,7 +218,7 @@ export {
                 auto* child_state = reinterpret_cast<slice_project_state*>(child_custom);
                 if (!child_state->runtime.source_routes_acquired ||
                     child_state->runtime.source_routes.count == 0u ||
-                    !bioseq::storage::merge_pg_sequence_source_routes(
+                    !bioseq::storage::source_routes::merge(
                         state->runtime.source_routes, child_state->runtime.source_routes)) {
                     ereport(ERROR,
                             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -238,7 +238,7 @@ export {
                  * Hold a reference to that phovider, keeping self-join aliases tied
                  * to the scan that produced their values. */
                 if (child_runtime.lazy_source_provider == nullptr ||
-                    !bioseq::storage::add_pg_sequence_source_route(
+                    !bioseq::storage::source_routes::add(
                         state->runtime.source_routes, child_runtime.lazy_source_provider)) {
                     ereport(ERROR,
                             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),

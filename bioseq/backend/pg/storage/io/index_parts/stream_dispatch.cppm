@@ -73,6 +73,7 @@ import bioseq.postgres.storage.manager; // Sequence locators, fragment writers a
 import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
+import bioseq.io.errors;
 import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
 
 import bioseq.io.identifier_parser.formats;
@@ -87,6 +88,17 @@ import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
 
 // Load records one packed chunk at a time.
+
+/** Keep parser classifications plain until the PostgreSQL execution thread reports them. */
+[[noreturn]] void raise_load_reader_failure(bioseq::io::input_failure_kind kind,
+        const std::string& message, const load_columns& columns) {
+    if (kind == bioseq::io::input_failure_kind::invalid_quality_byte) {
+        const auto alphabet = pgseq_supported_alphabets::name_of_alphabet_code(columns.quality_alphabet_code);
+        raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
+            fmt::format("{} [{}]", message, alphabet));
+    }
+    raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, message);
+}
 
 /** One quality codec axis, independent of the biological parser templates. */
 struct load_quality_encoder {
@@ -111,9 +123,11 @@ struct typed_load_quality_encoder final : load_quality_encoder {
             bioseq::simd::active_target::unknown_byte_policy::reject>(state, bytes.data(), bytes.size());
         if (!encoded) {
             raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
-                fmt::format("invalid {} quality byte {} at field offset {} in record '{}'; select phred63 explicitly for scores above phred42",
+                fmt::format("invalid {} quality byte {} at quality offset {} in record '{}'{}",
                     alphabet_name.view(), encoded.offending_byte,
-                    offset + encoded.consumed_bytes, header));
+                    offset + encoded.consumed_bytes, header,
+                    std::is_same_v<Alphabet, seqan3::phred42>
+                        ? "; select phred63 explicitly for scores above phred42" : ""));
         }
         if (!words.empty()) writer.append_packed_bytes(
             {reinterpret_cast<const std::uint8_t*>(words.data()), words.size() * sizeof(unit)},
@@ -136,6 +150,7 @@ struct typed_load_quality_encoder final : load_quality_encoder {
 [[nodiscard]] std::unique_ptr<load_quality_encoder> make_load_quality_encoder(const load_columns& columns) {
     std::unique_ptr<load_quality_encoder> result;
     if (!columns.quality_attno) return result;
+    inject_load_failure(7);
     pgseq_supported_quality_alphabets::dispatch_alphabet_by_code(columns.quality_alphabet_code,
         [&result, &columns]<class Alphabet>() {
             pgseq_supported_storage_unit_byte_widths::dispatch(columns.quality_byte_width,
@@ -462,21 +477,31 @@ template <sequence_alphabet p_alphabet,
 
     load_event_queue<col_unit_t> queue{/*capacity=*/16};
     std::string io_error;
+    auto io_error_kind = bioseq::io::input_failure_kind::other;
     std::string result_error;
     std::string producer_exception;
     std::optional<std::size_t> producer_records;
 
+    // Construct every potentially throwing backend-owned sink before submitting
+    // a producer that can block on queue capacity. In particular, quality codec
+    // allocation must not escape while an unjoined worker borrows the queue.
+    std::int64_t records = 0;
+    load_stream_sink<p_alphabet, p_column_byte_width> sink{ctx, tuple_writer, records};
+    queued_load_event<col_unit_t> event;
+
     auto& pool = bioseq::parallelism::global_pool::instance();
     auto group = pool.make_task_group();
     group.run(bioseq::parallelism::task_body{
-        [&queue, &io_error, &result_error, &producer_exception, &producer_records, file_path] {
+        [&queue, &io_error, &io_error_kind, &result_error, &producer_exception, &producer_records, file_path] {
             load_queue_close_scope<col_unit_t> close_scope{queue};
             try {
                 queued_load_stream_sink<p_alphabet, p_column_byte_width> sink{queue};
                 // Preserve the first asynchronous reader diagnostic.
-                auto on_fail = [&io_error](std::string&& msg) {
+                auto on_fail = [&io_error, &io_error_kind](std::string&& msg,
+                        bioseq::io::input_failure_kind kind = bioseq::io::input_failure_kind::other) {
                     if (io_error.empty()) {
                         io_error = std::move(msg);
+                        io_error_kind = kind;
                     }
                 };
                 bioseq::io::reader_options opts = bioseq::io::default_reader_options;
@@ -500,9 +525,6 @@ template <sequence_alphabet p_alphabet,
             }
         }});
 
-    std::int64_t records = 0;
-    load_stream_sink<p_alphabet, p_column_byte_width> sink{ctx, tuple_writer, records};
-    queued_load_event<col_unit_t> event;
     std::exception_ptr consumer_error;
     try {
         while (queue.pop(event)) {
@@ -538,7 +560,7 @@ template <sequence_alphabet p_alphabet,
                                 fmt::format("producer failed: {}", producer_exception));
     }
     if (!io_error.empty()) {
-        raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, io_error);
+        raise_load_reader_failure(io_error_kind, io_error, ctx.cols);
     }
     if (!result_error.empty()) {
         raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, result_error);
@@ -592,11 +614,14 @@ load_records(load_context& ctx, pg_identifier_writer& tuple_writer, const char* 
 
     std::int64_t records = 0;
     std::string io_error;
+    auto io_error_kind = bioseq::io::input_failure_kind::other;
     load_stream_sink<p_alphabet, p_column_byte_width> sink{ctx, tuple_writer, records};
     // Preserve the first direct-reader diagnostic.
-    auto on_fail = [&io_error](std::string&& msg) {
+    auto on_fail = [&io_error, &io_error_kind](std::string&& msg,
+            bioseq::io::input_failure_kind kind = bioseq::io::input_failure_kind::other) {
         if (io_error.empty()) {
             io_error = std::move(msg);
+            io_error_kind = kind;
         }
     };
 
@@ -607,7 +632,7 @@ load_records(load_context& ctx, pg_identifier_writer& tuple_writer, const char* 
         file_path, sink, on_fail, opts);
 
     if (!io_error.empty()) {
-        raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, io_error);
+        raise_load_reader_failure(io_error_kind, io_error, ctx.cols);
     }
     if (!result) {
         raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, result.error());

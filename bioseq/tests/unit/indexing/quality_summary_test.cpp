@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 import std;
 import bioseq.common.seqan_adapter;
 import bioseq.parallelism.memory_admission;
@@ -67,6 +68,8 @@ template<class Alphabet> void check_quality_wire() {
     REQUIRE(read->summary == value.summary);
     REQUIRE(read->counts == value.counts);
     REQUIRE(decode_quality_index<Alphabet>(*encoded, 124, 5).error() == quality_error::stale_source);
+    REQUIRE(decode_quality_index<Alphabet>(*encoded, 124, 6).error() == quality_error::stale_source);
+    REQUIRE(decode_quality_index<Alphabet>(*encoded, 123, 6).error() == quality_error::invalid_payload);
     for (const auto offset : {0, 6, 8, 9, 10, 11, 12, 14, 16, 24, 32, 40, 42, 44, 56, 64}) {
         auto broken = *encoded;
         broken[offset] ^= std::byte{128};
@@ -196,4 +199,64 @@ TEST_CASE("quality native conversion checks empty families and first narrowing f
         bioseq::storage::make_borrowed_rank_source(source), 0, 3, {}, output, false, nullptr);
     REQUIRE_FALSE(narrowed);
     REQUIRE(narrowed.error().input_position == 2);
+}
+
+namespace {
+using quality_bigint = boost::multiprecision::cpp_int;
+
+// Independent oracle: arbitrary-precision scaling and integer half-up rounding.
+// Production must instead use bounded remainder blocks, never S * 10^40.
+std::string oracle_quality_mean(quality_summary value) {
+    quality_bigint scale = 1;
+    for (unsigned i = 0; i < 40; ++i) scale *= 10;
+    quality_bigint magnitude{value.sum};
+    if (magnitude < 0) magnitude = -magnitude;
+    const quality_bigint rounded = (2 * magnitude * scale + value.length) / (2 * quality_bigint{value.length});
+    auto text = rounded.convert_to<std::string>();
+    if (text.size() <= 40) text.insert(0, 41 - text.size(), '0');
+    text.insert(text.size() - 40, 1, '.');
+    while (text.back() == '0') text.pop_back();
+    if (text.back() == '.') text.pop_back();
+    if (value.sum < 0 && rounded != 0) text.insert(text.begin(), '-');
+    return text;
+}
+}
+
+TEST_CASE("quality rounding and ordering agree with arbitrary precision arithmetic",
+          "[component:bioseq][layer:unit][feature:quality]") {
+    std::mt19937_64 random{0x6a09e667f3bcc909ULL};
+    std::vector<quality_summary> values;
+    for (unsigned i = 0; i < 1024; ++i) {
+        const auto length = i % 4 == 0 ? quality_max_length - i
+            : i % 4 == 1 ? (std::uint64_t{1} << (i % 63))
+            : i % 4 == 2 ? 1 + random() % 10000
+            : 1 + random() % quality_max_length;
+        const auto whole = static_cast<std::int16_t>(random() % 67) - 5;
+        const auto remainder = random() % length;
+        values.push_back({length, quality_sum{whole} * length + remainder,
+            static_cast<std::int16_t>(whole), static_cast<std::int16_t>(whole + (remainder != 0))});
+    }
+    for (const auto length : {quality_max_length, quality_max_length - 1, quality_max_length - 2}) {
+        values.push_back({length, quality_sum{30} * length + 1, 30, 31});
+        values.push_back({length, -1, -1, 0});
+        values.push_back({length, quality_sum{62} * length, 62, 62});
+    }
+    for (unsigned power = 1; power < 63; ++power) {
+        const auto length = std::uint64_t{1} << power;
+        values.push_back({length, 1, 0, 1});
+        values.push_back({length, -1, -1, 0});
+        values.push_back({length, quality_sum{1} - length, -1, 0});
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const auto& a = values[i];
+        const auto& b = values[(i + 1) % values.size()];
+        CAPTURE(i, a.length, b.length);
+        REQUIRE(valid_quality_summary<seq::phred68solexa>(a));
+        REQUIRE(quality_sum_decimal(a.sum) == quality_bigint{a.sum}.convert_to<std::string>());
+        REQUIRE(quality_mean_decimal(a) == oracle_quality_mean(a));
+        const quality_bigint left = quality_bigint{a.sum} * b.length;
+        const quality_bigint right = quality_bigint{b.sum} * a.length;
+        const int expected = (left > right) - (left < right);
+        REQUIRE(compare_quality_means(make_quality_mean_key(a), make_quality_mean_key(b)) == expected);
+    }
 }

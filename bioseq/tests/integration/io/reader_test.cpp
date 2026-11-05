@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <unistd.h>
 #include <zlib.h>
+// Canonicalize Highway's internal-linkage templates before importing the batch
+// and streaming codec modules (Clang otherwise emits duplicate NEON helpers).
+#include <hwy/highway.h>
 
 #include <kseq++/seqio.hpp>
 
@@ -21,6 +24,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.io.reader;
 import bioseq.io.options;
+import bioseq.io.errors;
 import bioseq.io.sources;
 import bioseq.io.compression.parallel_gzip_source;
 import bioseq.parallelism.mode;
@@ -813,12 +817,19 @@ TEST_CASE("FASTQ streams quality spans with strict boundaries", "[component:bios
         REQUIRE(sink.committed == 1); REQUIRE(sink.quality == "!@+;~I?J");
         fs::remove(path);
     }
-    for (const auto bad : std::vector<std::string>{"!!!", "!!!!!", "!! !!", "!!\t!", "!!\r!", "!!\x7f!", "!!\xff!"}) {
+    for (const auto& bad : std::vector<std::string>{"!!!", "!!!!!", "!! !!", "!!\t!", "!!\r!", "!!\x7f!", "!!\xff!", std::string{"!!\0!", 4}}) {
         const auto path = write_tmp_file("@r\nACGT\n+\n" + bad + "\n");
         sink_type sink;
+        auto kind = input_failure_kind::other;
+        std::string diagnostic;
         const auto result = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
-            path.c_str(), sink, [](std::string&&) {});
+            path.c_str(), sink, [&](std::string&& message, input_failure_kind failure_kind = input_failure_kind::other) {
+                diagnostic = std::move(message); kind = failure_kind;
+            });
         REQUIRE_FALSE(result); REQUIRE(sink.committed == 0);
+        const bool bad_byte = std::ranges::any_of(bad, [](unsigned char byte) { return byte < 33 || byte > 126; });
+        REQUIRE(kind == (bad_byte ? input_failure_kind::invalid_quality_byte : input_failure_kind::other));
+        if (bad_byte) { REQUIRE(diagnostic.contains("quality offset 2")); REQUIRE(diagnostic.contains("record 'r'")); }
         fs::remove(path);
     }
     const std::string long_quality(200003, 'I');

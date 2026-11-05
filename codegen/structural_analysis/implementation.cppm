@@ -50,6 +50,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>

@@ -1,6 +1,7 @@
 {
   "dependencies": [
     "boost-iterator",
+    "boost-multiprecision",
     "boost-program-options",
     "boost-regex",
     "boost-serialization",

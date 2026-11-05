@@ -417,10 +417,18 @@ TEST_CASE("quality comparison performance cohorts",
                         result += bioseq::storage::compare_lazy_sequences(views[row], views[row+1], true);
                     return result;
                 };
+                const auto streaming = [&] {
+                    std::int64_t result = 0;
+                    for (std::size_t row = 0; row < views.size(); row += 2)
+                        result += bioseq::storage::compare_lazy_sequences(views[row], views[row+1], false);
+                    return result;
+                };
                 REQUIRE(scalar() == simd());
+                REQUIRE(scalar() == streaming());
                 const auto label = std::string(alphabet) + "/" + std::to_string(length) + "/" + std::string(shape);
                 BENCHMARK(label + "/scalar_128_pairs") { return scalar(); };
                 BENCHMARK(label + "/highway_128_pairs") { return simd(); };
+                BENCHMARK(label + "/highway_streaming_128_pairs") { return streaming(); };
             }
         }
     };

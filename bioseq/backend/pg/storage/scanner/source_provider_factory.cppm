@@ -40,4 +40,14 @@ create_scan_pg_sequence_source_provider(Relation owning_relation,
 void close_pg_sequence_source_provider(pg_sequence_source_provider* provider,
                                        bool is_commit);
 
+// Parent plan nodes retain providers without importing the scanner templates.
+// The scanner implementation preserves the existing reference and abort rules.
+namespace source_routes {
+[[nodiscard]] bool add(pg_sequence_source_route_set& routes,
+                       const pg_sequence_source_provider* provider);
+[[nodiscard]] bool merge(pg_sequence_source_route_set& destination,
+                         const pg_sequence_source_route_set& source);
+void release_noexcept(pg_sequence_source_route_set& routes) noexcept;
+}
+
 } // namespace bioseq::storage

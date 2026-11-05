@@ -109,8 +109,8 @@ int load_failure_stage_for_test = 0;
 
 void arm_load_failure_for_test(int stage) {
 #if defined(BIOSEQ_TEST_INDEXES)
-    if (stage < 0 || stage > 6)
-        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "load failure stage must be between zero and six");
+    if (stage < 0 || stage > 7)
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "load failure stage must be between zero and seven");
     load_failure_stage_for_test = stage;
 #else
     (void)stage;

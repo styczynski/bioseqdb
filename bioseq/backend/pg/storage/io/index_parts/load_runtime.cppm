@@ -236,6 +236,7 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
         MemoryContextSwitchTo(stable_context);
         finish_load_write_states(ctx);
         build_indexes_if_enabled(ctx.main_relid);
+        if (ctx.cols.quality_attno) inject_load_failure(6);
         reset_sequence_caches_after_load_storage_alloc();
     } catch (...) {
         failure = std::current_exception();

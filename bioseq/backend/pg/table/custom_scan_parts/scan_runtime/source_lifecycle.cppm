@@ -27,11 +27,12 @@ export import :custom_scan_scan_runtime_source_lifecycle_contracts;
 
 import std;
 import bioseq.postgres.support;
-import bioseq.postgres.column;
+import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.storage.scanner;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.storage.lazy_sequence;
 
 import :custom_scan_oid_expression_support;

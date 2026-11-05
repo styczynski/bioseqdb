@@ -302,6 +302,9 @@ read_column_row_by_number(column_read_state *read_state,
 {
 	if (!is_current_read_stripe(read_state, row_number))
 	{
+		// The stripe metadata survives individual tuple evaluations. A table-AM
+		// caller such as ALTER TABLE resets its per-tuple context between reads.
+		bioseq::postgres::support::memory_context_scope context_guard{read_state->scan_context};
 		Relation bioseq_column_relation = read_state->relation;
 		Snapshot snapshot = read_state->snapshot;
 		stripe_metadata *stripe_metadata_value = find_stripe_by_row_number(bioseq_column_relation,
@@ -357,6 +360,7 @@ set_stripe_read_state(column_read_state *read_state,
 {
 	if (!is_current_read_stripe(read_state, start_stripe_metadata->first_row_number))
 	{
+		bioseq::postgres::support::memory_context_scope context_guard{read_state->scan_context};
 		Relation bioseq_column_relation = read_state->relation;
 		Snapshot snapshot = read_state->snapshot;
 		stripe_metadata *stripe_metadata_value =

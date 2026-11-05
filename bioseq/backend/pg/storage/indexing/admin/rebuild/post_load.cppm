@@ -28,7 +28,6 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.admin:rebuild_post_load;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
 import :rebuild_core;
 import bioseq.indexing.type;
 import bioseq.postgres.storage.indexing.index_relation_identity;
@@ -269,10 +268,6 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
                 fmt::format("index={} count={} accumulated={}", index_name, written, total));
         }
         total += written;
-#if defined(BIOSEQ_TEST_INDEXES)
-        if (bioseq::settings::testing::load::failure_stage == 6)
-            load_index_spi_error_as_cpp("failure injection", "injected load failure at stage 6");
-#endif
     }
     return total;
 }
