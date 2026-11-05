@@ -1,5 +1,7 @@
 {
   "params": {
+    "random_rows": {"alphabet": {"type": "string", "enum": ["dna4", "dna5", "aa10li", "aa10murphy", "aa20", "aa27", "phred42", "phred63", "phred68-legacy"], "default": "dna4"}, "batch_rows": {"type": "integer", "enum": [512, 4096], "default": 512, "description": "Rows admitted together; both variants share the same output group geometry"}},
+    "random_batch": {"alphabet": {"type": "string", "enum": ["dna4", "dna5", "aa10li", "aa10murphy", "aa20", "aa27", "phred42", "phred63", "phred68-legacy"], "default": "dna4"}, "batch_rows": {"type": "integer", "enum": [512, 4096], "default": 512, "description": "Rows admitted together; both variants share the same output group geometry"}},
     "bioseq_io_sync_fasta":        {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
     "bioseq_io_mmap_fasta":        {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
     "bioseq_io_async4_fasta":      {"_": {"type": "integer", "default": 0}, "alphabet": {"type": "string", "default": "corpus", "description": "corpus inherits the declared input alphabet; otherwise select a registered biological alphabet"}},
@@ -36,6 +38,7 @@
   },
 
   "test_cases": {
+    "RANDOM_NATIVE_SHORT": {"concurrency": 1, "data": {"rows": 4096, "length": 150, "seed": 42}, "description": "Native packed random output over all biological and quality alphabets; row and batch scheduling in 512-row and 4096-row groups"},
     "FASTA_SHORT":     { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200,    "seed": 1 }, "description": "~9 MiB FASTA of ~200 bp records" },
     "FASTA_MEDIUM":    { "data": { "format": "fasta", "kind": "synthetic", "record_count": 5000,  "mean_record_length_bp": 2000,   "seed": 2 }, "description": "~11 MiB FASTA of ~2 kbp records" },
     "FASTA_LONG":      { "data": { "format": "fasta", "kind": "synthetic", "record_count": 200,   "mean_record_length_bp": 50000,  "seed": 3 }, "description": "~11 MiB FASTA of ~50 kbp records" },
@@ -56,6 +59,500 @@
 
     "LAZY_SEQUENCE_EXPRESSION_8M": { "concurrency": 1, "data": { "kind": "lazy_sequence_expression", "bp_size": 8388608, "seed": 377 }, "description": "8 Mi-bp deterministic DNA4 nested slice/concat expression" },
     "CIGAR_SEQUENCE_SCALING": { "concurrency": 1, "data": { "kind": "cigar_sequence", "rows": 64, "profile_intervals": 64, "seed": 377019 }, "description": "Encoded counted-run processing and six semantic ordering tiers, including huge N without positional expansion" }
+  },
+
+  "bench_io_random_generation": {
+    "tags": [
+      "io"
+    ],
+    "description": "One native generation case compares identical row-seeded output bytes with individual scheduling and batch scheduling in 512-row and 4096-row groups. Both variants share each requested group's admission, output allocation and checksum, along with the production RNG and rank packer.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 42
+    },
+    "matrix": {
+      "for": {
+        "RANDOM_NATIVE_SHORT": 8
+      },
+      "over": {
+        "random_rows": {
+          "alphabet": [
+            "dna4",
+            "dna5",
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27",
+            "phred42",
+            "phred63",
+            "phred68-legacy"
+          ],
+          "batch_rows": [
+            512,
+            4096
+          ]
+        },
+        "random_batch": {
+          "alphabet": [
+            "dna4",
+            "dna5",
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27",
+            "phred42",
+            "phred63",
+            "phred68-legacy"
+          ],
+          "batch_rows": [
+            512,
+            4096
+          ]
+        }
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {},
+        "complete": {
+          "type": "evaluation"
+        },
+        "rows": {
+          "type": "evaluation"
+        },
+        "symbols": {
+          "type": "evaluation"
+        },
+        "hash_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [
+              "hash_hi32_dna4_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "dna4",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "dna4",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_dna5_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "dna5",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "dna5",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_aa10li_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa10li",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa10li",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_aa10murphy_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa10murphy",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa10murphy",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_aa20_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa20",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa20",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_aa27_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa27",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa27",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_phred42_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred42",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred42",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_phred63_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred63",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred63",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_hi32_phred68-legacy_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred68-legacy",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred68-legacy",
+                "batch_rows": 512
+              }
+            ],
+            [ "hash_hi32_dna4_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "dna4", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "dna4", "batch_rows": 4096} ],
+            [ "hash_hi32_dna5_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "dna5", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "dna5", "batch_rows": 4096} ],
+            [ "hash_hi32_aa10li_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa10li", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa10li", "batch_rows": 4096} ],
+            [ "hash_hi32_aa10murphy_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa10murphy", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa10murphy", "batch_rows": 4096} ],
+            [ "hash_hi32_aa20_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa20", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa20", "batch_rows": 4096} ],
+            [ "hash_hi32_aa27_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa27", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa27", "batch_rows": 4096} ],
+            [ "hash_hi32_phred42_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred42", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred42", "batch_rows": 4096} ],
+            [ "hash_hi32_phred63_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred63", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred63", "batch_rows": 4096} ],
+            [ "hash_hi32_phred68-legacy_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred68-legacy", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred68-legacy", "batch_rows": 4096} ]
+          ]
+        },
+        "hash_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [
+              "hash_lo32_dna4_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "dna4",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "dna4",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_dna5_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "dna5",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "dna5",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_aa10li_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa10li",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa10li",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_aa10murphy_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa10murphy",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa10murphy",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_aa20_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa20",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa20",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_aa27_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "aa27",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "aa27",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_phred42_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred42",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred42",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_phred63_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred63",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred63",
+                "batch_rows": 512
+              }
+            ],
+            [
+              "hash_lo32_phred68-legacy_batch_512_matches_rows",
+              {
+                "key": "random_batch",
+                "alphabet": "phred68-legacy",
+                "batch_rows": 512
+              },
+              {
+                "compare": "=",
+                "tolerance%": 0,
+                "aggregate": "min",
+                "pairing": "by_iteration_exact"
+              },
+              {
+                "key": "random_rows",
+                "alphabet": "phred68-legacy",
+                "batch_rows": 512
+              }
+            ],
+            [ "hash_lo32_dna4_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "dna4", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "dna4", "batch_rows": 4096} ],
+            [ "hash_lo32_dna5_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "dna5", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "dna5", "batch_rows": 4096} ],
+            [ "hash_lo32_aa10li_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa10li", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa10li", "batch_rows": 4096} ],
+            [ "hash_lo32_aa10murphy_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa10murphy", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa10murphy", "batch_rows": 4096} ],
+            [ "hash_lo32_aa20_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa20", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa20", "batch_rows": 4096} ],
+            [ "hash_lo32_aa27_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "aa27", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "aa27", "batch_rows": 4096} ],
+            [ "hash_lo32_phred42_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred42", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred42", "batch_rows": 4096} ],
+            [ "hash_lo32_phred63_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred63", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred63", "batch_rows": 4096} ],
+            [ "hash_lo32_phred68-legacy_batch_4096_matches_rows",
+              {"key": "random_batch", "alphabet": "phred68-legacy", "batch_rows": 4096},
+              {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"},
+              {"key": "random_rows", "alphabet": "phred68-legacy", "batch_rows": 4096} ]
+          ]
+        }
+      }
+    }
   },
 
   "bench_io_cigar_sequence": {

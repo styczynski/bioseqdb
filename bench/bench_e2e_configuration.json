@@ -1,5 +1,78 @@
 {
   "params": {
+    "sample_table": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Native create_sample_table including table creation"
+      },
+      "vectorization": {
+        "type": "string",
+        "default": "on",
+        "enum": [
+          "on",
+          "off"
+        ],
+        "description": "Existing bioseq.vectorization.enabled setting; batching must work in both modes"
+      }
+    },
+    "insert_random": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "INSERT with inferred destination layout and batched random_seq including table creation"
+      },
+      "vectorization": {
+        "type": "string",
+        "default": "on",
+        "enum": [
+          "on",
+          "off"
+        ],
+        "description": "Existing bioseq.vectorization.enabled setting; batching must work in both modes"
+      }
+    },
+    "query_target_sample": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Native query/target helper with one shared reference, fixed query length and no reverse complement"
+      },
+      "vectorization": {
+        "type": "string",
+        "default": "on",
+        "enum": [
+          "on",
+          "off"
+        ],
+        "description": "Existing bioseq.vectorization.enabled setting; batching must work in both modes"
+      }
+    },
+    "insert_mutate": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "INSERT random_mutate of slices from one shared reference; constant source is a separate batching diagnostic"
+      },
+      "vectorization": {
+        "type": "string",
+        "default": "on",
+        "enum": [
+          "on",
+          "off"
+        ],
+        "description": "Existing bioseq.vectorization.enabled setting; batching must work in both modes"
+      },
+      "source": {
+        "type": "string",
+        "default": "column",
+        "enum": [
+          "column",
+          "constant"
+        ],
+        "description": "Column slices compare against the helper; a prepared literal tests constant-source batching without a parity claim"
+      }
+    },
     "bioseq_ksw2_scalar_dp_scalar_mm_no_index": {
       "_": {"type": "integer", "default": 0, "description": "bioseq scalar minimizer sketch + scalar DP chaining/backtracking + KSW2; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact index construction + mapping timed"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after validating both persisted policies absent"},
@@ -44,6 +117,126 @@
   },
 
   "test_cases": {
+    "RANDOM_DNA4_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native dna4 rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_DNA4_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native dna4 rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
+    "RANDOM_DNA5_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna5",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native dna5 rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_DNA5_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna5",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native dna5 rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
+    "RANDOM_AA10LI_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa10li",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native aa10li rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_AA10LI_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa10li",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native aa10li rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
+    "RANDOM_AA10MURPHY_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa10murphy",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native aa10murphy rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_AA10MURPHY_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa10murphy",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native aa10murphy rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
+    "RANDOM_AA20_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa20",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native aa20 rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_AA20_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa20",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native aa20 rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
+    "RANDOM_AA27_150": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa27",
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "4096 native aa27 rows of 150 symbols; paired cases share one 600-symbol reference"
+    },
+    "RANDOM_AA27_2000": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "aa27",
+        "row_count": 1024,
+        "sequence_length": 2000,
+        "seed": 42
+      },
+      "description": "1024 native aa27 rows of 2000 symbols; paired cases share one 8000-symbol reference"
+    },
     "E2E_2GBP_DNA4": { "concurrency": 1, "data": {
         "alphabet": "dna4", "size_label": "2gbp_dna4", "reference_length": 2000000000,
         "fragment_count": 16, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
@@ -984,6 +1177,111 @@
         "peak_bench_rss_mb": { "type": "evaluation", "rules": [] },
         "min_tmp_available_gib": { "type": "evaluation", "rules": [] },
         "peak_swap_used_mb": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "bench_random_generation": {
+    "tags": [
+      "e2e",
+      "random-generation"
+    ],
+    "description": "CREATE plus random generation/insertion, excluding DROP, verification and EXPLAIN. Six native biological alphabets and both vectorization settings. Pair workloads share a 4x-length reference; dna5 helper reference N probability differs from uniform random_seq. Constant-source mutation is a batching diagnostic with untimed source preparation.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 42
+    },
+    "matrix": {
+      "for": {
+        "RANDOM_DNA4_150": 3,
+        "RANDOM_DNA4_2000": 3,
+        "RANDOM_DNA5_150": 3,
+        "RANDOM_DNA5_2000": 3,
+        "RANDOM_AA10LI_150": 3,
+        "RANDOM_AA10LI_2000": 3,
+        "RANDOM_AA10MURPHY_150": 3,
+        "RANDOM_AA10MURPHY_2000": 3,
+        "RANDOM_AA20_150": 3,
+        "RANDOM_AA20_2000": 3,
+        "RANDOM_AA27_150": 3,
+        "RANDOM_AA27_2000": 3
+      },
+      "over": {
+        "sample_table": {
+          "vectorization": [
+            "on",
+            "off"
+          ]
+        },
+        "insert_random": {
+          "vectorization": [
+            "on",
+            "off"
+          ]
+        },
+        "query_target_sample": {
+          "vectorization": [
+            "on",
+            "off"
+          ]
+        },
+        "insert_mutate": {
+          "vectorization": [
+            "on",
+            "off"
+          ],
+          "source": [
+            "column",
+            "constant"
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "row_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "valid_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "correctness_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "shared_references": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "custom_scan_taken": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "custom_scan_expected": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "rows_per_second": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "rules": []
+        }
       }
     }
   },

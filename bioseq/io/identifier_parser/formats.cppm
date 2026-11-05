@@ -46,6 +46,14 @@ enum class header_format : std::uint8_t {
     count // Sentinel value that does not represent a real format.
 };
 
+/// Canonical native SQL enum labels, shared by parsing and SQL generation.
+inline constexpr std::array<std::string_view, 14> header_format_sql_names{
+    "auto", "plain", "uniprot", "uniref", "uniparc", "unimes", "spd",
+    "ncbi", "ncbi_gi", "ncbi_pdb", "refseq", "genbank", "gisaid", "imgt"
+};
+static_assert(header_format_sql_names.size()
+    == static_cast<std::size_t>(header_format::count));
+
 /// Where a field's bytes come from inside a header.
 enum class field_origin : std::uint8_t {
     identifier,  // whole header, with optional metadata removal
@@ -111,11 +119,13 @@ struct header_field_definition {
 /// The field span refers to a static table.
 struct header_format_definition {
     header_format id;
-    std::string_view sql_name; // SQL format name, for example 'uni_prot'
+    std::string_view sql_name; // Canonical SQL format name, for example 'uniprot'.
     char primary_delimiter;    // field delimiter, or '\0' when fields are  not delimited
     metadata_style metadata;
     std::span<const header_field_definition> fields;
     std::uint16_t identifier_block_field_count = 0; // number of prefix fields before the NCBI description or PDB chain
+    /// Synthetic recipe: {0} is a safe generated component, {1} its numeric identity.
+    std::string_view synthetic_pattern;
 };
 
 // Alternate field names.
@@ -288,21 +298,35 @@ inline constexpr std::array<header_field_definition, 0> no_fields{};
 inline constexpr std::array<header_format_definition,
                             static_cast<std::size_t>(header_format::count)>
     header_format_definitions{{
-        // format, SQL name, delimiter, metadata style, fields, identifier prefix length
-        {header_format::automatic, "auto", '\0', metadata_style::both, no_fields, 0},
-        {header_format::plain, "plain", '\0', metadata_style::none, no_fields, 0},
-        {header_format::uniprotkb, "uni_prot", '|', metadata_style::equals, uniprotkb_fields, 0},
-        {header_format::uniref, "uni_ref", '\0', metadata_style::equals, uniref_fields, 0},
-        {header_format::uniparc, "uni_parc", '\0', metadata_style::equals, uniparc_fields, 0},
-        {header_format::unimes, "uni_mes", '\0', metadata_style::equals, unimes_fields, 0},
-        {header_format::spd, "spd", '|', metadata_style::none, spd_fields, 0},
-        {header_format::ncbi, "ncbi", '\0', metadata_style::bracket, ncbi_fields, 0},
-        {header_format::ncbi_gi, "ncbi_gi", '|', metadata_style::bracket, ncbi_gi_fields, 2},
-        {header_format::ncbi_pdb, "ncbi_pdb", '|', metadata_style::bracket, ncbi_pdb_fields, 2},
-        {header_format::refseq, "refseq", '|', metadata_style::bracket, refseq_fields, 2},
-        {header_format::genbank, "genbank", '\0', metadata_style::bracket, genbank_fields, 0},
-        {header_format::gisaid, "gisaid", '|', metadata_style::none, gisaid_fields, 0},
-        {header_format::imgt, "imgt", '|', metadata_style::none, imgt_fields, 0},
+        // format, SQL name, delimiter, metadata, fields, prefix count, synthetic recipe
+        {header_format::automatic, header_format_sql_names[0], '\0', metadata_style::both, no_fields, 0,
+         "{0}"},
+        {header_format::plain, header_format_sql_names[1], '\0', metadata_style::none, no_fields, 0,
+         "{0}"},
+        {header_format::uniprotkb, header_format_sql_names[2], '|', metadata_style::equals, uniprotkb_fields, 0,
+         "sp|SYN{1}|SYNTH_HUMAN {0} OS=Homo sapiens OX=9606 GN=SYNTH PE=1 SV=1"},
+        {header_format::uniref, header_format_sql_names[3], '\0', metadata_style::equals, uniref_fields, 0,
+         "UniRef100_SYN{1} {0} n=1 Tax=Homo sapiens TaxID=9606 RepID=SYNTH_HUMAN"},
+        {header_format::uniparc, header_format_sql_names[4], '\0', metadata_style::equals, uniparc_fields, 0,
+         "UPI{1:012X} {0} status=active"},
+        {header_format::unimes, header_format_sql_names[5], '\0', metadata_style::equals, unimes_fields, 0,
+         "MES{1} {0} OS=Homo sapiens SV=1"},
+        {header_format::spd, header_format_sql_names[6], '|', metadata_style::none, spd_fields, 0,
+         "SYN{1}|SYNTH_HUMAN|{0}"},
+        {header_format::ncbi, header_format_sql_names[7], '\0', metadata_style::bracket, ncbi_fields, 0,
+         "SYN{1} {0} [Homo sapiens]"},
+        {header_format::ncbi_gi, header_format_sql_names[8], '|', metadata_style::bracket, ncbi_gi_fields, 2,
+         "gi|{1}|{0} [Homo sapiens]"},
+        {header_format::ncbi_pdb, header_format_sql_names[9], '|', metadata_style::bracket, ncbi_pdb_fields, 2,
+         "pdb|1ABC|A {0} [Homo sapiens]"},
+        {header_format::refseq, header_format_sql_names[10], '|', metadata_style::bracket, refseq_fields, 2,
+         "ref|NP_{1}.1|{0} [Homo sapiens]"},
+        {header_format::genbank, header_format_sql_names[11], '\0', metadata_style::bracket, genbank_fields, 0,
+         "{0} [organism=Homo sapiens] [chromosome=1] [moltype=mRNA]"},
+        {header_format::gisaid, header_format_sql_names[12], '|', metadata_style::none, gisaid_fields, 0,
+         "A/Synthetic/{0}/{1}/2026|A|H1N1|2026-01-01|0|Poland|Human|EPI{1}"},
+        {header_format::imgt, header_format_sql_names[13], '|', metadata_style::none, imgt_fields, 0,
+         "{0}|IGHV1-1*01|Homo sapiens|F|V-REGION|1..64|64|1|0|0|0|21|64|partial|forward"},
     }};
 
 /// Returns the definition for a valid format value.
@@ -310,6 +334,18 @@ inline constexpr std::array<header_format_definition,
 [[nodiscard]] inline const header_format_definition&
 header_format_definition_for(header_format f) noexcept {
     return header_format_definitions[static_cast<std::size_t>(f)];
+}
+
+/**
+ * Format synthetic header contents from an already sampled safe component.
+ * The component must be nonempty ASCII alphanumeric text. Its length excludes
+ * format grammar. Identity fills numeric identifiers; auto uses plain output.
+ * Returns raw header contents without a FASTA/FASTQ marker or line terminator.
+ */
+[[nodiscard]] inline std::string make_synthetic_header(
+    header_format format, std::string_view component, std::uint64_t identity) {
+    const auto& definition = header_format_definition_for(format);
+    return fmt::format(fmt::runtime(definition.synthetic_pattern), component, identity);
 }
 
 // Compile-time table checks.
@@ -327,7 +363,9 @@ static_assert(all_norm_keys_canonical(), "header field keys must match normalise
 /// Checks that each format value equals its  index in the lookup table.
 [[nodiscard]] consteval bool format_table_is_dense_and_ordered() {
     for (std::size_t i = 0; i < header_format_definitions.size(); ++i)
-        if (static_cast<std::size_t>(header_format_definitions[i].id) != i)
+        if (static_cast<std::size_t>(header_format_definitions[i].id) != i
+            || header_format_definitions[i].sql_name != header_format_sql_names[i]
+            || header_format_definitions[i].synthetic_pattern.empty())
             return false;
     return true;
 }
@@ -336,7 +374,7 @@ static_assert(format_table_is_dense_and_ordered(),
 
 // Format-name parsing.
 
-/// Parses a SQL format name such as 'auto' or 'uni_prot'.
+/// Parses a format name such as 'auto' or 'uniprot'.
 /// Ignores ASCII case, underscores, and hyphens. Unknown names eturn an error.
 /// The error lists valid names unless the input exceeds the 64-byte limit
 [[nodiscard]] inline std::expected<header_format, std::string>

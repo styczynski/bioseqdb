@@ -46,6 +46,7 @@ import bioseq.postgres.sql.generated.production.guc_registry;
 #endif
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.postgres.sequences.random;
 
 using namespace bioseq::postgres::support;
 
@@ -177,6 +178,7 @@ void initialize_extension()
 		"[bioseq] pg: _PG_init() entered");
 	bioseq::pg::detail::install_alignment_execution_hooks();
 	initialize_bioseq_extension();
+	bioseq::postgres::random::install_random_scan();
 #if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
 	bioseq_external_tableam_init();
 	bioseq_external_scan_init();

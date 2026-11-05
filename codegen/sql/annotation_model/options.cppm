@@ -268,6 +268,8 @@ struct operator_options {
 
 struct type_options {
     schema_ref schema{};
+    /// A constexpr string-literal array defining a native PostgreSQL enum.
+    declaration_reference enum_labels{};
     std::int32_t internal_length{};
     bool variable_length{};
     bool passed_by_value{};

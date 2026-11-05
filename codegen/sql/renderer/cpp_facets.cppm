@@ -17,6 +17,7 @@ module;
 export module bioseq.codegen.sql.renderer:cpp_facets;
 
 import :model;
+import :fmgr;
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
 
@@ -140,22 +141,9 @@ struct normalized_row_cpp_type {
 
 [[nodiscard]] inline normalized_row_cpp_type normalized_cpp_field_type(
     std::string_view cpp_type) {
-    std::string compact;
-    compact.reserve(cpp_type.size());
-    for (const unsigned char value : cpp_type) {
-        if (!std::isspace(value)) {
-            compact.push_back(static_cast<char>(value));
-        }
-    }
-    bool nullable = false;
-    constexpr std::string_view optional_prefix{"std::optional<"};
-    if (compact.starts_with(optional_prefix)
-        && compact.ends_with(">")) {
-        nullable = true;
-        compact = compact.substr(
-            optional_prefix.size(),
-            compact.size() - optional_prefix.size() - 1);
-    }
+    const auto normalized = fmgr_detail::normalize_cpp_type(cpp_type);
+    const std::string& compact = normalized.canonical;
+    const bool nullable = normalized.nullable;
     if (compact == "std::int16_t" || compact == "int16_t"
         || compact == "int16") {
         return {.type = "std::int16_t", .nullable = nullable};
@@ -1471,6 +1459,7 @@ render_row_codec_modules(
     for (const normalized_entity& entity : graph.entities) {
         if ((entity.source.kind != entity_kind::table
              && entity.source.kind != entity_kind::type)
+            || find_option(entity.source, "enum_labels") != nullptr
             || !entity.source.source_module.ends_with(".sql_rows")) {
             continue;
         }

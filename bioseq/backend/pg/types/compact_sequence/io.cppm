@@ -1037,6 +1037,7 @@ char* seq_out(
     .create = bioseq::sql::create_mode::or_replace,
     .volatility = bioseq::sql::volatility::immutable,
     .parallel = bioseq::sql::parallel_safety::safe,
+    .support = "random_support",
 })]]
 [[bioseq_sql::cast({
     .assignment = true,

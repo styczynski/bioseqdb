@@ -1310,6 +1310,30 @@ natural_type_statements(
         "element",
         "default_value",
     });
+    if (find_option(source, "enum_labels") != nullptr) {
+        if (!roles.empty()
+            || std::ranges::any_of(base_option_names,
+                [&source](std::string_view name) {
+                    return find_option(source, name) != nullptr;
+                })
+            || std::ranges::any_of(children, [](const auto* child) {
+                return child->source.kind == entity_kind::column;
+            })) {
+            throw std::runtime_error(
+                "enum type '" + source.name
+                + "' cannot declare base-type options, callbacks, or composite fields");
+        }
+        if (source.enum_labels.empty()) {
+            throw std::runtime_error(
+                "enum type '" + source.name + "' has no resolved label authority");
+        }
+        std::string result = "CREATE TYPE " + qualified + " AS ENUM (";
+        for (std::size_t index = 0; index < source.enum_labels.size(); ++index) {
+            if (index != 0) result += ", ";
+            result += quoted_sql_literal(source.enum_labels[index]);
+        }
+        return {{.text = result + ");"}};
+    }
     const bool base_type = !roles.empty()
         || std::ranges::any_of(
             base_option_names,

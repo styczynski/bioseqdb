@@ -101,6 +101,16 @@ int run(int argc, char** argv) {
     using cigar_cleanup = std::function<void(
         std::string_view, std::string_view, simdjson::dom::element, const cigar_benchmark_input&)>;
 
+    using random_builder = std::function<random_generation_input(
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
+    using random_runner = std::function<random_generation_measurement(
+        std::string_view, const parameter_map&, const random_generation_input&)>;
+    using random_evaluator = std::function<std::map<std::string, double>(
+        std::string_view, const parameter_map&, const random_generation_input&,
+        const random_generation_measurement&)>;
+    using random_cleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element, const random_generation_input&)>;
+
     return bioseq::bench::framework::run(
         argc,
         argv,
@@ -186,7 +196,15 @@ int run(int argc, char** argv) {
             cigar_builder{build_cigar_benchmark_input},
             cigar_runner{run_cigar_benchmark},
             cigar_evaluator{evaluate_cigar_benchmark},
-            cigar_cleanup{cleanup_cigar_benchmark}));
+            cigar_cleanup{cleanup_cigar_benchmark}),
+        create_benchmark<random_generation_input, random_generation_measurement>(
+            "Native random generation: row scheduling versus batch scheduling",
+            "bench_io_random_generation", config_path,
+            resource_estimator{estimate_random_generation_resources},
+            random_builder{build_random_generation_input},
+            random_runner{run_random_generation},
+            random_evaluator{evaluate_random_generation},
+            random_cleanup{cleanup_random_generation}));
 }
 
 } // namespace bioseq::io::benchmark

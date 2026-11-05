@@ -485,7 +485,7 @@ inline void validate_options(
                     "join", "hashes", "merges"});
             case entity_kind::type:
                 return one_of(name, {
-                    "schema", "internal_length", "variable_length",
+                    "schema", "enum_labels", "internal_length", "variable_length",
                     "passed_by_value", "alignment", "storage",
                     "category", "preferred", "delimiter",
                     "collatable", "element",
@@ -1859,22 +1859,24 @@ collect_direct_import_enum_authorities(
     const std::vector<
         structural_analysis::dependency_module_identity>&
         dependency_modules) {
-    std::set<std::string, std::less<>> guc_owner_modules;
+    std::set<std::string, std::less<>> enum_owner_modules;
     for (const collected_entity& entity : program.entities) {
-        if (entity.kind == entity_kind::guc) {
-            guc_owner_modules.emplace(entity.source_module);
+        if (entity.kind == entity_kind::guc
+            || (entity.kind == entity_kind::type
+                && find_option(entity, "enum_labels") != nullptr)) {
+            enum_owner_modules.emplace(entity.source_module);
         }
     }
 
     std::set<std::string, std::less<>> direct_imports;
-    for (const std::string& owner : guc_owner_modules) {
+    for (const std::string& owner : enum_owner_modules) {
         const auto graph_unit = std::ranges::find(
             module_graph.units,
             owner,
             &structural_analysis::module_graph_unit::provided_module);
         if (graph_unit == module_graph.units.end()) {
             throw std::runtime_error(
-                "registered GUC owner module '" + owner
+                "registered enum owner module '" + owner
                 + "' is absent from the validated module graph");
         }
         direct_imports.insert(
@@ -1905,7 +1907,7 @@ collect_direct_import_enum_authorities(
         const auto dependency = dependency_by_module.find(imported);
         if (dependency == dependency_by_module.end()) {
             throw std::runtime_error(
-                "registered GUC owner direct import '" + imported
+                "registered enum owner direct import '" + imported
                 + "' is absent from the validated PREPARE module closure");
         }
         structural_analysis::translation_unit authority =
@@ -1915,12 +1917,129 @@ collect_direct_import_enum_authorities(
             || authority.source_sha256
                 != dependency->second->source_sha256) {
             throw std::runtime_error(
-                "registered GUC owner direct import '" + imported
+                "registered enum owner direct import '" + imported
                 + "' disagrees with its validated PREPARE source authority");
         }
         result.push_back(std::move(authority));
     }
     return result;
+}
+
+/** Resolve native SQL enum labels from one validated, directly imported array. */
+inline void resolve_enum_labels(collected_program& program) {
+    for (collected_entity& entity : program.entities) {
+        if (entity.kind != entity_kind::type) continue;
+        const option_value* option = find_option(entity, "enum_labels");
+        if (option == nullptr) continue;
+        std::string_view reference = collector_trim(option->expression);
+        if (!direct_cpp_declaration_reference(reference)
+            || !reference.contains("::")) {
+            throw std::runtime_error(
+                "enum_labels for '" + entity.cpp_qualified_name
+                + "' requires a fully qualified constexpr array reference");
+        }
+        if (reference.starts_with("::")) reference.remove_prefix(2);
+
+        const structural_analysis::translation_unit* authority = nullptr;
+        const structural_analysis::declaration_record* declaration = nullptr;
+        const auto find_authority = [&authority, &declaration, reference](
+                                        const auto& units) {
+            for (const auto& unit : units) {
+                for (const auto& candidate : unit.declarations) {
+                    if (candidate.kind
+                            != structural_analysis::declaration_kind::variable
+                        || candidate.qualified_name != reference) continue;
+                    if (authority != nullptr) {
+                        if (authority->source_path != unit.source_path
+                            || authority->source_sha256 != unit.source_sha256) {
+                            throw std::runtime_error(
+                                "enum_labels reference has conflicting source authorities: "
+                                + std::string{reference});
+                        }
+                        continue;
+                    }
+                    authority = &unit;
+                    declaration = &candidate;
+                }
+            }
+        };
+        // Token-slice authorities retain the authored initializer exactly.
+        find_authority(program.enum_authority_units);
+        find_authority(program.translation_units);
+        if (authority == nullptr || declaration == nullptr
+            || !declaration->specifiers.is_constexpr
+            || !declaration->active_condition.empty()) {
+            throw std::runtime_error(
+                "enum_labels requires an unconditional constexpr array: "
+                + std::string{reference});
+        }
+        const auto owner = std::ranges::find(
+            program.module_graph.units, entity.source_module,
+            &structural_analysis::module_graph_unit::provided_module);
+        if (authority->module_name != entity.source_module
+            && (owner == program.module_graph.units.end()
+                || (!std::ranges::contains(owner->internal_imports,
+                                          authority->module_name)
+                    && !std::ranges::contains(owner->exported_imports,
+                                             authority->module_name)))) {
+            throw std::runtime_error(
+                "enum_labels authority is not directly imported by '"
+                + entity.cpp_qualified_name + "'");
+        }
+        const auto declared_type =
+            parse_cpp_template(declaration->explicit_declared_type);
+        const std::string_view initializer =
+            collector_trim(declaration->initializer_text);
+        if (!declared_type.valid || declared_type.outer != "std::array"
+            || declared_type.arguments.size() != 2
+            || declared_type.arguments.front() != "std::string_view"
+            || !encloses_entire_expression(initializer, '{', '}')) {
+            throw std::runtime_error(
+                "enum_labels requires std::array<std::string_view, N> "
+                "with a braced string-literal initializer: "
+                + std::string{reference});
+        }
+
+        entity.enum_labels.clear();
+        std::set<std::string, std::less<>> seen;
+        for (const std::string& item : split_top_level(initializer)) {
+            const std::string_view literal = collector_trim(item);
+            const bool single_string_literal =
+                (literal.starts_with('"') || literal.starts_with("R\""))
+                && std::ranges::any_of(
+                    authority->tokens,
+                    [literal, declaration](const auto& token) {
+                        return token.spelling == literal
+                            && token.range.begin.byte_offset
+                                >= declaration->body_or_initializer_range.begin.byte_offset
+                            && token.range.end.byte_offset
+                                <= declaration->body_or_initializer_range.end.byte_offset;
+                    });
+            if (!single_string_literal) {
+                throw std::runtime_error(
+                    "enum_labels initializer accepts individual string literals only: "
+                    + std::string{reference});
+            }
+            std::string label = decoded_cpp_literal(literal);
+            if (label.empty() || label.size() > 63
+                || label.find('\0') != std::string::npos
+                || !seen.emplace(label).second) {
+                throw std::runtime_error(
+                    "enum_labels must contain unique, nonempty labels of at most "
+                    "63 bytes without NUL: " + std::string{reference});
+            }
+            entity.enum_labels.push_back(std::move(label));
+        }
+        if (entity.enum_labels.empty()) {
+            throw std::runtime_error(
+                "enum_labels cannot be empty: " + std::string{reference});
+        }
+        if (declared_type.arguments[1] != std::to_string(entity.enum_labels.size())) {
+            throw std::runtime_error(
+                "enum_labels array requires a decimal literal extent matching "
+                "every explicitly initialized label: " + std::string{reference});
+        }
+    }
 }
 
 }  // namespace detail
@@ -2001,6 +2120,7 @@ collect_direct_import_enum_authorities(
                 module_graph,
                 environment.dependency_modules);
         result.module_graph = std::move(module_graph);
+        detail::resolve_enum_labels(result);
         result.compiler_profile =
             environment.compiler_profile;
         result.compilation_signature =
@@ -2086,6 +2206,7 @@ collect_direct_import_enum_authorities(
     result.enum_authority_units =
         std::move(enum_authority_units);
     result.module_graph = std::move(module_graph);
+    detail::resolve_enum_labels(result);
     return result;
 }
 
@@ -2108,6 +2229,7 @@ collect_direct_import_enum_authorities(
             authority.source_module.imported_modules,
     });
     result.enum_authority_units.push_back(std::move(authority));
+    detail::resolve_enum_labels(result);
     return result;
 }
 

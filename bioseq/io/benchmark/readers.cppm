@@ -4,6 +4,7 @@
  */
 module;
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@ module;
 #include <fstream>
 #include <kseq++/seqio.hpp>
 #include <map>
+#include <oneapi/tbb/global_control.h>
 #include <simdjson.h>
 #include <span>
 #include <stdexcept>
@@ -24,8 +26,15 @@ module bioseq.io.benchmark:readers;
 
 import :common;
 import bioseq.common.logging;
+import bioseq.common.hashing;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.sequences.generation;
+import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 import bioseq.io.reader;
 import bioseq.io.options;
 import bioseq.io.identifier_parser.formats;
@@ -516,6 +525,123 @@ void cleanup_identifier_bench(std::string_view data_dir,
                               simdjson::dom::element data,
                               const identifier_benchmark_input& input) {
     cleanup_reader(data_dir, test_case_name, data, input.reader);
+}
+
+/** Estimate the same bounded output and descriptors used by both generation variants. */
+[[nodiscard]] run_constraints estimate_random_generation_resources(
+        std::string_view, std::string_view, simdjson::dom::element data) {
+    const auto rows = static_cast<std::uint64_t>(read_int_field(data, "rows", 4096));
+    const auto length = static_cast<std::uint64_t>(read_int_field(data, "length", 150));
+    const auto bytes = bioseq::common::saturating_mul(rows,
+        bioseq::common::saturating_add(length, 128u));
+    return {.base_memory = bytes, .extra_memory = bytes};
+}
+
+/** Read a small deterministic workload without creating files or changing the RNG. */
+[[nodiscard]] random_generation_input build_random_generation_input(
+        std::string_view, std::string_view, simdjson::dom::element data, const run_constraints&) {
+    const auto rows = read_int_field(data, "rows", 4096);
+    const auto length = read_int_field(data, "length", 150);
+    if (rows < 1 || rows > 1'000'000 || length < 1 || length > 1'000'000)
+        throw std::invalid_argument("random generation benchmark geometry is out of range");
+    // Input construction holds the benchmark lock and precedes measured runs.
+    // Configure the shared pool within the framework's existing worker limit.
+    const auto worker_limit = std::min<std::size_t>(
+        bioseq::parallelism::default_concurrency_limit(),
+        oneapi::tbb::global_control::active_value(
+            oneapi::tbb::global_control::max_allowed_parallelism));
+    bioseq::parallelism::global_pool::instance().configure(bioseq::parallelism::pool_config{
+        .maximum_concurrency = static_cast<unsigned>(worker_limit),
+        .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
+    });
+    return {static_cast<std::size_t>(rows), static_cast<std::size_t>(length),
+        static_cast<std::uint64_t>(read_int_field(data, "seed", 42))};
+}
+
+/** Compare row and batch scheduling at the requested group size with identical native output. */
+[[nodiscard]] random_generation_measurement run_random_generation(
+        std::string_view algorithm, const parameter_map& parameters,
+        const random_generation_input& input) {
+    namespace generation = bioseq::sequences::generation;
+    if (algorithm != "random_rows" && algorithm != "random_batch")
+        throw std::invalid_argument("unknown random generation benchmark algorithm");
+    const auto parameter = parameters.find("alphabet");
+    if (parameter == parameters.end() || !parameter->second.is_string())
+        throw std::invalid_argument("random generation benchmark requires an alphabet");
+    const std::string alphabet{parameter->second.as_string()};
+    const auto code = supported_storage_alphabets::try_index_of_name(alphabet.c_str());
+    if (!code || *code == supported_storage_alphabets::index_of<bioseq::cigar_symbol>())
+        throw std::invalid_argument("random generation benchmark requires a rank-packed alphabet");
+    const auto batch_parameter = parameters.find("batch_rows");
+    if (batch_parameter == parameters.end() || !batch_parameter->second.is_integer()
+        || batch_parameter->second.as_integer() < 1)
+        throw std::invalid_argument("random generation benchmark requires a positive integer batch_rows");
+    const auto requested_batch_rows = static_cast<unsigned>(std::min<std::uint64_t>(
+        input.rows, static_cast<std::uint64_t>(batch_parameter->second.as_integer())));
+    random_generation_measurement measurement{};
+    supported_rank_packed_alphabets::dispatch_alphabet_by_code(*code,
+        [algorithm, &input, &measurement, requested_batch_rows]<class Alphabet>() {
+        using Configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        using Traits = typename compact_sequence_range<Configuration>::traits;
+        using Destination = generation::random_packed_destination<Traits>;
+        constexpr auto letters = Traits::letters_per_unit;
+        const auto units = input.length / letters + (input.length % letters != 0u);
+        const auto row_bytes = units * sizeof(std::uint64_t) + sizeof(Destination);
+        auto admission = bioseq::parallelism::try_reserve_budgeted_wave(
+            requested_batch_rows, row_bytes);
+        if (!admission.is_admitted)
+            throw std::runtime_error("random generation benchmark memory admission was rejected");
+        if (admission.fanout != requested_batch_rows)
+            throw std::runtime_error("random generation benchmark could not admit its requested batch_rows");
+        const auto capacity = static_cast<std::size_t>(admission.fanout);
+        std::vector<std::uint64_t> packed(capacity * units);
+        std::vector<Destination> destinations(capacity);
+        static constexpr auto cdf = generation::make_integer_cdf(
+            generation::base_alphabet_probability<Alphabet>::probability());
+        for (std::size_t first = 0; first < input.rows; first += capacity) {
+            const auto count = std::min(capacity, input.rows - first);
+            for (std::size_t index = 0; index < count; ++index) {
+                destinations[index] = Destination{
+                    .units = std::span{packed}.subspan(index * units, units),
+                    .symbol_count = input.length,
+                    .row_seed = bioseq::common::splitmix64(input.seed ^ (first + index)),
+                };
+            }
+            if (algorithm == "random_batch") {
+                auto batch = std::span{destinations}.first(count);
+                if (!generation::generate_packed_batch<Traits>(batch, cdf, input.seed))
+                    throw std::runtime_error("random generation benchmark could not fill its admitted output");
+            } else {
+                for (std::size_t index = 0; index < count; ++index)
+                    generation::generate_units_cpu_for_sequence<Traits>(destinations[index].units,
+                        input.length, 0u, 1u, cdf, *destinations[index].row_seed);
+            }
+            for (const auto word : std::span{packed}.first(count * units))
+                measurement.checksum = bioseq::common::hash_combine_64(measurement.checksum, word);
+            measurement.rows += count;
+            measurement.symbols += count * input.length;
+        }
+    });
+    if (measurement.rows != input.rows)
+        throw std::runtime_error("random generation benchmark output is incomplete");
+    return measurement;
+}
+
+/** Report shape and byte-equivalence evidence alongside framework timing metrics. */
+[[nodiscard]] std::map<std::string, double> evaluate_random_generation(
+        std::string_view, const parameter_map&, const random_generation_input& input,
+        const random_generation_measurement& measurement) {
+    return {{"rows", static_cast<double>(measurement.rows)},
+        {"symbols", static_cast<double>(measurement.symbols)},
+        {"complete", measurement.rows == input.rows ? 1.0 : 0.0},
+        {"hash_hi32", static_cast<double>(measurement.checksum >> 32u)},
+        {"hash_lo32", static_cast<double>(measurement.checksum & 0xffffffffu)}};
+}
+
+/** Release the joined benchmark arena so later workloads choose their own pool settings. */
+void cleanup_random_generation(std::string_view, std::string_view,
+        simdjson::dom::element, const random_generation_input&) {
+    bioseq::parallelism::global_pool::instance().shutdown();
 }
 
 } // namespace bioseq::io::benchmark::detail

@@ -28,14 +28,17 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <limits>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,6 +46,8 @@ export module bioseq.postgres.sequences.sample_table;
 
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
+import bioseq.common.hashing;
+import bioseq.simd.utils;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
@@ -61,6 +66,7 @@ import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.sequences.sample_table.sql_rows;
+import bioseq.postgres.sequences.random;
 
 using bioseq::storage::sequence_size_t;
 
@@ -118,6 +124,101 @@ struct sample_table_write_context {
     sequence_size_t cap_bytes = 0;
     std::uint64_t main_storage_id = 0;
 };
+
+/** Validated optional quality-column identity; the biological source decides its length. */
+struct sample_quality_column {
+    std::string definition;
+    std::uint8_t alphabet_code{};
+};
+
+/** Validate and quote a requested quality column before any table is created. */
+[[nodiscard]] std::optional<sample_quality_column> resolve_sample_quality_column(
+        const std::optional<std::string>& name,
+        const std::optional<std::string>& alphabet,
+        std::span<const std::string_view> reserved_names) {
+    if (!name) return std::nullopt;
+    if (name->empty() || name->size() >= NAMEDATALEN
+        || name->find('\0') != std::string::npos
+        || std::ranges::find(reserved_names, *name) != reserved_names.end()) {
+        bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+            {.message = "quality_column must be a distinct nonempty column name shorter than 64 bytes"});
+    }
+    const auto selected = bioseq::postgres::support::invoke_pg_as_cpp([&alphabet] {
+        return parse_alphabet_name_checked(alphabet.value_or("phred63").c_str(), "quality_column");
+    });
+    if (!is_quality_alphabet_code(selected)) {
+        bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+            {.message = "quality_alphabet must name a supported quality alphabet"});
+    }
+    const auto quoted = bioseq::postgres::support::invoke_pg_as_cpp([&name] {
+        return std::string{quote_identifier(name->c_str())};
+    });
+    return sample_quality_column{
+        .definition = ", " + quoted + " bioseq.seq('"
+            + std::string{supported_alphabet_name(selected)} + "', 64)",
+        .alphabet_code = selected,
+    };
+}
+
+/** The parent row's locator and its existing deferred storage-publication token. */
+struct generated_sample_source {
+    bioseq::pg_types::seq* value;
+    bioseq::storage::pending_sequence_source publication;
+};
+
+/** Generate any rank-packed alphabet directly into the existing streamed storage writer.
+ * The returned token must be published only after its parent row has been written. */
+[[nodiscard]] generated_sample_source prepare_random_sample_source(
+        sample_table_write_context& context, std::uint8_t alphabet_code,
+        std::int16_t attribute, sequence_size_t length,
+        std::uint64_t seed, std::uint64_t ordinal) {
+    std::optional<generated_sample_source> output;
+    pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(alphabet_code,
+        [&context, alphabet_code, attribute, length, seed, ordinal, &output]<class Alphabet>() {
+        using Configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        using Traits = typename compact_sequence_range<Configuration>::traits;
+        constexpr auto letters_per_unit = Traits::letters_per_unit;
+        constexpr auto fragment_symbols = k_fragment_storage_units * letters_per_unit;
+        static constexpr auto cdf = make_integer_cdf(base_alphabet_probability<Alphabet>::probability());
+        const auto padding = static_cast<std::uint16_t>(
+            length % letters_per_unit == 0u ? 0u : letters_per_unit - length % letters_per_unit);
+        auto producer = [length, padding, seed, ordinal](
+                std::size_t fragment, bioseq::pg_types::seq* destination,
+                MemoryContext, bool last) {
+            const auto first_symbol = static_cast<sequence_size_t>(fragment) * fragment_symbols;
+            const auto count = last ? length - first_symbol
+                                    : static_cast<sequence_size_t>(fragment_symbols);
+            destination->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(count);
+            destination->padding_letters = last ? padding : std::uint16_t{0};
+            const auto unit_count = count / letters_per_unit
+                + static_cast<sequence_size_t>(count % letters_per_unit != 0u);
+            generate_units_cpu_for_sequence<Traits>(
+                {reinterpret_cast<std::uint64_t*>(destination->data),
+                 static_cast<std::size_t>(unit_count)},
+                length, ordinal, 0u, cdf, seed,
+                static_cast<std::uint64_t>(fragment) * k_fragment_storage_units);
+        };
+        auto pending = bioseq::postgres::support::invoke_pg_as_cpp(
+            [&context, alphabet_code, attribute, length, padding, &producer] {
+            return bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
+                context.parent_relid, context.main_storage_id,
+                context.parent_rel->rd_locator.dbOid,
+                context.parent_rel->rd_locator.spcOid,
+                context.parent_rel->rd_locator.relNumber,
+                attribute, context.parent_td, alphabet_code, sizeof(std::uint64_t),
+                length, padding, context.cap_bytes, context.caches, producer);
+        });
+        const auto locator = pending.locator();
+        auto* value = bioseq::postgres::support::invoke_pg_as_cpp(
+            [&context, alphabet_code, length, padding, &locator] {
+            return bioseq::storage::alloc_locator_stub_in(
+                get_column_write_per_tuple_context(context.write_state), alphabet_code,
+                sizeof(std::uint64_t), padding, length, locator);
+        });
+        output.emplace(generated_sample_source{value, std::move(pending)});
+    });
+    return std::move(*output);
+}
 
 /** Raise a PostgreSQL error that identifies the failing sample-table routine */
 [[noreturn]] void raise_sample_table_error(
@@ -261,10 +362,80 @@ void open_sample_relation_for_writes(
         });
 }
 
+/** Finish the parent and fragment writers before their primary-key build.
+ * The registered parent flush adapter also flushes its sequence-fragment caches.
+ * Writer frames retain transaction ownership on failure; caller cleanup closes
+ * only the relation and any cache which has not been handed back to its frame. */
+void finish_sample_write_states(sample_table_write_context& context) {
+    const Oid parent_file_number = context.parent_rel->rd_locator.relNumber;
+    const auto subtransaction = bioseq::postgres::support::invoke_pg_as_cpp([] {
+        return GetCurrentSubTransactionId();
+    });
+    bioseq::postgres::support::invoke_pg_as_cpp([parent_file_number, subtransaction] {
+        flush_relation_write_state(parent_file_number, subtransaction);
+        CommandCounterIncrement();
+    });
+
+    std::vector<Oid> fragment_file_numbers;
+    if (context.caches != nullptr) {
+        fragment_file_numbers.reserve(context.caches->entries.size());
+        for (const auto& cached : context.caches->entries) {
+            if (cached.second.rel != nullptr)
+                fragment_file_numbers.push_back(cached.second.rel->rd_locator.relNumber);
+        }
+    }
+    for (const Oid file_number : fragment_file_numbers) {
+        bioseq::postgres::support::invoke_pg_as_cpp([file_number, subtransaction] {
+            const ResourceOwner previous_owner = CurrentResourceOwner;
+            CurrentResourceOwner = TopTransactionResourceOwner;
+            pop_relation_column_write_state(file_number, subtransaction, 0, true);
+            CurrentResourceOwner = previous_owner;
+        });
+    }
+    // Popping the parent destroys its cache. Clear borrowed pointers first so a
+    // later failure cannot make resource cleanup follow those freed objects.
+    context.write_state = nullptr;
+    context.caches = nullptr;
+    bioseq::postgres::support::invoke_pg_as_cpp([parent_file_number, subtransaction] {
+        const ResourceOwner previous_owner = CurrentResourceOwner;
+        CurrentResourceOwner = TopTransactionResourceOwner;
+        pop_relation_column_write_state(parent_file_number, subtransaction, 0, true);
+        CurrentResourceOwner = previous_owner;
+        CommandCounterIncrement();
+    });
+}
+
+/** Rebuild the existing primary key after direct sample writes have completed.
+ * The caller has closed its tuple slot and parent relation before this utility
+ * command; the existing table-AM index builder supplies visible rows and TIDs.
+ * Rows with empty sequence values still receive ordinary primary-key entries. */
+void rebuild_sample_primary_key(Oid parent_relid) {
+    const auto qualified_index_name = bioseq::postgres::support::invoke_pg_as_cpp([parent_relid] {
+        Relation parent = table_open(parent_relid, AccessShareLock);
+        const Oid primary_key = bioseq::postgres::support::find_primary_key_oid(parent);
+        table_close(parent, AccessShareLock);
+        if (!OidIsValid(primary_key))
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("sample table primary-key index is missing")));
+        return std::string{quote_qualified_identifier(
+            get_namespace_name(get_rel_namespace(primary_key)), get_rel_name(primary_key))};
+    });
+    bioseq::postgres::support::spi_session session;
+    if (session.connect() != SPI_OK_CONNECT)
+        raise_sample_table_error("sample generation", "could not connect to SPI for primary-key rebuild");
+    const auto statement = "REINDEX INDEX " + qualified_index_name;
+    const auto status = bioseq::postgres::support::invoke_pg_as_cpp([&statement] {
+        return SPI_execute(statement.c_str(), false, 0);
+    });
+    if (status != SPI_OK_UTILITY)
+        raise_sample_table_error("sample generation", "could not rebuild the sample primary key",
+            "SPI_execute status=" + std::to_string(status));
+}
+
 /**
  * Close the sample table's acquired resources, trying every cleanup action
  * before rethrowing the first failure.
- * @param commit Whether to save pending fragment-table byte counts.
+ * @param commit Whether to finish published writes and save fragment-table byte counts.
  */
 void close_sample_relation_after_writes(
         sample_table_write_context& context,
@@ -289,11 +460,15 @@ void close_sample_relation_after_writes(
             context.slot = nullptr;
         });
     }
+    if (commit && failure == nullptr && context.write_state != nullptr) {
+        attempt([&context] { finish_sample_write_states(context); });
+    }
     if (context.caches != nullptr) {
-        attempt([&context, commit] {
+        const bool save_cache_changes = commit && failure == nullptr;
+        attempt([&context, save_cache_changes] {
             bioseq::postgres::support::invoke_pg_as_cpp(
-                [&context, commit] {
-                    context.caches->close_all(commit);
+                [&context, save_cache_changes] {
+                    context.caches->close_all(save_cache_changes);
                 });
             context.caches = nullptr;
         });
@@ -389,27 +564,161 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
 }
 
 /**
- * Estimate temporary query-generation memory from the  mean fragment length.
- * Use the estimate to choose a batch size within the memory budget.
+ * Account for bounded rank scratch and retained pair descriptors in a wave.
+ * Each query owns a separate permit for its exact packed output allocation.
  */
 template<packed_sequence_config Configuration>
 [[nodiscard]] std::uint64_t estimate_query_pair_peak_bytes(
-    const bioseq::sequences::generation::generator_params& params) noexcept {
-    using traits = typename compact_sequence_range<Configuration>::traits;
-    const std::uint64_t mean = static_cast<std::uint64_t>(
-        std::max<std::size_t>(1, params.fragment_length_mean));
-    const std::uint64_t query_units =
-        mean / traits::letters_per_unit + static_cast<std::uint64_t>(mean % traits::letters_per_unit != 0u);
-    const std::uint64_t query_bytes =
-        bioseq::common::saturating_mul(query_units, sizeof(typename traits::storage_unit));
-    const std::uint64_t rank_scratch =
-        bioseq::common::saturating_mul(mean, 2u);
-    return bioseq::common::saturating_add(query_bytes, rank_scratch);
+    const bioseq::sequences::generation::generator_params&) noexcept {
+    using generator_type = bioseq::sequences::generation::sequence_generator<Configuration>;
+    return 2u * bioseq::simd::sequence_rank_io_chunk_capacity
+        + sizeof(typename generator_type::query_target_pair);
 }
 
 }  // namespace bioseq::sequences::generation::pg
 
 export namespace bioseq::sequences::generation::pg::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+    .support = "random_support",
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
+/**
+ * @brief Generate a native random sequence with an inferred or explicit alphabet.
+ * Length bounds count symbols; storage_bits selects packing independently.
+ * NULL max_length selects min_length. With no mean, zero stddev samples uniformly
+ * within differing bounds; positive stddev samples a normal length at the midpoint.
+ * An explicit mean with zero stddev gives a constant. Lengths are rounded and
+ * clamped to the inclusive bounds.
+ * @param alphabet Registered alphabet, or NULL for INSERT/cast inference.
+ * @param storage_bits Build-admitted packing width; defaults to the inferred width or 64.
+ * @param min_length Inclusive minimum symbol count; NULL selects 1000; zero is supported.
+ * @param max_length Inclusive maximum symbol count; NULL selects min_length.
+ * @param length_mean Finite mean; NULL selects uniform sampling at zero stddev,
+ * or midpoint-centered normal sampling when stddev is positive.
+ * @param length_stddev Finite nonnegative standard deviation; NULL or omitted selects zero.
+ * @param seed Optional reproducible call-site stream seed.
+ * @return A sequence in the resolved native layout.
+ */
+std::optional<Datum> random_seq(
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::string> alphabet,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int32_t> storage_bits,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"1000"}})]] std::optional<std::int64_t> min_length,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int64_t> max_length,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<double> length_mean,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0"}})]] std::optional<double> length_stddev,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int64_t> seed,
+    bioseq::postgres::support::function_call_context call) {
+    bioseq::postgres::random::request request{
+        .kind = bioseq::postgres::random::request_kind::sequence,
+        .alphabet = std::move(alphabet), .storage_bits = storage_bits,
+        .minimum = min_length, .maximum = max_length, .mean = length_mean, .stddev = length_stddev,
+        .seed = seed.transform([](std::int64_t value) { return static_cast<std::uint64_t>(value); })};
+    return bioseq::postgres::random::generate_scalar(std::move(request), call);
+}
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+    .support = "random_support",
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
+/**
+ * @brief Mutate a sequence while preserving its alphabet, packing width and CIGAR space.
+ * CIGAR edits act on logical coordinates and keep adjacent runs canonical.
+ * @param source Native input sequence; NULL returns NULL.
+ * @param substitution_rate Probability of replacing a visited source symbol.
+ * @param insertion_rate Probability of inserting after a visited source symbol.
+ * @param deletion_rate Probability of deleting following source symbols.
+ * @param insertion_length_mean Mean inserted event length before rounding and clamping to zero.
+ * @param deletion_length_mean Mean deleted event length before rounding and clamping to zero.
+ * @param insertion_length_stddev Nonnegative inserted event length deviation.
+ * @param deletion_length_stddev Nonnegative deleted event length deviation.
+ * @param seed Optional reproducible call-site stream seed.
+ * @return Mutated native output, or NULL for a NULL source.
+ */
+std::optional<Datum> random_mutate(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]] std::optional<Datum> source,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0.01"}})]] std::optional<double> substitution_rate,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0.0005"}})]] std::optional<double> insertion_rate,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0.0005"}})]] std::optional<double> deletion_rate,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"2"}})]] std::optional<double> insertion_length_mean,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"2"}})]] std::optional<double> deletion_length_mean,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"1"}})]] std::optional<double> insertion_length_stddev,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"1"}})]] std::optional<double> deletion_length_stddev,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int64_t> seed,
+    bioseq::postgres::support::function_call_context call) {
+    bioseq::postgres::random::request request{
+        .kind = bioseq::postgres::random::request_kind::mutation,
+        .seed = seed.transform([](std::int64_t value) { return static_cast<std::uint64_t>(value); }),
+        .source = source};
+    request.mutation.substitution_rate = substitution_rate.value_or(0.01);
+    request.mutation.insertion_rate = insertion_rate.value_or(0.0005);
+    request.mutation.deletion_rate = deletion_rate.value_or(0.0005);
+    request.mutation.insertion_length_mean = insertion_length_mean.value_or(2.0);
+    request.mutation.deletion_length_mean = deletion_length_mean.value_or(2.0);
+    request.mutation.insertion_length_stddev = insertion_length_stddev.value_or(1.0);
+    request.mutation.deletion_length_stddev = deletion_length_stddev.value_or(1.0);
+    return bioseq::postgres::random::generate_scalar(std::move(request), call);
+}
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+    .support = "random_support",
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::pg::text})]]
+/**
+ * @brief Generate a parser-compatible header without a record marker or newline.
+ * Length bounds count the alphanumeric component; structured formats add grammar
+ * bytes. NULL or auto selects plain output. Length sampling follows random_seq.
+ * @param header_format Structured header grammar, default plain.
+ * @param min_length Inclusive component minimum, at least one; NULL selects 16.
+ * @param max_length Inclusive component maximum; NULL selects min_length.
+ * @param length_mean Finite mean; NULL selects uniform sampling at zero stddev,
+ * or midpoint-centered normal sampling when stddev is positive.
+ * @param length_stddev Finite nonnegative component-length deviation; NULL or omitted selects zero.
+ * @param seed Optional reproducible call-site stream seed.
+ * @return Header text suitable for the selected bioseq.load parser.
+ */
+std::optional<Datum> random_header(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::custom_type<"bioseq.header_format">,
+        .default_value = bioseq::sql::checked_sql{"'plain'"}})]] std::optional<Datum> header_format,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"16"}})]] std::optional<std::int64_t> min_length,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int64_t> max_length,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<double> length_mean,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"0"}})]] std::optional<double> length_stddev,
+    [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]] std::optional<std::int64_t> seed,
+    bioseq::postgres::support::function_call_context call) {
+    bioseq::postgres::random::request request{
+        .kind = bioseq::postgres::random::request_kind::header,
+        .minimum = min_length, .maximum = max_length, .mean = length_mean, .stddev = length_stddev,
+        .seed = seed.transform([](std::int64_t value) { return static_cast<std::uint64_t>(value); }),
+        .header_format = header_format};
+    return bioseq::postgres::random::generate_scalar(std::move(request), call);
+}
+
+/** Bind direct sequence casts and charge scalar generation's real planner cost. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::pg::internal})]]
+Datum random_support(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::pg::internal})]] Datum request_datum) {
+    return bioseq::postgres::random::planner_support(request_datum);
+}
+
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -423,6 +732,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
  * @param sequence_bp_size Nonnegative length of each sequence in base pairs.
  * @param alphabet Supported biological alphabet name.
  * @param seed Random seed, defaulting to 42.
+ * @param quality_column Optional quality column name; its length matches seq.
+ * @param quality_alphabet Registered quality alphabet, default phred63.
  * @return Created table OID.
  *
  * ```sql
@@ -445,7 +756,11 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         [[bioseq_sql::param({
             .default_value = bioseq::sql::checked_sql{"42"},
         })]]
-        std::optional<std::int64_t> seed) {
+        std::optional<std::int64_t> seed,
+        [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]]
+        std::optional<std::string> quality_column,
+        [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'phred63'"}})]]
+        std::optional<std::string> quality_alphabet) {
     if (!table_name.has_value() || !n_sequences.has_value()
         || !sequence_bp_size.has_value()) {
         bioseq::postgres::support::raise_sql_error(
@@ -499,161 +814,51 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
     const std::uint64_t seed_value = static_cast<std::uint64_t>(
         seed.value_or(std::int64_t{42}));
 
-    Oid created_relation = InvalidOid;
-    supported_biological_alphabets::dispatch_alphabet_by_code(*selected_alphabet,
-        [&created_relation, &table_name, &resolved_alphabet, sequence_bp, sequence_count, seed_value]<class Alphabet>() {
-        using Configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
-        using Traits = typename compact_sequence_range<Configuration>::traits;
-        constexpr auto alphabet_code = supported_biological_alphabets::template index_of<Alphabet>();
-        constexpr auto storage_width = sizeof(typename Traits::storage_unit);
-        constexpr auto letters_per_unit = Traits::letters_per_unit;
-        constexpr auto fragment_symbols = k_fragment_storage_units * letters_per_unit;
-        static constexpr auto cdf = make_integer_cdf(base_alphabet_probability<Alphabet>::probability());
-        sample_table_write_context context{};
-        std::exception_ptr failure;
-        try {
-            const std::string columns = "(id BIGSERIAL PRIMARY KEY, seq bioseq.seq('"
-                + resolved_alphabet + "', 64)) USING bioseq;";
-            const Oid parent_relid = create_sample_relation(
-                "bioseq.create_sample_table",
-                *table_name,
-                columns.c_str());
-            open_sample_relation_for_writes(
-                context, parent_relid);
-
-            constexpr std::int16_t seq_attno = 2;
-            const sequence_size_t total_bp =
-                static_cast<sequence_size_t>(sequence_bp);
-            const std::uint16_t last_fragment_padding =
-                static_cast<std::uint16_t>(
-                    sequence_bp == 0
-                        ? 0
-                        : ((total_bp + letters_per_unit - 1)
-                            / letters_per_unit)
-                            * letters_per_unit - total_bp);
-
-            for (std::int32_t seq_no = 0;
-                 seq_no < sequence_count;
-                 ++seq_no) {
-                /* Generate native packed letters directly in the next storage fragment. */
-                auto producer =
-                    [seed_value, seq_no, sequence_count, total_bp, last_fragment_padding](
-                        std::size_t frag_no,
-                        bioseq::pg_types::seq* dst,
-                        MemoryContext /*scratch*/,
-                        bool is_last) {
-                        const sequence_size_t frag_global_bp_start =
-                            static_cast<sequence_size_t>(frag_no)
-                            * static_cast<sequence_size_t>(fragment_symbols);
-                        const sequence_size_t this_fragment_bp =
-                            is_last
-                                ? (total_bp - frag_global_bp_start)
-                                : static_cast<sequence_size_t>(
-                                    fragment_symbols);
-                        dst->bp_size =
-                            static_cast<
-                                bioseq::pg_types::seq::bp_size_t>(
-                                    this_fragment_bp);
-                        dst->padding_letters =
-                            is_last
-                                ? last_fragment_padding
-                                : std::uint16_t{0};
-                        auto* units =
-                            reinterpret_cast<std::uint64_t*>(
-                                dst->data);
-                        const auto unit_count = this_fragment_bp / letters_per_unit
-                            + static_cast<sequence_size_t>(this_fragment_bp % letters_per_unit != 0u);
-                        generate_units_cpu_for_sequence<Traits>(
-                            std::span<std::uint64_t>{units, static_cast<std::size_t>(unit_count)},
-                            total_bp, static_cast<std::uint64_t>(seq_no),
-                            static_cast<std::uint64_t>(sequence_count), cdf, seed_value,
-                            static_cast<std::uint64_t>(frag_no) * k_fragment_storage_units);
-                    };
-
-                auto pending_source =
-                    bioseq::postgres::support::invoke_pg_as_cpp(
-                        [&context, total_bp,
-                         last_fragment_padding, &producer] {
-                            return bioseq::storage::
-                                bioseq_default_storage_manager::
-                                    insert_sequence_streamed(
-                                        context.parent_relid,
-                                        context.main_storage_id,
-                                        context.parent_rel->rd_locator.dbOid,
-                                        context.parent_rel->rd_locator.spcOid,
-                                        context.parent_rel->rd_locator.relNumber,
-                                        seq_attno,
-                                        context.parent_td,
-                                        alphabet_code,
-                                        storage_width,
-                                        total_bp,
-                                        last_fragment_padding,
-                                        context.cap_bytes,
-                                        context.caches,
-                                        producer);
-                        });
-                const bioseq::storage::sequence_locator locator =
-                    pending_source.locator();
-                bioseq::pg_types::seq* const stub =
-                    bioseq::postgres::support::invoke_pg_as_cpp(
-                        [&context, total_bp,
-                         last_fragment_padding, &locator] {
-                            return bioseq::storage::
-                                alloc_locator_stub_in(
-                                    get_column_write_per_tuple_context(
-                                        context.write_state),
-                                    alphabet_code,
-                                    storage_width,
-                                    last_fragment_padding,
-                                    total_bp,
-                                    locator);
-                        });
-
-                bioseq::postgres::support::invoke_pg_as_cpp(
-                    [&context, stub, seq_no] {
-                        bioseq::postgres::support::pg_slot_datums_view
-                            slot_values{context.slot};
-                        slot_values.set(
-                            1,
-                            static_cast<std::int64_t>(seq_no + 1));
-                        slot_values.set_raw(
-                            2,
-                            bioseq::postgres::support::pg_datum::from_pointer(
-                                stub));
-                        slot_values.store_virtual();
-                        Datum write_values[2] = {
-                            context.slot->tts_values[0],
-                            context.slot->tts_values[1],
-                        };
-                        bool write_nulls[2] = {false, false};
-                        (void) write_column_row(
-                            context.write_state,
-                            write_values,
-                            write_nulls);
-                    });
-                bioseq::postgres::support::invoke_pg_as_cpp(
-                    [&pending_source] {
-                        pending_source.publish_after_parent_row();
-                    });
+    static constexpr std::array reserved_names{std::string_view{"id"}, std::string_view{"seq"}};
+    const auto quality = resolve_sample_quality_column(quality_column, quality_alphabet, reserved_names);
+    const auto quality_seed = bioseq::common::splitmix64(seed_value ^ 0x7175616c697479ULL);
+    sample_table_write_context context{};
+    std::exception_ptr failure;
+    try {
+        const std::string columns = "(id BIGSERIAL PRIMARY KEY, seq bioseq.seq('"
+            + resolved_alphabet + "', 64)" + (quality ? quality->definition : "") + ") USING bioseq;";
+        const auto relation = create_sample_relation("bioseq.create_sample_table", *table_name, columns.c_str());
+        open_sample_relation_for_writes(context, relation);
+        for (std::int32_t sequence_index = 0; sequence_index < sequence_count; ++sequence_index) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] { CHECK_FOR_INTERRUPTS(); });
+            auto sequence = prepare_random_sample_source(context, *selected_alphabet, 2,
+                static_cast<sequence_size_t>(sequence_bp), seed_value,
+                static_cast<std::uint64_t>(sequence_index));
+            std::optional<generated_sample_source> scores;
+            if (quality) {
+                scores.emplace(prepare_random_sample_source(context, quality->alphabet_code, 3,
+                    static_cast<sequence_size_t>(sequence_bp), quality_seed,
+                    static_cast<std::uint64_t>(sequence_index)));
             }
-        } catch (...) {
-            failure = std::current_exception();
+            bioseq::postgres::support::invoke_pg_as_cpp([&context, &sequence, &scores, sequence_index] {
+                bioseq::postgres::support::pg_slot_datums_view values{context.slot};
+                values.set(1, static_cast<std::int64_t>(sequence_index) + 1);
+                values.set_raw(2, bioseq::postgres::support::pg_datum::from_pointer(sequence.value));
+                if (scores) values.set_raw(3, bioseq::postgres::support::pg_datum::from_pointer(scores->value));
+                values.store_virtual();
+                (void)write_column_row(context.write_state, context.slot->tts_values, context.slot->tts_isnull);
+            });
+            bioseq::postgres::support::invoke_pg_as_cpp([&sequence, &scores] {
+                sequence.publication.publish_after_parent_row();
+                if (scores) scores->publication.publish_after_parent_row();
+            });
         }
-
-        try {
-            close_sample_relation_after_writes(
-                context, failure == nullptr);
-        } catch (...) {
-            if (failure == nullptr) {
-                failure = std::current_exception();
-            }
-        }
-        if (failure != nullptr) {
-            std::rethrow_exception(failure);
-        }
-        created_relation = context.parent_relid;
-    });
-    return created_relation;
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    try {
+        close_sample_relation_after_writes(context, failure == nullptr);
+    } catch (...) {
+        if (failure == nullptr) failure = std::current_exception();
+    }
+    if (failure != nullptr) std::rethrow_exception(failure);
+    rebuild_sample_primary_key(context.parent_relid);
+    return context.parent_relid;
 }
 
 [[bioseq_sql::function({
@@ -679,6 +884,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
  * @param reverse_complement_rate Probability of reverse-complementing a query.
  * @param seed Random seed.
  * @param alphabet Native biological alphabet; proteins use forward ground truth.
+ * @param quality_column Optional quality column name; its length matches the final mutated query.
+ * @param quality_alphabet Registered quality alphabet, default phred63.
  * @return Created table OID after publishing each query and target source.
  *
  * ```sql
@@ -705,7 +912,11 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         std::optional<double> reverse_complement_rate,
         std::optional<std::int64_t> seed,
         [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'dna4'"}})]]
-        std::optional<std::string> alphabet) {
+        std::optional<std::string> alphabet,
+        [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"NULL"}})]]
+        std::optional<std::string> quality_column,
+        [[bioseq_sql::param({.default_value = bioseq::sql::checked_sql{"'phred63'"}})]]
+        std::optional<std::string> quality_alphabet) {
     namespace gen_ns = bioseq::sequences::generation;
 
     if (!table_name.has_value()) {
@@ -782,13 +993,26 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         params.seed = static_cast<std::uint64_t>(*seed);
     }
 
+    if (!std::isfinite(params.fragment_length_stddev) || params.fragment_length_stddev < 0.0
+        || !gen_ns::validate_mutation_parameters(params)) {
+        bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
+            {.message = "sample length deviations must be finite and nonnegative, and mutation rates must be finite probabilities"});
+    }
+    static constexpr std::array reserved_names{
+        std::string_view{"id"}, std::string_view{"query"}, std::string_view{"target"},
+        std::string_view{"truth_target_start"}, std::string_view{"truth_target_end"},
+        std::string_view{"is_reverse"}, std::string_view{"effective_error_rate"},
+        std::string_view{"original_query_length"}};
+    const auto quality = resolve_sample_quality_column(quality_column, quality_alphabet, reserved_names);
+    const auto quality_seed = bioseq::common::splitmix64(params.seed ^ 0x7175616c697479ULL);
+
     const std::string resolved_alphabet = alphabet.value_or(std::string{"dna4"});
     const auto selected_alphabet = supported_biological_alphabets::try_index_of_name(resolved_alphabet.c_str());
     if (!selected_alphabet) bioseq::postgres::support::raise_sql_error(ERRCODE_INVALID_PARAMETER_VALUE,
         {.message = "bioseq.create_query_target_sample_table requires a supported biological alphabet"});
     Oid created_relation = InvalidOid;
     supported_biological_alphabets::dispatch_alphabet_by_code(*selected_alphabet,
-        [&created_relation, &table_name, &resolved_alphabet, &params, &reverse_complement_rate]<class Alphabet>() {
+        [&created_relation, &table_name, &resolved_alphabet, &params, &reverse_complement_rate, &quality, quality_seed]<class Alphabet>() {
         using Configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
         constexpr auto alphabet_code = supported_biological_alphabets::template index_of<Alphabet>();
         constexpr auto storage_width = sizeof(std::uint64_t);
@@ -804,7 +1028,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
             const std::string columns = "(id BIGSERIAL PRIMARY KEY, query bioseq.seq('"
                 + resolved_alphabet + "', 64), target bioseq.seq('" + resolved_alphabet
                 + "', 64), truth_target_start BIGINT, truth_target_end BIGINT, is_reverse BOOLEAN, "
-                  "effective_error_rate DOUBLE PRECISION, original_query_length BIGINT) USING bioseq;";
+                  "effective_error_rate DOUBLE PRECISION, original_query_length BIGINT"
+                + (quality ? quality->definition : "") + ") USING bioseq;";
             const Oid parent_relid = create_sample_relation(
                 "bioseq.create_query_target_sample_table",
                 *table_name,
@@ -820,16 +1045,30 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
 
             for (std::size_t first = 0;
                  first < params.fragment_count;) {
-                auto wave =
-                    bioseq::parallelism::try_reserve_budgeted_wave(
-                        4096u,
+                auto requested = static_cast<unsigned>(
+                    std::min<std::size_t>(4096u, params.fragment_count - first));
+                bioseq::parallelism::budgeted_wave wave;
+                std::vector<typename decltype(generator)::query_target_pair> batch;
+                std::size_t batch_count{};
+                for (;;) {
+                    wave = bioseq::parallelism::try_reserve_budgeted_wave(requested,
                         estimate_query_pair_peak_bytes<Configuration>(params));
-                const std::size_t batch_count =
-                    std::min<std::size_t>(
-                        wave.is_admitted ? wave.fanout : 1u,
-                        params.fragment_count - first);
-                auto batch = generator.generate_fragment_pairs(
-                    reference, first, batch_count);
+                    if (!wave.is_admitted) {
+                        bioseq::postgres::support::raise_sql_error(ERRCODE_OUT_OF_MEMORY,
+                            {.message = "query sample generation could not reserve its batch scratch"});
+                    }
+                    batch_count = wave.fanout;
+                    batch = generator.generate_fragment_pairs(reference, first, batch_count);
+                    if (batch.size() == batch_count) break;
+                    // Failed output owners have been released; retry the same deterministic
+                    // prefix with less retained output and scratch memory.
+                    wave = {};
+                    if (batch_count == 1u) {
+                        bioseq::postgres::support::raise_sql_error(ERRCODE_OUT_OF_MEMORY,
+                            {.message = "query sample generation could not admit or materialize one row"});
+                    }
+                    requested = static_cast<unsigned>(batch_count / 2u);
+                }
 
                 for (std::size_t local = 0;
                      local < batch.size();
@@ -866,6 +1105,11 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                             context.main_storage_id,
                             context.cap_bytes,
                             context.caches);
+                    std::optional<generated_sample_source> scores;
+                    if (quality) {
+                        scores.emplace(prepare_random_sample_source(context, quality->alphabet_code, 9,
+                            query_total_bp, quality_seed, first + local));
+                    }
                     const bioseq::storage::sequence_locator query_locator =
                         query_source.locator();
                     const bioseq::storage::sequence_locator target_locator =
@@ -901,7 +1145,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                             });
 
                     bioseq::postgres::support::invoke_pg_as_cpp(
-                        [&context, &pair, first, local,
+                        [&context, &pair, &scores, first, local,
                          query_stub, target_stub] {
                             bioseq::postgres::support::pg_slot_datums_view
                                 slot_values{context.slot};
@@ -932,27 +1176,22 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                                 8,
                                 static_cast<std::int64_t>(
                                     pair.original_query_length));
-                            slot_values.store_virtual();
-
-                            Datum write_values[8];
-                            bool write_nulls[8];
-                            for (int index = 0; index < 8; ++index) {
-                                write_values[index] =
-                                    context.slot->tts_values[index];
-                                write_nulls[index] = false;
+                            if (scores) {
+                                slot_values.set_raw(9,
+                                    bioseq::postgres::support::pg_datum::from_pointer(scores->value));
                             }
-                            (void) write_column_row(
-                                context.write_state,
-                                write_values,
-                                write_nulls);
+                            slot_values.store_virtual();
+                            (void) write_column_row(context.write_state,
+                                context.slot->tts_values, context.slot->tts_isnull);
                         });
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [&query_source] {
                             query_source.publish_after_parent_row();
                         });
                     bioseq::postgres::support::invoke_pg_as_cpp(
-                        [&target_source] {
+                        [&target_source, &scores] {
                             target_source.publish_after_parent_row();
+                            if (scores) scores->publication.publish_after_parent_row();
                         });
                 }
                 first += batch_count;
@@ -972,6 +1211,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         if (failure != nullptr) {
             std::rethrow_exception(failure);
         }
+        rebuild_sample_primary_key(context.parent_relid);
         created_relation = context.parent_relid;
     });
     return created_relation;

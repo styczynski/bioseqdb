@@ -742,7 +742,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
                           "sv int, seq bioseq.seq('dna4',64)) USING bioseq;");
         REQUIRE(it::query_scalar_int(ctx,
             "SELECT bioseq.load('uniprot_records'::regclass, '" + path +
-            "', header_format => 'uni_prot');") == 1);
+            "', header_format => 'uniprot');") == 1);
         const auto rows = it::query_rows(ctx,
             "SELECT accession, organism_name, sv FROM uniprot_records");
         REQUIRE(rows.size() == 1);
@@ -846,7 +846,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
                           "seq bioseq.seq('dna4',64)) USING bioseq;");
         REQUIRE(it::query_scalar_int(ctx,
             "SELECT bioseq.load('load_defaulted_fields'::regclass, '" + path +
-            "', header_format => 'uni_prot');") == 1);
+            "', header_format => 'uniprot');") == 1);
         const auto rows = it::query_rows(ctx,
             "SELECT accession, score, (ts IS NOT NULL)::text FROM load_defaulted_fields");
         REQUIRE(rows.size() == 1);
@@ -863,7 +863,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
                           "seq bioseq.seq('dna4',64)) USING bioseq;");
         const auto err = it::sql_error(ctx,
             "SELECT bioseq.load('load_missing_default'::regclass, '" + path +
-            "', header_format => 'uni_prot');");
+            "', header_format => 'uniprot');");
         REQUIRE(err.sqlstate == "42P16");
         REQUIRE(err.contains("NOT NULL"));
         REQUIRE(err.contains("no default"));
@@ -877,7 +877,7 @@ TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch",
                           "seq bioseq.seq('dna4',64)) USING bioseq;");
         const auto err = it::sql_error(ctx,
             "SELECT bioseq.load('load_bad_coercion'::regclass, '" + path +
-            "', header_format => 'uni_prot');");
+            "', header_format => 'uniprot');");
         REQUIRE(err.sqlstate == "22P02");                   // invalid_text_representation
         REQUIRE(err.contains("invalid input syntax"));      // integer input error
         // Record and column details are in libpq's PG_DIAG_CONTEXT field.

@@ -124,6 +124,8 @@ struct collected_entity {
     std::string cpp_return_type;
     std::string resolved_sql_type;
     std::string initializer_expression;
+    /// Validated labels resolved from an enum type's constexpr source authority.
+    std::vector<std::string> enum_labels;
     std::vector<option_value> options;
     std::vector<dependency_reference> dependencies;
     std::vector<routine_parameter> parameters;

@@ -50,6 +50,7 @@ bioseq_add_postgresql_extension(
     TBB::tbb
     lfreist-hwinfo::hwinfo
     kseq++::kseq++
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
     bioseq_bench_framework
   SHARED_MODULE_LIBS
     bioseq_modules_nopg

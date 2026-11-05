@@ -118,6 +118,20 @@ struct identifier_benchmark_measurement {
     std::size_t parsed_field_bytes = 0;
 };
 
+/** Fixed-size native generation workload; alphabet is a benchmark parameter. */
+struct random_generation_input {
+    std::size_t rows{};
+    std::size_t length{};
+    std::uint64_t seed{};
+};
+
+/** Native output evidence, with separate 32-bit hash metrics for exact JSON comparison. */
+struct random_generation_measurement {
+    std::size_t rows{};
+    std::size_t symbols{};
+    std::uint64_t checksum{};
+};
+
 /// Sequence types for comparing immediate, and delayed copying. Packed results
 /// use the same memory budget and materializer as the storage code.
 using lazy_expression_range = compact_sequence_range<benchmark_alphabet>;

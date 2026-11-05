@@ -114,7 +114,7 @@ void arm_load_failure(std::int32_t stage) {
  * Finish fragment and parent writes before updating indexes configured for insertion.
  * @param[in] target_table Target OID. SQL NULL is rejected.
  * @param[in] file_path Input path. SQL NULL is rejected.
- * @param[in] header_format Parser name. NULL or omitted means `auto`.
+ * @param[in] header_format Native header-format enum. NULL or omitted means `auto`.
  * @param[in] columns Optional header-to-column mappings.
  * @return Number of complete records inserted, as SQL BIGINT.
  * @throws postgres_error For invalid input, unsupported tables, read/write errors or index failures.
@@ -134,8 +134,9 @@ void arm_load_failure(std::int32_t stage) {
                                 })]] std::optional<Oid> target_table,
                                 std::optional<std::string> file_path,
                                 [[bioseq_sql::param({
+                                    .sql_type = bioseq::sql::custom_type<"bioseq.header_format">,
                                     .default_value = bioseq::sql::checked_sql{"'auto'"},
-                                })]] std::optional<std::string> header_format,
+                                })]] std::optional<Datum> header_format,
                                 [[bioseq_sql::param({
                                     .sql_type = bioseq::sql::custom_type<"bioseq.column_mapping[]">,
                                     .default_value = bioseq::sql::checked_sql{"NULL"},
@@ -150,7 +151,6 @@ void arm_load_failure(std::int32_t stage) {
     }
     const Oid relid = *target_table;
     const char* const path = file_path->c_str();
-    const char* const fmt_arg = header_format.has_value() ? header_format->c_str() : "auto";
 
     // Identify FASTA or FASTQ input and repor detection errors to PostgreSQL.
     auto kind_or = bioseq::io::detect_sequence_file_kind(path);
@@ -159,12 +159,8 @@ void arm_load_failure(std::int32_t stage) {
     }
     const auto kind = *kind_or;
 
-    // Resolve the requested header  parser.
-    auto fmt_or = bioseq::io::identifier_parser::parse_header_format_name(fmt_arg);
-    if (!fmt_or) {
-        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, fmt_or.error());
-    }
-    const bioseq::io::identifier_parser::header_format requested_fmt = *fmt_or;
+    const auto requested_fmt = bioseq::storage::load_pg::decode_header_format(
+        header_format, bioseq::io::identifier_parser::header_format::automatic);
 
     // Read optional mappings from the SQL column_mapping array.
     std::vector<bioseq::io::identifier_parser::user_column_mapping> user_maps;

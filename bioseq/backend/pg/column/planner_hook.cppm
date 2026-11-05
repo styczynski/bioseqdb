@@ -26,6 +26,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.vectorization.execution;
 import bioseq.postgres.vectorization.aggregator_node;
+import bioseq.postgres.sequences.random;
 
 using namespace bioseq::postgres::support;
 
@@ -39,11 +40,10 @@ struct plan_tree_mutator_context
 	bool vectorized_aggregation;
 };
 
-/** @brief Check whether a plan is BioseqSliceProject.
- * Its output contains ordinary scalar Datums, so aggregates above it must
- * keep scalar execution. The regivtered CustomName identifies copied plans.
+/** @brief Check scalar projection providers that cannot feed vector aggregates.
+ * Their ordinary Datums require scalar execution; CustomName survives copied plans.
  */
-[[nodiscard]] static inline bool is_bioseq_slice_project_scan(
+[[nodiscard]] static inline bool is_bioseq_scalar_projection_scan(
 		const Plan* plan) noexcept {
 	if (plan == nullptr || !IsA(plan, CustomScan))
 	{
@@ -52,8 +52,8 @@ struct plan_tree_mutator_context
 	const CustomScan* custom_scan = reinterpret_cast<const CustomScan*>(plan);
 	return custom_scan->methods != nullptr
 		&& custom_scan->methods->CustomName != nullptr
-		&& strcmp(custom_scan->methods->CustomName,
-			"BioseqSliceProject") == 0;
+		&& (strcmp(custom_scan->methods->CustomName, "BioseqSliceProject") == 0
+			|| strcmp(custom_scan->methods->CustomName, "BioseqRandom") == 0);
 }
 
 /** @brief Check the mmsearch expression owned by a BioseqScan.
@@ -264,12 +264,12 @@ struct plan_tree_mutator {
 			if (!bioseq::settings::vectorization::enabled)
 				return pg_plan_mutation::descend();
 
-			/* SliceProject returns scalar values. Keep this aggregate and its
+			/* Projection providers return scalar values. Keep this aggregate and its
 			 * BioseqScan child in scalar mode so vector functions cannot treat
 			 * ordinary Datums as vector_column pointers. Restore the surrounding
 			 * traversal mode after visiting the children. */
-			if (is_bioseq_slice_project_scan(agg_node->plan.lefttree)) {
-				bioseq_log<logging_level::debug>("[bioseq] pg: plan_tree_mutator() Agg has BioseqSliceProject child -- keeping scalar aggregate");
+			if (is_bioseq_scalar_projection_scan(agg_node->plan.lefttree)) {
+				bioseq_log<logging_level::debug>("[bioseq] pg: plan_tree_mutator() Agg has a scalar projection child -- keeping scalar aggregate");
 				const bool saved_vectorized_aggregation =
 					plan_tree_context.vectorized_aggregation;
 				plan_tree_context.vectorized_aggregation = false;
@@ -493,6 +493,7 @@ column_planner_hook(Query* parse,
 	/* Check mmsearch options before planning can fold a volatile SQL wrapper
 	 * into a Const. The third argument must stay fixed for the statement. */
 	bioseq_validate_raw_mmsearch_options(parse);
+	bioseq::postgres::random::bind_random_sequence_types(parse);
 
 	PlannedStmt* stmt;
 	if (previous_planner_hook) {
@@ -517,6 +518,7 @@ column_planner_hook(Query* parse,
 	 * rescans keep the same owner. Ambiguous, ownership must raise a planning
 	 * error outside the optional vectorization fallback. */
 	bioseq_finalize_match_helper_bindings(stmt);
+	bioseq::postgres::random::rewrite_random_projections(*stmt, cursor_options);
 
 	/* Clear the parallel-mode flag for possible CREATE TABLE AS queries,
   * which may write through the columnar table access method. */

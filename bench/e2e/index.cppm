@@ -18319,6 +18319,284 @@ void cleanup_sort_scan_input(
     };
 }
 
+/** Shared session and dimensions for native random-generation SQL comparisons. */
+struct random_generation_input {
+    std::shared_ptr<it::connection_test_context> conn;
+    std::string table;
+    std::string alphabet;
+    std::size_t row_count = 0;
+    std::size_t sequence_length = 0;
+    std::int64_t seed = 42;
+    std::string constant_preparation_sql;
+    std::string constant_reference_literal;
+    std::string constant_query_literal;
+};
+
+/** SQL prepared outside timing; the constant-source variant is diagnostic only. */
+struct random_generation_preparation {
+    std::string create_sql;
+    std::string generate_sql;
+    std::string execution_sql;
+    bool paired = false;
+    bool constant_source = false;
+    bool expect_random_scan = false;
+};
+
+/** Independently checked rows, selected plan, and exact executed SQL. */
+struct random_generation_output {
+    std::int64_t row_count = 0;
+    std::int64_t valid_rows = 0;
+    std::int64_t shared_references = 0;
+    bool correctness_accepted = false;
+    bool custom_scan_taken = false;
+    bool custom_scan_expected = false;
+    bool paired = false;
+    bool constant_source = false;
+    std::uint64_t measured_region_ns = 0;
+    std::string create_sql;
+    std::string generate_sql;
+    std::vector<std::string> plan;
+};
+
+/** Reserve through the benchmark framework for the largest shared-reference case. */
+[[nodiscard]] run_constraints random_generation_estimate(
+    std::string_view, std::string_view, simdjson::dom::element data) {
+    const auto rows = static_cast<std::size_t>(jint(data, "row_count", 1024));
+    const auto length = static_cast<std::size_t>(jint(data, "sequence_length", 150));
+    return {.base_memory = 64u * 1024u * 1024u,
+            .extra_memory = rows * (5u * length + 256u)};
+}
+
+/** Validate the shared alphabet registry and prepare a reproducible constant source. */
+[[nodiscard]] random_generation_input build_random_generation_input(
+    std::string_view, std::string_view test_case_name,
+    simdjson::dom::element data, const run_constraints&) {
+    random_generation_input input;
+    input.alphabet = jstr(data, "alphabet", "dna4");
+    const auto rows = jint(data, "row_count", 1024);
+    const auto length = jint(data, "sequence_length", 150);
+    if (!supported_biological_alphabets::try_index_of_name(input.alphabet.c_str())
+        || rows < 1 || rows > 100'000'000 || length < 1
+        || length > std::numeric_limits<std::int64_t>::max() / 4) {
+        bioseq_log<logging_level::error>(
+            "[bench_random_generation] invalid dimensions or alphabet in {}", test_case_name);
+        std::abort();
+    }
+    input.row_count = static_cast<std::size_t>(rows);
+    input.sequence_length = static_cast<std::size_t>(length);
+    input.seed = jint(data, "seed", 42);
+    input.table = "bench_random_" + sort_scan_identifier(test_case_name);
+    input.conn = std::make_shared<it::connection_test_context>();
+    it::exec_sql(*input.conn,
+        "SET bioseq.index.insert_maintenance.enabled = off; "
+        "SET bioseq.index.async_persistence.enabled = off; "
+        "SET bioseq.index.recompute_async_persistence.enabled = off; "
+        "SET bioseq.planner.custom_scan.enabled = on; "
+        "SET bioseq.column_cache.enabled = on;");
+    input.constant_preparation_sql = fmt::format(
+        "WITH reference AS MATERIALIZED (SELECT bioseq.random_seq('{}', 64, "
+        "min_length => {}, seed => {}) AS seq) "
+        "SELECT quote_literal(seq::text), quote_literal(seq[0:{}]::text) FROM reference;",
+        input.alphabet, 4u * input.sequence_length, input.seed, input.sequence_length);
+    const auto literals = it::query_one(*input.conn, input.constant_preparation_sql);
+    if (literals.size() != 2u || !literals[0] || !literals[1]) {
+        bioseq_log<logging_level::error>(
+            "[bench_random_generation] constant source preparation failed for {}", test_case_name);
+        std::abort();
+    }
+    input.constant_reference_literal = *literals[0];
+    input.constant_query_literal = *literals[1];
+    return input;
+}
+
+/** Drop only this benchmark's fixture after a case or an interrupted iteration. */
+void cleanup_random_generation_input(
+    std::string_view, std::string_view, simdjson::dom::element,
+    const random_generation_input& input) {
+    if (input.conn) it::exec_sqlf(*input.conn, "DROP TABLE IF EXISTS {} CASCADE;", input.table);
+}
+
+/** Drop the old fixture and construct equivalent CREATE+generation statements untimed. */
+[[nodiscard]] random_generation_preparation prepare_random_generation_iteration(
+    std::string_view algorithm, const parameter_map& params,
+    const random_generation_input& input, std::size_t) {
+    random_generation_preparation preparation;
+    preparation.paired = algorithm == "query_target_sample" || algorithm == "insert_mutate";
+    preparation.constant_source = algorithm == "insert_mutate"
+        && param_string(params, "source", "column") == "constant";
+    preparation.expect_random_scan = algorithm == "insert_random" || preparation.constant_source;
+    const std::string vectorization = param_string(params, "vectorization", "on");
+    it::exec_sqlf(*input.conn, "DROP TABLE IF EXISTS {} CASCADE;", input.table);
+    it::exec_sqlf(*input.conn, "SET bioseq.vectorization.enabled = {};", vectorization);
+    // PostgreSQL samples the fragment positions once; mutation uses its own seeded stream.
+    it::exec_sql(*input.conn, "SELECT setseed(0.42);");
+    const std::string sequence_type = fmt::format("bioseq.seq('{}', 64)", input.alphabet);
+    const std::size_t reference_length = 4u * input.sequence_length;
+    if (algorithm == "sample_table") {
+        preparation.generate_sql = fmt::format(
+            "SELECT bioseq.create_sample_table('{}', {}, {}, '{}', {});",
+            input.table, input.row_count, input.sequence_length, input.alphabet, input.seed);
+    } else if (algorithm == "query_target_sample") {
+        preparation.generate_sql = fmt::format(
+            "SELECT bioseq.create_query_target_sample_table('{}', {}, {}, 0.0, {}, "
+            "0.01, 0.0005, 0.0005, 2.0, 2.0, 0.0, {}, '{}');",
+            input.table, input.row_count, input.sequence_length,
+            reference_length, input.seed, input.alphabet);
+    } else if (algorithm == "insert_random") {
+        preparation.create_sql = fmt::format(
+            "CREATE TABLE {} (id BIGSERIAL PRIMARY KEY, seq {}) USING bioseq;",
+            input.table, sequence_type);
+        preparation.generate_sql = fmt::format(
+            "INSERT INTO {} (id, seq) SELECT ordinal, bioseq.random_seq(min_length => {}, seed => {}) "
+            "FROM generate_series(1, {}) AS ordinal;",
+            input.table, input.sequence_length, input.seed, input.row_count);
+    } else if (algorithm == "insert_mutate") {
+        preparation.create_sql = fmt::format(
+            "CREATE TABLE {} (id BIGSERIAL PRIMARY KEY, query {}, target {}, "
+            "truth_target_start BIGINT, truth_target_end BIGINT, is_reverse BOOLEAN, "
+            "effective_error_rate DOUBLE PRECISION, original_query_length BIGINT) USING bioseq;",
+            input.table, sequence_type, sequence_type);
+        const std::string reference_expression = preparation.constant_source
+            ? fmt::format("{}::{}", input.constant_reference_literal, sequence_type)
+            : fmt::format("bioseq.random_seq('{}', 64, min_length => {}, seed => {})",
+                input.alphabet, reference_length, input.seed);
+        const std::string positions_sql = preparation.constant_source
+            ? fmt::format("SELECT ordinal AS id, 0::bigint AS start_position, "
+                "bioseq.random_mutate({}::{}, seed => {}) AS query FROM generate_series(1, {}) AS ordinal",
+                input.constant_query_literal, sequence_type, input.seed, input.row_count)
+            : fmt::format("SELECT ordinal AS id, floor(random() * {})::bigint AS start_position "
+                "FROM generate_series(1, {}) AS ordinal",
+                reference_length - input.sequence_length + 1u, input.row_count);
+        const std::string query_expression = preparation.constant_source
+            ? "positions.query"
+            : fmt::format("bioseq.random_mutate("
+                "reference.seq[positions.start_position:positions.start_position + {}], seed => {})",
+                input.sequence_length, input.seed);
+        preparation.generate_sql = fmt::format(
+            "INSERT INTO {} (id, query, target, truth_target_start, truth_target_end, "
+            "is_reverse, effective_error_rate, original_query_length) "
+            "WITH reference AS MATERIALIZED (SELECT {} AS seq), "
+            "positions AS MATERIALIZED ({}) "
+            "SELECT positions.id, {}, reference.seq, positions.start_position, "
+            "positions.start_position + {}, false, 0.011::double precision, {} "
+            "FROM reference CROSS JOIN positions;",
+            input.table, reference_expression, positions_sql,
+            query_expression, input.sequence_length, input.sequence_length);
+    } else {
+        bioseq_log<logging_level::error>("[bench_random_generation] unknown algorithm {}", algorithm);
+        std::abort();
+    }
+    // One simple-query request gives every variant one implicit transaction and commit.
+    preparation.execution_sql = preparation.create_sql + preparation.generate_sql;
+    return preparation;
+}
+
+/** Time one SQL request including DDL, generation, insertion, and its commit. */
+[[nodiscard]] random_generation_output measure_random_generation_iteration(
+    std::string_view, const parameter_map&, const random_generation_input& input,
+    random_generation_preparation& preparation) {
+    auto measured_scope = bioseq::instrumentation::region(k_measured_region);
+    it::exec_sql(*input.conn, preparation.execution_sql);
+    return {};
+}
+
+/** Check native values and shared-reference geometry, then explain without inserting twice. */
+void finalize_random_generation_iteration(
+    std::string_view algorithm, const parameter_map&, const random_generation_input& input,
+    random_generation_preparation& preparation, random_generation_output& output,
+    const bioseq::bench::framework::iteration_measurement_window& window) {
+    output.measured_region_ns = window.elapsed_ns;
+    output.paired = preparation.paired;
+    output.constant_source = preparation.constant_source;
+    output.custom_scan_expected = preparation.expect_random_scan;
+    output.row_count = it::query_scalar_int(*input.conn, fmt::format("SELECT count(*) FROM {};", input.table));
+    const std::string validity = preparation.paired
+        ? fmt::format(
+            "query IS NOT NULL AND bioseq.len(query) >= 0 AND bioseq.len(target) = {} "
+            "AND truth_target_start >= 0 AND truth_target_end <= {} "
+            "AND truth_target_end - truth_target_start = {} AND NOT is_reverse "
+            "AND abs(effective_error_rate - 0.011) < 1e-12 AND original_query_length = {}",
+            4u * input.sequence_length, 4u * input.sequence_length,
+            input.sequence_length, input.sequence_length)
+        : fmt::format("bioseq.len(seq) = {}", input.sequence_length);
+    output.valid_rows = it::query_scalar_int(*input.conn, fmt::format(
+        "SELECT count(*) FROM {} WHERE id > 0 AND {};", input.table, validity));
+    if (preparation.paired) {
+        output.shared_references = it::query_scalar_int(*input.conn, fmt::format(
+            "SELECT count(DISTINCT target::text) FROM {};", input.table));
+    }
+    // Non-ANALYZE EXPLAIN verifies the executed INSERT's shape without duplicating its rows.
+    output.plan = it::explain_text<false>(*input.conn, preparation.generate_sql);
+    output.custom_scan_taken = it::plan_contains(output.plan, "Custom Scan (BioseqRandom)");
+    output.correctness_accepted = output.row_count == static_cast<std::int64_t>(input.row_count)
+        && output.valid_rows == output.row_count
+        && (!preparation.paired || output.shared_references == 1)
+        && (!preparation.expect_random_scan || output.custom_scan_taken);
+    output.create_sql = std::move(preparation.create_sql);
+    output.generate_sql = std::move(preparation.generate_sql);
+    it::exec_sqlf(*input.conn, "DROP TABLE {} CASCADE;", input.table);
+    if (!output.correctness_accepted) {
+        bioseq_log<logging_level::error>(
+            "[bench_random_generation] rejected {}: rows={} valid={} references={} custom_scan={}",
+            algorithm, output.row_count, output.valid_rows,
+            output.shared_references, output.custom_scan_taken);
+        std::abort();
+    }
+}
+
+/** Boundary callbacks are mandatory so no fallback can publish checks as generation time. */
+[[nodiscard]] random_generation_output random_generation_run(
+    std::string_view, const parameter_map&, const random_generation_input&) {
+    bioseq_log<logging_level::error>("[bench_random_generation] missing iteration boundaries");
+    std::abort();
+}
+
+/** Publish row throughput and the independently checked plan/row contract. */
+[[nodiscard]] std::map<std::string, double> random_generation_eval(
+    std::string_view, const parameter_map&, const random_generation_input&,
+    const random_generation_output& output) {
+    return {{"row_count", static_cast<double>(output.row_count)},
+            {"valid_rows", static_cast<double>(output.valid_rows)},
+            {"correctness_accepted", output.correctness_accepted ? 1.0 : 0.0},
+            {"shared_references", static_cast<double>(output.shared_references)},
+            {"custom_scan_taken", output.custom_scan_taken ? 1.0 : 0.0},
+            {"custom_scan_expected", output.custom_scan_expected ? 1.0 : 0.0},
+            {"rows_per_second", output.measured_region_ns == 0 ? 0.0
+                : static_cast<double>(output.row_count) * 1e9 / static_cast<double>(output.measured_region_ns)},
+            {"measured_region_ns_manual", static_cast<double>(output.measured_region_ns)}};
+}
+
+/** Preserve exact SQL, timing scope, and the known workload differences with each result. */
+[[nodiscard]] std::string serialize_random_generation_raw_sample(
+    std::string_view algorithm, const parameter_map& params, const random_generation_input& input,
+    const random_generation_output& output) {
+    return nlohmann::json{
+        {"payload_schema", "bioseq.random-generation.raw-sample"}, {"payload_schema_version", 1},
+        {"alphabet", input.alphabet}, {"storage_bits", 64},
+        {"requested_rows", input.row_count}, {"sequence_length", input.sequence_length},
+        {"seed", input.seed}, {"vectorization", param_string(params, "vectorization", "on")},
+        {"comparison_group", output.constant_source ? "constant_source_diagnostic"
+            : output.paired ? "shared_reference_pairs" : "sample_sequences"},
+        {"create_sql", output.create_sql}, {"generate_sql", output.generate_sql},
+        {"constant_preparation_sql", output.constant_source ? input.constant_preparation_sql : ""},
+        {"constant_reference_prepared_untimed", output.constant_source},
+        {"reference_distribution", input.alphabet == "dna5" && algorithm == "query_target_sample"
+            ? "dna5_n_probability_0.01" : "uniform_native_alphabet"},
+        {"fragment_positions", output.constant_source ? "fixed_zero"
+            : algorithm == "insert_mutate" ? "postgres_random_setseed_0.42" : "native_generator"},
+        {"same_seed_means_identical_samples", false},
+        {"id_policy", "explicit ordinal in both helpers and INSERT; no nextval in timed row generation"},
+        {"timed_scope", "one SQL request and implicit transaction: CREATE TABLE, generation, insertion, commit; cleanup and checks excluded"},
+        {"explain_analyze", false}, {"explain", output.plan},
+        {"row_count", output.row_count}, {"valid_rows", output.valid_rows},
+        {"correctness_accepted", output.correctness_accepted},
+        {"shared_references", output.shared_references},
+        {"custom_scan_taken", output.custom_scan_taken},
+        {"custom_scan_expected", output.custom_scan_expected},
+        {"custom_scan_may_cover_reference_only", algorithm == "insert_mutate" && !output.constant_source},
+        {"measured_region_ns", output.measured_region_ns}}.dump();
+}
+
 }  // anonymous namespace
 
 #if defined(BIOSEQ_E2E_TESTING_API)
@@ -19226,6 +19504,20 @@ int run(int argc, char** argv) {
     auto sort_run = std::function<sort_scan_output(std::string_view, const parameter_map&, const sort_scan_input&)>{sort_scan_run};
     auto sort_evl = std::function<std::map<std::string,double>(std::string_view, const parameter_map&, const sort_scan_input&, const sort_scan_output&)>{sort_scan_eval};
     auto sort_cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const sort_scan_input&)>{cleanup_sort_scan_input};
+    auto random_est = std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)>{random_generation_estimate};
+    auto random_inp = std::function<random_generation_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>{build_random_generation_input};
+    auto random_run = std::function<random_generation_output(std::string_view, const parameter_map&, const random_generation_input&)>{random_generation_run};
+    auto random_evl = std::function<std::map<std::string,double>(std::string_view, const parameter_map&, const random_generation_input&, const random_generation_output&)>{random_generation_eval};
+    auto random_cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const random_generation_input&)>{cleanup_random_generation_input};
+    auto random_raw = std::function<std::string(std::string_view, const parameter_map&, const random_generation_input&, const random_generation_output&)>{serialize_random_generation_raw_sample};
+    bioseq::bench::framework::iteration_boundary_callbacks<
+        random_generation_input, random_generation_preparation, random_generation_output>
+        random_boundaries{
+            .enabled = [](std::string_view, const parameter_map&, const random_generation_input&) { return true; },
+            .before_iteration = prepare_random_generation_iteration,
+            .measured_iteration = measure_random_generation_iteration,
+            .after_iteration = finalize_random_generation_iteration,
+        };
     return bioseq::bench::framework::run(argc, argv, rep, data,
         bioseq::bench::framework::create_benchmark_with_iteration_boundaries<
             e2e_input, e2e_iteration_preparation, e2e_output>(
@@ -19246,7 +19538,12 @@ int run(int argc, char** argv) {
         bioseq::bench::framework::create_benchmark<sort_scan_input, sort_scan_output>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl,
-            sort_cln, {}, cfg_open));
+            sort_cln, {}, cfg_open),
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<
+            random_generation_input, random_generation_preparation, random_generation_output>(
+            "Native random SQL generation vs sample helpers across all biological alphabets",
+            "bench_random_generation", cfg, random_est, random_inp, random_run, random_evl,
+            random_boundaries, random_cln, random_raw, cfg_open));
 }
 
 }  // namespace bioseq::bench::e2e

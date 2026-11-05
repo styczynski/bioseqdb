@@ -4,7 +4,7 @@
  *
  * Node views borrow PostgreSQL pointers without copying or freeing nodes.
  * Expression traversal uses PostgreSQL's walker and mutator callbacks. Plan
- * traversal handles left  and right children and CustomScan::custom_plans.
+ * traversal handles ordinary links, subquery plans, and list-owned plan children.
  */
 module;
 
@@ -1090,9 +1090,8 @@ Node* mutate_pg_expression(Node* root, p_state& state, p_mutator& mutator) {
 // Plan-tree mutator.
 
 /**
- * Let a plan visitor rewrite lefttree, righttree and CustomScan::custom_plans
- * children in place. The custom_plans list contains children of Bioseq custom
- * scans that ordinary left/right traversal would miss.
+ * Let a plan visitor rewrite ordinary links and separately owned plan children
+ * in place, including custom scans, subquery scans, appends and bitmap nodes.
  */
 class pg_plan_mutation_cursor {
   private:
@@ -1105,8 +1104,8 @@ class pg_plan_mutation_cursor {
         : adapter_(adapter), trampoline_(trampoline) {}
 
     /**
-     * Rewrite and reassign the left and right children and any CustomScan
-     * custom_plans entries. Return the same parent plan.
+     * Rewrite every standard child link/list owned by this plan. Return the
+     * same parent; the visitor decides whether custom-provider internals may be visited.
      */
     Plan* descend_children(Plan* plan) const {
         if (plan == nullptr) {
@@ -1119,6 +1118,19 @@ class pg_plan_mutation_cursor {
                 Plan* child = reinterpret_cast<Plan*>(lfirst(cell));
                 lfirst(cell) = trampoline_(child, adapter_);
             }
+        }
+        if (IsA(plan, SubqueryScan)) {
+            auto* subquery = reinterpret_cast<SubqueryScan*>(plan);
+            subquery->subplan = trampoline_(subquery->subplan, adapter_);
+        }
+        List* children = nullptr;
+        if (IsA(plan, Append)) children = reinterpret_cast<Append*>(plan)->appendplans;
+        else if (IsA(plan, MergeAppend)) children = reinterpret_cast<MergeAppend*>(plan)->mergeplans;
+        else if (IsA(plan, BitmapAnd)) children = reinterpret_cast<BitmapAnd*>(plan)->bitmapplans;
+        else if (IsA(plan, BitmapOr)) children = reinterpret_cast<BitmapOr*>(plan)->bitmapplans;
+        ListCell* cell = nullptr;
+        foreach (cell, children) {
+            lfirst(cell) = trampoline_(reinterpret_cast<Plan*>(lfirst(cell)), adapter_);
         }
         plan->lefttree = trampoline_(plan->lefttree, adapter_);
         plan->righttree = trampoline_(plan->righttree, adapter_);
