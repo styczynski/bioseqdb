@@ -21,6 +21,94 @@ import bioseq.storage.size;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.test_support;
 
+TEST_CASE("Native prefilter coverage preserves connected and disjoint windows",
+          "[feature:prefilter][vulkan][native][coverage]") {
+    namespace gv = bioseq::gpu::vulkan;
+    namespace bs = bioseq::storage;
+    auto& runtime = gv::runtime::instance();
+    if (!gv::hardware_device_available(runtime)) SKIP("Hardware Vulkan is unavailable");
+    const auto validator = ::bioseq::simd_dispatch::highway_test_kernel_table()
+        .common.validate_packed_sequence_ranks;
+    const auto exercise = [&]<class Alphabet, class Word>() {
+        using range_type = compact_sequence_range<sequence_custom_alphabet<Alphabet, Word>>;
+        constexpr std::size_t slots = range_type::traits::letters_per_unit;
+        constexpr std::size_t step = slots * (sizeof(Word) < 4u ? 4u / sizeof(Word) : 1u);
+        constexpr std::size_t extent = 8u * step + 32u;
+        constexpr std::array<std::array<std::uint32_t, 3>, 4> orders{{
+            {{0u, 1u, 2u}}, {{2u, 1u, 0u}}, {{0u, 2u, 1u}}, {{0u, 2u, 4u}}}};
+        std::vector<Alphabet> query_letters(extent);
+        for (std::size_t i = 0u; i < extent; ++i)
+            seqan3::assign_rank_to((7u * i + i / 5u) % seqan3::alphabet_size<Alphabet>, query_letters[i]);
+        const range_type query{query_letters};
+        const std::size_t orientations = seqan3::nucleotide_alphabet<Alphabet> ? 2u : 1u;
+        for (std::size_t orientation = 0u; orientation < orientations; ++orientation) {
+            for (std::size_t shape = 0u; shape < orders.size(); ++shape) {
+                for (const auto max_edits : {0u, 16u}) {
+                    std::vector<Alphabet> target_letters(extent);
+                    std::vector<bioseq::prefilter::prefilter_job> jobs;
+                    std::vector<bioseq::prefilter::prefilter_result> expected;
+                    for (const auto block : orders[shape]) {
+                        const auto qbegin = static_cast<std::uint32_t>(3u + block * step);
+                        const auto tbegin = static_cast<std::uint32_t>(7u + block * step);
+                        std::vector<std::uint8_t> qbytes(step), tbytes(step);
+                        for (std::size_t i = 0u; i < step; ++i) {
+                            auto letter = query_letters[qbegin + (orientation ? step - 1u - i : i)];
+                            if constexpr (seqan3::nucleotide_alphabet<Alphabet>)
+                                if (orientation) letter = seqan3::complement(letter);
+                            qbytes[i] = static_cast<std::uint8_t>(seqan3::to_rank(letter));
+                            tbytes[i] = qbytes[i];
+                        }
+                        if (block == 1u) tbytes[step / 2u] =
+                            static_cast<std::uint8_t>((tbytes[step / 2u] + 1u) % seqan3::alphabet_size<Alphabet>);
+                        for (std::size_t i = 0u; i < step; ++i)
+                            seqan3::assign_rank_to(tbytes[i], target_letters[tbegin + i]);
+                        jobs.push_back({.query_record_index = static_cast<std::uint32_t>(orientation),
+                            .target_record_index = 0u,
+                            .query_start = orientation ? static_cast<std::uint32_t>(extent - qbegin - step) : qbegin,
+                            .target_start = tbegin, .query_length = static_cast<std::uint32_t>(step),
+                            .target_length = static_cast<std::uint32_t>(step), .max_edits = max_edits,
+                            .orientation = orientation ? 3u : 0u});
+                        expected.push_back(bioseq::prefilter::sneaky_snake_scalar(qbytes, tbytes, max_edits));
+                    }
+                    const range_type target{target_letters};
+                    const auto actual = gv::with_prefilter_packed_windows(
+                        bs::make_lazy_sequence_view(query), bs::make_lazy_sequence_view(target), jobs,
+                        [&](auto queries, auto targets, const auto& rank_lut, auto local_jobs) {
+                            const auto records = shape == 3u ? 3u : 1u;
+                            REQUIRE(queries.size() == records);
+                            REQUIRE(targets.size() == records);
+                            for (const auto uploads : {queries, targets}) {
+                                for (const auto& upload : uploads) {
+                                    CHECK(upload.sequence.unit_bits == sizeof(Word) * 8u);
+                                    CHECK(upload.sequence.bp_count == (shape == 3u ? step : 3u * step));
+                                }
+                            }
+                            return runtime.run_sneaky_snake_rank_batch_roundtrip(
+                                queries, targets, rank_lut, local_jobs, validator, range_type::traits::bits_per_char);
+                        });
+                    REQUIRE(actual.size() == expected.size());
+                    for (std::size_t i = 0u; i < actual.size(); ++i) {
+                        CAPTURE(seqan3::alphabet_size<Alphabet>, sizeof(Word), orientation, shape, max_edits, i);
+                        CHECK(actual[i].lower_bound == expected[i].lower_bound);
+                        CHECK(actual[i].is_accepted == expected[i].is_accepted);
+                        CHECK(actual[i].status == expected[i].status);
+                        CHECK(actual[i].diagnostics == expected[i].diagnostics);
+                    }
+                }
+            }
+        }
+    };
+    [&]<class... Entries>(std::tuple<Entries...>) {
+        const auto for_alphabet = [&]<class Alphabet>() {
+            [&]<std::size_t... Widths>(supported_storage_unit_byte_widths<Widths...>) {
+                (exercise.template operator()<Alphabet,
+                    typename all_storage_unit_byte_widths::template storage_unit<Widths>>(), ...);
+            }(all_storage_unit_byte_widths{});
+        };
+        (for_alphabet.template operator()<typename Entries::alphabet_type>(), ...);
+    }(supported_biological_alphabets::alphabet_entries_tuple{});
+}
+
 using namespace bioseq::prefilter;
 
 namespace {

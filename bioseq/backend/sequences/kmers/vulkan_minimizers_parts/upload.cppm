@@ -1387,6 +1387,8 @@ template <sequence_alphabet p_alphabet, class p_function>
     std::uint64_t query_phase = 0u;
     std::uint64_t target_phase = 0u;
     bool first_job = true;
+    bool connected_query_coverage = true;
+    bool connected_target_coverage = true;
     bool can_coalesce = jobs.size() > 1u;
     for (const auto& job : jobs) {
         const bool reverse = job.orientation == 3u;
@@ -1406,6 +1408,13 @@ template <sequence_alphabet p_alphabet, class p_function>
             query_phase = query_begin & alignment_mask;
             target_phase = target_begin & alignment_mask;
             first_job = false;
+        } else {
+            // A connected prefix union needs neither sorting nor an interval array.
+            // A later interval may bridge a gap; that case uses the general coalescer.
+            connected_query_coverage = connected_query_coverage &&
+                query_begin <= query_bounds.end && query_end >= query_bounds.begin;
+            connected_target_coverage = connected_target_coverage &&
+                target_begin <= target_bounds.end && target_end >= target_bounds.begin;
         }
         can_coalesce = can_coalesce && job.query_length != 0u && job.target_length != 0u &&
             (query_begin & alignment_mask) == query_phase &&
@@ -1471,25 +1480,6 @@ template <sequence_alphabet p_alphabet, class p_function>
         target_bounds.end - target_bounds.begin <= maximum_local_extent &&
         has_aligned_native_windows(query, query_bounds, true) &&
         has_aligned_native_windows(target, target_bounds, false)) {
-        // Both sources use one enumerator type and the same existing coalescer.
-        const auto enumerate_intervals = [jobs](bool query_side, std::uint64_t source_length) {
-            return [jobs, query_side, source_length](auto emit) {
-                for (const auto& job : jobs) {
-                    const std::uint64_t length = query_side ? job.query_length : job.target_length;
-                    const std::uint64_t begin = query_side
-                        ? (job.orientation == 3u ? source_length - job.query_start - length
-                                                 : job.query_start)
-                        : job.target_start;
-                    emit(sequence_upload_interval{begin, begin + length});
-                }
-            };
-        };
-        auto query_windows = prepare_native_seed_windows(
-            query, enumerate_intervals(true, query_length));
-        auto target_windows = prepare_native_seed_windows(
-            target, enumerate_intervals(false, target_length));
-        const auto queries = query_windows.view().windows;
-        const auto targets = target_windows.view().windows;
         // The existing coalescer returns sorted, disjoint windows. Return the record
         // index and oriented local start without expanding or inspecting any ranks.
         const auto locate_window = [](std::span<const gpu_packed_sequence_upload> windows,
@@ -1518,44 +1508,89 @@ template <sequence_alphabet p_alphabet, class p_function>
             return std::pair{static_cast<std::uint32_t>(record_index),
                              static_cast<std::uint32_t>(local_start)};
         };
-        bioseq::parallelism::memory_permit local_jobs_permit;
-        std::vector<bioseq::prefilter::prefilter_job> local_jobs;
-        bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
-            bioseq::parallelism::vector_admission_policy::retain_permit>(
-            local_jobs, local_jobs_permit, jobs.size());
-        bool transport_phases_preserved = true;
-        for (const auto& job : jobs) {
-            const bool reverse = job.orientation == 3u;
-            const std::uint64_t query_begin = reverse
-                ? query_length - job.query_start - job.query_length : job.query_start;
-            const std::uint64_t target_begin = job.target_start;
-            const auto [query_record_index, query_start] = locate_window(
-                queries, query_begin, query_begin + job.query_length, reverse);
-            const auto [target_record_index, target_start] = locate_window(
-                targets, target_begin, target_begin + job.target_length, false);
-            // A provider may expose a different valid native layout for a subrange.
-            // Check the actual prepared descriptors too, using this existing job walk.
-            const auto& query_sequence = queries[query_record_index].sequence;
-            const auto& target_sequence = targets[target_record_index].sequence;
-            if (!preserves_native_transport_phase(
-                    query_begin - query_sequence.bp_offset, query_sequence.leading_symbol_offset,
-                    query_sequence.letters_per_unit, query_sequence.unit_bits / std::numeric_limits<unsigned char>::digits) ||
-                !preserves_native_transport_phase(
-                    target_begin - target_sequence.bp_offset, target_sequence.leading_symbol_offset,
-                    target_sequence.letters_per_unit, target_sequence.unit_bits / std::numeric_limits<unsigned char>::digits)) {
-                transport_phases_preserved = false;
-                break;
+        const auto remap_jobs = [&](std::span<const gpu_packed_sequence_upload> queries,
+                                    std::span<const gpu_packed_sequence_upload> targets) {
+            struct remapped_batch {
+                bioseq::parallelism::memory_permit permit;
+                std::vector<bioseq::prefilter::prefilter_job> jobs;
+                bool transport_phases_preserved = true;
+            } batch;
+            auto& local_jobs = batch.jobs;
+            auto& local_jobs_permit = batch.permit;
+            bioseq::parallelism::prepare_admitted_vector_capacity<vulkan_runtime_error,
+                bioseq::parallelism::vector_admission_policy::retain_permit>(
+                local_jobs, local_jobs_permit, jobs.size());
+            for (const auto& job : jobs) {
+                const bool reverse = job.orientation == 3u;
+                const std::uint64_t query_begin = reverse
+                    ? query_length - job.query_start - job.query_length : job.query_start;
+                const std::uint64_t target_begin = job.target_start;
+                const auto [query_record_index, query_start] = locate_window(
+                    queries, query_begin, query_begin + job.query_length, reverse);
+                const auto [target_record_index, target_start] = locate_window(
+                    targets, target_begin, target_begin + job.target_length, false);
+                // A provider may expose a different valid native layout for a subrange.
+                // Check the actual prepared descriptors too, using this existing job walk.
+                const auto& query_sequence = queries[query_record_index].sequence;
+                const auto& target_sequence = targets[target_record_index].sequence;
+                if (!preserves_native_transport_phase(
+                        query_begin - query_sequence.bp_offset, query_sequence.leading_symbol_offset,
+                        query_sequence.letters_per_unit, query_sequence.unit_bits / std::numeric_limits<unsigned char>::digits) ||
+                    !preserves_native_transport_phase(
+                        target_begin - target_sequence.bp_offset, target_sequence.leading_symbol_offset,
+                        target_sequence.letters_per_unit, target_sequence.unit_bits / std::numeric_limits<unsigned char>::digits)) {
+                    batch.transport_phases_preserved = false;
+                    break;
+                }
+                auto local = job;
+                local.query_record_index = query_record_index;
+                local.target_record_index = target_record_index;
+                local.query_start = query_start;
+                local.target_start = target_start;
+                local_jobs.push_back(local);
             }
-            auto local = job;
-            local.query_record_index = query_record_index;
-            local.target_record_index = target_record_index;
-            local.query_start = query_start;
-            local.target_start = target_start;
-            local_jobs.push_back(local);
+            return batch;
+        };
+        if (connected_query_coverage && connected_target_coverage) {
+            // The requested intervals already cover their complete bounds. Borrow
+            // the same native bytes directly and keep the two descriptors on the
+            // stack; no interval/descriptor heap metadata or permits are needed.
+            auto query_window = prepare_native_packed_window(query, query_bounds.begin, query_bounds.end);
+            auto target_window = prepare_native_packed_window(target, target_bounds.begin, target_bounds.end);
+            const std::array queries{make_sequence_upload_view(query_window, query_bounds.begin, rank_lut)};
+            const std::array targets{make_sequence_upload_view(target_window, target_bounds.begin, rank_lut)};
+            auto local = remap_jobs(queries, targets);
+            if (local.transport_phases_preserved) {
+                return std::forward<p_function>(consume)(
+                    std::span<const gpu_packed_sequence_upload>{queries},
+                    std::span<const gpu_packed_sequence_upload>{targets}, rank_lut,
+                    std::span<const bioseq::prefilter::prefilter_job>{local.jobs});
+            }
+            // Release these owners before retrying the general preparation route.
         }
-        if (transport_phases_preserved) {
+        // Both sources use one enumerator type and the same existing coalescer.
+        const auto enumerate_intervals = [jobs](bool query_side, std::uint64_t source_length) {
+            return [jobs, query_side, source_length](auto emit) {
+                for (const auto& job : jobs) {
+                    const std::uint64_t length = query_side ? job.query_length : job.target_length;
+                    const std::uint64_t begin = query_side
+                        ? (job.orientation == 3u ? source_length - job.query_start - length
+                                                 : job.query_start)
+                        : job.target_start;
+                    emit(sequence_upload_interval{begin, begin + length});
+                }
+            };
+        };
+        auto query_windows = prepare_native_seed_windows(
+            query, enumerate_intervals(true, query_length));
+        auto target_windows = prepare_native_seed_windows(
+            target, enumerate_intervals(false, target_length));
+        const auto queries = query_windows.view().windows;
+        const auto targets = target_windows.view().windows;
+        auto local = remap_jobs(queries, targets);
+        if (local.transport_phases_preserved) {
             return std::forward<p_function>(consume)(queries, targets, rank_lut,
-                std::span<const bioseq::prefilter::prefilter_job>{local_jobs});
+                std::span<const bioseq::prefilter::prefilter_job>{local.jobs});
         }
         // Prepared metadata/owners unwind here before the existing per-job route.
     }
