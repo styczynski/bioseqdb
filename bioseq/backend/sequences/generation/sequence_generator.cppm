@@ -40,6 +40,7 @@ import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
@@ -426,70 +427,6 @@ template <typename p_sequence_traits>
     return packed_unit;
 }
 
-/// @brief Decode a reference window to ranks in the requested orientation.
-/// Nucleotide windows are also complemented when reversed.
-/// @tparam p_sequence_type Packed sequence type.
-/// @param sequence Source sequence.
-/// @param start First source position in the window
-/// @param end Position just past the window.
-/// @param is_reverse Read the window backwards when true.
-/// @param out_ranks Destination  with room for end - start ranks.
-template <typename p_sequence_type>
-void extract_window_ranks(
-    const p_sequence_type& sequence,
-    std::size_t start,
-    std::size_t end,
-    bool is_reverse,
-    std::span<typename p_sequence_type::traits::letter_unit> out_ranks) {
-    using sequence_traits = typename p_sequence_type::traits;
-    DEBUG_ASSERT(out_ranks.size() >= end - start, "extract_window_ranks: output too small");
-    if (end <= start) {
-        return;
-    }
-    if constexpr (sizeof(typename sequence_traits::letter_unit) == sizeof(std::uint8_t)) {
-        auto byte_output = std::span<std::uint8_t>{
-            reinterpret_cast<std::uint8_t*>(out_ranks.data()), end - start};
-        if (is_reverse) {
-            sequence.template to_encoded_into<false, true>(byte_output, start, end);
-            if constexpr (seqan3::nucleotide_alphabet<typename sequence_traits::alphabet_type>) {
-                for (auto& rank : out_ranks) {
-                    rank = static_cast<typename sequence_traits::letter_unit>(
-                        sequence_traits::letter_complement(
-                            static_cast<typename sequence_traits::storage_unit>(rank)));
-                }
-            }
-        } else {
-            sequence.template to_encoded_into<false, false>(byte_output, start, end);
-        }
-    } else {
-        const std::size_t length = end - start;
-        auto iter = sequence.template iterable<logical_rank>().begin();
-        for (std::size_t offset = 0; offset < start; ++offset) {
-            ++iter;
-        }
-        if (is_reverse) {
-            for (std::size_t offset = 0; offset < length; ++offset) {
-                auto letter = *iter;
-                if constexpr (seqan3::nucleotide_alphabet<typename sequence_traits::alphabet_type>) {
-                    out_ranks[length - 1 - offset] =
-                        static_cast<typename sequence_traits::letter_unit>(
-                            sequence_traits::letter_complement(
-                                static_cast<typename sequence_traits::storage_unit>(letter)));
-                } else {
-                    out_ranks[length - 1 - offset] =
-                        static_cast<typename sequence_traits::letter_unit>(letter);
-                }
-                ++iter;
-            }
-        } else {
-            for (std::size_t offset = 0; offset < length; ++offset) {
-                out_ranks[offset] = static_cast<typename sequence_traits::letter_unit>(*iter);
-                ++iter;
-            }
-        }
-    }
-}
-
 /** One native output interval borrowed for the duration of a generation batch. */
 template<class Traits>
 struct random_packed_destination {
@@ -599,11 +536,15 @@ template<class Traits, class Batch>
         }
     };
     constexpr std::size_t parallel_units = 64u * 1024u / sizeof(typename Traits::storage_unit);
-    if (total_units < parallel_units || total_chunks < 2u) run_rows(0u, destinations.size());
-    else if (destinations.size() > 1u && total_chunks / destinations.size() <= 64u)
-        bioseq::parallelism::global_pool::instance().parallel_for(
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    const auto mode = pool.get_mode();
+    if (total_units < parallel_units || total_chunks < 2u ||
+        !bioseq::parallelism::has_parallel_dispatch(mode)) run_rows(0u, destinations.size());
+    else if (!bioseq::parallelism::has_parallel_tasks(mode) ||
+             (destinations.size() > 1u && total_chunks / destinations.size() <= 64u))
+        pool.parallel_for(
             0u, destinations.size(), 16u, bioseq::parallelism::range_body{run_rows});
-    else bioseq::parallelism::global_pool::instance().parallel_for(
+    else pool.parallel_for(
         0u, total_chunks, 64u, bioseq::parallelism::range_body{run});
     return {};
 }
@@ -666,27 +607,6 @@ void generate_units_cpu_for_sequence(
     return length;
 }
 
-/// @brief Replace randomly selected symbols with different alphabet ranks.
-/// @tparam p_sequence_traits Alphabet and rank types.
-/// @param ranks Sequence ranks to edit in, place.
-/// @param rate Substitution probability for each rank.
-/// @param state Random state advanced by selection and replacement draws.
-template <typename p_sequence_traits>
-void apply_substitutions(
-    std::span<typename p_sequence_traits::letter_unit> ranks,
-    double rate,
-    taus_lcg_state& state) {
-    if (rate <= 0.0) {
-        return;
-    }
-    for (auto& rank : ranks) {
-        if (sample_mutation_event(rate, state)) {
-            rank = static_cast<typename p_sequence_traits::letter_unit>(
-                next_other_rank(state, p_sequence_traits::alphabet_size, rank));
-        }
-    }
-}
-
 /// @brief Counts observed insertion and deletion events for generator checks.
 struct indel_event_counts {
     /// Source positions examined by the indel pass.
@@ -724,63 +644,6 @@ struct indel_event_counts {
             runtime.features().device_type);
     }
     throw bioseq::gpu::vulkan::vulkan_runtime_error(message);
-}
-
-/// @brief Copy the source  while inserting symbols and skipping deleted spans.
-/// The current symbol is kept before either event is tried Deletion skips
-/// following source positions, which receive no further event checks.
-/// @tparam p_sequence_traits Alphabet and rank types.
-/// @tparam p_output_vector Mutable vector type for the output ranks.
-/// @param in_ranks Source ranks before insertions and deletions.
-/// @param params Event probabilities and length distributions.
-/// @param cdf Cumulative rank boundaries for inserted symbols.
-/// @param state Random state advanced by this operation.
-/// @param out_ranks Replaced witm the resulting sequence ranks.
-/// @param counts Optional counters to add the observed events to.
-template <typename p_sequence_traits, typename p_output_vector>
-void apply_indels(
-    std::span<const typename p_sequence_traits::letter_unit> in_ranks,
-    const generator_params& params,
-    std::span<const std::uint32_t> cdf,
-    taus_lcg_state& state,
-    p_output_vector& out_ranks,
-    indel_event_counts* counts = nullptr) {
-    out_ranks.clear();
-    out_ranks.reserve(in_ranks.size() + in_ranks.size() / 8);
-    std::size_t position = 0;
-    while (position < in_ranks.size()) {
-        if (counts != nullptr) {
-            counts->visited_positions += 1;
-        }
-        out_ranks.push_back(in_ranks[position]);
-        if (sample_mutation_event(params.insertion_rate, state)) {
-            const std::size_t length = clamp_round_nonneg(
-                next_gaussian(state, params.insertion_length_mean, params.insertion_length_stddev));
-            for (std::size_t inserted_position = 0;
-                 inserted_position < length;
-                 ++inserted_position) {
-                out_ranks.push_back(static_cast<typename p_sequence_traits::letter_unit>(
-                    sample_rank(
-                        cdf.data(), p_sequence_traits::alphabet_size, next_u32(state))));
-            }
-            if (counts != nullptr) {
-                counts->insertions += 1;
-                counts->inserted_bp += length;
-            }
-        }
-
-        std::size_t advance = 1;
-        if (sample_mutation_event(params.deletion_rate, state)) {
-            const std::size_t deleted = clamp_round_nonneg(
-                next_gaussian(state, params.deletion_length_mean, params.deletion_length_stddev));
-            advance += deleted;
-            if (counts != nullptr) {
-                counts->deletions += 1;
-                counts->deleted_bp += deleted;
-            }
-        }
-        position += advance;
-    }
 }
 
 /** Dry-count destination implementing the same checked packing contract as fixed output. */
@@ -1104,11 +967,12 @@ struct generation_cigar_cursor {
     }
 };
 
-/** Mutate logical CIGAR coordinates in O(runs + events), preserving the declared space. */
+/** Mutate logical CIGAR coordinates, optionally bounding count/replay output extent. */
 template<bioseq::cigar_operation_alphabet Alphabet, bioseq::cigar_run_cursor Cursor, class Sink>
 [[nodiscard]] std::expected<indel_event_counts, generation_error> mutate_cigar_runs(
     Cursor cursor, bioseq::cigar_space space, const generator_params& parameters,
-    taus_lcg_state& random, Sink& output) {
+    taus_lcg_state& random, Sink& output,
+    std::uint64_t output_symbol_limit = (std::numeric_limits<std::uint32_t>::max)()) {
     static_assert(std::same_as<typename Cursor::run_type, bioseq::cigar_run_value<Alphabet>>);
     static_assert(std::same_as<typename Sink::value_type, bioseq::cigar_run_value<Alphabet>>);
     const auto valid = validate_mutation_parameters(parameters);
@@ -1122,14 +986,16 @@ template<bioseq::cigar_operation_alphabet Alphabet, bioseq::cigar_run_cursor Cur
             static_cast<seqan3::alphabet_rank_t<Alphabet>>(rank));
     if (operation_count == 0u || (parameters.substitution_rate > 0.0 && operation_count < 2u))
         return std::unexpected(generation_error::invalid_parameter);
+    const auto maximum_output = std::min<std::uint64_t>(output_symbol_limit,
+        (std::numeric_limits<std::uint32_t>::max)());
     const mutation_event_distribution events{parameters};
     auto unchanged = events.unchanged_prefix(random);
     std::uint64_t deleted_remaining{};
     indel_event_counts counts;
-    const auto append = [&output, &counts](Alphabet operation, std::uint64_t length)
+    const auto append = [&output, &counts, maximum_output](Alphabet operation, std::uint64_t length)
         -> std::expected<void, generation_error> {
         if (length == 0u) return {};
-        if (length > (std::numeric_limits<std::uint32_t>::max)() - counts.output_symbols)
+        if (length > maximum_output - counts.output_symbols)
             return std::unexpected(generation_error::size_overflow);
         const auto written = bioseq::append_canonical_run(output, bioseq::cigar_run_value<Alphabet>{
             static_cast<std::uint32_t>(length), operation});
@@ -1179,7 +1045,7 @@ template<bioseq::cigar_operation_alphabet Alphabet, bioseq::cigar_run_cursor Cur
                 const auto length = sample_mutation_length(parameters.insertion_length_mean,
                     parameters.insertion_length_stddev, random);
                 if (!length) return std::unexpected(length.error());
-                if (*length > (std::numeric_limits<std::uint32_t>::max)() - counts.output_symbols)
+                if (*length > maximum_output - counts.output_symbols)
                     return std::unexpected(generation_error::size_overflow);
                 ++counts.insertions;
                 counts.inserted_bp += *length;
@@ -1207,9 +1073,11 @@ template<bioseq::cigar_operation_alphabet Alphabet, bioseq::cigar_run_cursor Cur
 template<bioseq::cigar_operation_alphabet Alphabet, std::ranges::input_range Runs, class Sink>
 [[nodiscard]] std::expected<indel_event_counts, generation_error> mutate_cigar_runs(
     Runs&& runs, bioseq::cigar_space space, const generator_params& parameters,
-    taus_lcg_state& random, Sink& output) {
+    taus_lcg_state& random, Sink& output,
+    std::uint64_t output_symbol_limit = (std::numeric_limits<std::uint32_t>::max)()) {
     return mutate_cigar_runs<Alphabet>(generation_cigar_cursor{
-        std::ranges::begin(runs), std::ranges::end(runs)}, space, parameters, random, output);
+        std::ranges::begin(runs), std::ranges::end(runs)}, space, parameters, random, output,
+        output_symbol_limit);
 }
 
 /** Generate an exact logical CIGAR extent from a paired run and sparse substitutions. */
@@ -1454,79 +1322,79 @@ public:
       std::vector<query_target_pair> pairs(count);
       std::atomic<bool> failed{false};
       auto& pool = bioseq::parallelism::global_pool::instance();
-      // Workers fill separate  result slots and read the same unchanged reference.
-      pool.parallel_for_with_context(
-          0,
-          count,
-          1,
-          bioseq::parallelism::range_body{[this, &pairs, &reference, &failed, first](std::size_t lo,
-                                                                            std::size_t hi) {
-              for (std::size_t pair_index = lo; pair_index < hi; ++pair_index) {
-                  const std::size_t fragment_index = first + pair_index;
-                  taus_lcg_state state =
-                      seed_stream(params_.seed, k_reference_stream_space + fragment_index);
-                  const std::size_t length = sample_fragment_length(state,
-                                                                    params_.fragment_length_mean,
-                                                                    params_.fragment_length_stddev,
-                                                                    params_.reference_length);
-                  const std::size_t start = static_cast<std::size_t>(next_below64(
-                      state, static_cast<std::uint64_t>(params_.reference_length - length + 1)));
-                  const std::size_t end = start + length;
-                  const bool is_reverse = next_unit_double(state) < params_.reverse_complement_rate;
+      // Workers fill separate result slots and read the same unchanged reference.
+      const auto generate_pairs = [this, &pairs, &reference, &failed, first](std::size_t first_pair,
+                                                                          std::size_t last_pair) {
+          for (std::size_t pair_index = first_pair; pair_index < last_pair; ++pair_index) {
+              const std::size_t fragment_index = first + pair_index;
+              taus_lcg_state state =
+                  seed_stream(params_.seed, k_reference_stream_space + fragment_index);
+              const std::size_t length = sample_fragment_length(state,
+                                                                params_.fragment_length_mean,
+                                                                params_.fragment_length_stddev,
+                                                                params_.reference_length);
+              const std::size_t start = static_cast<std::size_t>(next_below64(
+                  state, static_cast<std::uint64_t>(params_.reference_length - length + 1)));
+              const std::size_t end = start + length;
+              const bool is_reverse = next_unit_double(state) < params_.reverse_complement_rate;
 
-                  query_target_pair pair;
-                  {
-                      const auto initial_random = state;
-                      const auto mutate = [this, &reference, start, end, is_reverse](auto& random, auto& writer) {
-                          if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
-                              if (is_reverse) return mutate_sequence<true>(*reference, start, end,
-                                  params_, random, writer, k_cdf);
-                          }
-                          return mutate_sequence<false>(*reference, start, end, params_, random, writer, k_cdf);
-                      };
-                      counting_rank_sink<p_sequence_config> counter;
-                      const auto counted = mutate(state, counter);
-                      if (!counted) { failed.store(true, std::memory_order_relaxed); continue; }
-                      const auto geometry = counter.finish();
-                      bioseq::parallelism::memory_permit query_memory;
-                      std::vector<storage_unit_type> query_units;
-                      try {
-                          bioseq::parallelism::prepare_admitted_vector_capacity<
-                              std::runtime_error,
-                              bioseq::parallelism::vector_admission_policy::retain_permit>(
-                                  query_units, query_memory,
-                                  static_cast<std::size_t>(geometry.written_units));
-                          query_units.resize(static_cast<std::size_t>(geometry.written_units));
-                      } catch (const std::bad_alloc&) {
-                          failed.store(true, std::memory_order_relaxed); continue;
-                      } catch (const std::length_error&) {
-                          failed.store(true, std::memory_order_relaxed); continue;
-                      } catch (const std::runtime_error&) {
-                          failed.store(true, std::memory_order_relaxed); continue;
+              query_target_pair pair;
+              {
+                  const auto initial_random = state;
+                  const auto mutate = [this, &reference, start, end, is_reverse](auto& random, auto& writer) {
+                      if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
+                          if (is_reverse) return mutate_sequence<true>(*reference, start, end,
+                              params_, random, writer, k_cdf);
                       }
-                      using sink = fixed_rank_pack_unit_sink<storage_unit_type>;
-                      using writer_type = checked_rank_pack_sink<p_sequence_config, invalid_rank_policy::reject,
-                          pack_capacity_policy::fixed_span, sink>;
-                      writer_type writer{sink{query_units}};
-                      state = initial_random;
-                      const auto replayed = mutate(state, writer);
-                      const auto finished = writer.finish(geometry.emitted_symbols, geometry.written_units);
-                      if (!replayed || !finished || replayed->output_symbols != counted->output_symbols) {
-                          failed.store(true, std::memory_order_relaxed); continue;
-                      }
-                      pair.query = sequence_type::from_packed(std::move(query_units), finished.padding_letters);
-                      pair.query_memory = std::move(query_memory);
+                      return mutate_sequence<false>(*reference, start, end, params_, random, writer, k_cdf);
+                  };
+                  counting_rank_sink<p_sequence_config> counter;
+                  const auto counted = mutate(state, counter);
+                  if (!counted) { failed.store(true, std::memory_order_relaxed); continue; }
+                  const auto geometry = counter.finish();
+                  bioseq::parallelism::memory_permit query_memory;
+                  std::vector<storage_unit_type> query_units;
+                  try {
+                      bioseq::parallelism::prepare_admitted_vector_capacity<
+                          std::runtime_error,
+                          bioseq::parallelism::vector_admission_policy::retain_permit>(
+                              query_units, query_memory,
+                              static_cast<std::size_t>(geometry.written_units));
+                      query_units.resize(static_cast<std::size_t>(geometry.written_units));
+                  } catch (const std::bad_alloc&) {
+                      failed.store(true, std::memory_order_relaxed); continue;
+                  } catch (const std::length_error&) {
+                      failed.store(true, std::memory_order_relaxed); continue;
+                  } catch (const std::runtime_error&) {
+                      failed.store(true, std::memory_order_relaxed); continue;
                   }
-                  pair.target = reference;
-                  pair.truth_target_start = start;
-                  pair.truth_target_end = end;
-                  pair.is_reverse = is_reverse;
-                  pair.effective_error_rate =
-                      params_.substitution_rate + params_.insertion_rate + params_.deletion_rate;
-                  pair.original_query_length = length;
-                  pairs[pair_index] = std::move(pair);
+                  using sink = fixed_rank_pack_unit_sink<storage_unit_type>;
+                  using writer_type = checked_rank_pack_sink<p_sequence_config, invalid_rank_policy::reject,
+                      pack_capacity_policy::fixed_span, sink>;
+                  writer_type writer{sink{query_units}};
+                  state = initial_random;
+                  const auto replayed = mutate(state, writer);
+                  const auto finished = writer.finish(geometry.emitted_symbols, geometry.written_units);
+                  if (!replayed || !finished || replayed->output_symbols != counted->output_symbols) {
+                      failed.store(true, std::memory_order_relaxed); continue;
+                  }
+                  pair.query = sequence_type::from_packed(std::move(query_units), finished.padding_letters);
+                  pair.query_memory = std::move(query_memory);
               }
-          }});
+              pair.target = reference;
+              pair.truth_target_start = start;
+              pair.truth_target_end = end;
+              pair.is_reverse = is_reverse;
+              pair.effective_error_rate =
+                  params_.substitution_rate + params_.insertion_rate + params_.deletion_rate;
+              pair.original_query_length = length;
+              pairs[pair_index] = std::move(pair);
+          }
+      };
+      if (bioseq::parallelism::has_parallel_dispatch(pool.get_mode()))
+          pool.parallel_for_with_context(0u, count, 1u,
+              bioseq::parallelism::range_body{generate_pairs});
+      else generate_pairs(0u, count);
       if (failed.load(std::memory_order_relaxed)) {
           bioseq_log<logging_level::error>("[generation] fragment mutation rejected its output extent or memory admission");
           return {};

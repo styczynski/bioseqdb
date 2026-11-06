@@ -910,20 +910,11 @@ template<class p_alphabet>
         [&ok, &flat, from, to, output]<class p_instance>() {
           if constexpr (std::is_same_v<typename p_instance::alphabet_type,
                                        p_alphabet>) {
-            using range = compact_sequence_range<p_instance>;
-            using traits = typename range::traits;
-            using unit = typename traits::storage_unit;
-            auto const *units = reinterpret_cast<unit const *>(flat.data);
-            for (std::uint64_t position = from; position < to; ++position) {
-              unit word = units[position / traits::letters_per_unit];
-              const std::size_t shift =
-                  static_cast<std::size_t>(position %
-                                           traits::letters_per_unit) *
-                  traits::bits_per_char;
-              output[static_cast<std::size_t>(position - from)] =
-                  static_cast<std::uint8_t>((word >> shift) &
-                                            traits::char_mask);
-            }
+            // Borrow the already-validated flat storage for this bounded read.
+            // The common packed-word decoder preserves native ranks and final
+            // padding without allocating or retaining another source owner.
+            const compact_sequence_range<p_instance> sequence{flat};
+            sequence.template to_encoded_into<false>(output, from, to);
             ok = true;
           }
         });

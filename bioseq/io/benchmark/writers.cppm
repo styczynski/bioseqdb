@@ -4,6 +4,10 @@
  */
 module;
 
+// Canonicalize Highway's internal-linkage templates before importing the batch
+// and streaming codecs, as in the IO reader tests, to avoid duplicate NEON helpers.
+#include <hwy/highway.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>

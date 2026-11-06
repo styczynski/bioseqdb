@@ -119,6 +119,40 @@ TEST_CASE("sample table generators resolve the active creation namespace",
     exec_sql(ctx, "ROLLBACK;");
 }
 
+TEST_CASE("sample table generators resolve quality row seeds independently of length",
+          "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
+    constexpr std::string_view fixed_table = "sample_quality_fixed";
+    constexpr std::string_view pair_table = "sample_quality_variable";
+    constexpr std::array quality_alphabets{
+        std::string_view{"phred42"}, std::string_view{"phred63"}, std::string_view{"phred68-legacy"}};
+    for (const auto alphabet : quality_alphabets) {
+        CAPTURE(alphabet);
+        auto ctx = fresh_context({fixed_table, pair_table});
+        exec_sql(ctx, "BEGIN; SET LOCAL bioseq.index.insert_maintenance.enabled = off;");
+        exec_sqlf(ctx,
+            "SELECT bioseq.create_sample_table('{}', 32, 4000, 'dna4', 42, 'qual', '{}');",
+            fixed_table, alphabet);
+        exec_sqlf(ctx,
+            "SELECT bioseq.create_query_target_sample_table('{}', 32, 1000, 150.0, 4000, "
+            "0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 42, 'dna4', 'qual', '{}');",
+            pair_table, alphabet);
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT count(DISTINCT bioseq.len(qual)) FROM {};", pair_table)) > 1);
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT count(DISTINCT qual::text) FROM {};", fixed_table)) == 32);
+        // Both helpers use the same seeded quality domain. Changing a row's
+        // length must only change its extent, never its preceding random symbols.
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM {} AS variable JOIN {} AS fixed USING (id) "
+            "WHERE bioseq.len(variable.qual) = bioseq.len(variable.query) "
+            "AND bioseq.len(fixed.qual) = 4000 "
+            "AND bioseq.len(variable.qual) <= bioseq.len(fixed.qual) "
+            "AND variable.qual::text = left(fixed.qual::text, bioseq.len(variable.qual)::integer);",
+            pair_table, fixed_table)) == 32);
+        exec_sql(ctx, "ROLLBACK;");
+    }
+}
+
 TEST_CASE("an empty sequence creates a catalog row "
           "without allocating an empty fragment relation",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {

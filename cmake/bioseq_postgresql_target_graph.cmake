@@ -160,6 +160,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
       set_property(SOURCE "${_bioseq_highway_source}" APPEND PROPERTY COMPILE_OPTIONS "${_bioseq_highway_target_options}")
     endif()
   endforeach()
+  # This instantiation owner can create enormous LLVM inline-location graphs.
+  # Keep optimization and ordinary line tables, but use call-site locations for
+  # its inlined bodies. Other owners retain full inline-stack debug locations.
+  # Append after ordinary-source language and target ISA options are installed.
+  # Fast presets also name their configuration Debug; only inspection presets
+  # retain per-TU artifacts through this existing save-temps setting.
+  if(CMAKE_CXX_FLAGS MATCHES "(^|[ \t])-save-temps=obj([ \t]|$)")
+    foreach(_bioseq_highway_source IN LISTS
+        BIOSEQ_HIGHWAY_GENERATED_TARGET_ORDINARY_IMPLEMENTATIONS)
+      if(_bioseq_highway_source MATCHES
+          "/instances/minimizer_two_stack_nthash\\.cppm$")
+        set_property(SOURCE "${_bioseq_highway_source}" APPEND PROPERTY
+          COMPILE_OPTIONS "$<$<CONFIG:Debug>:-gno-inline-line-tables>")
+      endif()
+    endforeach()
+  endif()
 endif()
 unset(_bioseq_hwy_sse2)
 unset(_bioseq_hwy_ssse3)

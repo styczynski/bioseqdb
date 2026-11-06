@@ -24,6 +24,8 @@ extern "C" {
 #include "miscadmin.h"
 #include "fmgr.h"
 #include "catalog/namespace.h"
+#include "catalog/dependency.h"
+#include "utils/fmgrprotos.h"
 #include "nodes/makefuncs.h"
 }
 
@@ -67,6 +69,7 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.sequences.sample_table.sql_rows;
 import bioseq.postgres.sequences.random;
+import bioseq.postgres.scheduler.supervisor;
 
 using bioseq::storage::sequence_size_t;
 
@@ -405,11 +408,11 @@ void finish_sample_write_states(sample_table_write_context& context) {
     });
 }
 
-/** Rebuild the existing primary key after direct sample writes have completed.
+/** Finalize the primary key and owned serial sequence after direct sample writes.
  * The caller has closed its tuple slot and parent relation before this utility
  * command; the existing table-AM index builder supplies visible rows and TIDs.
  * Rows with empty sequence values still receive ordinary primary-key entries. */
-void rebuild_sample_primary_key(Oid parent_relid) {
+void finalize_sample_identifiers(Oid parent_relid, std::int64_t last_id) {
     const auto qualified_index_name = bioseq::postgres::support::invoke_pg_as_cpp([parent_relid] {
         Relation parent = table_open(parent_relid, AccessShareLock);
         const Oid primary_key = bioseq::postgres::support::find_primary_key_oid(parent);
@@ -430,6 +433,16 @@ void rebuild_sample_primary_key(Oid parent_relid) {
     if (status != SPI_OK_UTILITY)
         raise_sample_table_error("sample generation", "could not rebuild the sample primary key",
             "SPI_execute status=" + std::to_string(status));
+    bioseq::postgres::support::invoke_pg_as_cpp([parent_relid, last_id] {
+        List* sequences = getOwnedSequences(parent_relid);
+        if (list_length(sequences) != 1)
+            ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                errmsg("sample table must own exactly one serial sequence")));
+        const Oid sequence = linitial_oid(sequences);
+        list_free(sequences);
+        (void)DirectFunctionCall3(setval3_oid, ObjectIdGetDatum(sequence),
+            Int64GetDatum(last_id), BoolGetDatum(true));
+    });
 }
 
 /**
@@ -817,6 +830,7 @@ Datum random_support(
     static constexpr std::array reserved_names{std::string_view{"id"}, std::string_view{"seq"}};
     const auto quality = resolve_sample_quality_column(quality_column, quality_alphabet, reserved_names);
     const auto quality_seed = bioseq::common::splitmix64(seed_value ^ 0x7175616c697479ULL);
+    bioseq::postgres::support::invoke_pg_as_cpp([] { bioseq::postgres::scheduler::backend_sync(); });
     sample_table_write_context context{};
     std::exception_ptr failure;
     try {
@@ -831,9 +845,11 @@ Datum random_support(
                 static_cast<std::uint64_t>(sequence_index));
             std::optional<generated_sample_source> scores;
             if (quality) {
+                // Isolate row identity before the legacy length-dependent chunk mapping.
+                const auto row_seed = bioseq::common::splitmix64(
+                    quality_seed ^ static_cast<std::uint64_t>(sequence_index));
                 scores.emplace(prepare_random_sample_source(context, quality->alphabet_code, 3,
-                    static_cast<sequence_size_t>(sequence_bp), quality_seed,
-                    static_cast<std::uint64_t>(sequence_index)));
+                    static_cast<sequence_size_t>(sequence_bp), row_seed, 0u));
             }
             bioseq::postgres::support::invoke_pg_as_cpp([&context, &sequence, &scores, sequence_index] {
                 bioseq::postgres::support::pg_slot_datums_view values{context.slot};
@@ -857,7 +873,7 @@ Datum random_support(
         if (failure == nullptr) failure = std::current_exception();
     }
     if (failure != nullptr) std::rethrow_exception(failure);
-    rebuild_sample_primary_key(context.parent_relid);
+    finalize_sample_identifiers(context.parent_relid, sequence_count);
     return context.parent_relid;
 }
 
@@ -1005,6 +1021,7 @@ Datum random_support(
         std::string_view{"original_query_length"}};
     const auto quality = resolve_sample_quality_column(quality_column, quality_alphabet, reserved_names);
     const auto quality_seed = bioseq::common::splitmix64(params.seed ^ 0x7175616c697479ULL);
+    bioseq::postgres::support::invoke_pg_as_cpp([] { bioseq::postgres::scheduler::backend_sync(); });
 
     const std::string resolved_alphabet = alphabet.value_or(std::string{"dna4"});
     const auto selected_alphabet = supported_biological_alphabets::try_index_of_name(resolved_alphabet.c_str());
@@ -1041,7 +1058,37 @@ Datum random_support(
             constexpr std::int16_t target_attno = 3;
             gen_ns::alphabet_sequence_generator<
                 Alphabet, std::uint64_t> generator{params};
+            using ReferenceTraits = typename compact_sequence_range<Configuration>::traits;
+            const auto reference_units = bioseq::common::ceil_div(
+                static_cast<std::uint64_t>(params.reference_length),
+                static_cast<std::uint64_t>(ReferenceTraits::letters_per_unit));
+            const auto reference_bytes = bioseq::common::checked_mul(
+                reference_units, sizeof(typename ReferenceTraits::storage_unit));
+            const auto reference_bound = reference_bytes ? bioseq::common::checked_mul(
+                *reference_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor)
+                : std::optional<std::uint64_t>{};
+            if (!reference_bound) {
+                bioseq::postgres::support::raise_sql_error(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                    {.message = "query sample reference allocation size overflows admission"});
+            }
+            // Declare the permit first so every shared reference is destroyed before
+            // releasing its exact packed capacity, including during exception unwinding.
+            auto reference_admission = bioseq::parallelism::try_reserve_budgeted_wave(
+                1u, *reference_bound);
+            if (!reference_admission.is_admitted) {
+                bioseq::postgres::support::raise_sql_error(ERRCODE_OUT_OF_MEMORY,
+                    {.message = "query sample generation could not reserve its shared reference"});
+            }
             auto reference = generator.generate_reference();
+            const auto reference_capacity_bytes = bioseq::common::checked_mul(
+                static_cast<std::uint64_t>(reference->packed_units.capacity()),
+                sizeof(typename ReferenceTraits::storage_unit));
+            if (!reference_capacity_bytes
+                || *reference_capacity_bytes > reference_admission.permit.bytes()) {
+                bioseq::postgres::support::raise_sql_error(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                    {.message = "query sample reference allocation exceeds admitted capacity"});
+            }
+            reference_admission.permit.shrink_to(*reference_capacity_bytes);
 
             for (std::size_t first = 0;
                  first < params.fragment_count;) {
@@ -1107,8 +1154,10 @@ Datum random_support(
                             context.caches);
                     std::optional<generated_sample_source> scores;
                     if (quality) {
+                        const auto row_seed = bioseq::common::splitmix64(
+                            quality_seed ^ static_cast<std::uint64_t>(first + local));
                         scores.emplace(prepare_random_sample_source(context, quality->alphabet_code, 9,
-                            query_total_bp, quality_seed, first + local));
+                            query_total_bp, row_seed, 0u));
                     }
                     const bioseq::storage::sequence_locator query_locator =
                         query_source.locator();
@@ -1211,7 +1260,7 @@ Datum random_support(
         if (failure != nullptr) {
             std::rethrow_exception(failure);
         }
-        rebuild_sample_primary_key(context.parent_relid);
+        finalize_sample_identifiers(context.parent_relid, static_cast<std::int64_t>(params.fragment_count));
         created_relation = context.parent_relid;
     });
     return created_relation;

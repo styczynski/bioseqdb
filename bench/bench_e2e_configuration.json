@@ -117,6 +117,19 @@
   },
 
   "test_cases": {
+    "RANDOM_DNA4_STARTUP": {"concurrency": 1,"data": {"alphabet": "dna4","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation dna4: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_DNA4_LONG": {"concurrency": 1,"data": {"alphabet": "dna4","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation dna4: 16 rows of 100000 symbols, including DDL and commit"},
+    "RANDOM_DNA5_STARTUP": {"concurrency": 1,"data": {"alphabet": "dna5","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation dna5: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_DNA5_LONG": {"concurrency": 1,"data": {"alphabet": "dna5","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation dna5: 16 rows of 100000 symbols, including DDL and commit"},
+    "RANDOM_AA10LI_STARTUP": {"concurrency": 1,"data": {"alphabet": "aa10li","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation aa10li: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_AA10LI_LONG": {"concurrency": 1,"data": {"alphabet": "aa10li","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation aa10li: 16 rows of 100000 symbols, including DDL and commit"},
+    "RANDOM_AA10MURPHY_STARTUP": {"concurrency": 1,"data": {"alphabet": "aa10murphy","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation aa10murphy: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_AA10MURPHY_LONG": {"concurrency": 1,"data": {"alphabet": "aa10murphy","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation aa10murphy: 16 rows of 100000 symbols, including DDL and commit"},
+    "RANDOM_AA20_STARTUP": {"concurrency": 1,"data": {"alphabet": "aa20","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation aa20: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_AA20_LONG": {"concurrency": 1,"data": {"alphabet": "aa20","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation aa20: 16 rows of 100000 symbols, including DDL and commit"},
+    "RANDOM_AA27_STARTUP": {"concurrency": 1,"data": {"alphabet": "aa27","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation aa27: 32 rows of 150 symbols, including DDL and commit"},
+    "RANDOM_AA27_LONG": {"concurrency": 1,"data": {"alphabet": "aa27","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation aa27: 16 rows of 100000 symbols, including DDL and commit"},
+
     "RANDOM_DNA4_150": {
       "concurrency": 1,
       "data": {
@@ -1198,6 +1211,19 @@
     },
     "matrix": {
       "for": {
+        "RANDOM_DNA4_STARTUP": 3,
+        "RANDOM_DNA4_LONG": 3,
+        "RANDOM_DNA5_STARTUP": 3,
+        "RANDOM_DNA5_LONG": 3,
+        "RANDOM_AA10LI_STARTUP": 3,
+        "RANDOM_AA10LI_LONG": 3,
+        "RANDOM_AA10MURPHY_STARTUP": 3,
+        "RANDOM_AA10MURPHY_LONG": 3,
+        "RANDOM_AA20_STARTUP": 3,
+        "RANDOM_AA20_LONG": 3,
+        "RANDOM_AA27_STARTUP": 3,
+        "RANDOM_AA27_LONG": 3,
+
         "RANDOM_DNA4_150": 3,
         "RANDOM_DNA4_2000": 3,
         "RANDOM_DNA5_150": 3,

@@ -132,6 +132,13 @@ namespace {
                     row_number_to_tid(scan_vector->source_row_numbers[row_index]);
                 econtext->ecxt_scantuple = scalar_scan_slot;
 
+                /* Residual scalar filters and projections require the same owned
+                 * sequence values as the ordinary row path after vector extraction. */
+                if (!runtime.buffer.mmsearch_active() && !runtime.locator_passthrough &&
+                    !runtime.lazy_source_projection) {
+                    hydrate_scan_slot(node->ss_currentScanDesc, scalar_scan_slot, /*force=*/true);
+                }
+
                 if (qual != nullptr && !ExecQual(qual, econtext)) {
                     InstrCountFiltered1(node, 1);
                     continue;

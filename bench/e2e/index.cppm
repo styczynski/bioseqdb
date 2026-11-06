@@ -18355,6 +18355,7 @@ struct random_generation_output {
     std::uint64_t measured_region_ns = 0;
     std::string create_sql;
     std::string generate_sql;
+    std::string execution_sql;
     std::vector<std::string> plan;
 };
 
@@ -18488,6 +18489,11 @@ void cleanup_random_generation_input(
     }
     // One simple-query request gives every variant one implicit transaction and commit.
     preparation.execution_sql = preparation.create_sql + preparation.generate_sql;
+    if (algorithm == "insert_random" || algorithm == "insert_mutate") {
+        preparation.execution_sql += fmt::format(
+            "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence('{}', 'id'), {}, true);",
+            input.table, input.row_count);
+    }
     return preparation;
 }
 
@@ -18534,6 +18540,7 @@ void finalize_random_generation_iteration(
         && (!preparation.expect_random_scan || output.custom_scan_taken);
     output.create_sql = std::move(preparation.create_sql);
     output.generate_sql = std::move(preparation.generate_sql);
+    output.execution_sql = std::move(preparation.execution_sql);
     it::exec_sqlf(*input.conn, "DROP TABLE {} CASCADE;", input.table);
     if (!output.correctness_accepted) {
         bioseq_log<logging_level::error>(
@@ -18578,6 +18585,7 @@ void finalize_random_generation_iteration(
         {"comparison_group", output.constant_source ? "constant_source_diagnostic"
             : output.paired ? "shared_reference_pairs" : "sample_sequences"},
         {"create_sql", output.create_sql}, {"generate_sql", output.generate_sql},
+        {"execution_sql", output.execution_sql},
         {"constant_preparation_sql", output.constant_source ? input.constant_preparation_sql : ""},
         {"constant_reference_prepared_untimed", output.constant_source},
         {"reference_distribution", input.alphabet == "dna5" && algorithm == "query_target_sample"
@@ -18585,7 +18593,7 @@ void finalize_random_generation_iteration(
         {"fragment_positions", output.constant_source ? "fixed_zero"
             : algorithm == "insert_mutate" ? "postgres_random_setseed_0.42" : "native_generator"},
         {"same_seed_means_identical_samples", false},
-        {"id_policy", "explicit ordinal in both helpers and INSERT; no nextval in timed row generation"},
+        {"id_policy", "explicit ordinal in both helpers and INSERT; owned serial advanced once after rows"},
         {"timed_scope", "one SQL request and implicit transaction: CREATE TABLE, generation, insertion, commit; cleanup and checks excluded"},
         {"explain_analyze", false}, {"explain", output.plan},
         {"row_count", output.row_count}, {"valid_rows", output.valid_rows},
@@ -18594,6 +18602,8 @@ void finalize_random_generation_iteration(
         {"custom_scan_taken", output.custom_scan_taken},
         {"custom_scan_expected", output.custom_scan_expected},
         {"custom_scan_may_cover_reference_only", algorithm == "insert_mutate" && !output.constant_source},
+        // Canonical manual-region key required by the framework's durable evidence contract.
+        {"index_and_map_ns", output.measured_region_ns},
         {"measured_region_ns", output.measured_region_ns}}.dump();
 }
 

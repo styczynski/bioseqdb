@@ -13,6 +13,7 @@ module;
 export module bioseq.codegen.sql:tests.contract;
 
 import :policy;
+import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
 export import :tests.contract.guc;
 import bioseq.codegen.sql.renderer;
@@ -248,6 +249,35 @@ inline void require_failure(
         }},
         .companion = true,
     };
+}
+
+/** Collect a literal enum authority and an intentionally earlier SQL consumer. */
+[[nodiscard]] inline collected_program enum_type_program(
+    std::string_view initializer = R"({"plain", "uniprot", "quote'd"})",
+    std::string_view extent = "3") {
+    std::string source =
+        "export module bioseq.postgres.fixture.sql_rows;\n"
+        "namespace bioseq::fixture {\n"
+        "inline constexpr std::array<std::string_view, ";
+    source += extent;
+    source += "> enum_names";
+    source += initializer;
+    source += R"CPP(;
+using header_format [[bioseq_sql::type({
+    .schema = bioseq::sql::fixed_schema<"fixture_types">,
+    .enum_labels = bioseq::fixture::enum_names,
+})]] = int;
+}
+)CPP";
+    collected_program result = collect_source_text(
+        "enum_labels_contract.cppm", source);
+    result.entities.insert(result.entities.begin(), fixture_function(
+        "consume_format", "fixture_types",
+        {{.name = "format", .cpp_type = "Datum",
+          .sql_type = "fixture_types.header_format"}},
+        "text"));
+    result.entities.push_back(fixture_schema("fixture_types"));
+    return result;
 }
 
 [[nodiscard]] inline collected_entity fixture_table(
@@ -1232,6 +1262,75 @@ inline void run_generator_contract_self_tests() {
         },
         "must resolve one emitting table/composite owner",
         "SQL graph accepted an ordinary ownerless inline column");
+
+    const sql_graph enum_graph = build_sql_graph(
+        contract_test_detail::enum_type_program());
+    const rendered_sql_artifact enum_artifact = render_sql_graph(enum_graph);
+    const std::size_t enum_schema = contract_test_detail::statement_position(
+        enum_artifact, "CREATE SCHEMA fixture_types");
+    const std::size_t enum_definition = contract_test_detail::statement_position(
+        enum_artifact, "CREATE TYPE fixture_types.header_format AS ENUM");
+    const std::size_t enum_consumer = contract_test_detail::statement_position(
+        enum_artifact, "FUNCTION fixture_types.consume_format(");
+    contract_test_detail::require(
+        enum_artifact.statements[enum_definition].text
+            == "CREATE TYPE fixture_types.header_format AS ENUM "
+               "('plain', 'uniprot', 'quote''d');"
+            && enum_schema < enum_definition && enum_definition < enum_consumer
+            && !enum_artifact.sql.contains(
+                "CREATE TYPE fixture_types.header_format;"),
+        "native enum labels lost quoting/order or their schema/type dependency");
+    contract_test_detail::require(
+        render_row_codec_modules(enum_graph, {}).empty(),
+        "native enum incorrectly requires a composite row codec");
+    contract_test_detail::require_failure(
+        [] {
+            static_cast<void>(contract_test_detail::enum_type_program(
+                R"({"plain", "plain", "uniprot"})"));
+        },
+        "unique, nonempty labels",
+        "enum authority accepted repeated labels");
+    contract_test_detail::require_failure(
+        [] {
+            static_cast<void>(contract_test_detail::enum_type_program(
+                R"({"plain", "", "uniprot"})"));
+        },
+        "unique, nonempty labels",
+        "enum authority accepted an empty label");
+    contract_test_detail::require_failure(
+        [] {
+            static_cast<void>(contract_test_detail::enum_type_program(
+                R"({"plain", "bad\0label", "uniprot"})"));
+        },
+        "without NUL",
+        "enum authority accepted an embedded NUL");
+    contract_test_detail::require_failure(
+        [] {
+            static_cast<void>(contract_test_detail::enum_type_program(
+                R"({"plain", std::string_view{"uniprot"}, "last"})"));
+        },
+        "individual string literals only",
+        "enum authority accepted a nonliteral initializer");
+    contract_test_detail::require_failure(
+        [] {
+            static_cast<void>(contract_test_detail::enum_type_program(
+                R"({"plain", "uniprot"})"));
+        },
+        "extent matching every explicitly initialized label",
+        "enum authority silently accepted an implicit empty array element");
+    contract_test_detail::require_failure(
+        [] {
+            collected_program invalid = contract_test_detail::enum_type_program();
+            const auto enum_type = std::ranges::find(
+                invalid.entities, entity_kind::type, &collected_entity::kind);
+            contract_test_detail::require(
+                enum_type != invalid.entities.end(), "enum fixture type is absent");
+            enum_type->options.push_back({
+                .name = "internal_length", .expression = "4"});
+            static_cast<void>(render_sql_graph(build_sql_graph(std::move(invalid))));
+        },
+        "cannot declare base-type options",
+        "native enum accepted conflicting base-type storage options");
 
     const sql_graph annotated_type_graph = build_sql_graph(
         contract_test_detail::annotated_type_program());

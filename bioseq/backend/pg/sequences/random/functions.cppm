@@ -30,6 +30,8 @@ import bioseq.storage.lazy_sequence;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.concepts;
+import bioseq.parallelism.mode;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.support;
 import bioseq.postgres.sql_boundary;
@@ -120,6 +122,7 @@ struct request {
 struct stream_state {
     std::uint64_t entropy{};
     std::uint64_t ordinal{};
+    bool scheduler_ready{};
 };
 
 /** A measured output; measurement and emission replay exactly the same random seed. */
@@ -128,6 +131,8 @@ struct measured_row {
     std::uint64_t symbols;
     std::size_t runs;
     std::uint64_t bytes;
+    /// Workers retain typed failures until the backend consumes the measured prefix.
+    std::optional<generation::generation_error> failure{};
 };
 
 /** State owned by a memory-context callback, including the active shared permit. */
@@ -163,6 +168,10 @@ struct batch_state {
     /** Initialize fixed metadata and borrow a constant source once on first demand. */
     void initialize() {
         if (initialized) return;
+        if (!stream.scheduler_ready) {
+            support::invoke_pg_as_cpp([] { bioseq::postgres::scheduler::backend_sync(); });
+            stream.scheduler_ready = true;
+        }
         if (parameters.kind == request_kind::header) {
             lengths = resolve_lengths(parameters);
             format = bioseq::storage::load_pg::decode_header_format(
@@ -214,9 +223,16 @@ struct batch_state {
         initialized = true;
     }
 
-    /** Count logical output and packed bytes without allocating output storage. */
-    [[nodiscard]] std::expected<measured_row, generation::generation_error> measure(std::uint64_t ordinal) {
-        measured_row result{.seed = bioseq::common::splitmix64(parameters.seed.value_or(stream.entropy) ^ ordinal)};
+    /** Derive an ordinal's private seed identically for scalar and worker measurements. */
+    [[nodiscard]] measured_row row_for_ordinal(std::uint64_t ordinal) const {
+        return {.seed = bioseq::common::splitmix64(parameters.seed.value_or(stream.entropy) ^ ordinal)};
+    }
+
+    /** Count output without allocation; an optional extent bounds speculative work only. */
+    [[nodiscard]] std::expected<measured_row, generation::generation_error> measure(
+        std::uint64_t ordinal,
+        std::uint64_t output_symbol_limit = (std::numeric_limits<std::uint32_t>::max)()) {
+        auto result = row_for_ordinal(ordinal);
         auto random = generation::seed_stream(result.seed, 0u);
         if (parameters.kind != request_kind::mutation) {
             // Reserve the final stream ID for length sampling. Packed content chunk
@@ -226,6 +242,8 @@ struct batch_state {
             const auto sampled = generation::sample_generation_length(lengths, length_random);
             if (!sampled) return std::unexpected(sampled.error());
             result.symbols = *sampled;
+            if (result.symbols > output_symbol_limit)
+                return std::unexpected(generation::generation_error::size_overflow);
         }
         if (parameters.kind == request_kind::header) {
             // Includes temporary component, formatted string and PostgreSQL text.
@@ -238,7 +256,7 @@ struct batch_state {
             const auto counted = parameters.kind == request_kind::mutation
                 ? generation::mutate_cigar_runs<bioseq::cigar_symbol>(
                     pg_cigar_run_cursor{*session, cigar_source.root(), 0u, cigar_source.bp_length()},
-                    layout.space, parameters.mutation, random, counter)
+                    layout.space, parameters.mutation, random, counter, output_symbol_limit)
                 : generation::generate_cigar<bioseq::cigar_symbol>(
                     result.symbols, layout.space, random, counter);
             if (!counted) return std::unexpected(counted.error());
@@ -259,19 +277,20 @@ struct batch_state {
         std::expected<measured_row, generation::generation_error> measured =
             std::unexpected(generation::generation_error::unsupported_layout);
         pgseq_dispatch_rank_packed_instance(layout.alphabet_code, layout.storage_unit_byte_width,
-            [this, result, random, &measured]<class Instance>() {
-                measured = measure_packed<Instance>(result, random);
+            [this, result, random, output_symbol_limit, &measured]<class Instance>() {
+                measured = measure_packed<Instance>(result, random, output_symbol_limit);
             });
         return measured;
     }
 
-    /** Measure one rank-packed layout without allocating destination words. */
+    /** Measure one packed layout, optionally bounding unused inserted-symbol counting. */
     template<class Instance>
     [[nodiscard]] std::expected<measured_row, generation::generation_error> measure_packed(
-        measured_row result, generation::taus_lcg_state random) {
+        measured_row result, generation::taus_lcg_state random,
+        std::uint64_t output_symbol_limit = (std::numeric_limits<std::uint32_t>::max)()) const {
         using traits = typename compact_sequence_range<Instance>::traits;
         if (parameters.kind == request_kind::mutation) {
-            generation::counting_rank_sink<Instance> counter;
+            generation::counting_rank_sink<Instance> counter{output_symbol_limit};
             const auto counted = generation::mutate_rank_windows<typename traits::alphabet_type>(
                 rank_source, 0u, source_descriptor.bp_length, parameters.mutation, random, counter);
             if (!counted) return std::unexpected(counted.error());
@@ -361,11 +380,38 @@ struct batch_state {
         discard();
         if (null_source) return;
         constexpr std::size_t ceiling = 4096u;
+        constexpr std::uint64_t wave_bytes = 2u * 1024u * 1024u;
+        constexpr std::uint64_t parallel_measurement_symbols = 64u * 1024u;
+        constexpr std::uint64_t speculative_symbol_budget = 4u * 1024u * 1024u;
+        constexpr auto ordinal_limit = std::numeric_limits<std::uint64_t>::max();
+        const auto remaining_ordinals = ordinal_limit - stream.ordinal;
+        if (remaining_ordinals == 0u) fail_generation(generation::generation_error::size_overflow);
         // The scalar path reserves one small stack block without zeroing a
         // maximum-sized batch. Larger measurement arrays hold their own shared
         // permit before allocation and are released after synchronous filling.
         std::array<measured_row, 32u> inline_measurements;
         auto requested = std::max<std::size_t>(1u, std::min({capacity, ceiling, demand_bound}));
+        requested = static_cast<std::size_t>(std::min<std::uint64_t>(requested, remaining_ordinals));
+        const auto source_symbols = source_descriptor.bp_length;
+        if (parameters.kind == request_kind::mutation && source_symbols != 0u) {
+            // Every later row may traverse the entire source, even when deletions
+            // leave little output. This single work bound covers serial and worker
+            // counting; the first row is already demanded and exempt.
+            const auto speculative_rows = speculative_symbol_budget / source_symbols;
+            requested = static_cast<std::size_t>(std::min<std::uint64_t>(requested, 1u + speculative_rows));
+        }
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        const auto minimum_parallel_rows = source_symbols == 0u ? ceiling + 1u
+            : (parallel_measurement_symbols - 1u) / source_symbols + 1u;
+        // Keep long rows individually schedulable within the same work target;
+        // short rows retain the existing bounded grouping to amortize dispatch.
+        const auto maximum_row_grain = std::min<std::size_t>(8u, minimum_parallel_rows);
+        const bool worker_measurement_source = parameters.kind == request_kind::mutation
+            && !pgseq_is_cigar_alphabet(layout.alphabet_code)
+            && rank_source.worker_shareable
+            && source_descriptor.kind == pg_sequence_datum_kind::flat_bound
+            && bioseq::parallelism::has_parallel_dispatch(pool.get_mode())
+            && pool.maximum_concurrency() > 1u;
         bioseq::parallelism::budgeted_wave measurement_admission;
         std::vector<measured_row> larger_measurements;
         std::span<measured_row> measured{inline_measurements.data(), std::min(requested, inline_measurements.size())};
@@ -380,22 +426,50 @@ struct batch_state {
                 capacity = requested;
             }
         }
+        // Compute one output-work limit after every request shrink. Both worker
+        // COUNT and all serial fallback paths use this same speculative bound.
+        const auto speculative_output_limit = speculative_symbol_budget
+            / std::max<std::size_t>(1u, requested - 1u);
+        const bool parallel_measurement = worker_measurement_source
+            && requested > 2u && requested - 1u >= minimum_parallel_rows;
+        if (parallel_measurement) {
+            // Dispatch once on the backend. Workers read immutable flat ranks,
+            // own their RNG/count sink, and write disjoint admitted metadata slots.
+            // The demanded first row is uncapped; its typed failure is raised
+            // on the backend only after the synchronous worker join.
+            // A capped speculative row is retried uncapped only when demanded.
+            pgseq_dispatch_rank_packed_instance(layout.alphabet_code, layout.storage_unit_byte_width,
+                [this, requested, measured, speculative_output_limit, maximum_row_grain, &pool]<class Instance>() {
+                    const auto count_rows = [this, measured, speculative_output_limit](std::size_t first, std::size_t last) {
+                        for (auto index = first; index < last; ++index) {
+                            const auto row = row_for_ordinal(stream.ordinal + index);
+                            const auto output_limit = index == 0u
+                                ? (std::numeric_limits<std::uint32_t>::max)() : speculative_output_limit;
+                            const auto counted = measure_packed<Instance>(row,
+                                generation::seed_stream(row.seed, 0u), output_limit);
+                            measured[index] = counted ? *counted : measured_row{.failure = counted.error()};
+                        }
+                    };
+                    const auto grain = std::clamp<std::size_t>(
+                        requested / std::max<std::size_t>(1u, pool.maximum_concurrency()), 1u, maximum_row_grain);
+                    pool.parallel_for(0u, requested, grain, bioseq::parallelism::range_body{count_rows});
+                });
+        }
         std::size_t count{};
         std::uint64_t bytes{ALLOCSET_SMALL_INITSIZE};
-        constexpr auto ordinal_limit = std::numeric_limits<std::uint64_t>::max();
         for (; count < requested; ++count) {
-            if (count >= ordinal_limit - stream.ordinal) {
-                if (count == 0u) fail_generation(generation::generation_error::size_overflow);
-                break;
+            if (!parallel_measurement) {
+                const auto row = measure(stream.ordinal + count, count == 0u
+                    ? (std::numeric_limits<std::uint32_t>::max)() : speculative_output_limit);
+                measured[count] = row ? *row : measured_row{.failure = row.error()};
             }
-            const auto row = measure(stream.ordinal + count);
-            if (!row) {
-                if (count == 0u) fail_generation(row.error());
+            const auto& row = measured[count];
+            if (row.failure) {
+                if (count == 0u) fail_generation(*row.failure);
                 break; // A speculative row's error is raised only when demanded.
             }
-            if (count != 0u && bytes + row->bytes > 256u * 1024u) break;
-            measured[count] = *row;
-            bytes += row->bytes + sizeof(Datum);
+            if (count != 0u && bytes + row.bytes + sizeof(Datum) > wave_bytes) break;
+            bytes += row.bytes + sizeof(Datum);
         }
         for (;;) {
             admission = bioseq::parallelism::try_reserve_budgeted_wave(1u, bytes);
@@ -421,7 +495,7 @@ struct batch_state {
                 for (std::size_t index = 0u; index < count; ++index) outputs[index] = emit_cigar(measured[index]);
             } else {
                 pgseq_dispatch_rank_packed_instance(layout.alphabet_code, layout.storage_unit_byte_width,
-                    [this, count, &measured]<class Instance>() {
+                    [this, count, maximum_row_grain, &measured]<class Instance>() {
                         using traits = typename compact_sequence_range<Instance>::traits;
                         using alphabet = typename traits::alphabet_type;
                         std::vector<generation::random_packed_destination<traits>> destinations;
@@ -453,17 +527,21 @@ struct batch_state {
                                 }
                             };
                             if (count > 1u && count * source_descriptor.bp_length >= 64u * 1024u
+                                && bioseq::parallelism::global_pool::instance().get_mode()
+                                    != bioseq::parallelism::pipeline_concurrency_mode::single_thread
                                 && rank_source.worker_shareable
                                 && source_descriptor.kind == pg_sequence_datum_kind::flat_bound) {
-                                bioseq::parallelism::global_pool::instance().parallel_for(
-                                    0u, count, 8u, bioseq::parallelism::range_body{emit_rows});
+                                auto& pool = bioseq::parallelism::global_pool::instance();
+                                const auto row_grain = std::clamp<std::size_t>(
+                                    count / std::max<std::size_t>(1u, pool.maximum_concurrency()), 1u, maximum_row_grain);
+                                pool.parallel_for(0u, count, row_grain, bioseq::parallelism::range_body{emit_rows});
                             } else emit_rows(0u, count);
                         }
                     });
             }
         }
         ++batches;
-        capacity = count == requested ? std::min(ceiling, capacity * 2u) : count;
+        capacity = count == requested ? std::min(ceiling, requested * 2u) : count;
     }
 
     /** Consume exactly one output and advance only the externally observed ordinal. */
@@ -516,7 +594,7 @@ inline void release_batch_state(void* opaque) noexcept {
     auto& stream = *static_cast<stream_state*>(extra);
     auto* state = make_batch_state(std::move(input), CurrentMemoryContext, stream, 1u);
     auto result = state->next(1u);
-    stream.ordinal = state->stream.ordinal;
+    stream = state->stream;
     return result;
 }
 

@@ -15,6 +15,8 @@ import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.indexing.symbol_counts;
 import bioseq.sequences;
 import bioseq.sequences.generation;
+import bioseq.sequences.cigar;
+import bioseq.sequences.rank_pack;
 import bioseq.storage.lazy_sequence;
 
 struct rank_300_alphabet {
@@ -126,6 +128,101 @@ void check_generator(std::string_view label, std::string_view valid_chars) {
 
 }  // namespace
 
+TEST_CASE("mutation counting bounds speculative work without changing default replay",
+          "[component:bioseq][layer:unit][feature:sequence]") {
+    const auto match = bioseq::cigar_symbol{}.assign_char('M');
+    gen::generator_params parameters;
+    parameters.substitution_rate = 0.0;
+    parameters.insertion_rate = 0.0;
+    parameters.deletion_rate = 0.0;
+
+    SECTION("CIGAR cap precedes canonical trailing-run coalescing") {
+        const std::array runs{bioseq::cigar_run{4u, match}, bioseq::cigar_run{4u, match}};
+        auto random = gen::seed_stream(42u, 0u);
+        gen::counting_cigar_sink<bioseq::cigar_symbol> counter;
+        const auto counted = gen::mutate_cigar_runs<bioseq::cigar_symbol>(
+            runs, bioseq::cigar_space::compatibility, parameters, random, counter, 7u);
+        REQUIRE_FALSE(counted.has_value());
+        REQUIRE(counted.error() == gen::generation_error::size_overflow);
+        REQUIRE(counter.size() == 1u);
+        REQUIRE(counter.symbol_count() == 4u);
+    }
+
+    SECTION("large CIGAR insertion stops before generating inserted operations") {
+        const std::array runs{bioseq::cigar_run{1u, match}};
+        parameters.insertion_rate = 1.0;
+        parameters.insertion_length_mean = 1'000'000'000.0;
+        parameters.insertion_length_stddev = 0.0;
+        auto random = gen::seed_stream(42u, 0u);
+        auto expected_random = random;
+        (void)gen::mutation_event_distribution{parameters}.events(expected_random);
+        gen::counting_cigar_sink<bioseq::cigar_symbol> counter;
+        const auto counted = gen::mutate_cigar_runs<bioseq::cigar_symbol>(
+            runs, bioseq::cigar_space::compatibility, parameters, random, counter, 32u);
+        REQUIRE_FALSE(counted.has_value());
+        REQUIRE(counted.error() == gen::generation_error::size_overflow);
+        REQUIRE(counter.symbol_count() == 1u);
+        REQUIRE(gen::next_u64(random) == gen::next_u64(expected_random));
+    }
+
+    SECTION("rank counting reuses its bounded sink for large insertions") {
+        using configuration = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+        const compact_sequence_range<configuration> source{
+            std::vector<seq::dna4>{seq::dna4{}.assign_char('A')}};
+        parameters.insertion_rate = 1.0;
+        parameters.insertion_length_mean = 1'000'000'000.0;
+        parameters.insertion_length_stddev = 0.0;
+        auto random = gen::seed_stream(42u, 0u);
+        gen::counting_rank_sink<configuration> counter{32u};
+        const auto counted = gen::mutate_sequence(source, 0u, source.bp_size(),
+            parameters, random, counter);
+        REQUIRE_FALSE(counted.has_value());
+        REQUIRE(counter.symbol_count() <= 32u);
+    }
+
+    SECTION("default CIGAR cap admits a large unchanged demanded output") {
+        const std::array runs{bioseq::cigar_run{5'000'000u, match}};
+        auto random = gen::seed_stream(42u, 0u);
+        gen::counting_cigar_sink<bioseq::cigar_symbol> counter;
+        const auto counted = gen::mutate_cigar_runs<bioseq::cigar_symbol>(
+            runs, bioseq::cigar_space::compatibility, parameters, random, counter);
+        REQUIRE(counted.has_value());
+        REQUIRE(counted->output_symbols == 5'000'000u);
+        REQUIRE(counter.size() == 1u);
+    }
+
+    SECTION("count, exact-cap count and default replay preserve RNG and geometry") {
+        const std::array runs{bioseq::cigar_run{30u, match}};
+        parameters.substitution_rate = 0.2;
+        parameters.insertion_rate = 0.1;
+        parameters.deletion_rate = 0.1;
+        auto random = gen::seed_stream(77u, 0u);
+        auto replay_random = random;
+        auto limited_random = random;
+        gen::counting_cigar_sink<bioseq::cigar_symbol> counter;
+        const auto counted = gen::mutate_cigar_runs<bioseq::cigar_symbol>(
+            runs, bioseq::cigar_space::compatibility, parameters, random, counter);
+        REQUIRE(counted.has_value());
+        std::vector<bioseq::cigar_run> storage(counter.size());
+        bioseq::cigar_run_span_sink<bioseq::cigar_symbol> writer{storage};
+        const auto replayed = gen::mutate_cigar_runs<bioseq::cigar_symbol>(
+            runs, bioseq::cigar_space::compatibility, parameters, replay_random, writer);
+        REQUIRE(replayed.has_value());
+        REQUIRE(replayed->output_symbols == counted->output_symbols);
+        REQUIRE(writer.used == counter.size());
+        gen::counting_cigar_sink<bioseq::cigar_symbol> limited_counter;
+        const auto limited = gen::mutate_cigar_runs<bioseq::cigar_symbol>(runs,
+            bioseq::cigar_space::compatibility, parameters, limited_random, limited_counter,
+            counted->output_symbols);
+        REQUIRE(limited.has_value());
+        REQUIRE(limited_counter.symbol_count() == counter.symbol_count());
+        REQUIRE(limited_counter.size() == counter.size());
+        const auto next_random = gen::next_u64(random);
+        REQUIRE(gen::next_u64(replay_random) == next_random);
+        REQUIRE(gen::next_u64(limited_random) == next_random);
+    }
+}
+
 TEST_CASE("sequence generation produces dna4 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna4, std::uint32_t>("dna4/u32", "ACGT");
@@ -207,6 +304,52 @@ TEST_CASE("sequence generation extracts uint16 ranks for custom alphabets",
             ASSERT(query_ranks[i] == reference_ranks[pair.truth_target_start + i],
                    "custom alphabet rank extraction drift", i);
         }
+    }
+
+    gp.substitution_rate = 1.0;
+    const auto substituted = gen::sequence_generator<custom_type>(gp)
+        .generate_fragment_pairs(reference, 0, gp.fragment_count);
+    REQUIRE(substituted.size() == gp.fragment_count);
+    bool observed_wide_rank = false;
+    for (const auto& pair : substituted) {
+        const auto query_ranks = decode(pair.query);
+        REQUIRE(query_ranks.size() == gp.fragment_length_mean);
+        for (std::size_t index = 0; index < query_ranks.size(); ++index) {
+            REQUIRE(query_ranks[index] < rank_300_alphabet::alphabet_size);
+            REQUIRE(query_ranks[index] != reference_ranks[pair.truth_target_start + index]);
+            observed_wide_rank = observed_wide_rank || query_ranks[index] > 255u;
+        }
+    }
+    REQUIRE(observed_wide_rank);
+
+    gp.substitution_rate = 0.0;
+    gp.insertion_rate = 1.0;
+    gp.insertion_length_mean = 1.0;
+    gp.insertion_length_stddev = 0.0;
+    const auto inserted = gen::sequence_generator<custom_type>(gp)
+        .generate_fragment_pairs(reference, 0, gp.fragment_count);
+    REQUIRE(inserted.size() == gp.fragment_count);
+    for (const auto& pair : inserted) {
+        const auto query_ranks = decode(pair.query);
+        REQUIRE(query_ranks.size() == 2u * gp.fragment_length_mean);
+        for (std::size_t index = 0; index < gp.fragment_length_mean; ++index) {
+            REQUIRE(query_ranks[index * 2u] == reference_ranks[pair.truth_target_start + index]);
+            REQUIRE(query_ranks[index * 2u + 1u] < rank_300_alphabet::alphabet_size);
+        }
+    }
+
+    gp.insertion_rate = 0.0;
+    gp.deletion_rate = 1.0;
+    gp.deletion_length_mean = 1.0;
+    gp.deletion_length_stddev = 0.0;
+    const auto deleted = gen::sequence_generator<custom_type>(gp)
+        .generate_fragment_pairs(reference, 0, gp.fragment_count);
+    REQUIRE(deleted.size() == gp.fragment_count);
+    for (const auto& pair : deleted) {
+        const auto query_ranks = decode(pair.query);
+        REQUIRE(query_ranks.size() == (gp.fragment_length_mean + 1u) / 2u);
+        for (std::size_t index = 0; index < query_ranks.size(); ++index)
+            REQUIRE(query_ranks[index] == reference_ranks[pair.truth_target_start + index * 2u]);
     }
 }
 
@@ -353,9 +496,11 @@ template <typename p_sequence>
     std::size_t end,
     bool reverse = false) {
     using rank_type = typename p_sequence::traits::letter_unit;
+    static_assert(std::same_as<rank_type, std::uint8_t>);
     std::vector<rank_type> ranks(end - start);
-    gen::extract_window_ranks(
-        seq, start, end, reverse, std::span<rank_type>{ranks.data(), ranks.size()});
+    if (reverse)
+        seq.template to_encoded_into<true>(ranks, seq.bp_size() - end, seq.bp_size() - start);
+    else seq.template to_encoded_into<false>(ranks, start, end);
     return ranks;
 }
 
@@ -363,15 +508,18 @@ inline void report_validation(std::string_view topic, const std::string& detail)
     std::cout << topic << ": " << detail << '\n';
 }
 
-template <typename p_traits, typename p_sequence>
+/** Replay production mutation into measured fixed storage and count actual event opportunities. */
+template <supports_compact_sequence_range Range>
 [[nodiscard]] gen::indel_event_counts replay_indel_counts(
-    const p_sequence& reference,
+    const compact_sequence_range<Range>& reference,
     const gen::generator_params& gp,
     std::size_t count,
     std::uint64_t& total_positions) {
-    using rank_type = typename p_traits::letter_unit;
+    using traits = typename compact_sequence_range<Range>::traits;
+    using storage_unit = typename traits::storage_unit;
+    using alphabet = typename traits::alphabet_type;
     static constexpr auto insertion_cdf =
-        gen::make_integer_cdf(gen::alphabet_probability<seq::dna5>::probability());
+        gen::make_integer_cdf(gen::alphabet_probability<alphabet>::probability());
     gen::indel_event_counts total{};
     total_positions = 0;
     for (std::size_t i = 0; i < count; ++i) {
@@ -381,30 +529,42 @@ template <typename p_traits, typename p_sequence>
         const std::size_t start = static_cast<std::size_t>(gen::next_below64(
             state, static_cast<std::uint64_t>(gp.reference_length - length + 1)));
         const bool is_reverse = gen::next_unit_double(state) < gp.reverse_complement_rate;
-
-        std::vector<rank_type> fragment(length);
-        gen::extract_window_ranks(reference,
-                                  start,
-                                  start + length,
-                                  is_reverse,
-                                  std::span<rank_type>{fragment.data(), fragment.size()});
-        gen::apply_substitutions<p_traits>(
-            std::span<rank_type>{fragment.data(), fragment.size()}, gp.substitution_rate, state);
-
-        std::vector<rank_type> out;
-        gen::indel_event_counts local{};
-        gen::apply_indels<p_traits>(
-            std::span<const rank_type>{fragment.data(), fragment.size()},
-            gp,
-            std::span<const std::uint32_t>{insertion_cdf.data(), insertion_cdf.size()},
-            state,
-            out,
-            &local);
+        const auto mutate = [&reference, &gp, start, length, is_reverse](auto& random, auto& writer) {
+            if constexpr (seqan3::nucleotide_alphabet<alphabet>) {
+                if (is_reverse) return gen::mutate_sequence<true>(reference, start, start + length,
+                    gp, random, writer, insertion_cdf);
+            }
+            return gen::mutate_sequence<false>(reference, start, start + length,
+                gp, random, writer, insertion_cdf);
+        };
+        const auto initial_random = state;
+        gen::counting_rank_sink<Range> counter;
+        const auto counted = mutate(state, counter);
+        REQUIRE(counted.has_value());
+        const auto geometry = counter.finish();
+        REQUIRE(static_cast<bool>(geometry));
+        std::vector<storage_unit> words(static_cast<std::size_t>(geometry.written_units));
+        using sink = bioseq::sequences::fixed_rank_pack_unit_sink<storage_unit>;
+        bioseq::sequences::checked_rank_pack_sink<Range,
+            bioseq::sequences::invalid_rank_policy::reject,
+            bioseq::sequences::pack_capacity_policy::fixed_span, sink> writer{sink{words}};
+        auto replay_random = initial_random;
+        const auto replayed = mutate(replay_random, writer);
+        REQUIRE(replayed.has_value());
+        REQUIRE(static_cast<bool>(writer.finish(geometry.emitted_symbols, geometry.written_units)));
+        REQUIRE(replayed->output_symbols == counted->output_symbols);
+        REQUIRE(replayed->insertions == counted->insertions);
+        REQUIRE(replayed->deletions == counted->deletions);
+        REQUIRE(replayed->inserted_bp == counted->inserted_bp);
+        REQUIRE(replayed->deleted_bp == counted->deleted_bp);
+        REQUIRE(gen::next_u64(replay_random) == gen::next_u64(state));
+        const auto& local = *replayed;
         total.visited_positions += local.visited_positions;
         total.insertions += local.insertions;
         total.deletions += local.deletions;
         total.inserted_bp += local.inserted_bp;
         total.deleted_bp += local.deleted_bp;
+        total.output_symbols += local.output_symbols;
         total_positions += length;
     }
     return total;
@@ -584,7 +744,7 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
     indel_params.deletion_length_mean = 2.0;
     std::uint64_t indel_positions = 0;
     const auto indel_counts =
-        replay_indel_counts<traits>(
+        replay_indel_counts(
             *reference, indel_params, indel_params.fragment_count, indel_positions);
     const double event_opportunities = static_cast<double>(indel_counts.visited_positions);
     const double expected_events = event_opportunities * 0.01;

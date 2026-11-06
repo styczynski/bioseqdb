@@ -13,6 +13,57 @@ import bioseq.tests.integration.join_test_support;
 using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::join_test_support;
 
+TEST_CASE("Vector aggregates hydrate residual sequence predicates",
+          "[component:bioseq][layer:integration][feature:sequence][feature:pipeline][resource:postgres]") {
+    constexpr std::string_view table = "vector_aggregate_sequence_quals";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.index.insert_maintenance.enabled=off; "
+        "SET max_parallel_workers_per_gather=0; "
+        "CREATE TABLE vector_aggregate_sequence_quals (id integer, "
+        "seq bioseq.seq('dna4',64), protein bioseq.seq('aa20',64), "
+        "qual bioseq.seq('phred63',64)) USING bioseq; "
+        "INSERT INTO vector_aggregate_sequence_quals VALUES "
+        "(1,'ACGT','ARNDCQ','!!!!'), "
+        "(2,'A','ARNDCQ','!'), "
+        "(3,'ACGT','AR','!!!!'), "
+        "(4,NULL,'ARNDCQ',NULL), "
+        "(5,'','ARNDCQ',''), "
+        "(-1,'ACGT','ARNDCQ','!!!!');");
+
+    constexpr std::array queries{
+        std::pair<std::string_view, std::int64_t>{
+            "SELECT count(*) FROM vector_aggregate_sequence_quals "
+            "WHERE id>0 AND bioseq.len(seq)>=4 AND bioseq.len(protein)=6 "
+            "AND bioseq.len(qual)=4;", 1},
+        std::pair<std::string_view, std::int64_t>{
+            "SELECT count(*) FROM vector_aggregate_sequence_quals "
+            "WHERE bioseq.len(seq)>0;", 4},
+        std::pair<std::string_view, std::int64_t>{
+            "SELECT count(*) FROM vector_aggregate_sequence_quals "
+            "WHERE id>100 AND bioseq.len(seq)>0;", 0},
+        std::pair<std::string_view, std::int64_t>{
+            "SELECT sum(id) FROM vector_aggregate_sequence_quals "
+            "WHERE bioseq.len(seq)>0;", 5},
+    };
+    constexpr std::array settings{"off", "on"};
+    for (const char* vectorization : settings) {
+        for (const char* column_cache : settings) {
+            exec_sqlf(ctx,
+                "SET bioseq.vectorization.enabled={}; SET bioseq.column_cache.enabled={};",
+                vectorization, column_cache);
+            for (const auto& [sql, expected] : queries) {
+                CAPTURE(vectorization, column_cache, sql);
+                const auto plan = explain_text<false>(ctx, sql);
+                REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+                REQUIRE(plan_contains(plan, "Custom Scan (VectorAggNode)")
+                    == (std::string_view{vectorization} == "on"));
+                REQUIRE(query_scalar_int(ctx, sql) == expected);
+            }
+        }
+    }
+}
+
 TEST_CASE("Projection-only EPQ evaluates volatile final once",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     constexpr std::string_view table = "projection_epq";

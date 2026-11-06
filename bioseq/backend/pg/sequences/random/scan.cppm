@@ -8,6 +8,8 @@ extern "C" {
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "parser/parse_func.h"
+#include "parser/parser.h"
+#include "tcop/pquery.h"
 #include "utils/expandeddatum.h"
 }
 #include <algorithm>
@@ -86,49 +88,98 @@ inline void normalize_arguments(FuncExpr& expression) {
 
 /** The planner binds only direct producers and transparent assignment lineage. */
 struct binding_walk {
+    /** Preserve which layout fields came from consumers after NULLs become constants. */
+    struct inferred_layout {
+        enum field : std::uint8_t { alphabet = 1u, storage_width = 2u };
+        FuncExpr* producer{};
+        compact_sequence_stdc_type_params destination{};
+        std::uint8_t fields{};
+
+        /** Compare only inferred fields; explicit fields may undergo intentional conversion. */
+        [[nodiscard]] bool conflicts_with(compact_sequence_stdc_type_params const& target) const noexcept {
+            return ((fields & alphabet) != 0u
+                    && (destination.alphabet_code != target.alphabet_code
+                        || destination.encoding != target.encoding
+                        || destination.space != target.space))
+                || ((fields & storage_width) != 0u
+                    && destination.storage_unit_byte_width != target.storage_unit_byte_width);
+        }
+    };
+
     routine_ids ids;
     Query* query{};
-    std::vector<std::pair<FuncExpr*, std::int32_t>> inferred;
+    std::vector<inferred_layout> inferred;
+
+    /** Infer NULL layout values while preserving explicit runtime values and evaluation count. */
+    [[nodiscard]] static Expr* nullable_layout_fallback(Expr* expression, Const* fallback) {
+        if (IsA(expression, Const)) return reinterpret_cast<Expr*>(fallback);
+        if (IsA(expression, CoalesceExpr)) {
+            auto* existing = reinterpret_cast<CoalesceExpr*>(expression);
+            if (list_length(existing->args) == 2
+                && equal(lsecond(existing->args), fallback)) return expression;
+        }
+        auto* coalesce = makeNode(CoalesceExpr);
+        coalesce->coalescetype = fallback->consttype;
+        coalesce->coalescecollid = fallback->constcollid;
+        coalesce->args = list_make2(expression, fallback);
+        coalesce->location = exprLocation(reinterpret_cast<Node*>(expression));
+        return reinterpret_cast<Expr*>(coalesce);
+    }
 
     /** Fill absent producer type fields, retaining explicit conversion requests. */
     [[nodiscard]] bool bind_producer(FuncExpr& function, std::int32_t typmod) {
         normalize_arguments(function);
         const auto* name = constant_argument(function, 0);
         const auto* width = constant_argument(function, 1);
-        if (name == nullptr || width == nullptr) return false;
         const auto target = decode_seq_typmod_checked(typmod);
-        const bool missing_name = name->constisnull;
-        const bool missing_width = width->constisnull;
-        if (missing_name || missing_width) {
-            const auto previous = std::ranges::find_if(inferred,
-                [&function](auto const& value) { return value.first == &function; });
-            if (previous != inferred.end() && previous->second != typmod) {
-                ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
-                    errmsg("conflicting inferred types for bioseq.random_seq"),
-                    errhint("Specify alphabet and storage_bits explicitly for the shared producer.")));
-            }
-            if (previous == inferred.end()) inferred.emplace_back(&function, typmod);
-        } else {
-            const auto previous = std::ranges::find_if(inferred,
-                [&function](auto const& value) { return value.first == &function; });
-            if (previous != inferred.end() && previous->second != typmod) {
-                ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
-                    errmsg("conflicting inferred types for bioseq.random_seq")));
+        // Dynamic layout fields can also be NULL at execution. Bind their
+        // fallback now so generic and custom prepared plans agree.
+        const bool infer_name = name == nullptr || name->constisnull;
+        const bool infer_width = width == nullptr || width->constisnull;
+        const auto inferred_fields = static_cast<std::uint8_t>(
+            (infer_name ? inferred_layout::alphabet : 0u)
+            | (infer_width ? inferred_layout::storage_width : 0u));
+        const auto previous = std::ranges::find_if(inferred,
+            [&function](auto const& value) { return value.producer == &function; });
+        if (previous != inferred.end() && previous->conflicts_with(target)) {
+            ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                errmsg("conflicting inferred types for bioseq.random_seq"),
+                errhint("Use one destination for nullable layout arguments, or supply constant alphabet and storage_bits.")));
+        }
+        if (inferred_fields != 0u) {
+            if (previous == inferred.end()) {
+                inferred.push_back({.producer = &function, .destination = target, .fields = inferred_fields});
+            } else {
+                if (infer_name && (previous->fields & inferred_layout::alphabet) == 0u) {
+                    previous->destination.alphabet_code = target.alphabet_code;
+                    previous->destination.encoding = target.encoding;
+                    previous->destination.space = target.space;
+                }
+                if (infer_width && (previous->fields & inferred_layout::storage_width) == 0u)
+                    previous->destination.storage_unit_byte_width = target.storage_unit_byte_width;
+                previous->fields |= inferred_fields;
             }
         }
-        if (missing_name) {
+        if (infer_name) {
             const auto alphabet_name = pgseq_is_cigar_alphabet(target.alphabet_code)
                 ? bioseq::cigar_space_name(target.space) : supported_alphabet_name(target.alphabet_code);
-            lfirst(list_nth_cell(function.args, 0)) = makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
+            auto* fallback = makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID,
                 -1, PointerGetDatum(cstring_to_text_with_len(alphabet_name.data(),
                     static_cast<int>(alphabet_name.size()))), false, false);
+            auto* cell = list_nth_cell(function.args, 0);
+            lfirst(cell) = nullable_layout_fallback(static_cast<Expr*>(lfirst(cell)), fallback);
         }
-        if (missing_width) {
-            lfirst(list_nth_cell(function.args, 1)) = makeConst(INT4OID, -1, InvalidOid,
+        if (infer_width) {
+            auto* fallback = makeConst(INT4OID, -1, InvalidOid,
                 sizeof(std::int32_t), Int32GetDatum(target.storage_unit_byte_width * 8u), false, true);
+            auto* cell = list_nth_cell(function.args, 1);
+            lfirst(cell) = nullable_layout_fallback(static_cast<Expr*>(lfirst(cell)), fallback);
         }
         name = constant_argument(function, 0);
         width = constant_argument(function, 1);
+        // Preserve runtime coercion until both layout fields are known.
+        if (name == nullptr || width == nullptr || name->constisnull || width->constisnull)
+            return false;
         // Classification must not raise a producer's runtime parameter error
         // for a branch or LIMIT 0 that never demands its first output.
         try {
@@ -137,6 +188,32 @@ struct binding_walk {
             return supplied == target;
         } catch (support::postgres_error&) {
             return false;
+        }
+    }
+
+    /** Mutation preserves its source layout; inspect literals without evaluating calls. */
+    [[nodiscard]] std::int32_t mutation_typmod(FuncExpr& function) {
+        normalize_arguments(function);
+        const auto* source = static_cast<Node*>(linitial(function.args));
+        const auto source_typmod = exprTypmod(source);
+        if (source_typmod >= 0) return source_typmod;
+        const auto* literal = constant_argument(function, 0);
+        if (literal == nullptr || literal->constisnull) return -1;
+        // Constant folding can erase the source expression's typmod while its
+        // already-built sequence still records the exact native layout.
+        try {
+            const auto descriptor = support::invoke_pg_as_cpp([literal] {
+                return classify_and_describe_sequence_header(literal->constvalue);
+            });
+            if (!descriptor.alphabet_bound) return -1;
+            const compact_sequence_stdc_type_params layout{
+                .alphabet_code = descriptor.alphabet_code,
+                .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+                .encoding = descriptor.encoding, .space = descriptor.space};
+            return layout.encode();
+        } catch (support::postgres_error&) {
+            // Leave malformed input validation at its original demand point.
+            return -1;
         }
     }
 
@@ -156,6 +233,11 @@ struct binding_walk {
                     return reinterpret_cast<Expr*>(makeRelabelType(expression, ids.sequence_type,
                         typmod, function->funccollid, COERCE_IMPLICIT_CAST));
                 }
+            } else if (function->funcid == ids.mutation) {
+                if (mutation_typmod(*function) == typmod) {
+                    return reinterpret_cast<Expr*>(makeRelabelType(expression, ids.sequence_type,
+                        typmod, function->funccollid, COERCE_IMPLICIT_CAST));
+                }
             } else if (function->funcid == ids.cast) {
                 normalize_arguments(*function);
                 auto* modifier = constant_argument(*function, 1);
@@ -163,7 +245,9 @@ struct binding_walk {
                     const auto own_typmod = DatumGetInt32(modifier->constvalue);
                     auto* argument = bind(static_cast<Expr*>(linitial(function->args)), owner, own_typmod);
                     lfirst(list_head(function->args)) = argument;
-                    if (exprTypmod(reinterpret_cast<Node*>(argument)) == own_typmod) return argument;
+                    // Keep this coercion boundary during the Query walk: an
+                    // outer conversion must not re-infer its producer. The
+                    // SUPPORT callback removes an exact redundant cast later.
                 }
             }
             return expression;
@@ -339,6 +423,7 @@ struct random_scan_state {
     std::size_t site_count{};
     std::size_t demand_bound{std::numeric_limits<std::size_t>::max()};
     std::size_t initial_capacity{32};
+    double estimated_rows{};
     std::uint64_t emitted_rows{};
     std::uint64_t rows_since_rescan{};
 };
@@ -356,6 +441,8 @@ inline void begin_scan(CustomScanState* node, EState* estate, int flags) {
         state.demand_bound = serialized_bound < 0 ? std::numeric_limits<std::size_t>::max()
             : static_cast<std::size_t>(serialized_bound);
         state.initial_capacity = static_cast<std::size_t>(intVal(lfourth(plan->custom_private)));
+        const auto estimate = plan->scan.plan.plan_rows;
+        state.estimated_rows = std::isfinite(estimate) && estimate > 0.0 ? std::ceil(estimate) : 0.0;
         state.sites = static_cast<batch_state**>(palloc0(state.site_count * sizeof(batch_state*)));
         state.attributes = static_cast<int*>(palloc(state.site_count * sizeof(int)));
         const auto ids = routine_ids::resolve();
@@ -385,8 +472,14 @@ inline void begin_scan(CustomScanState* node, EState* estate, int flags) {
         std::copy_n(input->tts_isnull, count, output->tts_isnull);
         output->tts_tid = input->tts_tid;
         output->tts_tableOid = input->tts_tableOid;
-        const auto remaining = state.rows_since_rescan < state.demand_bound
+        auto remaining = state.rows_since_rescan < state.demand_bound
             ? state.demand_bound - static_cast<std::size_t>(state.rows_since_rescan) : std::size_t{1};
+        // The estimate bounds speculation only; an underestimated child still runs to completion.
+        const auto estimated_remaining = state.estimated_rows - static_cast<double>(state.rows_since_rescan);
+        if (estimated_remaining > 0.0) {
+            remaining = std::min(remaining, static_cast<std::size_t>(
+                std::clamp(estimated_remaining, 1.0, 4096.0)));
+        }
         for (std::size_t index = 0u; index < state.site_count; ++index) {
             const auto value = state.sites[index]->next(remaining);
             const auto attribute = static_cast<std::size_t>(state.attributes[index] - 1);
@@ -515,6 +608,7 @@ struct projection_rewrite {
     routine_ids ids;
     int next_id{};
     std::size_t demand_bound{std::numeric_limits<std::size_t>::max()};
+    bool scalar_only{};
 
     /** Replace exact target producers after setrefs, keeping child tuple evaluation demand-driven. */
     [[nodiscard]] support::pg_plan_mutation operator()(support::pg_plan_mutation_cursor cursor,
@@ -564,6 +658,20 @@ struct projection_rewrite {
             const auto type = exprType(reinterpret_cast<Node*>(target->expr));
             const auto modifier = exprTypmod(reinterpret_cast<Node*>(target->expr));
             const auto collation = exprCollation(reinterpret_cast<Node*>(target->expr));
+            if (scalar_only) {
+                if (function != nullptr) {
+                    // Preserve the planner's SCROLL exclusion in the expression
+                    // itself: EXPLAIN does not forward BACKWARD to ExecutorStart.
+                    // One-argument COALESCE evaluates once and retains NULL/type.
+                    auto* scalar = makeNode(CoalesceExpr);
+                    scalar->coalescetype = type;
+                    scalar->coalescecollid = collation;
+                    scalar->args = list_make1(target->expr);
+                    scalar->location = exprLocation(reinterpret_cast<Node*>(target->expr));
+                    target->expr = reinterpret_cast<Expr*>(scalar);
+                }
+                continue;
+            }
             auto* scan_target = static_cast<TargetEntry*>(copyObject(target));
             auto* result_target = static_cast<TargetEntry*>(copyObject(target));
             result_target->expr = reinterpret_cast<Expr*>(makeVar(INDEX_VAR, attribute,
@@ -607,11 +715,11 @@ struct projection_rewrite {
 /** Wrap eligible projections unless existing executor capability decisions require mark/restore. */
 inline void rewrite_random_projections(PlannedStmt& statement, int cursor_options = 0) {
     (void) support::invoke_postgres_callback([&statement, cursor_options]() -> Datum {
-        if (!bioseq::settings::planner::custom_scan::enabled
-            || (cursor_options & CURSOR_OPT_SCROLL) != 0) return Datum{0};
+        if (!bioseq::settings::planner::custom_scan::enabled) return Datum{0};
         auto analysis = analyze_plan(statement);
         if (!analysis.eligible || analysis.mark_restore_required) return Datum{0};
-        projection_rewrite rewrite{.ids = analysis.ids, .next_id = analysis.maximum_id};
+        projection_rewrite rewrite{.ids = analysis.ids, .next_id = analysis.maximum_id,
+            .scalar_only = (cursor_options & CURSOR_OPT_SCROLL) != 0};
         statement.planTree = support::mutate_pg_plan_tree(statement.planTree, rewrite, rewrite);
         ListCell* cell{};
         foreach(cell, statement.subplans)
@@ -636,6 +744,56 @@ inline void restore_copied_plan(void* opaque) noexcept {
     cleanup.query->plannedstmt = cleanup.original;
 }
 
+/** Recognize only an EXPLAIN's immediate typed DECLARE SCROLL statement. */
+[[nodiscard]] inline bool is_scroll_explain(Node const* statement) noexcept {
+    if (statement == nullptr || !IsA(statement, ExplainStmt)) return false;
+    auto const* explained = reinterpret_cast<ExplainStmt const*>(statement)->query;
+    if (explained != nullptr && IsA(explained, Query))
+        explained = reinterpret_cast<Query const*>(explained)->utilityStmt;
+    return explained != nullptr && IsA(explained, DeclareCursorStmt)
+        && (reinterpret_cast<DeclareCursorStmt const*>(explained)->options & CURSOR_OPT_SCROLL) != 0;
+}
+
+/** Recover EXPLAIN's missing cursor flags without adding plan state or parsing hot rows. */
+[[nodiscard]] inline bool explains_scroll_cursor(QueryDesc const& query, int flags) {
+    if (query.sourceText == nullptr) return false;
+    // ExplainOnePlan forwards PortalRunUtility's source pointer but omits the
+    // cursor's BACKWARD flag. Read this owned typed tree whenever available.
+    if (ActivePortal != nullptr && ActivePortal->sourceText == query.sourceText
+        && list_length(ActivePortal->stmts) == 1) {
+        auto const* statement = static_cast<PlannedStmt const*>(linitial(ActivePortal->stmts));
+        return is_scroll_explain(statement->utilityStmt);
+    }
+    // Nested SPI utilities have no matching portal. Only EXPLAIN startup can
+    // lose the capability flags: plain EXPLAIN sets EXPLAIN_ONLY, while ANALYZE
+    // always requests executor instrumentation (including TIMING OFF).
+    if ((flags & EXEC_FLAG_EXPLAIN_ONLY) == 0 && query.instrument_options == 0) return false;
+    return DatumGetBool(support::invoke_postgres_callback([source = query.sourceText]() -> Datum {
+        const auto parse_context = AllocSetContextCreate(CurrentMemoryContext,
+            "Bioseq random explain source", ALLOCSET_SMALL_SIZES);
+        bool scroll{};
+        try {
+            const support::memory_context_scope scope{parse_context};
+            scroll = support::invoke_pg_as_cpp([source] {
+                const auto statements = raw_parser(source, RAW_PARSE_DEFAULT);
+                // SPI can retain a whole multi-statement source while EXPLAIN's
+                // inner SELECT has no reliable top-level statement location.
+                // Any top-level SCROLL EXPLAIN conservatively keeps this cold
+                // source scalar; warm plans still use the normal planner hook.
+                for (auto const* statement : support::postgres_list<RawStmt>{statements})
+                    if (is_scroll_explain(statement->stmt)) return true;
+                return false;
+            });
+        } catch (support::postgres_error& error) {
+            // Internal executor sources may use a non-SQL parser mode. Failure
+            // to recognize that text must not break an already valid plan.
+            if (error.get_sql_state_code() != ERRCODE_SYNTAX_ERROR) throw;
+        }
+        MemoryContextDelete(parse_context);
+        return BoolGetDatum(scroll);
+    }));
+}
+
 /** Complete first-backend planning after SUPPORT loads the extension mid-planning. */
 inline void executor_start(QueryDesc* query, int flags) {
     const auto previous_context = CurrentMemoryContext;
@@ -646,7 +804,7 @@ inline void executor_start(QueryDesc* query, int flags) {
         if (bioseq::settings::planner::custom_scan::enabled
             && (flags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)) == 0) {
             auto analysis = analyze_plan(*original);
-            if (analysis.eligible && !analysis.mark_restore_required) {
+            if (analysis.eligible && !analysis.mark_restore_required && !explains_scroll_cursor(*query, flags)) {
                 copied_context = AllocSetContextCreate(previous_context, "Bioseq random copied plan", ALLOCSET_SMALL_SIZES);
                 MemoryContextSwitchTo(copied_context);
                 query->plannedstmt = static_cast<PlannedStmt*>(copyObject(original));
