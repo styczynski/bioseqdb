@@ -58,7 +58,9 @@ export {
                                           const batch_join_placeholder_site& site,
                                           const bioseq::simd::match_result& match,
                                           const bioseq_stub_oids& oids,
-                                          MemoryContext output_context) {
+                                          MemoryContext output_context,
+                                          const int target_operand_resno,
+                                          const int query_operand_resno) {
         if (slot == nullptr || site.resno <= 0 || site.resno > slot->tts_tupleDescriptor->natts) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -110,6 +112,21 @@ export {
             value = BoolGetDatum(match.is_reverse);
         } else if (site.funcid == oids.is_primary_oid) {
             value = BoolGetDatum(match.is_primary);
+        } else if (site.funcid == oids.export_alignment_status_oid) {
+            bigint(match.export_status());
+        } else if (site.funcid == oids.alignment_ordinal_oid) {
+            bigint(match.alignment_ordinal);
+        } else if (site.funcid == oids.alignment_query_sequence_oid ||
+                   site.funcid == oids.alignment_reference_sequence_oid) {
+            const int source_resno = site.funcid == oids.alignment_query_sequence_oid
+                ? query_operand_resno : target_operand_resno;
+            if (source_resno <= 0 || source_resno > slot->tts_tupleDescriptor->natts) {
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("alignment operand output column is invalid")));
+            }
+            // These child fields were evaluated before alignment and retained with the row.
+            value = slot->tts_values[source_resno - 1];
+            is_null = slot->tts_isnull[source_resno - 1];
         } else if (site.funcid == oids.has_cigar_oid) {
             value = BoolGetDatum(match.has_cigar);
         } else if (site.funcid == oids.divergence_oid) {
@@ -349,7 +366,9 @@ export {
         const bioseq_stub_oids& oids = get_cached_stub_oids();
         for (const batch_join_placeholder_site& site : runtime.placeholder_sites) {
             batch_join_set_placeholder_value(
-                combined, site, *output.match, oids, expression_context->ecxt_per_tuple_memory);
+                combined, site, *output.match, oids, expression_context->ecxt_per_tuple_memory,
+                runtime.target_slot_seq_resno,
+                runtime.target_column_count + runtime.query_slot_seq_resno);
         }
         ExecStoreVirtualTuple(combined);
         expression_context->ecxt_scantuple = combined;

@@ -7,9 +7,12 @@
  */
 module;
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -42,6 +45,8 @@ struct gzip_header {
     std::uint8_t operating_system = 0;
     std::uint8_t extra_flags = 0;
     std::uint32_t modification_time = 0;
+    /// Total BGZF member bytes from BC/BSIZE, including header and trailer.
+    std::optional<std::uint32_t> bgzf_member_bytes;
 };
 
 /// Parsed checksum and modulo-2^32 size from a gzip member footer.
@@ -50,103 +55,128 @@ struct gzip_footer {
     std::uint32_t isize_low32 = 0;
 };
 
-/// Reads a gzip header and advances to the first DEFLATE block.
-/// The  reader must start at a byte boundary. On failure, its position may
-/// have advanced. Optional header checksums are skipped without verification.
+/// Validate the complete XLEN payload and return the optional unique BGZF member size.
+/// Shared by mapped-header parsing and bounded sequential BGZF framing.
+[[nodiscard]] inline std::expected<std::optional<std::uint32_t>, std::string>
+parse_gzip_extra_fields(std::span<const std::uint8_t> extra) {
+    std::optional<std::uint32_t> member_bytes;
+    for (std::size_t cursor = 0; cursor < extra.size();) {
+        if (extra.size() - cursor < 4)
+            return std::unexpected(std::string{"gzip header: truncated extra subfield"});
+        const bool is_bgzf = extra[cursor] == 'B' && extra[cursor + 1] == 'C';
+        const auto field_length = static_cast<std::size_t>(extra[cursor + 2])
+            | (static_cast<std::size_t>(extra[cursor + 3]) << 8);
+        cursor += 4;
+        if (field_length > extra.size() - cursor)
+            return std::unexpected(std::string{"gzip header: extra subfield exceeds XLEN"});
+        if (is_bgzf) {
+            if (member_bytes || field_length != 2)
+                return std::unexpected(std::string{"BGZF header: duplicate or invalid BC field"});
+            member_bytes = (static_cast<std::uint32_t>(extra[cursor])
+                | (static_cast<std::uint32_t>(extra[cursor + 1]) << 8)) + 1;
+        }
+        cursor += field_length;
+    }
+    return member_bytes;
+}
+
+/// Reads and validates a complete gzip header at the current byte boundary.
+/// Every access is bounded by compressed_view; BC and FHCRC are validated here
+/// for ordinary gzip and BGZF consumers. The reader advances only on success.
 [[nodiscard]] inline std::expected<gzip_header, std::string>
 parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_view) {
-    if (reader.bits_buffered() < 8)
-        reader.refill();
-    const std::uint64_t magic0 = reader.read<8>();
-    if (magic0 != gzip_magic_first_byte) {
-        return std::unexpected(
-            fmt::format("gzip header: bad magic byte 0 ({:#04x} expected {:#04x})",
-                        magic0,
-                        gzip_magic_first_byte));
-    }
-    const std::uint64_t magic1 = reader.read<8>();
-    if (magic1 != gzip_magic_second_byte) {
-        return std::unexpected(
-            fmt::format("gzip header: bad magic byte 1 ({:#04x} expected {:#04x})",
-                        magic1,
-                        gzip_magic_second_byte));
-    }
-    const std::uint64_t method = reader.read<8>();
-    if (method != gzip_deflate_method) {
-        return std::unexpected(
-            fmt::format("gzip header: unsupported method {} (only DEFLATE supported)", method));
-    }
-    const std::uint8_t flag_byte = static_cast<std::uint8_t>(reader.read<8>());
+    const auto initial_bit = reader.bit_position();
+    if (initial_bit % 8 != 0)
+        return std::unexpected(std::string{"gzip header: cursor is not byte aligned"});
+    const auto begin = initial_bit / 8;
+    if (begin > compressed_view.size() || compressed_view.size() - begin < 10)
+        return std::unexpected(std::string{"gzip header: truncated fixed header"});
+    if (compressed_view[begin] != gzip_magic_first_byte
+        || compressed_view[begin + 1] != gzip_magic_second_byte)
+        return std::unexpected(std::string{"gzip header: invalid magic"});
+    if (compressed_view[begin + 2] != gzip_deflate_method)
+        return std::unexpected(std::string{"gzip header: unsupported compression method"});
+    const auto flag_byte = compressed_view[begin + 3];
+    if ((flag_byte & 0xE0u) != 0)
+        return std::unexpected(std::string{"gzip header: reserved flags are set"});
     gzip_header header;
     header.flags.ftext = (flag_byte & 0x01u) != 0;
     header.flags.fhcrc = (flag_byte & 0x02u) != 0;
     header.flags.fextra = (flag_byte & 0x04u) != 0;
     header.flags.fname = (flag_byte & 0x08u) != 0;
     header.flags.fcomment = (flag_byte & 0x10u) != 0;
-
-    header.modification_time = static_cast<std::uint32_t>(reader.read<32>());
-    header.extra_flags = static_cast<std::uint8_t>(reader.read<8>());
-    header.operating_system = static_cast<std::uint8_t>(reader.read<8>());
-
+    for (std::size_t byte = 0; byte < 4; ++byte)
+        header.modification_time |= static_cast<std::uint32_t>(compressed_view[begin + 4 + byte])
+            << (8 * byte);
+    header.extra_flags = compressed_view[begin + 8];
+    header.operating_system = compressed_view[begin + 9];
+    std::size_t cursor = begin + 10;
     if (header.flags.fextra) {
-        const std::uint64_t length = reader.read<16>();
-        for (std::uint64_t byte_index = 0; byte_index < length; ++byte_index) {
-            (void)reader.read<8>();
-        }
+        if (compressed_view.size() - cursor < 2)
+            return std::unexpected(std::string{"gzip header: truncated XLEN"});
+        const auto extra_length = static_cast<std::size_t>(compressed_view[cursor])
+            | (static_cast<std::size_t>(compressed_view[cursor + 1]) << 8);
+        cursor += 2;
+        if (extra_length > compressed_view.size() - cursor)
+            return std::unexpected(std::string{"gzip header: truncated extra field"});
+        const auto parsed_extra = parse_gzip_extra_fields(compressed_view.subspan(cursor, extra_length));
+        if (!parsed_extra) return std::unexpected(parsed_extra.error());
+        header.bgzf_member_bytes = *parsed_extra;
+        cursor += extra_length;
     }
-
-    // Consume one optional NUL-terminated gzip header field.
-    auto skip_zero_terminated = [&compressed_view, &reader]() -> std::expected<void, std::string> {
-        // Use SIMD scan when the underlying compressed view's tail is
-        // available. Fall back to a byte-by-byte read.
-        const std::size_t bit_pos = reader.bit_position();
-        if (bit_pos % 8 == 0) {
-            const std::size_t byte_pos = bit_pos / 8;
-            if (byte_pos < compressed_view.size()) {
-                const std::size_t scanned =
-                    bioseq::io::simd::scan_first_byte(std::uint8_t{0},
-                                                      compressed_view.data() + byte_pos,
-                                                      compressed_view.size() - byte_pos);
-                if (scanned >= compressed_view.size() - byte_pos) {
-                    return std::unexpected(
-                        std::string{"gzip header: NUL terminator missing in FNAME / FCOMMENT"});
-                }
-                // Advance past the NUL.
-                reader.seek_to_bit((byte_pos + scanned + 1) * 8);
-                return {};
-            }
+    const auto skip_terminated = [&compressed_view, &cursor, begin, &header]()
+        -> std::expected<void, std::string> {
+        auto available = compressed_view.size() - cursor;
+        if (header.bgzf_member_bytes) {
+            const auto used = cursor - begin;
+            if (used >= *header.bgzf_member_bytes)
+                return std::unexpected(std::string{"BGZF header: optional field exceeds member"});
+            available = std::min(available,
+                static_cast<std::size_t>(*header.bgzf_member_bytes) - used);
         }
-        // Read bytes individually when a direct scan is unavailable.
-        for (std::size_t safety = 0; safety < 65536; ++safety) {
-            const std::uint64_t byte = reader.read<8>();
-            if (byte == 0)
-                return {};
-        }
-        return std::unexpected(
-            std::string{"gzip header: NUL terminator absent in FNAME / FCOMMENT (>64K)"});
+        const auto distance = bioseq::io::simd::scan_first_byte(
+            std::uint8_t{0}, compressed_view.data() + cursor, available);
+        if (distance == available)
+            return std::unexpected(std::string{"gzip header: unterminated FNAME or FCOMMENT"});
+        cursor += distance + 1;
+        return {};
     };
-
     if (header.flags.fname) {
-        if (auto result = skip_zero_terminated(); !result) {
-            return std::unexpected(std::move(result.error()));
-        }
+        const auto skipped = skip_terminated();
+        if (!skipped) return std::unexpected(skipped.error());
     }
     if (header.flags.fcomment) {
-        if (auto result = skip_zero_terminated(); !result) {
-            return std::unexpected(std::move(result.error()));
-        }
+        const auto skipped = skip_terminated();
+        if (!skipped) return std::unexpected(skipped.error());
     }
     if (header.flags.fhcrc) {
-        (void)reader.read<16>();
+        if (compressed_view.size() - cursor < 2)
+            return std::unexpected(std::string{"gzip header: truncated FHCRC"});
+        const auto expected = static_cast<std::uint16_t>(
+            static_cast<std::uint16_t>(compressed_view[cursor])
+            | (static_cast<std::uint16_t>(compressed_view[cursor + 1]) << 8));
+        const auto observed = static_cast<std::uint16_t>(bioseq::io::simd::crc32_iso_hdlc_simd(
+            0, compressed_view.data() + begin, cursor - begin));
+        if (expected != observed)
+            return std::unexpected(std::string{"gzip header: FHCRC mismatch"});
+        cursor += 2;
     }
-
-    header.end_bit_offset = reader.bit_position();
+    if (header.bgzf_member_bytes
+        && (*header.bgzf_member_bytes < 8 || cursor - begin > *header.bgzf_member_bytes - 8))
+        return std::unexpected(std::string{"BGZF header: BSIZE cannot contain header and trailer"});
+    if (cursor > std::numeric_limits<std::size_t>::max() / 8)
+        return std::unexpected(std::string{"gzip header: bit offset overflow"});
+    header.end_bit_offset = cursor * 8;
+    reader.seek_to_bit(header.end_bit_offset);
     return header;
 }
 
-/// Aligns the reader to the nejt byte boundary and reads the 8-byte gzip footer
+/// Aligns to the next byte boundary and reads a complete eight-byte gzip footer.
 [[nodiscard]] inline std::expected<gzip_footer, std::string> parse_gzip_footer(bit_reader& reader) {
     reader.align_to_byte_boundary();
+    const auto byte_position = reader.bit_position() / 8;
+    if (byte_position > reader.total_bytes() || reader.total_bytes() - byte_position < 8)
+        return std::unexpected(std::string{"gzip footer: truncated checksum or size"});
     gzip_footer footer;
     footer.crc32 = static_cast<std::uint32_t>(reader.read<32>());
     footer.isize_low32 = static_cast<std::uint32_t>(reader.read<32>());

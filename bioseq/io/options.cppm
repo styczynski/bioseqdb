@@ -6,8 +6,13 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
 
 export module bioseq.io.options;
+
+import bioseq.io.record_schema;
 
 export namespace bioseq::io {
 
@@ -15,7 +20,12 @@ export namespace bioseq::io {
 enum class sequence_file_format : std::uint8_t {
     fasta = 0,
     fastq = 1,
+    sam = 2,
+    bam = 3,
 };
+
+/** Compression framing selected independently of the logical record format. */
+enum class sequence_compression : std::uint8_t { none, gzip, bgzf };
 
 /// Input buffers, memory mapping, and gzip settings.
 struct io_options {
@@ -84,6 +94,20 @@ inline constexpr reader_options default_reader_options{};
 
 /// Formatting and  output-buffer settings for FASTA and FASTQ writers.
 struct writer_options {
+    /// Absent format/compression are inferred once from the output filename.
+    std::optional<sequence_file_format> format;
+    std::optional<sequence_compression> compression;
+    /// Existing zlib encoder's common level range, checked before opening output.
+    int compression_level = 6;
+    /// Explicit permission to replace an existing final destination atomically.
+    bool overwrite = false;
+    /// Caller-supplied reference declarations in their declared source units.
+    std::vector<reference_descriptor> references;
+    /// Explicit validated header lines; original source contexts live on the source.
+    std::vector<std::string> sam_header;
+    /// Ordinary rows may override orientation/form, but trusted origins must agree.
+    std::optional<record_orientation> sequence_orientation;
+    std::optional<cigar_form> alignment_cigar_form;
     /// Letters per FASTA body line. Zero writes each sequence on one lne.
     std::size_t fasta_line_width = 0;
 
@@ -93,14 +117,6 @@ struct writer_options {
 
     /// Flush a producer's pending bytes before the next record once this size is reached.
     std::size_t flush_threshold_bytes = 64 * 1024 * 1024 - 64 * 1024;
-
-    /// Reject FASTQ quality lengths that differ from the decoded sequence length.
-    /// When false, excess quality bytes are removed and missing bytes become '!'.
-    bool strict_fastq_quality_length = false;
-
-    /// Reserved setting. Oversized records currently follow the chosen write method.
-    /// Use `write_record_streamed` to  write a record in slices.
-    bool stream_oversize_records = true;
 
     /// Maximum file size to map for output. Zero selects the pwrite sink.
     /// A mapped write fails if it exceeds this capacity. Closing the mapped

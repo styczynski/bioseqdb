@@ -25,6 +25,7 @@ set(BIOSEQ_TEST_TARGET_ARGUMENTS
     safestring_static
     fmt
     ZLIB::ZLIB
+    ${BIOSEQ_LIBDEFLATE_TARGET}
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
@@ -36,6 +37,7 @@ set(BIOSEQ_TEST_TARGET_ARGUMENTS
     bioseq_pg_support
     bioseq_bench_prefilter_metrics
     bioseq_testing_support
+    bioseq_highway_runtime
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SUPPORT_CXX_MODULES

@@ -936,17 +936,22 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
                              "bioseq_runtime_core")),
     "bioseq_io_benchmark": InspectTargetDefinition(
         mode="benchmark-io", artifact_names=("bioseq_io_benchmark",),
-        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
+        shared_target_names=("bioseq_modules_nopg",
+                             "bioseq_highway_fixed_target",
+                             "bioseq_highway_runtime",
+                             "bioseq_runtime_core")),
     "bioseq_unit_tests": InspectTargetDefinition(
         mode="unit-integration", artifact_names=("bioseq_unit_tests",),
         shared_target_names=("bioseq_modules_nopg",
                              "bioseq_highway_fixed_target",
+                             "bioseq_highway_runtime",
                              "bioseq_runtime_core")),
     "bioseq_integration_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_integration_tests",),
         shared_target_names=("bioseq_modules_nopg",
                              "bioseq_highway_fixed_target",
+                             "bioseq_highway_runtime",
                              "bioseq_runtime_core")),
     "bioseq_benchmark_e2e_contract_tests": InspectTargetDefinition(
         mode="unit-integration",
@@ -961,6 +966,7 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         artifact_names=("bioseq.dylib", "bioseq.so", "bioseq.dll"),
         shared_target_names=("bioseq_modules_nopg",
                              "bioseq_highway_fixed_target",
+                             "bioseq_highway_runtime",
                              "bioseq_runtime_core",
                              "bioseq_pipeline_dispatch_owners")),
     "postgresql_bioseq_cache": InspectTargetDefinition(

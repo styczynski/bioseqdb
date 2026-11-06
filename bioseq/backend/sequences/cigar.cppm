@@ -237,6 +237,91 @@ concept cigar_run_cursor = requires(Cursor& cursor) {
     { cursor.next() } -> std::same_as<std::expected<std::optional<typename Cursor::run_type>, cigar_error>>;
 };
 
+/** Bounded canonical runs borrowed until the next read from the same source. */
+struct cigar_run_tile {
+    std::span<const cigar_run> runs;
+    std::uint64_t next_token{};
+    bool at_end{};
+};
+
+/** Immutable replay recipe over admitted resident, fragmented, or spooled runs.
+ * Token zero starts an independent traversal. A nonterminal read advances the
+ * token and returns at least one run. The owner outlives every borrowed cursor.
+ */
+struct borrowed_cigar_run_source {
+    const void* context{};
+    using read_function = std::expected<cigar_run_tile, cigar_error> (*)(
+        const void*, std::uint64_t, std::span<cigar_run>);
+    read_function read_tile{};
+    bool worker_shareable{};
+};
+
+/** Resident adapter whose descriptor and run backing remain frozen while read. */
+struct cigar_span_source {
+    std::span<const cigar_run> runs;
+
+    /** Read at most the supplied tile capacity, without copying resident runs. */
+    [[nodiscard]] static std::expected<cigar_run_tile, cigar_error> read(
+            const void* context, std::uint64_t token, std::span<cigar_run> scratch) {
+        if (context == nullptr)
+            return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
+        const auto& source = *static_cast<const cigar_span_source*>(context);
+        if (token > source.runs.size())
+            return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
+        const auto position = static_cast<std::size_t>(token);
+        const auto count = std::min(scratch.size(), source.runs.size() - position);
+        const auto next = position + count;
+        return cigar_run_tile{source.runs.subspan(position, count), next,
+                              next == source.runs.size()};
+    }
+
+    /** Borrow this immutable descriptor; its address must not move while used. */
+    [[nodiscard]] borrowed_cigar_run_source borrow() const & noexcept {
+        return {this, &read, true};
+    }
+    borrowed_cigar_run_source borrow() const && = delete;
+};
+
+/** Independent bounded cursor implementing the existing canonical-run contract. */
+class borrowed_cigar_cursor {
+    borrowed_cigar_run_source source_;
+    std::array<cigar_run, simd::sequence_rank_io_chunk_capacity> scratch_{};
+    std::span<const cigar_run> runs_{};
+    std::size_t index_{};
+    std::uint64_t token_{};
+    bool at_end_{};
+public:
+    using run_type = cigar_run;
+
+    /** Bind a fresh traversal; no source read or allocation occurs yet. */
+    explicit borrowed_cigar_cursor(borrowed_cigar_run_source source) : source_(source) {}
+    borrowed_cigar_cursor(const borrowed_cigar_cursor&) = delete;
+    borrowed_cigar_cursor(borrowed_cigar_cursor&&) = delete;
+    borrowed_cigar_cursor& operator=(const borrowed_cigar_cursor&) = delete;
+    borrowed_cigar_cursor& operator=(borrowed_cigar_cursor&&) = delete;
+
+    /** Return a run, clean end, or source failure without expanding positions. */
+    [[nodiscard]] std::expected<std::optional<run_type>, cigar_error> next() {
+        if (index_ == runs_.size()) {
+            if (at_end_) return std::optional<run_type>{};
+            if (source_.read_tile == nullptr)
+                return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
+            const auto tile = source_.read_tile(source_.context, token_, scratch_);
+            if (!tile) return std::unexpected(tile.error());
+            if (tile->runs.size() > scratch_.size()
+                || (!tile->at_end && (tile->runs.empty() || tile->next_token <= token_)))
+                return std::unexpected(cigar_error{cigar_error_code::invalid_encoding});
+            runs_ = tile->runs;
+            index_ = 0;
+            token_ = tile->next_token;
+            at_end_ = tile->at_end;
+            if (runs_.empty()) return std::optional<run_type>{};
+        }
+        return std::optional<run_type>{runs_[index_++]};
+    }
+};
+static_assert(cigar_run_cursor<borrowed_cigar_cursor>);
+
 /** Portable expression capability implemented by the existing PG tree and admitted flat backend. */
 template<class Backend>
 concept cigar_sequence_backend = requires(Backend& backend,

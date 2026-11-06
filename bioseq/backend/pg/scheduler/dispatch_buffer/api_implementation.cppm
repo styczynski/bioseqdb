@@ -343,7 +343,16 @@ std::optional<dispatch_next_output> dispatch_buffer_runtime::read_next_output() 
         next_output->entry->sequence_rowno,
         next_output->query_ordinal,
         next_output->match,
+        next_output->operand_entry_index,
+        next_output->operand_query_index,
     };
+}
+
+/** Resolve only requested alignment operands while their retained input batch is live. */
+Datum dispatch_buffer_runtime::retained_operand(const dispatch_next_output& output,
+        bool query, MemoryContext result_context) {
+    return as_buffer(implementation)->retained_operand(output.operand_entry_index,
+        output.operand_query_index, query, result_context);
 }
 
 bioseq::pipeline_stats::pipeline_execution_stats dispatch_buffer_runtime::execution_stats() const {

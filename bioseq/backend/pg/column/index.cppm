@@ -26,6 +26,7 @@ import bioseq.postgres.storage.manager;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.column.planner_hook;
 import bioseq.postgres.table.batch_sort_scan;
+import bioseq.postgres.storage.io.exporting;
 
 /// @brief Register Bioseq's table  access method, custom scans and planner hooks.
 /// During shared-library preload, also register scheduler shared memory and
@@ -43,6 +44,7 @@ initialize_bioseq_extension()
 	// Register custom scans here to keep the table access method independent
 	// of the scan implementations that use it.
 	bioseq_customscan_init();
+    bioseq::postgres::storage::io::exporting::initialize_export_scan();
 	install_column_planner_hooks();
 	/* Register sequence sorting for ORDER BY bioseq.seq through the
 	 * create_upper_paths_hook. */

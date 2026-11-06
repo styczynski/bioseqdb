@@ -16,6 +16,7 @@ import :common;
 import :lazy_expression;
 import :readers;
 import :writers;
+import :alignment;
 import bioseq.common.logging;
 import bioseq.bench.framework;
 
@@ -111,6 +112,52 @@ int run(int argc, char** argv) {
     using random_cleanup = std::function<void(
         std::string_view, std::string_view, simdjson::dom::element, const random_generation_input&)>;
 
+    using alignment_builder = std::function<alignment_benchmark_input(
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
+    using alignment_runner = std::function<alignment_measurement(
+        std::string_view, const parameter_map&, const alignment_benchmark_input&)>;
+    using alignment_evaluator = std::function<std::map<std::string, double>(
+        std::string_view, const parameter_map&, const alignment_benchmark_input&, const alignment_measurement&)>;
+    using alignment_cleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element, const alignment_benchmark_input&)>;
+
+    bioseq::bench::framework::iteration_boundary_callbacks<alignment_benchmark_input,
+        io_pool_scope, alignment_measurement> alignment_boundaries{
+        .enabled = [](std::string_view, const parameter_map&, const alignment_benchmark_input&) { return true; },
+        .before_iteration = [](std::string_view algorithm, const parameter_map& parameters,
+                const alignment_benchmark_input&, std::size_t repeat) {
+            return prepare_alignment_iteration(algorithm, parameters, repeat);
+        },
+        .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
+                const alignment_benchmark_input& input, io_pool_scope& preparation) {
+            if (!preparation.error.empty()) return alignment_measurement{.error = preparation.error};
+            return run_alignment(algorithm, parameters, input);
+        },
+        .after_iteration = [](std::string_view, const parameter_map&, const alignment_benchmark_input&,
+                io_pool_scope& preparation, alignment_measurement&,
+                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+    };
+
+    bioseq::bench::framework::iteration_boundary_callbacks<writer_input,
+        io_pool_scope, io_measurement> writer_boundaries{
+        .enabled = [](std::string_view, const parameter_map&, const writer_input&) { return true; },
+        .before_iteration = [](std::string_view algorithm, const parameter_map&,
+                const writer_input&, std::size_t repeat) {
+            return prepare_writer_iteration(algorithm, repeat);
+        },
+        .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
+                const writer_input& input, io_pool_scope& preparation) {
+            if (!preparation.error.empty()) {
+                bioseq_log<logging_level::error>("writer budget preparation failed: {}", preparation.error);
+                return io_measurement{};
+            }
+            return run_writer(algorithm, parameters, input);
+        },
+        .after_iteration = [](std::string_view, const parameter_map&, const writer_input&,
+                io_pool_scope& preparation, io_measurement&,
+                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+    };
+
     return bioseq::bench::framework::run(
         argc,
         argv,
@@ -152,23 +199,25 @@ int run(int argc, char** argv) {
             reader_runner{run_reader},
             reader_evaluator{evaluate_reader},
             reader_cleanup{cleanup_reader}),
-        create_benchmark<writer_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<writer_input,
+            io_pool_scope, io_measurement>(
             "IO writers — FASTA (sync / parallel)",
             "bench_io_writers_fasta",
             config_path,
             resource_estimator{estimate_writer_resources},
             writer_builder{build_writer_input},
             writer_runner{run_writer},
-            writer_evaluator{evaluate_writer},
+            writer_evaluator{evaluate_writer}, writer_boundaries,
             writer_cleanup{cleanup_writer}),
-        create_benchmark<writer_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<writer_input,
+            io_pool_scope, io_measurement>(
             "IO writers — FASTQ (sync / parallel)",
             "bench_io_writers_fastq",
             config_path,
             resource_estimator{estimate_writer_resources},
             writer_builder{build_writer_input},
             writer_runner{run_writer},
-            writer_evaluator{evaluate_writer},
+            writer_evaluator{evaluate_writer}, writer_boundaries,
             writer_cleanup{cleanup_writer}),
         create_benchmark<identifier_benchmark_input, identifier_benchmark_measurement>(
             "IO identifier parser — UniProt header overhead",
@@ -197,6 +246,12 @@ int run(int argc, char** argv) {
             cigar_runner{run_cigar_benchmark},
             cigar_evaluator{evaluate_cigar_benchmark},
             cigar_cleanup{cleanup_cigar_benchmark}),
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<alignment_benchmark_input,
+            io_pool_scope, alignment_measurement>(
+            "SAM/BAM full records versus pinned samtools HTSlib", "bench_io_alignment", config_path,
+            resource_estimator{estimate_alignment_resources}, alignment_builder{build_alignment_input},
+            alignment_runner{run_alignment}, alignment_evaluator{evaluate_alignment}, alignment_boundaries,
+            alignment_cleanup{cleanup_alignment}),
         create_benchmark<random_generation_input, random_generation_measurement>(
             "Native random generation: row scheduling versus batch scheduling",
             "bench_io_random_generation", config_path,

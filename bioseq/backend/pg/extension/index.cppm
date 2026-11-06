@@ -37,6 +37,60 @@ import bioseq.postgres.table.alignment_execution;
 
 export namespace bioseq::pg::sql_routines {
 
+/** Internal alignment status is populated by the owning custom scan. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::safe,
+    .cost = 100000.0,
+    .has_cost = true,
+    .support = "bioseq_placeholder_support",
+})]]
+std::int64_t export_alignment_status(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::pg::anyelement})]] Datum sequence);
+
+/** Internal ordinal preserves one alignment's identity through SQL projections. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::safe,
+    .cost = 100000.0,
+    .has_cost = true,
+    .support = "bioseq_placeholder_support",
+})]]
+std::int64_t alignment_ordinal(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::pg::anyelement})]] Datum sequence);
+
+/** Return the exact retained query operand submitted to the owning alignment. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::safe,
+    .cost = 100000.0,
+    .has_cost = true,
+    .support = "bioseq_placeholder_support",
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
+Datum alignment_query_sequence(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::pg::anyelement})]] Datum sequence);
+
+/** Return the exact retained reference operand submitted to the owning alignment. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::safe,
+    .cost = 100000.0,
+    .has_cost = true,
+    .support = "bioseq_placeholder_support",
+})]]
+[[bioseq_sql::result({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
+Datum alignment_reference_sequence(
+    [[bioseq_sql::param({.sql_type = bioseq::sql::pg::anyelement})]] Datum sequence);
+
 [[bioseq_sql::function({
     .create = bioseq::sql::create_mode::or_replace,
     .volatility = bioseq::sql::volatility::immutable,

@@ -98,6 +98,7 @@ struct row_codec_field {
         bytea_pointer,
         text_pointer,
         text_string,
+        varlena_datum,
     };
 
     std::string cpp_name;
@@ -105,6 +106,8 @@ struct row_codec_field {
     std::string cpp_type;
     std::string underlying_cpp_type;
     std::string type_oid;
+    std::string type_schema;
+    std::string type_name;
     std::array<std::string, 5> comparison_procedures;
     std::size_t attribute_number{};
     bool nullable{};
@@ -116,7 +119,8 @@ struct row_codec_field {
     return storage == row_codec_field::storage_kind::name
         || storage == row_codec_field::storage_kind::bytea_pointer
         || storage == row_codec_field::storage_kind::text_pointer
-        || storage == row_codec_field::storage_kind::text_string;
+        || storage == row_codec_field::storage_kind::text_string
+        || storage == row_codec_field::storage_kind::varlena_datum;
 }
 
 [[nodiscard]] inline std::string_view datum_copy_length_expression(
@@ -127,6 +131,7 @@ struct row_codec_field {
         case row_codec_field::storage_kind::bytea_pointer:
         case row_codec_field::storage_kind::text_pointer:
         case row_codec_field::storage_kind::text_string:
+        case row_codec_field::storage_kind::varlena_datum:
             return "static_cast<int16>(-1)";
         default:
             throw std::runtime_error(
@@ -188,6 +193,9 @@ struct normalized_row_cpp_type {
             .nullable = nullable,
         };
     }
+    if (compact == "Datum" || compact == "::Datum") {
+        return {.type = "Datum", .nullable = nullable};
+    }
     if (compact == "double") {
         return {.type = "double", .nullable = nullable};
     }
@@ -201,6 +209,13 @@ struct normalized_row_cpp_type {
     for (const option_value& option : column.options) {
         if (option.name != "sql_type") continue;
         std::string_view expression = option.expression;
+        if (expression.contains("custom_type<")) {
+            const auto first_quote = expression.find('"');
+            const auto final_quote = expression.rfind('"');
+            if (first_quote == std::string_view::npos || final_quote <= first_quote)
+                throw std::runtime_error("invalid custom SQL row field type");
+            return std::string{expression.substr(first_quote + 1, final_quote - first_quote - 1)};
+        }
         while (!expression.empty()
                && (expression.back() == '}' || expression.back() == ')'
                    || std::isspace(
@@ -242,7 +257,20 @@ struct normalized_row_cpp_type {
         .attribute_number = attribute_number,
         .nullable = cpp_type.nullable,
     };
-    if (result.underlying_cpp_type == "std::int16_t") {
+    if (result.underlying_cpp_type == "Datum") {
+        result.storage = row_codec_field::storage_kind::varlena_datum;
+        const std::string sql_type = row_column_sql_type(column);
+        if (sql_type == "jsonb") result.type_oid = "JSONBOID";
+        else {
+            const auto separator = sql_type.find('.');
+            if (separator == std::string::npos || separator == 0 || separator + 1 == sql_type.size())
+                throw std::runtime_error("Datum row fields require jsonb or an explicitly schema-qualified varlena SQL type");
+            result.type_oid = "InvalidOid";
+            result.type_schema = sql_type.substr(0, separator);
+            result.type_name = sql_type.substr(separator + 1);
+        }
+        result.comparison_procedures.fill("InvalidOid");
+    } else if (result.underlying_cpp_type == "std::int16_t") {
         result.type_oid = "INT2OID";
         result.comparison_procedures = {
             "F_INT2EQ", "F_INT2LT", "F_INT2LE", "F_INT2GT", "F_INT2GE"};
@@ -537,6 +565,8 @@ inline void validate_row_codec_text_lifetime_contract(
                     ? "true"
                     : "false")
             << ";\n"
+            << "    static constexpr bool varlena_datum = "
+            << (field.storage == row_codec_field::storage_kind::varlena_datum ? "true" : "false") << ";\n"
             << "    static constexpr bool text_string = "
             << (field.storage
                         == row_codec_field::storage_kind::text_string
@@ -577,7 +607,10 @@ inline void validate_row_codec_text_lifetime_contract(
             << ", .name = \"" << field.sql_name
             << "\", .type_oid = " << field.type_oid
             << ", .nullable = "
-            << (field.nullable ? "true" : "false") << "},\n";
+            << (field.nullable ? "true" : "false")
+            << ", .type_schema = \"" << field.type_schema << "\", .type_name = \"" << field.type_name
+            << "\", .require_varlena = "
+            << (field.storage == row_codec_field::storage_kind::varlena_datum ? "true" : "false") << "},\n";
     }
     output
         << "    }};\n\n"
@@ -646,6 +679,19 @@ inline void validate_row_codec_text_lifetime_contract(
     }
     for (const row_codec_field& field : fields) {
         switch (field.storage) {
+            case row_codec_field::storage_kind::varlena_datum:
+                if (field.nullable) {
+                    output << "            if (row." << field.cpp_name << ") {\n"
+                        << "                data_.set_raw(" << field.attribute_number
+                        << ", bioseq::postgres::support::pg_datum::from_raw(bioseq::postgres::support::copy_pg_datum_to_memory_context(*row."
+                        << field.cpp_name << ", field<&row_type::" << field.cpp_name << ">::datum_copy_policy, value_context)));\n"
+                        << "            } else data_.set_null(" << field.attribute_number << ");\n";
+                } else {
+                    output << "            data_.set_raw(" << field.attribute_number
+                        << ", bioseq::postgres::support::pg_datum::from_raw(bioseq::postgres::support::copy_pg_datum_to_memory_context(row."
+                        << field.cpp_name << ", field<&row_type::" << field.cpp_name << ">::datum_copy_policy, value_context)));\n";
+                }
+                break;
             case row_codec_field::storage_kind::scalar:
                 if (field.nullable) {
                     output
@@ -904,6 +950,14 @@ inline void validate_row_codec_text_lifetime_contract(
     for (const row_codec_field& field : fields) {
         output << "            ." << field.cpp_name << " = ";
         switch (field.storage) {
+            case row_codec_field::storage_kind::varlena_datum:
+                if (field.nullable) output << "data.is_null(" << field.attribute_number
+                    << ") ? std::nullopt : std::optional<Datum>{";
+                output << "bioseq::postgres::support::copy_pg_datum_to_memory_context(data.at("
+                    << field.attribute_number << ").raw(), field<&row_type::"
+                    << field.cpp_name << ">::datum_copy_policy, result_context)";
+                if (field.nullable) output << "}";
+                break;
             case row_codec_field::storage_kind::scalar:
                 if (field.nullable) {
                     output
@@ -1126,7 +1180,12 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                MemoryContext value_context) -> update& {\n"
         << "            bioseq::postgres::support::require_row_result_context(\n"
         << "                value_context, row_name);\n"
-        << "            if constexpr (field<p_member>::name_value) {\n"
+        << "            if constexpr (field<p_member>::varlena_datum) {\n"
+        << "                if constexpr (field<p_member>::nullable) {\n"
+        << "                    if (!value) data_.set_null(attribute_number<p_member>());\n"
+        << "                    else data_.set_raw(attribute_number<p_member>(), bioseq::postgres::support::pg_datum::from_raw(bioseq::postgres::support::copy_pg_datum_to_memory_context(*value, field<p_member>::datum_copy_policy, value_context)));\n"
+        << "                } else data_.set_raw(attribute_number<p_member>(), bioseq::postgres::support::pg_datum::from_raw(bioseq::postgres::support::copy_pg_datum_to_memory_context(value, field<p_member>::datum_copy_policy, value_context)));\n"
+        << "            } else if constexpr (field<p_member>::name_value) {\n"
         << "                if constexpr (field<p_member>::nullable) {\n"
         << "                    if (!value.has_value()) {\n"
         << "                        data_.set_null(\n"

@@ -7,8 +7,11 @@ module;
 #include <bioseq/pg_compat.h>
 
 extern "C" {
+#include "catalog/namespace.h"
+#include "catalog/pg_type.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 }
 
 #include <array>
@@ -49,7 +52,29 @@ struct row_descriptor_field final {
     std::string_view name;
     Oid type_oid;
     bool nullable;
+    std::string_view type_schema{};
+    std::string_view type_name{};
+    bool require_varlena{};
 };
+
+/** Check a generated field's built-in OID or schema-qualified extension type.
+ * Explicit Datum fields must have varlena, pass-by-reference storage; arbitrary
+ * fixed-size or by-value types cannot accidentally use the varlena copy policy.
+ */
+[[nodiscard]] inline bool row_attribute_type_matches(
+    const Form_pg_attribute attribute, const row_descriptor_field& expected) {
+    if (expected.require_varlena && (attribute->attbyval || attribute->attlen != -1)) return false;
+    if (OidIsValid(expected.type_oid)) return attribute->atttypid == expected.type_oid;
+    if (expected.type_schema.empty() || expected.type_name.empty()) return false;
+    const std::string schema{expected.type_schema};
+    const std::string name{expected.type_name};
+    return invoke_pg_as_cpp([attribute, &schema, &name] {
+        const Oid namespace_oid = get_namespace_oid(schema.c_str(), true);
+        if (!OidIsValid(namespace_oid)) return false;
+        return GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+            CStringGetDatum(name.c_str()), ObjectIdGetDatum(namespace_oid)) == attribute->atttypid;
+    });
+}
 
 /**
  * Check that a tuple descriptor matches the generated row  definition.
@@ -73,7 +98,7 @@ void validate_row_descriptor(
             bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, static_cast<int>(index));
         if (attribute->attnum != expected[index].attribute_number
             || attribute->attisdropped
-            || attribute->atttypid != expected[index].type_oid
+            || !row_attribute_type_matches(attribute, expected[index])
             || attribute->attnotnull != !expected[index].nullable
             || std::string_view{NameStr(attribute->attname)}
                 != expected[index].name) {

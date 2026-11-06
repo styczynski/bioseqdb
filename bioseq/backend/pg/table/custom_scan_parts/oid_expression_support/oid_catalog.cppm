@@ -236,6 +236,10 @@ export {
         result.secondary_chain_score_oid = resolve("bioseq.secondary_chain_score(anyelement)");
         result.is_reverse_oid = resolve("bioseq.is_reverse(anyelement)");
         result.is_primary_oid = resolve("bioseq.is_primary(anyelement)");
+        result.export_alignment_status_oid = resolve("bioseq_internal.export_alignment_status(anyelement)");
+        result.alignment_ordinal_oid = resolve("bioseq_internal.alignment_ordinal(anyelement)");
+        result.alignment_query_sequence_oid = resolve("bioseq_internal.alignment_query_sequence(anyelement)");
+        result.alignment_reference_sequence_oid = resolve("bioseq_internal.alignment_reference_sequence(anyelement)");
         result.has_cigar_oid = resolve("bioseq.has_cigar(anyelement)");
         result.divergence_oid = resolve("bioseq.divergence(anyelement)");
         result.cigar_oid = resolve("bioseq.cigar(anyelement)");
@@ -343,6 +347,10 @@ export {
             o.secondary_chain_score_oid,
             o.is_reverse_oid,
             o.is_primary_oid,
+            o.export_alignment_status_oid,
+            o.alignment_ordinal_oid,
+            o.alignment_query_sequence_oid,
+            o.alignment_reference_sequence_oid,
             o.has_cigar_oid,
             o.divergence_oid,
             o.cigar_oid,

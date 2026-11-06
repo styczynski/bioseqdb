@@ -302,6 +302,9 @@ inline void write_json_string(
         case row_codec_field::storage_kind::text_string:
             key += "text_string";
             break;
+        case row_codec_field::storage_kind::varlena_datum:
+            key += "varlena_datum";
+            break;
     }
     key += codec.nullable ? ".nullable" : ".required";
     return key;
@@ -349,11 +352,6 @@ inline void write_json_string(
 [[nodiscard]] inline std::string manifest_routine_language(
     const collected_entity& entity) {
     return entity.kind == entity_kind::sql_function ? "sql" : "c";
-}
-
-[[nodiscard]] inline std::string manifest_c_symbol(
-    const collected_entity& entity) {
-    return manifest_option_leaf(entity, "c_symbol", entity.name);
 }
 
 [[nodiscard]] inline bool handwritten_fmgr_export_symbol(
@@ -438,18 +436,16 @@ struct fmgr_ownership_inventory {
                           + routine_identity + "'");
         }
         if (manifest_routine_language(entity.source) != "c") continue;
-        const std::string symbol = manifest_c_symbol(entity.source);
+        const std::string symbol = generated_routine_c_symbol(entity, graph);
         if (symbol.empty() || symbol == "none") {
             throw std::runtime_error(
                 "C-language SQL routine '" + routine_identity
                 + "' has no linked C symbol");
         }
-        if (symbol != entity.source.name
-            || routine_identity_leaf(routine_identity)
-                != entity.source.name) {
+        if (routine_identity_leaf(routine_identity) != entity.source.name) {
             throw std::runtime_error(
                 "natural C routine '" + routine_identity
-                + "' must derive its SQL leaf and C symbol from '"
+                + "' must derive its SQL leaf from '"
                 + entity.source.name + "'");
         }
         // The external table access method uses its own handwritten POSTGRES_FN
@@ -1111,7 +1107,7 @@ manifest_statement_owner(
             || detail::reviewed_handwritten_fmgr_export_routine(
                 entity,
                 identity,
-                detail::manifest_c_symbol(entity.source))) {
+                generated_routine_c_symbol(entity, graph))) {
             ++routine_boundary_contract_count;
         }
     }
@@ -1135,7 +1131,7 @@ manifest_statement_owner(
             && !detail::reviewed_handwritten_fmgr_export_routine(
                 entity,
                 identity,
-                detail::manifest_c_symbol(entity.source))) {
+                generated_routine_c_symbol(entity, graph))) {
             throw std::runtime_error(
                 "C routine has no generated or reviewed external boundary "
                 "contract: " + identity);
@@ -1591,7 +1587,7 @@ manifest_statement_owner(
             ? detail::manifest_routine_language(entity.source)
             : std::string{};
         const std::string c_symbol = routine_language == "c"
-            ? detail::manifest_c_symbol(entity.source)
+            ? generated_routine_c_symbol(entity, graph)
             : std::string{};
         const auto shared_routines =
             routine_inventory.routine_identities_by_symbol.find(c_symbol);

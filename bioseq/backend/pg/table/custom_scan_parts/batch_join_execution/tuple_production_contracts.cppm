@@ -22,7 +22,9 @@ export void batch_join_set_placeholder_value(
     const batch_join_placeholder_site& site,
     const bioseq::simd::match_result& match,
     const bioseq_stub_oids& oids,
-    MemoryContext output_context);
+    MemoryContext output_context,
+    int target_operand_resno,
+    int query_operand_resno);
 
 /** Combine a target match with its query row, then  filter and project the output. */
 export TupleTableSlot* batch_join_project_output(

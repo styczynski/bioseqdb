@@ -14,6 +14,7 @@ module;
 export module bioseq.io.reader:types;
 
 import bioseq.sequences;
+export import bioseq.io.record_schema;
 
 export namespace bioseq::io {
 
@@ -43,76 +44,6 @@ enum class reader_backend : std::uint8_t {
     }
     return "?";
 }
-
-/// Borrows one record's packed words from a batch. `size()` counts words,
-/// and `padding()` counts unused letter positions in the final word.
-/// Iterators read the words directly. The batch storage must remain alive
-/// and unchanged while the view is used.
-template <supports_compact_sequence_range p_range> class compact_sequence_view {
-  public:
-    /// Traits of the packed sequence range represented by this view.
-    using traits = typename compact_sequence_range<p_range>::traits;
-    /// Packed storage word type borrowed from the owning batch.
-    using storage_unit = typename traits::storage_unit;
-    /// Read-only iterator over packed storage words.
-    using iterator = const storage_unit*;
-    /// Read-only iterator over packed storage words.
-    using const_iterator = const storage_unit*;
-
-    /// Construct an empty view.
-    constexpr compact_sequence_view() = default;
-
-    /// Construct a view over `word_count` packed units with trailing padding.
-    constexpr compact_sequence_view(const storage_unit* base,
-                                    std::size_t word_count,
-                                    std::size_t padding) noexcept
-        : _base(base), _word_count(word_count), _padding(padding) {}
-
-    /// Return the number of packed storage units.
-    [[nodiscard]] constexpr std::size_t size() const noexcept {
-        return _word_count;
-    }
-
-    /// Return the number of unused letters in the final storage unit.
-    [[nodiscard]] constexpr std::size_t padding() const noexcept {
-        return _padding;
-    }
-
-    /// Returns a pointer to the first packed word.
-    [[nodiscard]] constexpr const storage_unit* data() const noexcept {
-        return _base;
-    }
-
-    /// Return an iterator to the first packed storage unit.
-    [[nodiscard]] constexpr iterator begin() const noexcept {
-        return _base;
-    }
-
-    /// Return an iterator one past the final packed storage unit.
-    [[nodiscard]] constexpr iterator end() const noexcept {
-        return _base + _word_count;
-    }
-
-    /// Return a const iterator to the first packed storage unit.
-    [[nodiscard]] constexpr const_iterator cbegin() const noexcept {
-        return begin();
-    }
-
-    /// Return a const iterator one past the final packed storage unit.
-    [[nodiscard]] constexpr const_iterator cend() const noexcept {
-        return end();
-    }
-
-    /// Return one packed storage unit without bounds checking.
-    [[nodiscard]] constexpr storage_unit operator[](std::size_t index) const noexcept {
-        return _base[index];
-    }
-
-  private:
-    const storage_unit* _base = nullptr;
-    std::size_t _word_count = 0;
-    std::size_t _padding = 0;
-};
 
 /// Packed sequence words passed to a streaming sink. The borrowed span is
 /// valiw during `sink.chunk` only. Non-final chunks contain full words.

@@ -6,6 +6,8 @@ module;
 // Include Highway and PostgreSQL headers before the named module declaration.
 // Imported sequence modules also depend on these declarations.
 #include <bioseq/pg_compat.h>
+#include <algorithm>
+#include <map>
 #include <array>
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
@@ -59,6 +61,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
 import bioseq.postgres.storage.io.sql_rows;
 import bioseq.postgres.storage.io.sql_row_codecs;
+import bioseq.postgres.storage.io.scalar_codec;
 import bioseq.postgres.configuration.core;
 import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
@@ -153,6 +156,7 @@ struct load_columns {
     std::uint8_t alphabet_code;
     /// Packed storage-unit width in bytes, read from the column type modifier.
     std::uint8_t byte_width;
+    std::int16_t alignment_attno{};
     std::int16_t quality_attno{};
     std::uint8_t quality_alphabet_code{};
     std::uint8_t quality_byte_width{};
@@ -165,7 +169,7 @@ struct load_columns {
  * @throws postgres_error If the table has zero or multiple sequence columns, or no sequence type modifier
  */
 [[nodiscard]] load_columns resolve_load_columns(Relation rel, std::string_view quality_name = {},
-        bool fastq = false) {
+        bool fastq = false, std::string_view alignment_name = {}) {
     const TupleDesc td = RelationGetDescr(rel);
     const Oid seq_type_oid = load_seq_type_oid();
     if (!OidIsValid(seq_type_oid)) {
@@ -182,7 +186,13 @@ struct load_columns {
         if (attr->attisdropped || attr->attnum <= 0) {
             continue;
         }
+        if (!alignment_name.empty() && alignment_name == NameStr(attr->attname)) {
+            result.alignment_attno = static_cast<std::int16_t>(i + 1);
+            continue;
+        }
         if (attr->atttypid == seq_type_oid) {
+            if (attr->atttypmod >= 0 && pgseq_is_cigar_alphabet(
+                    compact_sequence_stdc_type_params::decode(attr->atttypmod).alphabet_code)) continue;
             if (attr->atttypmod >= 0 && is_quality_alphabet_code(
                     compact_sequence_stdc_type_params::decode(attr->atttypmod).alphabet_code)) {
                 if (fastq && quality_name == NameStr(attr->attname)) {
@@ -190,9 +200,6 @@ struct load_columns {
                     result.quality_attno = i + 1;
                     result.quality_alphabet_code = type.alphabet_code;
                     result.quality_byte_width = type.storage_unit_byte_width;
-                } else if (fastq) {
-                    raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION,
-                        "extra quality sequence destination is not supported");
                 }
                 continue;
             }
@@ -410,6 +417,8 @@ struct load_context {
     idp::identifier_parse_state parse_state;
     idp::identifier_writer_reference writer_ref;
     std::vector<dest_coercion> dest; // One entry per parser destination slot.
+    std::map<std::pair<std::uint8_t, std::uint8_t>, std::array<std::uint32_t, 256>> rank_mappings;
+    std::vector<bool> assigned_columns; // Explicit NULL values must not invoke column defaults.
     std::vector<default_col> defaults;
     EState* estate = nullptr;
     ExprContext* econtext = nullptr;
@@ -475,8 +484,8 @@ void check_load_constraints(load_context& ctx,
         const bioseq::storage::pending_sequence_source* primary,
         const bioseq::storage::pending_sequence_source* quality) {
     if (!ctx.result_rel_info || !ctx.parent_rel->rd_att->constr) return;
-    if (primary == nullptr || ctx.parent_rel->rd_att->constr->num_check == 0) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    if ((primary == nullptr && quality == nullptr) || ctx.parent_rel->rd_att->constr->num_check == 0) {
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
             ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
         });
         return;
@@ -486,7 +495,7 @@ void check_load_constraints(load_context& ctx,
     ExprContext* check_context = nullptr;
     auto* const saved_context = ctx.estate->es_per_tuple_exprcontext;
     const auto saved_memory = CurrentMemoryContext;
-    const std::array<AttrNumber, 2> attributes{ctx.cols.seq_attno,
+    const std::array<AttrNumber, 2> attributes{primary ? ctx.cols.seq_attno : AttrNumber{0},
         quality ? ctx.cols.quality_attno : AttrNumber{0}};
     const std::array<const bioseq::storage::pending_sequence_source*, 2> sources{primary, quality};
     std::array<Datum, 2> locators{};
@@ -494,7 +503,7 @@ void check_load_constraints(load_context& ctx,
         if (attributes[i] > 0) locators[i] = ctx.slot->tts_values[attributes[i] - 1];
     std::exception_ptr failure;
     try {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx, &snapshot, &check_context] {
             bioseq::storage::flush_seq_cache_write_states(ctx.caches, GetCurrentSubTransactionId());
             CommandCounterIncrement();
             snapshot = RegisterSnapshot(GetTransactionSnapshot());
@@ -507,7 +516,7 @@ void check_load_constraints(load_context& ctx,
             ctx.slot->tts_values[attributes[i] - 1] = bioseq::storage::promote_pending_pg_sequence_source(
                 provider, attributes[i], locators[i], *sources[i], check_context->ecxt_per_tuple_memory);
         }
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
             ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
         });
     } catch (...) { failure = std::current_exception(); }
@@ -518,16 +527,16 @@ void check_load_constraints(load_context& ctx,
     const auto cleanup = [&failure](auto&& action) {
         try { action(); } catch (...) { if (!failure) failure = std::current_exception(); }
     };
-    if (check_context) cleanup([&] {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] { FreeExprContext(check_context, !failure); });
+    if (check_context) cleanup([check_context, &failure] {
+        bioseq::postgres::support::invoke_pg_as_cpp([check_context, succeeded = !failure] { FreeExprContext(check_context, succeeded); });
     });
-    if (provider) cleanup([&] {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
-            bioseq::storage::close_pg_sequence_source_provider(provider, !failure);
+    if (provider) cleanup([provider, &failure] {
+        bioseq::postgres::support::invoke_pg_as_cpp([provider, succeeded = !failure] {
+            bioseq::storage::close_pg_sequence_source_provider(provider, succeeded);
         });
     });
-    if (snapshot) cleanup([&] {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] { UnregisterSnapshot(snapshot); });
+    if (snapshot) cleanup([snapshot] {
+        bioseq::postgres::support::invoke_pg_as_cpp([snapshot] { UnregisterSnapshot(snapshot); });
     });
     if (failure) std::rethrow_exception(failure);
 }
@@ -540,17 +549,32 @@ struct pg_identifier_writer {
     std::span<const dest_coercion> dest;
     /// Defaults applied to destination columns still set to NULL.
     std::span<const default_col> defaults;
+    /// Canonical fields use deterministic typed scalar spelling, including raw hex bytea.
+    bool canonical_fields{};
 
     /// Clear the row slot and set every column to SQL NULL.
     void begin_tuple() {
+        ctx.assigned_columns.assign(static_cast<std::size_t>(ctx.parent_td->natts), false);
         bioseq::postgres::support::invoke_pg_as_cpp([this] {
             bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.clear_all_to_null();
         });
     }
 
+    /** Reject canonical keys which collapse onto one already populated destination. */
+    void check_canonical_assignment(idp::destination_slot slot) const {
+        if (canonical_fields && ctx.assigned_columns[dest[slot].attno - 1]
+            && std::find(ctx.routing.identifier_slots.begin(), ctx.routing.identifier_slots.end(), slot)
+                == ctx.routing.identifier_slots.end())
+            raise_load_error_as_cpp(ERRCODE_INVALID_COLUMN_REFERENCE,
+                "canonical metadata assigns destination column \"" + dest[slot].column_name
+                    + "\" more than once; use exact column names or explicit mappings");
+    }
+
     /// Set one mapped column to SQL NULL.
     /// @param slot Parser destination number, starting at zero.
     void set_null(idp::destination_slot slot) {
+        check_canonical_assignment(slot);
+        ctx.assigned_columns[dest[slot].attno - 1] = true;
         bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_null(dest[slot].attno);
     }
     /// Convert one parsed field to its PostgreSQL column type.
@@ -559,7 +583,12 @@ struct pg_identifier_writer {
     /// @param len Field length  in bytes.
     /// @throws postgres_error If conversion or allocation fails.
     void set_field(idp::destination_slot slot, const char* data, std::int32_t len) {
+        if (len < 0 || (len != 0 && (data == nullptr || std::memchr(data, '\0', static_cast<std::size_t>(len)) != nullptr)))
+            raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
+                "header/metadata field contains NUL or an invalid byte length");
         const dest_coercion& dc = dest[slot];
+        check_canonical_assignment(slot);
+        ctx.assigned_columns[dc.attno - 1] = true;
         ctx.current_column_name = dc.column_name.c_str(); // Name the column if conversion fails.
         const MemoryContext per_tuple = get_column_write_per_tuple_context(ctx.write_state);
         Datum v;
@@ -570,6 +599,12 @@ struct pg_identifier_writer {
                 MemoryContextSwitchTo(old);
                 return result;
             });
+        } else if (canonical_fields && std::find(ctx.routing.identifier_slots.begin(),
+                ctx.routing.identifier_slots.end(), slot) == ctx.routing.identifier_slots.end()) {
+            const bioseq::postgres::support::memory_context_scope scope{per_tuple};
+            const auto type = TupleDescAttr(ctx.parent_td, dc.attno - 1)->atttypid;
+            v = bioseq::postgres::storage::io::parse_io_scalar(
+                {data, static_cast<std::size_t>(len)}, type, dc.input_fn, dc.io_param, dc.typmod);
         } else { // Values that need PostgreSQL type conversion.
             char* cstr = make_cstr(data, len, dc, per_tuple);
             v = bioseq::postgres::support::invoke_pg_as_cpp([per_tuple, &dc, cstr] {
@@ -594,7 +629,7 @@ struct pg_identifier_writer {
         // Apply defaults to columns still set to NULL. Keep values allocated by default
         // expressions alive until write_column_row has copied them
         for (const default_col& d : defaults) {
-            if (!ctx.slot->tts_isnull[d.attno - 1]) {
+            if (ctx.assigned_columns[d.attno - 1] || !ctx.slot->tts_isnull[d.attno - 1]) {
                 continue;
             }
             bool isnull = false;
@@ -678,11 +713,16 @@ void write_parent_row(load_context& ctx,
                       std::uint8_t byte_width,
                       std::uint16_t last_pad,
                       sequence_size_t total_bp,
-                      bioseq::storage::pending_sequence_source&& pending_source,
+                      bioseq::storage::pending_sequence_source* pending_source,
                       bioseq::storage::pending_sequence_source* quality_source = nullptr,
-                      std::uint16_t quality_padding = 0) {
-    const bioseq::storage::sequence_locator locator = pending_source.locator();
-    bioseq::pg_types::seq* stub = bioseq::postgres::support::invoke_pg_as_cpp(
+                      std::uint16_t quality_padding = 0,
+                      bool header_is_null = false,
+                      bool canonical = false,
+                      const idp::canonical_header* parsed_canonical = nullptr) {
+    bioseq::pg_types::seq* stub = nullptr;
+    if (pending_source) {
+    const auto locator = pending_source->locator();
+    stub = bioseq::postgres::support::invoke_pg_as_cpp(
         [write_state = ctx.write_state, alphabet_code, byte_width, last_pad, total_bp, locator] {
             return bioseq::storage::alloc_locator_stub_in(
                 get_column_write_per_tuple_context(write_state),
@@ -692,26 +732,32 @@ void write_parent_row(load_context& ctx,
                 total_bp,
                 locator);
         });
+    }
 
     ++ctx.record_no;
     load_error_context_scope error_context{ctx, header};
 
     tuple_writer.begin_tuple(); // Begin with all columns set to NULL.
-    bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
+    ctx.assigned_columns[ctx.cols.seq_attno - 1] = true;
+    if (pending_source) bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
         ctx.cols.seq_attno, bioseq::postgres::support::pg_datum::from_pointer(stub));
+    if (ctx.cols.quality_attno && (canonical || quality_source))
+        ctx.assigned_columns[ctx.cols.quality_attno - 1] = true;
     if (quality_source) {
-        auto* quality_stub = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, quality_source, total_bp, quality_padding] {
+        auto* quality_stub = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, quality_source, quality_padding] {
             return bioseq::storage::alloc_locator_stub_in(get_column_write_per_tuple_context(ctx.write_state),
                 ctx.cols.quality_alphabet_code, ctx.cols.quality_byte_width, quality_padding,
-                total_bp, quality_source->locator());
+                quality_source->locator().logical_length, quality_source->locator());
         });
         bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
             ctx.cols.quality_attno, bioseq::postgres::support::pg_datum::from_pointer(quality_stub));
     }
 
+    tuple_writer.canonical_fields = canonical;
     if (ctx.parser_active) {
-        auto routed = idp::parse_and_route_header(
-            ctx.effective_fmt, header, ctx.routing, ctx.parse_state, ctx.writer_ref);
+        auto routed = parsed_canonical
+            ? idp::route_canonical_header(*parsed_canonical, ctx.routing, ctx.writer_ref)
+            : idp::parse_and_route_header(ctx.effective_fmt, header, ctx.routing, ctx.parse_state, ctx.writer_ref);
         if (!routed) {
             raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, routed.error());
         }
@@ -730,9 +776,12 @@ void write_parent_row(load_context& ctx,
         bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
             ctx.cols.header_attno, bioseq::postgres::support::pg_datum::from_pointer(htext));
     }
-    tuple_writer.end_tuple(&pending_source, quality_source); // Check both staged values before publication.
+    if (header_is_null) {
+        for (const auto destination : ctx.routing.identifier_slots) tuple_writer.set_null(destination);
+    }
+    tuple_writer.end_tuple(pending_source, quality_source); // Check both staged values before publication.
     if (quality_source) inject_load_failure(2);
-    pending_source.publish_after_parent_row();
+    if (pending_source) pending_source->publish_after_parent_row();
     if (quality_source) inject_load_failure(3);
     if (quality_source) quality_source->publish_after_parent_row();
 }

@@ -1,0 +1,337 @@
+'\" t
+.TH samtools-sort 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools sort \- sorts SAM/BAM/CRAM files
+.\"
+.\" Copyright (C) 2008-2011, 2013-2020, 2022-2024 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+samtools sort
+.RI [ options ]
+.RI "[" in.sam | in.bam | in.cram "]"
+
+.SH DESCRIPTION
+.PP
+Sort alignments by leftmost coordinates, by read name when \fB-n\fR or
+\fB-N\fR are used, by tag contents with \fB-t\fR, or a minimiser-based
+collation order with \fB-M\fR.  An appropriate \fB@HD SO\fR
+sort order header tag will be added or an existing one updated if
+necessary, along with the \fB@HD SS\fR sub-sort header tag where
+appropriate.
+
+The sorted output is written to standard output by default, or to the
+specified file
+.RI ( out.bam )
+when
+.B -o
+is used.
+This command will also create temporary files
+.IB tmpprefix . %d .bam
+as needed when the entire alignment data cannot fit into memory
+(as controlled via the
+.B -m
+option).
+
+Consider using
+.B samtools collate
+instead if you need name collated data without a full lexicographical sort.
+
+Note that if the sorted output file is to be indexed with
+.BR "samtools index" ,
+the default coordinate sort must be used.
+Thus the \fB-n\fR, \fB-N\fR and \fB-t\fR options are incompatible with
+.BR "samtools index" .
+
+When sorting by minimiser (\fB-M\fR), the sort order for unplaced
+data is defined by the whole-read minimiser value and the offset into
+the read that this minimiser was observed.  This produces small
+clusters (contig-like, but unaligned) and helps to improve compression
+with LZ algorithms.  This can be improved by supplying a known
+reference to build a minimiser index (\fB-I\fR and \fB-w\fR options).
+
+.SH OPTIONS
+
+.TP 11
+.BI "-l " INT
+Set the desired compression level for the final output file, ranging from 0
+(uncompressed) or 1 (fastest but minimal compression) to 9 (best compression
+but slowest to write), similarly to
+.BR gzip (1)'s
+compression level setting.
+.IP
+If
+.B -l
+is not used, the default compression level will apply.
+.TP
+.B "-u "
+Set the compression level to 0, for uncompressed output.  This is a
+synonym for \fB-l 0\fR.
+.TP
+.BI "-m " INT
+Approximately the maximum required memory per thread, specified either in bytes
+or with a
+.BR K ", " M ", or " G
+suffix.
+[768 MiB]
+.IP
+To prevent sort from creating a huge number of temporary files, it enforces a
+minimum value of 1M for this setting.
+.TP
+.B -n
+Sort by read names (i.e., the
+.B QNAME
+field) using an alpha-numeric ordering, rather than by chromosomal coordinates.
+The alpha-numeric or \*(lqnatural\*(rq sort order detects runs of digits in the
+strings and sorts these numerically.  Hence "a7b" appears before "a12b".
+Note this is not suitable where hexadecimal values are in use.
+Sets the header sub-sort (\fB@HD SS\fR) tag to \fBqueryname:natural\fR.
+.TP
+.B -N
+Sort by read names (i.e., the
+.B QNAME
+field) using the lexicographical ordering, rather than by chromosomal
+coordinates.  Unlike \fB-n\fR no detection of numeric components is
+used, instead relying purely on the ASCII value of each character.
+Hence "x12" comes before "x7" as "1" is before "7" in ASCII.  This is
+a more appropriate name sort order where all digits in names are
+already zero-padded and/or hexadecimal values are being used.
+Sets the header sub-sort (\fB@HD SS\fR) tag to \fBqueryname:lexicographical\fR.
+.TP
+.BI "-t " TAG
+Sort first by the value in the alignment tag TAG, then by position or name (if
+also using \fB-n\fP or \fB-N\fR).
+.TP
+.B "-M "
+Sort unmapped reads (those in chromosome "*") by their sequence
+minimiser (Schleimer et al., 2003; Roberts et al., 2004), also reverse
+complementing as appropriate.  This has the effect of collating some
+similar data together, improving the compressibility of the unmapped
+sequence.  The minimiser kmer size is adjusted using the \fB-K\fR
+option.  Note data compressed in this manner may need to be name
+collated prior to conversion back to fastq.
+.IP
+Mapped sequences are sorted by chromosome and position.
+.IP
+Files with at least one aligned record (being placed at a position on
+a chromosome) use the sort order "coordinate" with a sub-sort of
+"coordinate:minhash".  Files entirely consisting of unaligned data
+use sort order "unsorted" with sub-sort "unsorted:minhash".
+.TP
+.B "-R "
+Do not use reverse strand with minimiser sort (only compatible with -M).
+.TP
+.BI "-K " INT
+Sets the kmer size to be used in the \fB-M\fR option. [20]
+.TP
+.BI "-I " FILE
+Build a minimiser index over \fIFILE\fR.  The per-read minimisers
+produced by \fB-M\fR are no longer sorted by their numeric value, but
+by the reference coordinate this minimiser was found to come from (if
+found in the index).  This further improves compression due to
+improved sequence similarity between sequences, albeit with a small
+CPU cost of building and querying the index.  Specifying \fB-I\fR
+automatically implies \fB-M\fR.
+.TP
+.BI "-w " INT
+Specifies the window size for building the minimiser index on the file
+specified in \fB-I\fR.  This defaults to 100.  It may be better to set
+this closer to 50 for short-read data sets (at a higher CPU and
+memory cost), or for more speed up to 1000 for long-read data sets.
+.TP
+.B -H
+Squashes base homopolymers down to a single base pair before
+constructing the minimiser.  This is useful for instruments where the
+primary source of error is in the length of homopolymer.
+.TP
+.BI "-o " FILE
+Write the final sorted output to
+.IR FILE ,
+rather than to standard output.
+.TP
+.BI "-O " FORMAT
+Write the final output as
+.BR sam ", " bam ", or " cram .
+
+By default, samtools tries to select a format based on the
+.B -o
+filename extension; if output is to standard output or no format can be
+deduced,
+.B bam
+is selected.
+.TP
+.BI "-T " PREFIX
+Write temporary files to
+.IB PREFIX . nnnn .bam,
+or if the specified
+.I PREFIX
+is an existing directory, to
+.IB PREFIX /samtools. mmm . mmm .tmp. nnnn .bam,
+where
+.I mmm
+is unique to this invocation of the
+.B sort
+command.
+.IP
+By default, any temporary files are written alongside the output file, as
+.IB out.bam .tmp. nnnn .bam,
+or if output is to standard output, in the current directory as
+.BI samtools. mmm . mmm .tmp. nnnn .bam.
+.TP
+.BI "-@ " INT
+Set number of sorting and compression threads.
+By default, operation is single-threaded.
+.TP
+.BI --no-PG
+Do not add a @PG line to the header of the output file.
+.TP
+.B --template-coordinate
+Sorts by template-coordinate, whereby the sort order (@HD SO) is
+.BR unsorted ,
+the group order (GO) is
+.BR query ,
+and the sub-sort (SS) is
+.BR template-coordinate .
+.PP
+.B Ordering Rules
+
+The following rules are used for ordering records.
+
+If option \fB-t\fP is in use, records are first sorted by the value of
+the given alignment tag, and then by position or name (if using \fB-n\fP
+or \fB-N\fP).
+For example, \*(lq-t RG\*(rq will make read group the primary sort key.  The
+rules for ordering by tag are:
+
+.IP \(bu 4
+Records that do not have the tag are sorted before ones that do.
+.IP \(bu 4
+If the types of the tags are different, they will be sorted so
+that single character tags (type A) come before array tags (type B), then
+string tags (types H and Z), then numeric tags (types f and i).
+.IP \(bu 4
+Numeric tags (types f and i) are compared by value.  Note that comparisons
+of floating-point values are subject to issues of rounding and precision.
+.IP \(bu 4
+String tags (types H and Z) are compared based on the binary
+contents of the tag using the C
+.BR strcmp (3)
+function.
+.IP \(bu 4
+Character tags (type A) are compared by binary character value.
+.IP \(bu 4
+No attempt is made to compare tags of other types \(em notably type B
+array values will not be compared.
+.PP
+When the \fB-n\fP or \fB-N\fP option is present, records are sorted by
+name.  Historically samtools has used a \*(lqnatural\*(rq ordering
+\(em i.e. sections consisting of digits are compared numerically while
+all other sections are compared based on their binary representation.
+This means \*(lqa1\*(rq will come before \*(lqb1\*(rq and \*(lqa9\*(rq
+will come before \*(lqa10\*(rq.  However this alpha-numeric sort can
+be confused by runs of hexadecimal digits.  The newer \fB-N\fP
+option adds a simpler lexicographical based name collation which does not
+attempt any numeric comparisons and may be more appropriate for some
+data sets.  Note care must be taken when using \fBsamtools merge\fP to
+ensure all files are using the same collation order.
+Records with the same name will be ordered according to the values of
+the READ1 and READ2 flags (see \fBsamtools flags\fR). When that flag
+is also equal, ties are resolved with primary alignments first, then
+SUPPLEMENTARY, SECONDARY, and finally SUPPLEMENTARY plus SECONDARY.
+Any remaining ties are reported in the same order as the input data.
+
+When the 
+.B --template-coordinate
+option is in use, the reads are sorted by:
+
+.IP 1. 3
+The earlier unclipped 5' coordinate of the template.
+
+.IP 2. 3
+The higher unclipped 5' coordinate of the template.
+
+.IP 3. 3
+The library (from the read group).
+
+.IP 4. 3
+The cellular barcode (CB tag, if present).
+
+.IP 5. 3
+The molecular identifier (MI tag if present).
+
+.IP 6. 3
+The read name.
+
+.IP 7. 3
+If unpaired, or if R1 has the lower coordinates of the pair.
+.PP
+
+When none of the above options are in use,
+reads are sorted by reference (according to the order of the @SQ
+header records), then by position in the reference, and then by the REVERSE
+flag.
+
+.B Note
+
+.PP
+Historically
+.B samtools sort
+also accepted a less flexible way of specifying the final and
+temporary output filenames:
+.IP
+samtools sort
+.RB [ -f "] [" -o ]
+.I in.bam out.prefix
+.PP
+This has now been removed.
+The previous \fIout.prefix\fP argument (and \fB-f\fP option, if any)
+should be changed to an appropriate combination of \fB-T\fP \fIPREFIX\fP
+and \fB-o\fP \fIFILE\fP.  The previous \fB-o\fP option should be removed,
+as output defaults to standard output.
+
+.SH AUTHOR
+.PP
+Written by Heng Li from the Sanger Institute with numerous subsequent
+modifications.
+
+.SH SEE ALSO
+.IR samtools (1),
+.IR samtools-collate (1),
+.IR samtools-merge (1)
+.PP
+Samtools website: <http://www.htslib.org/>

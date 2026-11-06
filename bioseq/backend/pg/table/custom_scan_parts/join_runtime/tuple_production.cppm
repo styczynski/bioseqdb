@@ -137,6 +137,18 @@ export {
             return c->is_reverse_node;
         if (funcid == o->is_primary_oid)
             return c->is_primary_node;
+        if (funcid == o->export_alignment_status_oid)
+            return c->export_alignment_status_node;
+        if (funcid == o->alignment_ordinal_oid)
+            return c->alignment_ordinal_node;
+        if (funcid == o->alignment_query_sequence_oid) {
+            c->needs_alignment_query_sequence = true;
+            return c->alignment_query_sequence_node;
+        }
+        if (funcid == o->alignment_reference_sequence_oid) {
+            c->needs_alignment_reference_sequence = true;
+            return c->alignment_reference_sequence_node;
+        }
         if (funcid == o->has_cigar_oid)
             return c->has_cigar_node;
         if (funcid == o->divergence_oid)
@@ -443,6 +455,8 @@ export {
         set_int(consts.secondary_chain_score_node, match.secondary_chain_score);
         set_bool(consts.is_reverse_node, match.is_reverse);
         set_bool(consts.is_primary_node, match.is_primary);
+        set_bigint(consts.export_alignment_status_node, match.export_status());
+        set_bigint(consts.alignment_ordinal_node, match.alignment_ordinal);
         set_bool(consts.has_cigar_node, match.has_cigar);
         set_float(consts.divergence_node, match.divergence);
 

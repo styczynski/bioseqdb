@@ -28,6 +28,7 @@ import bioseq.io.buffer;
 import bioseq.io.fasta;
 import bioseq.io.fastq;
 import bioseq.io.sources;
+import bioseq.io.sinks;
 
 namespace bioseq::io::detail {
 
@@ -70,7 +71,8 @@ template <sequence_alphabet p_alphabet,
 
     // Sequence words are drained between parser calls. Headers remain until
     // completion; the shared FASTQ parser counts qualities without retaining them.
-    std::vector<char> header_scratch;
+    std::vector<char> header_scratch; // Batch parser attachment remains empty in the streaming path.
+    raw_header_buffer header_buffer;
     std::vector<p_storage_unit> seq_scratch;
     std::vector<std::uint8_t> quality_scratch; // Attached but empty: retention is disabled.
 
@@ -82,13 +84,22 @@ template <sequence_alphabet p_alphabet,
 
     // Clear the scratch buffers after delivering a record.
     auto reset_record =
-        [&completed_padding, &header_scratch, &quality_scratch, &record_open, &seq_scratch]() {
+        [&completed_padding, &header_scratch, &header_buffer, &quality_scratch, &record_open, &seq_scratch]() {
             header_scratch.clear();
+            header_buffer.reset();
             seq_scratch.clear();
             quality_scratch.clear();
             record_open = false;
             completed_padding = 0;
         };
+
+    // Ownership-capable sinks keep the raw header until end_record; ordinary sinks borrow it.
+    auto begin_record = [&sink, &header_buffer]() {
+        if constexpr (requires(p_sink& destination, admitted_byte_buffer&& owner) {
+            destination.begin_record_owned(std::move(owner));
+        }) sink.begin_record_owned(header_buffer.take());
+        else sink.begin_record(header_buffer.view());
+    };
 
     // Give the sink the packed words, then prepare empty scratch for further input.
     auto emit_stream_chunk = [&options, &seq_scratch, &sink](
@@ -115,11 +126,11 @@ template <sequence_alphabet p_alphabet,
     // Send completed words before refilling the input buffer. The header is
     // complete once any bdy words are available.
     auto drain_partial =
-        [&emit_stream_chunk, &header_scratch, &record_open, &seq_scratch, &sink]() {
+        [&emit_stream_chunk, &begin_record, &record_open, &seq_scratch]() {
             if (seq_scratch.empty())
                 return;
             if (!record_open) {
-                sink.begin_record(std::string_view(header_scratch.data(), header_scratch.size()));
+                begin_record();
                 record_open = true;
             }
             // The encoder keeps a partial  word in its state until record completion.
@@ -136,15 +147,14 @@ template <sequence_alphabet p_alphabet,
                             &completed_header_start,
                             &completed_padding,
                             &emit_stream_chunk,
-                            &header_scratch,
+                            &begin_record,
                             &record_open,
                             &records_emitted,
                             &reset_record,
                             &seq_scratch,
                             &sink]() {
         if (!record_open) {
-            sink.begin_record(std::string_view(header_scratch.data() + completed_header_start,
-                                               completed_header_size));
+            begin_record();
             record_open = true;
         }
         const std::uint64_t scratch_bp =
@@ -199,6 +209,7 @@ template <sequence_alphabet p_alphabet,
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch);
+                parser_state.streamed_header = &header_buffer;
                 const auto step = parse_one_fasta_record<p_alphabet, p_storage_unit>(
                     parser_state,
                     slab.raw(),
@@ -242,11 +253,11 @@ template <sequence_alphabet p_alphabet,
     } else {
         fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
         parser_state.retain_quality = false;
-        auto deliver_quality = [&sink, &record_open, &header_scratch](
+        auto deliver_quality = [&sink, &record_open, &begin_record](
                 std::span<const std::uint8_t> bytes, std::size_t offset) {
             if constexpr (requires { sink.quality_chunk(bytes, offset); }) {
                 if (!record_open) {
-                    sink.begin_record(std::string_view(header_scratch.data(), header_scratch.size()));
+                    begin_record();
                     record_open = true;
                 }
                 sink.quality_chunk(bytes, offset);
@@ -290,6 +301,7 @@ template <sequence_alphabet p_alphabet,
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch, quality_scratch);
+                parser_state.streamed_header = &header_buffer;
                 const auto step = parse_one_fastq_record<p_alphabet, p_storage_unit>(
                     parser_state,
                     slab.raw(),

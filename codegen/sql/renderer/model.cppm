@@ -1,13 +1,49 @@
 module;
 
+#include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 export module bioseq.codegen.sql.renderer:model;
 
 import bioseq.codegen.sql.collector;
+import bioseq.codegen.sql.graph;
 
 export namespace bioseq::codegen::sql {
+
+/** Derive a linked symbol for a C routine. Distinct SQL overloads receive
+ * separate wrappers; only the two existing audited arity dispatchers share one.
+ * Ranking the complete stable identities makes output independent of discovery
+ * order and avoids author-specified aliases or a runtime type dispatcher. */
+[[nodiscard]] inline std::string generated_routine_c_symbol(
+        const normalized_entity& entity,
+        const sql_graph& graph) {
+    const auto& name = entity.source.name;
+    if (name == "from_array" || name == "mmsearch") return name;
+    std::size_t overload_count = 0;
+    std::size_t overload_index = 0;
+    for (const auto& candidate : graph.entities) {
+        if ((candidate.source.kind != entity_kind::function
+             && candidate.source.kind != entity_kind::procedure)
+            || candidate.source.name != name) continue;
+        ++overload_count;
+        if (candidate.stable_identity < entity.stable_identity)
+            ++overload_index;
+    }
+    if (overload_count < 2) return name;
+    const auto symbol = name + "_overload_" + std::to_string(overload_index);
+    for (const auto& candidate : graph.entities) {
+        if ((candidate.source.kind == entity_kind::function
+             || candidate.source.kind == entity_kind::procedure)
+            && candidate.source.name == symbol) {
+            throw std::runtime_error(
+                "derived fmgr symbol '" + symbol
+                + "' conflicts with a C++ routine name");
+        }
+    }
+    return symbol;
+}
 
 struct rendered_statement {
     std::string id;

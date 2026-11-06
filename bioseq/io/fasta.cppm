@@ -10,6 +10,8 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <optional>
 #include <libassert/assert.hpp>
 #include <string>
 #include <string_view>
@@ -25,6 +27,7 @@ import bioseq.sequences.simd;
 import bioseq.io.options;
 import bioseq.io.errors;
 import bioseq.io.simd;
+import bioseq.io.sinks;
 
 export namespace bioseq::io {
 
@@ -50,6 +53,41 @@ struct record_parse_result {
     std::size_t cursor = 0;
 };
 
+
+/** Raw header ownership for streaming readers; one pending byte handles split CRLF safely. */
+class raw_header_buffer {
+    admitted_byte_buffer bytes_;
+    std::optional<char> pending_;
+    std::string_view borrowed_;
+public:
+    /** Append one raw fragment and freeze the header when its newline is consumed. */
+    [[nodiscard]] std::expected<void, std::string> append_fragment(std::string_view fragment, bool complete) {
+        if (!fragment.empty()) {
+            if (pending_) {
+                if (auto stored = bytes_.append(std::string_view{&*pending_, 1u}); !stored) return stored;
+            }
+            if (auto stored = bytes_.append(fragment.substr(0u, fragment.size() - 1u)); !stored) return stored;
+            pending_ = fragment.back();
+        }
+        if (complete) {
+            if (pending_ && *pending_ != '\r')
+                if (auto stored = bytes_.append(std::string_view{&*pending_, 1u}); !stored) return stored;
+            pending_.reset();
+            if (auto sealed = bytes_.seal(); !sealed) return sealed;
+            borrowed_ = bytes_.text();
+        }
+        return {};
+    }
+    /** Count accumulated header bytes before or after newline normalization. */
+    [[nodiscard]] std::size_t size() const noexcept { return bytes_.size() + static_cast<std::size_t>(pending_.has_value()); }
+    /** Borrow the completed header while its reader or receiving sink retains ownership. */
+    [[nodiscard]] std::string_view view() const noexcept { return borrowed_; }
+    /** Transfer the sealed owner; sinks accepting ownership must retain it through end_record. */
+    [[nodiscard]] admitted_byte_buffer take() noexcept { return std::move(bytes_); }
+    /** Start a new record after all parser access to the previous header ends. */
+    void reset() noexcept { bytes_ = admitted_byte_buffer{}; pending_.reset(); borrowed_ = {}; }
+};
+
 /// State for one FASTA record, aligned to keep cncurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fasta_parser_state {
@@ -62,6 +100,20 @@ struct alignas(64) fasta_parser_state {
         body{};
     /// Batch header buffer used while this record is being parsed.
     std::vector<char>* header_storage = nullptr;
+    raw_header_buffer* streamed_header = nullptr;
+
+    /** Count the selected batch or admitted streaming header storage. */
+    [[nodiscard]] std::size_t header_size() const noexcept {
+        return streamed_header ? streamed_header->size() : header_storage->size();
+    }
+    /** Append raw header bytes through one selected ownership path. */
+    [[nodiscard]] std::expected<void, std::string> append_header(std::string_view bytes, bool complete) {
+        if (streamed_header) return streamed_header->append_fragment(bytes, complete);
+        header_storage->insert(header_storage->end(), bytes.begin(), bytes.end());
+        if (complete && header_storage->size() > header_start_offset && header_storage->back() == '\r')
+            header_storage->pop_back();
+        return {};
+    }
 
     /// Reset record-local progress while keeping attached batch storage.
     void reset_for_next_record() noexcept {
@@ -128,7 +180,7 @@ template <sequence_alphabet p_alphabet,
             return record_parse_result{parse_outcome::abort, cursor};
         }
         // Snapshot offsets at the start of the record for emit_record.
-        state.header_start_offset = state.header_storage->size();
+        state.header_start_offset = state.header_size();
         state.body.record_start_offset = state.body.output_storage->size();
         cursor += 1; // consume '>'
         state.progress = fasta_parser_progress::in_header;
@@ -139,22 +191,14 @@ template <sequence_alphabet p_alphabet,
         const std::size_t remaining = slab_size - cursor;
         const std::size_t newline_offset =
             simd::scan_first_byte('\n', slab_data + cursor, remaining);
-        if (newline_offset == remaining) {
-            state.header_storage->insert(
-                state.header_storage->end(),
-                reinterpret_cast<const char*>(slab_data + cursor),
-                reinterpret_cast<const char*>(slab_data + cursor + remaining));
+        const auto appended = state.append_header(
+            {reinterpret_cast<const char*>(slab_data + cursor), newline_offset}, newline_offset != remaining);
+        if (!appended) {
+            emit_failure(failure_fn, "{}", appended.error());
+            return record_parse_result{parse_outcome::abort, cursor};
+        }
+        if (newline_offset == remaining)
             return record_parse_result{parse_outcome::incomplete, slab_size};
-        }
-        state.header_storage->insert(
-            state.header_storage->end(),
-            reinterpret_cast<const char*>(slab_data + cursor),
-            reinterpret_cast<const char*>(slab_data + cursor + newline_offset));
-        // The terminating carriage return may have arrived in an earlier refill.
-        if (state.header_storage->size() > state.header_start_offset &&
-            state.header_storage->back() == '\r') {
-            state.header_storage->pop_back();
-        }
         cursor += newline_offset + 1; // consume '\n'
         state.progress = fasta_parser_progress::at_body_line_start;
     }
@@ -192,7 +236,7 @@ template <sequence_alphabet p_alphabet,
 
     // Finish the packed sequence, emit its offsets, and reset for the next record
     if (state.progress == fasta_parser_progress::finished_record) {
-        const std::size_t header_size = state.header_storage->size() - state.header_start_offset;
+        const std::size_t header_size = state.header_size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] = bioseq::simd::active_target::
             finalize_encode_state<p_storage_unit, bits_per_char, letters_per_unit>(state.body);

@@ -123,6 +123,9 @@ struct [[bioseq_sql::table({
         .sql_type = bioseq::sql::pg::name,
     })]]
     NameData compression;
+    /// Canonical file contexts and original sequence/alignment column identities.
+    [[bioseq_sql::column({.sql_type = bioseq::sql::pg::jsonb})]]
+    std::optional<Datum> io_provenance;
 };
 
 /**

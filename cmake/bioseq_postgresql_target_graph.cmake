@@ -18,6 +18,7 @@ bioseq_add_postgresql_extension(
     safestring_static
     fmt
     ZLIB::ZLIB
+    ${BIOSEQ_LIBDEFLATE_TARGET}
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
@@ -191,19 +192,15 @@ unset(_bioseq_highway_target)
 unset(_bioseq_highway_target_options)
 unset(_bioseq_highway_target_specific_sources)
 
+# Only the scheduler partition has PostgreSQL ownership. Neutral generated
+# kernels and inventory are shared with standalone IO through one static owner.
 target_sources(postgresql_bioseq
-  PRIVATE
-    ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
-    "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
-  PRIVATE FILE_SET bioseq_highway_generated_primaries
+  PRIVATE FILE_SET bioseq_highway_generated_registry
     TYPE CXX_MODULES
     BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
-    FILES
-      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES}
-      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS}
-      "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}")
+    FILES "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}")
 target_link_libraries(postgresql_bioseq PRIVATE
-  bioseq_highway_fixed_target)
+  bioseq_highway_runtime)
 target_link_libraries(bioseq_modules_nopg PRIVATE
   bioseq_highway_target_policy)
 add_dependencies(postgresql_bioseq bioseq_highway_target_modules)

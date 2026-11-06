@@ -1,0 +1,140 @@
+'\" t
+.TH samtools-index 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools index \- indexes SAM/BAM/CRAM files
+.\"
+.\" Copyright (C) 2008-2011, 2013-2020 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+.PP
+.B samtools index -M
+.RB [ -bc ]
+.RB [ -m
+.IR INT ]
+.I FILE FILE
+.RI [ FILE ...]
+.PP
+.B samtools index
+.RB [ -bc ]
+.RB [ -m
+.IR INT ]
+.IR aln.sam | aln.bam | aln.cram
+.RI [ out.index ]
+
+.SH DESCRIPTION
+.PP
+Index coordinate-sorted BGZIP-compressed SAM, BAM or CRAM files for fast
+random access.
+Note for SAM this only works if the file has been BGZF compressed first.
+(The first synopsis with multiple input
+.IR FILE s
+is only available with Samtools 1.16 or later.)
+
+This index is needed when
+.I region
+arguments are used to limit
+.B samtools view
+and similar commands to particular regions of interest.
+
+When only one alignment file is being indexed, the output index filename
+can be specified via
+.B -o
+or as shown in the second synopsis.
+
+When no output filename is specified, for a CRAM file
+.IR aln.cram ,
+index file
+.IB aln.cram .crai
+will be created; for a BAM file
+.IR aln.bam ,
+either
+.IB aln.bam .bai
+or
+.IB aln.bam .csi
+will be created; and for a compressed SAM file
+.IR aln.sam.gz ,
+either
+.IB aln.sam.gz .bai
+or
+.IB aln.sam.gz .csi
+will be created, depending on the index format selected.
+
+The BAI index format can handle individual chromosomes up to 512 Mbp
+(2^29 bases) in length.
+If your input file might contain reads mapped to positions greater than that,
+you will need to use a CSI index.
+
+.SH OPTIONS
+.TP 8
+.B -b, --bai
+Create a BAI index.
+This is currently the default when no format options are used.
+.TP
+.B -c, --csi
+Create a CSI index.
+By default, the minimum interval size for the index is 2^14, which is the same
+as the fixed value used by the BAI format.
+.TP
+.BI "-m, --min-shift " INT
+Create a CSI index, with a minimum interval size of 2^INT.
+.TP
+.B -M
+Interpret all filename arguments as alignment files to be indexed individually.
+(Without
+.BR -M ,
+filename arguments are interpreted solely as per the second synopsis.)
+.TP
+.BI "-o, --output " FILE
+Write the output index to
+.IR FILE .
+(Currently may only be used when exactly one alignment file is being indexed.)
+.TP
+.BI "-@, --threads " INT
+Number of input/output compression threads to use in addition to main thread [0].
+
+.SH AUTHOR
+.PP
+Written by Heng Li from the Sanger Institute.
+
+.SH SEE ALSO
+.IR samtools (1),
+.IR samtools-idxstats (1),
+.IR samtools-view (1)
+.PP
+Samtools website: <http://www.htslib.org/>

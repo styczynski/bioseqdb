@@ -83,14 +83,39 @@ struct gzip_member_descriptor {
 /// while validating the tables, without building literal or distance lookups.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(bit_reader& reader) noexcept;
 
-/// Find possible gzip members by checking magic bytes, headers, and the first
-/// block's Huffman code lengths. Only members starting with a dynamic-Huffman
-/// block are  accepted here. The single-worker path supports other block types.
+/// Preserve exact BGZF member chains; ordinary gzip uses speculative headers only
+/// to establish a single-member candidate. Multiple unvalidated candidates select
+/// the existing sequential framing path, since compressed payload can contain
+/// header-looking bytes. Fixed/stored ordinary members also select that path.
 [[nodiscard]] inline std::expected<std::vector<gzip_member_descriptor>, std::string>
 prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
     std::vector<gzip_member_descriptor> members;
     if (compressed_view.empty())
         return members;
+    if (compressed_view.size() > std::numeric_limits<std::size_t>::max() / 8u)
+        return std::unexpected(std::string{"gzip input bit offsets overflow"});
+
+    // BC/BSIZE supplies exact member boundaries, including empty/fixed EOF members.
+    // A mixed or incomplete chain is merely ineligible for this fast path; the
+    // existing decoder remains responsible for accepting valid gzip or diagnosing corruption.
+    bit_reader first_reader{compressed_view};
+    const auto first_header = parse_gzip_header(first_reader, compressed_view);
+    if (first_header && first_header->bgzf_member_bytes) {
+        std::size_t member_start{};
+        while (member_start < compressed_view.size()) {
+            const auto remaining = compressed_view.subspan(member_start);
+            bit_reader member_reader{remaining};
+            const auto header = parse_gzip_header(member_reader, remaining);
+            if (!header || !header->bgzf_member_bytes || *header->bgzf_member_bytes > remaining.size())
+                return std::unexpected(std::string{"gzip members lack a complete exact BGZF boundary chain"});
+            if (members.size() == std::numeric_limits<std::uint32_t>::max())
+                return std::unexpected(std::string{"gzip member count exceeds parallel framing capacity"});
+            members.push_back(gzip_member_descriptor{member_start,
+                member_start * 8u + header->end_bit_offset});
+            member_start += *header->bgzf_member_bytes;
+        }
+        return members;
+    }
 
     std::size_t cursor = 0;
     while (cursor + 4 <= compressed_view.size()) {
@@ -120,14 +145,15 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
             continue;
         }
         const std::size_t header_end_bit_global = cursor * 8u + header_or->end_bit_offset;
+        if (!members.empty() || cursor != 0u)
+            return std::unexpected(std::string{"multiple unvalidated gzip headers require sequential member framing"});
 
         // Validate the first block's code lengths to reject accidental gzip magic
         // inside compressed data. This remains a candidate check until decoding.
         bit_reader block_probe{compressed_view};
         block_probe.seek_to_bit(header_end_bit_global);
         if (!validate_dynamic_huffman_only(block_probe)) {
-            ++cursor;
-            continue;
+            return std::unexpected(std::string{"gzip member needs sequential DEFLATE framing"});
         }
 
         gzip_member_descriptor info;
@@ -923,8 +949,9 @@ class chunk_fetcher {
     void producer_loop_parallel() noexcept {
         auto members_or = detail::prescan_members(_compressed_view);
         if (!members_or) {
-            set_error(members_or.error());
-            signal_done();
+            // Header scanning is only a speculative acceleration. The existing
+            // sequential decoder validates fixed/stored members and malformed input.
+            producer_loop_single_thread();
             return;
         }
         auto plans_or =

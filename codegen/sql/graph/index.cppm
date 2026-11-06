@@ -1104,7 +1104,8 @@ inline void inherit_base_type_callback_dependencies(
 
 inline void inherit_inline_column_dependencies(
     sql_graph& graph,
-    std::vector<std::vector<std::size_t>>& dependency_indexes) {
+    std::vector<std::vector<std::size_t>>& dependency_indexes,
+    bool support_codecs_only) {
     std::vector<std::set<std::size_t>> inherited(graph.entities.size());
     for (std::size_t column_index = 0;
          column_index < graph.entities.size();
@@ -1141,6 +1142,12 @@ inline void inherit_inline_column_dependencies(
         const std::string sql_type = find_option(column.source, "sql_type")
             ? option_literal(column.source, "sql_type")
             : infer_sql_type_from_cpp(column.source.cpp_return_type);
+        // SUPPORT emits C++ codecs before the base-type SQL owner closure is
+        // available. Its explicit named varlena references are runtime-checked
+        // by the codec; CORE/FINAL must still resolve their real SQL dependency.
+        if (support_codecs_only && sql_type.contains("custom_type<")
+            && annotated_type_reference_candidates(graph.entities, sql_type,
+                graph.extension_schema).empty()) continue;
         const std::vector<std::size_t> types =
             resolve_annotated_type_reference(
                 graph.entities,
@@ -1366,6 +1373,9 @@ inline void inherit_natural_column_schemas(
 
 }  // namespace detail
 
+/** SUPPORT can describe codecs referring to types emitted later by CORE/FINAL. */
+enum class sql_graph_phase { complete, support_codecs };
+
 [[nodiscard]] inline sql_graph build_sql_graph(
     collected_program program,
     std::string extension_schema = "public",
@@ -1373,7 +1383,8 @@ inline void inherit_natural_column_schemas(
     std::string generated_module_prefix = "bioseq.postgres.sql.generated",
     std::string fmgr_boundary_module =
         "bioseq.postgres.support.sql_boundary",
-    std::string fmgr_prelude = "bioseq_common") {
+    std::string fmgr_prelude = "bioseq_common",
+    sql_graph_phase phase = sql_graph_phase::complete) {
     if (!detail::sql_identifier(extension_schema)
         || detail::reserved_sql_identifier(extension_schema)) {
         throw std::runtime_error(
@@ -1844,7 +1855,7 @@ inline void inherit_natural_column_schemas(
     detail::inherit_base_type_callback_dependencies(
         graph, dependency_indexes);
     detail::inherit_inline_column_dependencies(
-        graph, dependency_indexes);
+        graph, dependency_indexes, phase == sql_graph_phase::support_codecs);
 
     const std::size_t size = graph.entities.size();
     std::vector<int> discovery(size, -1);

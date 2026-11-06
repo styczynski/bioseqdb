@@ -1,0 +1,208 @@
+'\" t
+.TH samtools-depth 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools depth \- computes the read depth at each position or region
+.\"
+.\" Copyright (C) 2008-2011, 2013-2022 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+.PP
+samtools depth
+.RI [ options ]
+.RI "[" in1.sam | in1.bam | in1.cram " [" in2.sam | in2.bam | in2.cram "] [...]]"
+
+.SH DESCRIPTION
+.PP
+Computes the depth at each position or region.
+
+.SH OPTIONS
+.TP 8
+.B -a
+Output all positions (including those with zero depth)
+.TP
+.B -a -a, -aa
+Output absolutely all positions, including unused reference sequences.
+Note that when used in conjunction with a BED file the -a option may
+sometimes operate as if -aa was specified if the reference sequence
+has coverage outside of the region specified in the BED file.
+.TP
+.BI "-b "  FILE
+.RI "Compute depth at list of positions or regions in specified BED " FILE.
+[]
+.TP
+.BI "-f " FILE
+.RI "Use the BAM files specified in the " FILE
+(a file of filenames, one file per line)
+[]
+.TP
+.B -H
+Write a comment line showing column names at the beginning of the output.
+The names are CHROM, POS, and then the input file name for each depth column.
+If one of the inputs came from stdin, the name \*(lq-\*(rq will be used for
+the corresponding column.
+.TP
+.BI "-l " INT
+.RI "Ignore reads shorter than " INT "."
+This is the number of bases in the sequence, minus any soft clips.
+.TP
+.BI "-m, -d " INT
+(Deprecated since 1.13) This option previously limited the depth to a maximum
+value.  It is still accepted as an option, but ignored.
+
+Note for single files, the behaviour of old
+.B samtools depth -J -q0 -d
+.I INT FILE
+is identical to
+.B samtools mpileup -A -Q0 -x -d
+.I INT FILE
+.B | cut -f 1,2,4
+.TP
+.BI "-o " FILE
+.RI "Write output to " FILE ".  Using \*(lq-\*(rq for " FILE
+will send the output to stdout (also the default if this option is not used).
+.TP
+.BI "-q,\ --min-BQ " INT
+.RI "Only count reads with base quality greater than or equal to " INT
+.TP
+.BI "-Q,\ --min-MQ " INT
+.RI "Only count reads with mapping quality greater than or equal to " INT
+.TP
+.BI "-r " CHR ":" FROM "-" TO
+Only report depth in specified region.
+.TP
+.B "-X"
+If this option is set, it will allow the user to specify customized index file location(s) if the data
+folder does not contain any index file. Example usage: samtools depth [options] -X /data_folder/in1.bam [/data_folder/in2.bam [...]] /index_folder/index1.bai [/index_folder/index2.bai [...]]
+.TP
+.BI "-g " FLAGS
+By default, reads that have any of the flags UNMAP, SECONDARY, QCFAIL,
+or DUP set are skipped. To include these reads back in the analysis, use
+this option together with the desired flag or flag combination.
+.I FLAGS
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names. [0]
+
+For a list of flag names see
+.IR samtools-flags (1).
+.TP
+.BI "-G " FLAGS ", --excl-flags " FLAGS
+Discard reads that have any of the flags specified by
+.I FLAGS
+set.  FLAGS are specified as for the
+.B "-g"
+option. [UNMAP,SECONDARY,QCFAIL,DUP]
+.TP
+.BI "--incl-flags " FLAGS
+Only include reads with at least one bit set in
+.I FLAGS
+present in the FLAG field.
+FLAGS are specified as for the
+.B "-g"
+option. [0]
+.TP
+.BI "--require-flags " FLAGS
+Only include reads with all bits set in
+.I FLAGS
+present in the FLAG field.
+FLAGS are specified as for the
+.B "-g"
+option. [0]
+.TP
+.B -J
+Include reads with deletions in depth computation.
+.TP
+.B -s
+For the overlapping section of a read pair, count only the bases of
+the first read.  Note this algorithm changed in 1.13 so the
+results may differ slightly to older releases.
+
+.SH CAVEATS
+It may appear that "samtools depth" is simply "samtools mpileup" with some
+of the columns removed, and indeed earlier versions of this command
+were just this.  However both then and now there are subtle
+differences in parameters which make the two not entirely comparable.
+Differences, other than the obvious speed benefits, include:
+
+.IP o 2
+Deletions (CIGAR element "D") are ignored by default in "depth".  These
+may be counted by adding the \fB-J\fR option.  "Mpileup" always counts
+the deleted bases, and has no option to toggle this.
+
+.IP o 2
+Beware there are idiosyncrasies in option naming.  Specifically
+\fB-q\fR and \fB-Q\fR options have their meanings swapped between
+"depth" and "mpileup".
+
+.IP o 2
+The removal of overlapping sequences (option \fB-s\fR) is on by
+default in "mpileup" and off by default in "depth".  Additionally the
+overlap removal algorithm differs, giving subtle changes when Ns are
+present in the sequence.  Also any paired read is considered for overlap
+removal by "depth", rather than only those with the properly-paired flag
+set ("mpileup").  See above for a more detailed description.
+
+.IP o 2
+The default minimum quality value is 0 for "depth" and 13 for "mpileup".
+
+.IP o 2
+Specifying multiple BAMs will produce one depth column per file with
+"depth", but these are merged in "mpileup".
+
+.IP o 2
+"Depth" doesn't have a maximum depth limit, while "mpileup" defaults
+to a maximum of 8000.
+
+.IP o 2
+If a reference is specified to "mpileup" the BAQ algorithm will be
+used to adjust quality values, although it can be disabled.  "Depth"
+never uses BAQ.
+.EE
+
+.SH AUTHOR
+.PP
+Written by Heng Li and James Bonfield from the Sanger Institute.
+
+.SH SEE ALSO
+.IR samtools (1),
+.IR samtools-mpileup (1),
+.IR samtools-coverage (1),
+.IR samtools-sort (1)
+.PP
+Samtools website: <http://www.htslib.org/>

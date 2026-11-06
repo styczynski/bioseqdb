@@ -138,6 +138,7 @@ void tuple_dispatch_buffer::capture_target_datum_(buffered_scan_entry& entry, Da
     bioseq::pg_types::seq* header = source.ptr;
     if (bioseq::storage::is_locator_stub(header)) {
         entry.seq_loc = bioseq::storage::decode_locator_from_stub(header);
+        entry.seq_locator_padding = header->padding_letters;
     } else {
         if (header->alphabet_code != mmsearch_state.alphabet_code ||
             header->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
@@ -177,6 +178,7 @@ void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Dat
     bioseq::pg_types::seq* header = source.ptr;
     if (bioseq::storage::is_locator_stub(header)) {
         entry.per_row_query_loc = bioseq::storage::decode_locator_from_stub(header);
+        entry.per_row_query_locator_padding = header->padding_letters;
         entry.per_row_query_is_null = false;
         source.free_if_copy();
         return;

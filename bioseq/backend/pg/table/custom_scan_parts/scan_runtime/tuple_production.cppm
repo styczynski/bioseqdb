@@ -270,6 +270,17 @@ TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
         runtime.placeholder_consts.secondary_chain_score_node = int_placeholder();
         runtime.placeholder_consts.is_reverse_node = bool_placeholder();
         runtime.placeholder_consts.is_primary_node = bool_placeholder();
+        runtime.placeholder_consts.export_alignment_status_node = bigint_placeholder();
+        runtime.placeholder_consts.alignment_ordinal_node = bigint_placeholder();
+        // Unknown typmod is deliberate: the query may use a different storage width.
+        const auto operand_placeholder = [] {
+            return makeConst(get_cached_stub_oids().bioseq_seq_type_oid, -1, InvalidOid,
+                -1, Datum{0}, true, false);
+        };
+        runtime.placeholder_consts.alignment_query_sequence_node = operand_placeholder();
+        runtime.placeholder_consts.alignment_reference_sequence_node = operand_placeholder();
+        runtime.placeholder_consts.needs_alignment_query_sequence = false;
+        runtime.placeholder_consts.needs_alignment_reference_sequence = false;
         runtime.placeholder_consts.has_cigar_node = bool_placeholder();
         runtime.placeholder_consts.divergence_node = float_placeholder();
         runtime.placeholder_consts.cigar_node = cigar_placeholder();
@@ -562,7 +573,8 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 const auto saved_scan_desc = node->ps.scandesc;
                 const bool saved_scan_ops_set = node->ps.scanopsset;
                 const bool saved_scan_ops_fixed = node->ps.scanopsfixed;
-                const auto restore_scan_projection_metadata = [&] {
+                const auto restore_scan_projection_metadata = [node, saved_scan_ops, saved_scan_desc,
+                    saved_scan_ops_set, saved_scan_ops_fixed] {
                     node->ps.scanops = saved_scan_ops;
                     node->ps.scandesc = saved_scan_desc;
                     node->ps.scanopsset = saved_scan_ops_set;
@@ -583,6 +595,20 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                         bioseq::storage::note_mmsearch_output_locator_promotion_for_test(
                             promoted_source_count != 0u);
                         bioseq::storage::inject_mmsearch_output_after_promotion_failure_for_test();
+
+                        // Read the producer's retained operands. Re-evaluating a slice here
+                        // would repeat work and could disagree with the sequence aligned.
+                        const auto populate_operand = [&runtime, &next, econtext](
+                                Const* placeholder, const bool query) {
+                            const Datum value = runtime.buffer.retained_operand(
+                                *next, query, econtext->ecxt_per_tuple_memory);
+                            placeholder->constvalue = value;
+                            placeholder->constisnull = value == Datum{0};
+                        };
+                        if (runtime.placeholder_consts.needs_alignment_query_sequence)
+                            populate_operand(runtime.placeholder_consts.alignment_query_sequence_node, true);
+                        if (runtime.placeholder_consts.needs_alignment_reference_sequence)
+                            populate_operand(runtime.placeholder_consts.alignment_reference_sequence_node, false);
 
                         /* Resolve projection Vars against the buffered input row. */
                         econtext->ecxt_scantuple = next->scan_slot_copy;

@@ -234,11 +234,268 @@ template<class D, sequence_rank_transform Operation>
     return true;
 }
 
+/** Apply a format-defined 16-entry byte table, including scalar and capped tags. */
+template<class D>
+    requires std::same_as<hn::TFromD<D>, std::uint8_t>
+[[nodiscard]] HWY_INLINE hn::Vec<D> lookup_u8_table16(D tag, hn::Vec<D> indexes,
+        const std::array<std::uint8_t, 16>& table) {
+    if constexpr (hn::MaxLanes(D{}) == 1u)
+        return hn::Set(tag, table[hn::GetLane(indexes)]);
+    if constexpr (hn::MaxLanes(D{}) >= 16u) {
+        if (hn::Lanes(tag) >= 16u)
+            return hn::TableLookupBytes(hn::LoadDup128(tag, table.data()), indexes);
+    }
+    auto mapped = hn::Zero(tag);
+    for (std::size_t index = 0u; index < table.size(); ++index)
+        mapped = hn::IfThenElse(hn::Eq(indexes, hn::Set(tag, static_cast<std::uint8_t>(index))),
+            hn::Set(tag, table[index]), mapped);
+    return mapped;
+}
+
+/** Map small native alphabets across full byte lanes with the shared lookup banks. */
+template<class D>
+[[nodiscard]] HWY_INLINE bool map_small_sequence_bytes_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> mapping, std::span<std::uint8_t> output) {
+    std::array<std::uint8_t, 16> low{}, high{};
+    for (std::size_t index = 0u; index < cardinality; ++index) {
+        if (mapping[index] > 255u) return false;
+        (index < 16u ? low[index] : high[index - 16u]) = static_cast<std::uint8_t>(mapping[index]);
+    }
+    const auto lanes = hn::Lanes(tag);
+    const auto limit = hn::Set(tag, static_cast<std::uint8_t>(cardinality));
+    const auto bank_size = hn::Set(tag, std::uint8_t{16});
+    const auto bank_mask = hn::Set(tag, std::uint8_t{15});
+    std::size_t position{};
+    while (input.size() - position >= lanes) {
+        const auto ranks = hn::LoadU(tag, input.data() + position);
+        if (!hn::AllFalse(tag, hn::Ge(ranks, limit))) return false;
+        const auto indexes = hn::And(ranks, bank_mask);
+        const auto lower = lookup_u8_table16(tag, indexes, low);
+        auto mapped = lower;
+        if (cardinality > 16u)
+            mapped = hn::IfThenElse(hn::Lt(ranks, bank_size), lower, lookup_u8_table16(tag, indexes, high));
+        hn::StoreU(mapped, tag, output.data() + position);
+        position += lanes;
+    }
+    for (; position < input.size(); ++position) {
+        if (input[position] >= cardinality) return false;
+        output[position] = static_cast<std::uint8_t>(mapping[input[position]]);
+    }
+    return true;
+}
+
+/** Fuse two representative triplets into three BAM bytes with no decoded DNA tile. */
+template<class D>
+[[nodiscard]] HWY_INLINE bool synthesize_paired_nibbles_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> table, std::span<std::uint8_t> output) {
+    if (cardinality == 0u || cardinality > 256u || table.size() != cardinality
+        || input.size() > std::numeric_limits<std::size_t>::max() / 3u
+        || output.size() != (input.size() * 3u) / 2u + input.size() % 2u) return false;
+    for (const auto codon : table)
+        if ((codon & std::uint32_t{0xfff0f0f0}) != 0u) return false;
+    const hn::Rebind<std::uint8_t, D> byte_tag;
+    const hn::Rebind<std::int32_t, D> index_tag;
+    const auto lanes = hn::Lanes(tag);
+    const auto rank_limit = hn::Set(tag, static_cast<std::uint32_t>(cardinality));
+    const auto nibble_mask = hn::Set(tag, std::uint32_t{15});
+    const auto pairs = input.size() / 2u;
+    std::size_t position{};
+    while (pairs - position >= lanes) {
+        hn::Vec<decltype(byte_tag)> first, second;
+        hn::LoadInterleaved2(byte_tag, input.data() + 2u * position, first, second);
+        const auto first_rank = hn::PromoteTo(tag, first);
+        const auto second_rank = hn::PromoteTo(tag, second);
+        if (!hn::AllFalse(tag, hn::Or(hn::Ge(first_rank, rank_limit), hn::Ge(second_rank, rank_limit)))) return false;
+        const auto first_codon = hn::GatherIndex(tag, table.data(), hn::BitCast(index_tag, first_rank));
+        const auto second_codon = hn::GatherIndex(tag, table.data(), hn::BitCast(index_tag, second_rank));
+        const auto first_byte = hn::Or(hn::ShiftLeft<4>(hn::And(first_codon, nibble_mask)),
+            hn::And(hn::ShiftRight<8>(first_codon), nibble_mask));
+        const auto second_byte = hn::Or(hn::ShiftLeft<4>(hn::And(hn::ShiftRight<16>(first_codon), nibble_mask)),
+            hn::And(second_codon, nibble_mask));
+        const auto third_byte = hn::Or(hn::ShiftLeft<4>(hn::And(hn::ShiftRight<8>(second_codon), nibble_mask)),
+            hn::And(hn::ShiftRight<16>(second_codon), nibble_mask));
+        hn::StoreInterleaved3(hn::DemoteTo(byte_tag, first_byte), hn::DemoteTo(byte_tag, second_byte),
+            hn::DemoteTo(byte_tag, third_byte), byte_tag, output.data() + 3u * position);
+        position += lanes;
+    }
+    for (; position < pairs; ++position) {
+        const auto first_rank = input[2u * position];
+        const auto second_rank = input[2u * position + 1u];
+        if (first_rank >= cardinality || second_rank >= cardinality) return false;
+        const auto first = table[first_rank];
+        const auto second = table[second_rank];
+        output[3u * position] = static_cast<std::uint8_t>(((first & 15u) << 4u) | ((first >> 8u) & 15u));
+        output[3u * position + 1u] = static_cast<std::uint8_t>(((first >> 12u) & 240u) | (second & 15u));
+        output[3u * position + 2u] = static_cast<std::uint8_t>(((second >> 4u) & 240u) | ((second >> 16u) & 15u));
+    }
+    if (input.size() % 2u != 0u) {
+        if (input.back() >= cardinality) return false;
+        const auto codon = table[input.back()];
+        output[3u * pairs] = static_cast<std::uint8_t>(((codon & 15u) << 4u) | ((codon >> 8u) & 15u));
+        output[3u * pairs + 1u] = static_cast<std::uint8_t>((codon >> 12u) & 240u);
+    }
+    return true;
+}
+
+/** Map arbitrary byte-alphabet ranks using the same checked gather as codon algebra. */
+template<class D>
+[[nodiscard]] HWY_INLINE bool map_sequence_bytes_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> table, std::span<std::uint8_t> output) {
+    if (cardinality == 0u || cardinality > 256u || table.size() != cardinality
+        || output.size() != input.size()) return false;
+    if (cardinality <= 32u)
+        return map_small_sequence_bytes_for(hn::ScalableTag<std::uint8_t>{}, input, cardinality, table, output);
+    const hn::Rebind<std::uint8_t, D> byte_tag;
+    const hn::Rebind<std::int32_t, D> index_tag;
+    const auto lanes = hn::Lanes(tag);
+    const auto rank_limit = hn::Set(tag, static_cast<std::uint32_t>(cardinality));
+    const auto byte_limit = hn::Set(tag, std::uint32_t{255});
+    std::size_t position{};
+    while (input.size() - position >= lanes) {
+        const auto indexes = hn::PromoteTo(tag, hn::LoadU(byte_tag, input.data() + position));
+        if (!hn::AllFalse(tag, hn::Ge(indexes, rank_limit))) return false;
+        const auto mapped = hn::GatherIndex(tag, table.data(), hn::BitCast(index_tag, indexes));
+        if (!hn::AllFalse(tag, hn::Gt(mapped, byte_limit))) return false;
+        hn::StoreU(hn::DemoteTo(byte_tag, mapped), byte_tag, output.data() + position);
+        position += lanes;
+    }
+    for (; position < input.size(); ++position) {
+        if (input[position] >= cardinality || table[input[position]] > 255u) return false;
+        output[position] = static_cast<std::uint8_t>(table[input[position]]);
+    }
+    return true;
+}
+
+/** Pack or unpack high-nibble-first format bytes; caller owns inter-window carry. */
+template<class D, bool Encode>
+[[nodiscard]] HWY_INLINE bool transform_sequence_nibbles_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> mapping, std::span<std::uint8_t> output) {
+    static_assert(std::same_as<hn::TFromD<D>, std::uint8_t>);
+    if (mapping.size() != 16u || cardinality == 0u || cardinality > 16u) return false;
+    std::array<std::uint8_t, 16> table{};
+    for (std::size_t index = 0u; index < table.size(); ++index) {
+        if (mapping[index] > 255u) return false;
+        table[index] = static_cast<std::uint8_t>(mapping[index]);
+        if constexpr (Encode) {
+            if (index < cardinality && table[index] > 15u) return false;
+        }
+    }
+    const auto lanes = hn::Lanes(tag);
+    const auto low_mask = hn::Set(tag, std::uint8_t{15});
+    const auto rank_limit = hn::Set(tag, static_cast<std::uint8_t>(cardinality));
+    std::size_t position{};
+    if constexpr (Encode) {
+        if (output.size() != input.size() / 2u + input.size() % 2u) return false;
+        const auto complete_pairs = input.size() / 2u;
+        while (complete_pairs - position >= lanes) {
+            hn::Vec<D> first, second;
+            hn::LoadInterleaved2(tag, input.data() + 2u * position, first, second);
+            if (!hn::AllFalse(tag, hn::Or(hn::Ge(first, rank_limit), hn::Ge(second, rank_limit))))
+                return false;
+            const auto first_codes = lookup_u8_table16(tag, first, table);
+            const auto second_codes = lookup_u8_table16(tag, second, table);
+            hn::StoreU(hn::Or(hn::ShiftLeft<4>(first_codes), second_codes), tag,
+                output.data() + position);
+            position += lanes;
+        }
+        for (; position < complete_pairs; ++position) {
+            const auto first = input[2u * position];
+            const auto second = input[2u * position + 1u];
+            if (first >= cardinality || second >= cardinality) return false;
+            output[position] = static_cast<std::uint8_t>((table[first] << 4u) | table[second]);
+        }
+        if (input.size() % 2u != 0u) {
+            if (input.back() >= cardinality) return false;
+            output.back() = static_cast<std::uint8_t>(table[input.back()] << 4u);
+        }
+    } else {
+        if (input.size() != output.size() / 2u + output.size() % 2u) return false;
+        const auto complete_pairs = output.size() / 2u;
+        while (complete_pairs - position >= lanes) {
+            const auto packed = hn::LoadU(tag, input.data() + position);
+            const auto first = lookup_u8_table16(tag, hn::ShiftRight<4>(packed), table);
+            const auto second = lookup_u8_table16(tag, hn::And(packed, low_mask), table);
+            if (!hn::AllFalse(tag, hn::Or(hn::Ge(first, rank_limit), hn::Ge(second, rank_limit))))
+                return false;
+            hn::StoreInterleaved2(first, second, tag, output.data() + 2u * position);
+            position += lanes;
+        }
+        for (std::size_t symbol = 2u * position; symbol < output.size(); ++symbol) {
+            const auto packed = input[symbol / 2u];
+            const auto code = static_cast<std::uint8_t>(symbol % 2u == 0u ? packed >> 4u : packed & 15u);
+            if (table[code] >= cardinality) return false;
+            output[symbol] = table[code];
+        }
+    }
+    return true;
+}
+
+/** Validate native quality bytes, or reverse a disjoint bounded byte tile. */
+template<class D, sequence_rank_transform Operation>
+[[nodiscard]] HWY_INLINE bool transform_sequence_byte_range_for(D tag,
+        std::span<const std::uint8_t> input, std::span<std::uint8_t> output) {
+    const auto lanes = hn::Lanes(tag);
+    if constexpr (Operation == sequence_rank_transform::collapse_equal_triplets) {
+        if (output.size() > std::numeric_limits<std::size_t>::max() / 3u
+            || input.size() != 3u * output.size()) return false;
+        std::size_t position{};
+        while (output.size() - position >= lanes) {
+            hn::Vec<D> first, second, third;
+            hn::LoadInterleaved3(tag, input.data() + 3u * position, first, second, third);
+            if (!hn::AllTrue(tag, hn::And(hn::Eq(first, second), hn::Eq(first, third)))) return false;
+            hn::StoreU(first, tag, output.data() + position);
+            position += lanes;
+        }
+        for (; position < output.size(); ++position) {
+            const auto value = input[3u * position];
+            if (value != input[3u * position + 1u] || value != input[3u * position + 2u]) return false;
+            output[position] = value;
+        }
+    } else if constexpr (Operation == sequence_rank_transform::reverse_bytes) {
+        if (output.size() != input.size()) return false;
+        std::size_t position{};
+        while (input.size() - position >= lanes) {
+            const auto value = hn::LoadU(tag, input.data() + input.size() - position - lanes);
+            hn::StoreU(hn::Reverse(tag, value), tag, output.data() + position);
+            position += lanes;
+        }
+        for (; position < input.size(); ++position) output[position] = input[input.size() - 1u - position];
+    } else {
+        if (!output.empty()) return false;
+        std::size_t position{};
+        while (input.size() - position >= lanes) {
+            const auto value = hn::LoadU(tag, input.data() + position);
+            if constexpr (Operation == sequence_rank_transform::validate_missing_quality) {
+                if (!hn::AllTrue(tag, hn::Eq(value, hn::Set(tag, std::uint8_t{255})))) return false;
+            } else if constexpr (Operation == sequence_rank_transform::validate_fastq) {
+                if (!hn::AllFalse(tag, hn::Or(hn::Lt(value, hn::Set(tag, std::uint8_t{33})),
+                    hn::Gt(value, hn::Set(tag, std::uint8_t{126}))))) return false;
+            } else {
+                if (!hn::AllFalse(tag, hn::Gt(value, hn::Set(tag, std::uint8_t{93})))) return false;
+            }
+            position += lanes;
+        }
+        for (; position < input.size(); ++position) {
+            if constexpr (Operation == sequence_rank_transform::validate_missing_quality) {
+                if (input[position] != 255u) return false;
+            } else if constexpr (Operation == sequence_rank_transform::validate_fastq) {
+                if (input[position] < 33u || input[position] > 126u) return false;
+            } else if (input[position] > 93u) return false;
+        }
+    }
+    return true;
+}
+
 /** Common generated-target entry; select the algebra once for the bounded tile. */
 [[nodiscard, gnu::noinline]] bool transform_sequence_rank_chunk(sequence_rank_transform operation,
     std::span<const std::uint8_t> input, std::size_t source_cardinality,
     std::span<const std::uint32_t> table, std::span<std::uint8_t> output) {
     const hn::ScalableTag<std::uint32_t> tag;
+    const hn::ScalableTag<std::uint8_t> byte_tag;
     switch (operation) {
         case sequence_rank_transform::translate_triplets:
             return transform_sequence_rank_chunk_for<std::remove_cv_t<decltype(tag)>, sequence_rank_transform::translate_triplets>(
@@ -246,6 +503,31 @@ template<class D, sequence_rank_transform Operation>
         case sequence_rank_transform::synthesize_triplets:
             return transform_sequence_rank_chunk_for<std::remove_cv_t<decltype(tag)>, sequence_rank_transform::synthesize_triplets>(
                 tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::synthesize_paired_nibbles:
+            return synthesize_paired_nibbles_for(tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::map_bytes:
+            return map_sequence_bytes_for(tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::pack_nibbles:
+            return transform_sequence_nibbles_for<std::remove_cv_t<decltype(byte_tag)>, true>(
+                byte_tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::unpack_nibbles:
+            return transform_sequence_nibbles_for<std::remove_cv_t<decltype(byte_tag)>, false>(
+                byte_tag, input, source_cardinality, table, output);
+        case sequence_rank_transform::reverse_bytes:
+            return transform_sequence_byte_range_for<std::remove_cv_t<decltype(byte_tag)>,
+                sequence_rank_transform::reverse_bytes>(byte_tag, input, output);
+        case sequence_rank_transform::collapse_equal_triplets:
+            return transform_sequence_byte_range_for<std::remove_cv_t<decltype(byte_tag)>,
+                sequence_rank_transform::collapse_equal_triplets>(byte_tag, input, output);
+        case sequence_rank_transform::validate_phred:
+            return transform_sequence_byte_range_for<std::remove_cv_t<decltype(byte_tag)>,
+                sequence_rank_transform::validate_phred>(byte_tag, input, output);
+        case sequence_rank_transform::validate_fastq:
+            return transform_sequence_byte_range_for<std::remove_cv_t<decltype(byte_tag)>,
+                sequence_rank_transform::validate_fastq>(byte_tag, input, output);
+        case sequence_rank_transform::validate_missing_quality:
+            return transform_sequence_byte_range_for<std::remove_cv_t<decltype(byte_tag)>,
+                sequence_rank_transform::validate_missing_quality>(byte_tag, input, output);
     }
     return false;
 }

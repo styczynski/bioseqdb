@@ -54,6 +54,12 @@ export {
         Const* secondary_chain_score_node = nullptr;
         Const* is_reverse_node = nullptr;
         Const* is_primary_node = nullptr;
+        Const* export_alignment_status_node = nullptr;
+        Const* alignment_ordinal_node = nullptr;
+        Const* alignment_query_sequence_node = nullptr;
+        Const* alignment_reference_sequence_node = nullptr;
+        bool needs_alignment_query_sequence = false;
+        bool needs_alignment_reference_sequence = false;
         Const* has_cigar_node = nullptr;
         Const* divergence_node = nullptr;
         Const* cigar_node = nullptr;

@@ -1009,6 +1009,16 @@ export {
             "Bioseq Honest Total Cost", nullptr, runtime->honest_total_cost, 2, es);
         ExplainPropertyFloat(
             "Bioseq Incumbent Cost Floor", nullptr, runtime->incumbent_cost_floor, 2, es);
+        unsigned retained_operands = 0u;
+        const auto& operand_oids = get_cached_stub_oids();
+        for (const auto& site : runtime->placeholder_sites) {
+            if (site.funcid == operand_oids.alignment_query_sequence_oid) retained_operands |= 1u;
+            if (site.funcid == operand_oids.alignment_reference_sequence_oid) retained_operands |= 2u;
+        }
+        if (retained_operands != 0u)
+            ExplainPropertyText("Bioseq Retained Alignment Operands",
+                retained_operands == 3u ? "query, reference"
+                : retained_operands == 1u ? "query" : "reference", es);
         ExplainPropertyInteger("Bioseq Match Placeholder Sites",
                                nullptr,
                                static_cast<std::int64_t>(runtime->placeholder_sites.size()),

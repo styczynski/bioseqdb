@@ -270,7 +270,7 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
         "bioseq_internal", "options", [](TupleDesc descriptor, Relation relation) {
             using row = metadata_rows::options;
             using codec = metadata_codecs::options_codec;
-            static_assert(codec::field_count == 5);
+            static_assert(codec::field_count == 6);
             const auto make_row = [](MemoryContext) {
                 return row{
                     .regclass = probe_oid(11),

@@ -1,0 +1,275 @@
+/*  sam_opts.c -- utilities to aid parsing common command line options.
+
+    Copyright (C) 2015, 2019, 2025-2026 Genome Research Ltd.
+
+    Author: James Bonfield <jkb@sanger.ac.uk>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.  */
+
+#include <config.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <stdbool.h>
+#include "sam_opts.h"
+#include "samtools.h"
+
+/*
+ * Parse an integer from a value passed on the command-line. Return true on
+ * success, false if the string was not a valid integer.
+*/
+bool parse_int_value(const char *optarg, int *value) {
+    char *endptr;
+    if (!optarg) return false;
+    errno = 0;
+    long result = strtol(optarg, &endptr, 10);
+    if (endptr == optarg) return false; // No integer was parsed
+    if (*endptr != '\0') return false; // Extra characters ("1hello")
+    if (errno) return false; // Out of long range, result not valid
+    if (result < INT_MIN || result > INT_MAX) return false; // result out of int range
+    *value = result;
+    return true;
+}
+
+/*
+ * Parse an long int from a value passed on the command-line. Return true on
+ * success, false if the string was not a valid long int.
+*/
+bool parse_long_value(const char *optarg, long *value, int base) {
+    char *endptr;
+    if (!optarg) return false;
+    errno = 0;
+    // Typically base is 10, or 0 to allow parsing strings like 0xff
+    long result = strtol(optarg, &endptr, base);
+    if (endptr == optarg) return false; // No integer was parsed
+    if (*endptr != '\0') return false; // Extra characters ("1hello")
+    if (errno) return false; // Out of long range, result not valid
+    *value = result;
+    return true;
+}
+
+/*
+ * Processes a standard "global" samtools long option.
+ *
+ * The 'c' value is the return value from a getopt_long() call.  It is checked
+ * against the lopt[] array to find the corresponding value as this may have
+ * been reassigned by the individual subcommand.
+ *
+ * Having found the entry, the corresponding long form is used to apply the
+ * option, storing the setting in sam_global_args *ga.
+ *
+ * Returns 0 on success,
+ *        -1 on failure.
+ */
+int parse_sam_global_opt(int c, const char *optarg, const struct option *lopt,
+                         sam_global_args *ga) {
+    int r = 0;
+
+    while (lopt->name) {
+        if (c != lopt->val) {
+            lopt++;
+            continue;
+        }
+
+        if (strcmp(lopt->name, "input-fmt") == 0) {
+            r = hts_parse_format(&ga->in, optarg);
+            break;
+        } else if (strcmp(lopt->name, "input-fmt-option") == 0) {
+            r = hts_opt_add((hts_opt **)&ga->in.specific, optarg);
+            break;
+        } else if (strcmp(lopt->name, "output-fmt") == 0) {
+            r = hts_parse_format(&ga->out, optarg);
+            break;
+        } else if (strcmp(lopt->name, "output-fmt-option") == 0) {
+            r = hts_opt_add((hts_opt **)&ga->out.specific, optarg);
+            break;
+        } else if (strcmp(lopt->name, "reference") == 0) {
+            char *ref = malloc(10 + strlen(optarg) + 1);
+
+            if (!ref) {
+                fprintf(stderr, "Unable to allocate memory in "
+                                "parse_sam_global_opt.\n");
+
+                return -1;
+            }
+
+            sprintf(ref, "reference=%s", optarg);
+
+            if (!(ga->reference = strdup(optarg))) {
+                fprintf(stderr, "Unable to allocate memory in "
+                                "parse_sam_global_opt.\n");
+
+                return -1;
+            }
+
+            r  = hts_opt_add((hts_opt **)&ga->in.specific, ref);
+            r |= hts_opt_add((hts_opt **)&ga->out.specific, ref);
+            free(ref);
+            break;
+        } else if (strcmp(lopt->name, "threads") == 0) {
+            if (!parse_int_value(optarg, &ga->nthreads))
+            {
+                fprintf(stderr, "Invalid threads value.\n");
+                return -1;
+            }
+            break;
+        } else if (strcmp(lopt->name, "write-index") == 0) {
+            ga->write_index = 1;
+            break;
+        } else if (strcmp(lopt->name, "verbosity") == 0) {
+            if (!parse_int_value(optarg, &hts_verbose))
+            {
+                fprintf(stderr, "Invalid verbosity value.\n");
+                return -1;
+            }
+            break;
+        }
+    }
+
+    if (!lopt->name) {
+        fprintf(stderr, "Unexpected global option.\n");
+        return -1;
+    }
+
+    /*
+     * SAM format with compression enabled implies SAM.bgzf
+     */
+    if (ga->out.format == sam) {
+        hts_opt *opts = (hts_opt *)ga->out.specific;
+        while (opts) {
+            if (opts->opt == HTS_OPT_COMPRESSION_LEVEL)
+                ga->out.compression = bgzf;
+            opts = opts->next;
+        }
+    }
+
+    return r;
+}
+
+/*
+ * Report the usage for global options.
+ *
+ * This accepts a string with one character per SAM_OPT_GLOBAL_OPTIONS option
+ * to determine which options need to be printed and how.
+ * Each character should be one of:
+ * '.'    No short option has been assigned. Use --long-opt only.
+ * '-'    The long (and short) option has been disabled.
+ * <c>    Otherwise the short option is character <c>.
+ */
+void sam_global_opt_help(FILE *fp, const char *shortopts) {
+    int i = 0;
+
+    static const struct option lopts[] = {
+        SAM_OPT_GLOBAL_OPTIONS(0,0,0,0,0,0),
+        { NULL, 0, NULL, 0 }
+    };
+
+    for (i = 0; shortopts && shortopts[i] && lopts[i].name; i++) {
+        if (shortopts[i] == '-')
+            continue;
+
+        if (shortopts[i] == '.')
+            fprintf(fp, "      --");
+        else
+            fprintf(fp, "  -%c, --", shortopts[i]);
+
+        if (strcmp(lopts[i].name, "input-fmt") == 0)
+            fprintf(fp,"input-fmt FORMAT[,OPT[=VAL]]...\n"
+                    "               Specify input format (SAM, BAM, CRAM)\n");
+        else if (strcmp(lopts[i].name, "input-fmt-option") == 0)
+            fprintf(fp,"input-fmt-option OPT[=VAL]\n"
+                    "               Specify a single input file format option in the form\n"
+                    "               of OPTION or OPTION=VALUE\n");
+        else if (strcmp(lopts[i].name, "output-fmt") == 0)
+            fprintf(fp,"output-fmt FORMAT[,OPT[=VAL]]...\n"
+                    "               Specify output format (SAM, BAM, CRAM)\n");
+        else if (strcmp(lopts[i].name, "output-fmt-option") == 0)
+            fprintf(fp,"output-fmt-option OPT[=VAL]\n"
+                    "               Specify a single output file format option in the form\n"
+                    "               of OPTION or OPTION=VALUE\n");
+        else if (strcmp(lopts[i].name, "reference") == 0)
+            fprintf(fp,"reference FILE\n"
+                    "               Reference sequence FASTA FILE [null]\n");
+        else if (strcmp(lopts[i].name, "threads") == 0)
+            fprintf(fp,"threads INT\n"
+                    "               Number of additional threads to use [0]\n");
+        else if (strcmp(lopts[i].name, "write-index") == 0)
+            fprintf(fp,"write-index\n"
+                    "               Automatically index the output files [off]\n");
+        else if (strcmp(lopts[i].name, "verbosity") == 0)
+            fprintf(fp,"verbosity INT\n"
+                    "               Set level of verbosity\n");
+    }
+
+    fprintf(fp, "\nSee https://www.htslib.org/doc/samtools.html#GLOBAL_COMMAND_OPTIONS\nfor more details.\n");
+}
+
+void sam_global_args_init(sam_global_args *ga) {
+    if (!ga)
+        return;
+
+    memset(ga, 0, sizeof(*ga));
+}
+
+/*
+ * Add the standard samtools @PG provenance line.  See samtools.h for details.
+ */
+int samtools_add_pg_line(sam_hdr_t *h, const char *arg_list, int no_pg) {
+    if (no_pg)
+        return 0;
+
+    const char *sam_ver = samtools_version(), *hts_ver = hts_version();
+    const char *version = sam_ver;
+    char version_buf[256];
+    int sam_maj, sam_min, hts_maj, hts_min;
+
+    // SAMtools and HTSlib are released together and have matching major and
+    // minor version numbers, so the HTSlib version can normally be deduced from
+    // the SAMtools one.  Only record it when it cannot be, i.e. when the major
+    // or minor numbers differ.
+    if (!(sscanf(sam_ver, "%d.%d", &sam_maj, &sam_min) == 2 &&
+          sscanf(hts_ver, "%d.%d", &hts_maj, &hts_min) == 2 &&
+          sam_maj == hts_maj && sam_min == hts_min)) {
+        snprintf(version_buf, sizeof(version_buf), "%s (with HTSlib %s)",
+                 sam_ver, hts_ver);
+        version = version_buf;
+    }
+
+    if (sam_hdr_add_pg(h, "samtools",
+                       "VN", version,
+                       arg_list ? "CL" : NULL,
+                       arg_list ? arg_list : NULL,
+                       NULL) == -1)
+        return -1;
+
+    return 0;
+}
+
+void sam_global_args_free(sam_global_args *ga) {
+    if (ga->in.specific)
+        hts_opt_free(ga->in.specific);
+
+    if (ga->out.specific)
+        hts_opt_free(ga->out.specific);
+
+    if (ga->reference)
+        free(ga->reference);
+}

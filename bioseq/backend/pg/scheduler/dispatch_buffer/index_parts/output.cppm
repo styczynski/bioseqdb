@@ -71,6 +71,8 @@ tuple_dispatch_buffer::read_next_output() {
             &buffered_entries.front(),
             ordinal,
             &found->second[cursor.match_index],
+            0u,
+            cursor.query_index,
         };
     }
     const cursor_boundary boundary =
@@ -104,7 +106,7 @@ tuple_dispatch_buffer::read_next_output() {
                            cursor.match_index,
                            hit == match_map.end() ? std::size_t{0} : hit->second.size())));
     }
-    return next_output{&entry, 0, &hit->second[cursor.match_index]};
+    return next_output{&entry, 0, &hit->second[cursor.match_index], cursor.scan_entry_index, std::nullopt};
 }
 
 } // namespace bioseq::scheduler

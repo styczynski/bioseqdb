@@ -15,6 +15,14 @@ export namespace bioseq::simd {
 
 using bioseq::storage::sequence_size_t;
 
+/** Stable packed status used only by internal per-row SQL export projections. */
+enum class match_export_status : std::uint64_t {
+    has_mapq = std::uint64_t{1} << 16,
+    has_dp_score = std::uint64_t{1} << 17,
+    has_edit_distance = std::uint64_t{1} << 18,
+    has_classification = std::uint64_t{1} << 19,
+};
+
 /**
  * @brief One alignment hit, with PAF-style coordinates and alignment details.
  *
@@ -50,7 +58,46 @@ struct match_result {
     std::vector<bioseq::cigar_run> cigar;      ///< CIGAR operations owned by this result.
 #endif
     sequence_size_t edit_distance = 0;      ///< Unit-cost edits in this  alignment, whgn exact edit counting was requested.
+    bool has_mapq = false;                  ///< MAPQ was computed, including a legitimate zero.
+    bool has_dp_score = false;              ///< Base alignment produced the DP score.
+    bool has_edit_distance = false;         ///< Unit-cost edit distance was computed exactly.
+    bool has_sam_classification = false;    ///< Classification covers the final surviving region set.
+    bool is_sam_primary = false;            ///< First surviving chain root in this result set.
+    bool is_supplementary = false;          ///< Other surviving chain roots; nonroots are secondary.
+    std::uint64_t alignment_ordinal = 0;    ///< Stable ordinal within this query/target result set.
+
+    /** Return native SAM flag bits and explicit validity without sentinel inference. */
+    [[nodiscard]] constexpr std::uint64_t export_status() const noexcept {
+        std::uint64_t result = is_reverse ? 0x10u : 0u;
+        if (has_sam_classification) {
+            if (!is_primary) result |= 0x100u;
+            if (is_supplementary) result |= 0x800u;
+            result |= static_cast<std::uint64_t>(match_export_status::has_classification);
+        }
+        if (has_mapq) result |= static_cast<std::uint64_t>(match_export_status::has_mapq);
+        if (has_dp_score) result |= static_cast<std::uint64_t>(match_export_status::has_dp_score);
+        if (has_edit_distance) result |= static_cast<std::uint64_t>(match_export_status::has_edit_distance);
+        return result;
+    }
 };
+
+/** Finalize validity and SAM classification after every region filter has run.
+ *  This does not change the existing chain-root is_primary meaning. Exporters
+ *  reconcile primary election across reference result sets using query identity. */
+inline void finalize_match_result_classification(std::span<match_result> results,
+    bool mapq_computed, bool edit_distance_computed, bool classification_available = true) {
+    bool primary_selected = false;
+    std::uint64_t ordinal = 0;
+    for (auto& result : results) {
+        result.has_mapq = mapq_computed;
+        result.has_edit_distance = edit_distance_computed && result.has_dp_score;
+        result.has_sam_classification = classification_available;
+        result.alignment_ordinal = ordinal++;
+        result.is_sam_primary = classification_available && result.is_primary && !primary_selected;
+        result.is_supplementary = classification_available && result.is_primary && primary_selected;
+        primary_selected = primary_selected || result.is_sam_primary;
+    }
+}
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 static_assert(!std::is_copy_constructible_v<match_result>);

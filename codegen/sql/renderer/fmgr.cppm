@@ -18,6 +18,7 @@ module;
 
 export module bioseq.codegen.sql.renderer:fmgr;
 
+import :model;
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
 import bioseq.codegen.support;
@@ -920,14 +921,14 @@ struct cpp_template_binding final {
 }
 
 [[nodiscard]] inline std::string result_encoder_name(
-        const collected_entity& entity,
+        std::string_view symbol,
         std::size_t arity) {
-    return overload_helper_name(entity.name, arity)
+    return overload_helper_name(symbol, arity)
         + "_result_encoder";
 }
 
 [[nodiscard]] inline std::string render_result_encoder(
-        const collected_entity& entity,
+        std::string_view symbol,
         const collected_result_row& row,
         std::size_t arity) {
     if (row.fields.empty()) {
@@ -950,7 +951,7 @@ struct cpp_template_binding final {
     }
     std::ostringstream output;
     output
-        << "struct " << result_encoder_name(entity, arity)
+        << "struct " << result_encoder_name(symbol, arity)
         << " final {\n"
         << "    inline static constexpr std::array<std::string_view, "
         << row.fields.size() << "> column_names{";
@@ -1026,14 +1027,15 @@ struct cpp_template_binding final {
         artifact.argument_converter_keys.push_back(argument.key);
     }
 
+    const auto symbol = generated_routine_c_symbol(entity, graph);
     std::ostringstream output;
     if (row != nullptr) {
         output << render_result_encoder(
-            entity.source, *row, artifact.sql_arity);
+            symbol, *row, artifact.sql_arity);
     }
     output
         << "[[nodiscard]] auto "
-        << overload_helper_name(entity.source.name, artifact.sql_arity)
+        << overload_helper_name(symbol, artifact.sql_arity)
         << "(FunctionCallInfo fcinfo) -> Datum {\n";
     for (const std::string& initializer : argument_initializers) {
         output << initializer;
@@ -1049,7 +1051,7 @@ struct cpp_template_binding final {
         if (row != nullptr) {
             output << ",\n        "
                 << result_encoder_name(
-                       entity.source, artifact.sql_arity)
+                       symbol, artifact.sql_arity)
                 << "{}";
         }
         output << ");\n";
@@ -1973,7 +1975,7 @@ render_fmgr_entrypoint_modules(
         }
         const std::string& owner_key = configured_owner->first;
         by_owner[owner_key]
-            [entity.source.name].push_back(&entity);
+            [generated_routine_c_symbol(entity, graph)].push_back(&entity);
         sources_by_owner[owner_key].insert(
             entity.source.source_module);
     }

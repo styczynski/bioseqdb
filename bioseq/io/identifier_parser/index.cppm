@@ -17,6 +17,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -26,10 +27,16 @@ module;
 
 export module bioseq.io.identifier_parser;
 
+import bioseq.parallelism.memory_admission;
+
+import bioseq.io.sinks;
+
 import bioseq.common.logging;
 import bioseq.io.simd;      // scan_for_each_delim4 (one SIMD pass per header)
 import bioseq.io.file_kind; // bioseq::io::detail::lowercase_ascii_character (shared ASCII fold)
 import bioseq.io.identifier_parser.formats;
+import bioseq.io.identifier_parser.preservation;
+export import bioseq.io.identifier_parser.canonical;
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -74,6 +81,7 @@ struct identifier_position_route {
 /// Complete routing table resolved once for a sequence load.
 struct identifier_routing {
     std::vector<identifier_key_route> key_routes;
+    std::vector<identifier_key_route> exact_key_routes;
     std::vector<identifier_position_route> position_routes;
     std::vector<destination_slot> identifier_slots;
     std::size_t destination_count = 0; // number of distinct slots
@@ -1011,6 +1019,49 @@ inline void parse_auto(string_view header,
 
 export namespace bioseq::io::identifier_parser {
 
+/** Route a borrowed canonical scalar by exact key, then unique normalized key.
+ * Explicit source mappings are already resolved in exact_key_routes; NULL and
+ * empty text remain distinct. Unselected metadata leaves SQL defaults intact.
+ */
+[[nodiscard]] std::expected<void, std::string> route_canonical_field(
+        std::string_view name, std::optional<std::string_view> value,
+        const identifier_routing& routing, identifier_writer_reference writer) {
+    const identifier_key_route* selected = nullptr;
+    for (const auto& route : routing.exact_key_routes)
+        if (route.key == name) { selected = &route; break; }
+    if (selected == nullptr) {
+        for (const auto& route : routing.exact_key_routes) {
+            if (!detail::names_match_normalised(route.key, name)) continue;
+            if (selected != nullptr)
+                return std::unexpected("ambiguous normalized canonical metadata column; use exact names");
+            selected = &route;
+        }
+    }
+    if (selected == nullptr) return {};
+    if (value && value->size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+        return std::unexpected("canonical metadata exceeds destination size limit");
+    for (const auto slot : selected->slots) {
+        if (value) writer.set_field(slot, value->data(), static_cast<std::int32_t>(value->size()));
+        else writer.set_null(slot);
+    }
+    return {};
+}
+
+/** Route one already decoded canonical owner without rescanning or copying its payload. */
+[[nodiscard]] std::expected<void, std::string> route_canonical_header(
+        const canonical_header& decoded, const identifier_routing& routing,
+        identifier_writer_reference writer) {
+    if (decoded.header.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+        return std::unexpected("canonical sequence identifier exceeds destination size limit");
+    for (const auto slot : routing.identifier_slots)
+        writer.set_field(slot, decoded.header.data(), static_cast<std::int32_t>(decoded.header.size()));
+    for (const auto& field : decoded.fields) {
+        const auto value = field.value ? std::optional<std::string_view>{*field.value} : std::nullopt;
+        if (const auto routed = route_canonical_field(field.name, value, routing, writer); !routed) return routed;
+    }
+    return {};
+}
+
 /// Reads one header and sends selected fields to the writer.
 /// The caller starts and finishes the tuple and initializes uset destinations.
 /// A missing field can leave its destination untouched.
@@ -1020,6 +1071,17 @@ parse_and_route_header(header_format format,
                        const identifier_routing& routing,
                        identifier_parse_state& state,
                        identifier_writer_reference writer) {
+    const auto canonical = parse_canonical_header(header);
+    if (!canonical) return std::unexpected(canonical.error());
+    if (*canonical) {
+        constexpr std::size_t scalar_capacity = 4096u;
+        auto scratch = parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
+        if (!scratch) return std::unexpected("cannot admit canonical descriptor validation scratch");
+        text_record_shape shape;
+        if (const auto validated = decode_preservation_record((**canonical).payload, shape, true, scalar_capacity); !validated)
+            return std::unexpected(validated.error());
+        return route_canonical_header(**canonical, routing, writer);
+    }
     state.lexer.lex(header);
     detail::route_emitter emit{routing, writer, {}};
     const header_format_definition& def = header_format_definition_for(format);
@@ -1068,6 +1130,9 @@ detect_header_format(std::span<const std::string_view> samples) noexcept {
     std::array<int, static_cast<std::size_t>(header_format::count)> votes{};
     bool any_structure = false;
     for (const std::string_view h : samples) {
+        const auto separator = canonical_delimiter(h, ' ');
+        if (separator != h.size() && h.substr(separator).starts_with(" [bq=1] "))
+            return header_format::automatic;
         if (h.find('|') != std::string_view::npos || h.find('=') != std::string_view::npos ||
             h.find('[') != std::string_view::npos)
             any_structure = true;
@@ -1164,9 +1229,14 @@ resolve_identifier_mapping(header_format requested_format,
     // Find a column by name, ignoring ASCII case, underscores, and hyphens.
     auto find_column = [&column_count, &columns](std::string_view raw_name) -> std::size_t {
         for (std::size_t i = 0; i < column_count; ++i)
-            if (detail::names_match_normalised(columns[i].name, raw_name))
-                return i;
-        return column_count;
+            if (columns[i].name == raw_name) return i;
+        std::size_t matched = column_count;
+        for (std::size_t i = 0; i < column_count; ++i)
+            if (detail::names_match_normalised(columns[i].name, raw_name)) {
+                if (matched != column_count) return column_count;
+                matched = i;
+            }
+        return matched;
     };
 
     const header_format_definition& effective_definition =
@@ -1183,6 +1253,9 @@ resolve_identifier_mapping(header_format requested_format,
                 fmt::format("mapping target column \"{}\" is an identity/generated column "
                             "and cannot be populated by bioseq.load",
                             user_mapping.column_name));
+        if (is_user_mapped[i])
+            return std::unexpected(fmt::format("mapping target column \"{}\" is specified more than once",
+                user_mapping.column_name));
         is_user_mapped[i] = 1;
         const destination_slot slot = slot_of(i);
 
@@ -1269,6 +1342,25 @@ resolve_identifier_mapping(header_format requested_format,
     routing.strip_metadata = (requested_format == header_format::automatic)
                                  ? has_key_or_position_route
                                  : (effective_definition.metadata != metadata_style::none);
+    // Canonical fields preserve exact SQL names, including normalized collisions.
+    // Explicit mappings retain their source key; aliases are only a fallback.
+    for (std::size_t i = 0; i < column_count; ++i) {
+        if (i == identifier_column || columns[i].is_identity_or_generated) continue;
+        std::string_view key = columns[i].name;
+        if (is_user_mapped[i]) {
+            for (const auto& mapping : user_mappings)
+                if (find_column(mapping.column_name) == i) { key = mapping.data_source; break; }
+        }
+        const auto slot = slot_of(i);
+        bool joined = false;
+        for (auto& route : routing.exact_key_routes) {
+            if (route.key != key) continue;
+            if (!contains_slot(route.slots, slot)) route.slots.push_back(slot);
+            joined = true;
+            break;
+        }
+        if (!joined) routing.exact_key_routes.push_back({std::string(key), {slot}});
+    }
     routing.destination_count = destination_columns.size();
     return result;
 }

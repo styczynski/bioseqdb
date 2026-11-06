@@ -1,21 +1,21 @@
-/**
- * @file sinks.cppm
- * @brief Positioned output sinks for FASTA and FASTQ writers.
- *
- * Concurrent producers reserve disjoint byte ranges before writing through
- * either `pwrite(2)` or a shared memory mapping.
- */
+/** @file Checked positioned IO and atomic publication of private staging files. */
 module;
 
 #include <atomic>
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <expected>
 #include <fcntl.h>
-#include <mutex>
+#include <limits>
+#include <optional>
+#include <vector>
+#include <span>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -26,310 +26,538 @@ module;
 export module bioseq.io.sinks;
 
 import bioseq.common.logging;
+import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::io {
 
-/// Result of one `write_at` call on a sink.
-struct sink_write_result {
-    std::size_t bytes_written = 0;
-    bool has_error = false;
+/** Optional caller-thread cancellation checkpoint; never copied into worker jobs.
+ * The callback may unwind through its caller's existing error bridge. It must
+ * remain valid until publication or abandonment; neutral callers leave it empty.
+ */
+struct io_caller_checkpoint {
+    void* context{};
+    void (*poll)(void*){};
+    /** Invoke the caller's cancellation hook without introducing platform state. */
+    void operator()() const { if (poll != nullptr) poll(context); }
 };
 
-/// Requires a sink that reserves byte ranges, writes at those offsets,
-/// and provides an error message when a write fails.
-template <typename p_sink>
-concept io_sink =
-    requires(p_sink& sink, const std::uint8_t* src, std::size_t size, std::uint64_t offset) {
-        { sink.write_at(src, size, offset) } -> std::same_as<sink_write_result>;
-        { sink.reserve_offset(size) } -> std::same_as<std::uint64_t>;
-        { sink.last_error_message() } -> std::convertible_to<std::string>;
-    };
+/** Positioned output reports errors by value, with no shared mutable diagnostic. */
+template<class Sink>
+concept io_sink = requires(Sink& sink, std::span<const std::byte> bytes,
+                           std::uint64_t offset) {
+    { sink.write_at(bytes, offset) } -> std::same_as<std::expected<std::size_t, std::string>>;
+    { sink.reserve_offset(bytes.size()) } -> std::same_as<std::expected<std::uint64_t, std::string>>;
+};
 
-/// Writes reserved file ranges with POSIX pwrite. Producers share an atomic
-/// offset counter, so each successful reservation has a separate  range.
-/// Create the sink with `try_open` to receive open errors.
-class posix_pwrite_sink {
-  public:
-    /// Construct a closed sink without an owned file descriptor.
-    posix_pwrite_sink() = default;
+/** Concurrent positional reads never mutate a shared file cursor. */
+template<class Source>
+concept positional_byte_source = requires(const Source& source,
+        std::uint64_t offset, std::span<std::byte> destination) {
+    { source.size_bytes() } -> std::same_as<std::uint64_t>;
+    { source.read_at(offset, destination) }
+        -> std::same_as<std::expected<std::size_t, std::string>>;
+};
 
-    /// Transfer the file descriptor, reservation cursor, and diagnostic state.
-    posix_pwrite_sink(posix_pwrite_sink&& other) noexcept
-        : _fd(other._fd), _next_offset(other._next_offset.load(std::memory_order_relaxed)),
-          _last_error_message(std::move(other._last_error_message)) {
-        other._fd = -1;
+/** A private sibling file; only explicit publication exposes the completed output.
+ * Writes may run concurrently at disjoint ranges; reservation ordering belongs
+ * to the caller. Seal/publication/destruction require all tasks to have joined.
+ */
+/** Bounded read-only mapping into a sealed private replay file; no copied payload. */
+class mapped_read_window {
+    void* mapping_{};
+    std::size_t mapped_bytes_{}, prefix_{}, bytes_{};
+public:
+    /** Construct an empty mapping for an empty requested window. */
+    mapped_read_window() = default;
+    mapped_read_window(const mapped_read_window&) = delete;
+    mapped_read_window& operator=(const mapped_read_window&) = delete;
+    /** Transfer one mapping without changing any borrowed byte addresses. */
+    mapped_read_window(mapped_read_window&& other) noexcept
+        : mapping_{std::exchange(other.mapping_, nullptr)}, mapped_bytes_{std::exchange(other.mapped_bytes_, 0u)},
+          prefix_{other.prefix_}, bytes_{other.bytes_} {}
+    /** Replace a stopped mapping and transfer ownership without changing source addresses. */
+    mapped_read_window& operator=(mapped_read_window&& other) noexcept {
+        if (this != &other) {
+            if (mapping_ != nullptr) ::munmap(mapping_, mapped_bytes_);
+            mapping_ = std::exchange(other.mapping_, nullptr);
+            mapped_bytes_ = std::exchange(other.mapped_bytes_, 0u);
+            prefix_ = other.prefix_;
+            bytes_ = other.bytes_;
+        }
+        return *this;
+    }
+    /** Release one read-only view; the separate replay owner retains its file. */
+    ~mapped_read_window() { if (mapping_ != nullptr) ::munmap(mapping_, mapped_bytes_); }
+
+    /** Map an already range-checked file interval using the OS page alignment. */
+    [[nodiscard]] static std::expected<mapped_read_window, std::string> open(
+            int descriptor, std::uint64_t offset, std::size_t bytes) {
+        mapped_read_window result;
+        if (bytes == 0u) return result;
+        const auto page_size = ::sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) return std::unexpected(std::string{"cannot query mapping page size"});
+        const auto prefix = static_cast<std::size_t>(offset % static_cast<std::uint64_t>(page_size));
+        if (bytes > std::numeric_limits<std::size_t>::max() - prefix
+            || offset - prefix > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+            return std::unexpected(std::string{"replay mapping geometry overflows"});
+        result.mapped_bytes_ = bytes + prefix;
+        result.prefix_ = prefix;
+        result.bytes_ = bytes;
+        result.mapping_ = ::mmap(nullptr, result.mapped_bytes_, PROT_READ, MAP_PRIVATE,
+            descriptor, static_cast<off_t>(offset - prefix));
+        if (result.mapping_ == MAP_FAILED) {
+            result.mapping_ = nullptr;
+            return std::unexpected(fmt::format("map replay window failed: {}", std::strerror(errno)));
+        }
+        return result;
     }
 
-    /// Replace this sink with transferred descriptor and reservation state.
+    /** Borrow the exact requested bytes rather than the aligned prefix. */
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        if (mapping_ == nullptr) return {};
+        return {static_cast<const std::byte*>(mapping_) + prefix_, bytes_};
+    }
+};
+
+class posix_pwrite_sink {
+    int descriptor_{-1};
+    int directory_descriptor_{-1};
+    std::string temporary_name_;
+    std::string destination_name_;
+    std::atomic<std::uint64_t> extent_{};
+    bool overwrite_{};
+    bool sealed_{};
+    bool published_{};
+
+    /** Report one saved errno without reading shared diagnostic state. */
+    [[nodiscard]] static std::string system_error(std::string_view operation, int error) {
+        return fmt::format("{} failed: {}", operation, std::strerror(error));
+    }
+
+    /** Check the endpoint before any signed offset conversion or syscall. */
+    [[nodiscard]] static bool representable_range(std::uint64_t offset, std::size_t count) {
+        constexpr auto maximum = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+        return offset <= maximum && count <= maximum - offset;
+    }
+
+    /** Release unpublished resources; never turn destructor cleanup into publication. */
+    void cleanup() noexcept {
+        if (descriptor_ >= 0) { ::close(descriptor_); descriptor_ = -1; }
+        if (directory_descriptor_ >= 0) {
+            if (!temporary_name_.empty())
+                ::unlinkat(directory_descriptor_, temporary_name_.c_str(), 0);
+            ::close(directory_descriptor_);
+            directory_descriptor_ = -1;
+        }
+    }
+
+public:
+    /** Construct a closed owner without side effects. */
+    posix_pwrite_sink() = default;
+    posix_pwrite_sink(const posix_pwrite_sink&) = delete;
+    posix_pwrite_sink& operator=(const posix_pwrite_sink&) = delete;
+
+    /** Transfer open file and cleanup responsibility after workers have joined. */
+    posix_pwrite_sink(posix_pwrite_sink&& other) noexcept
+        : descriptor_(std::exchange(other.descriptor_, -1)),
+          directory_descriptor_(std::exchange(other.directory_descriptor_, -1)),
+          temporary_name_(std::move(other.temporary_name_)),
+          destination_name_(std::move(other.destination_name_)),
+          extent_(other.extent_.load(std::memory_order_relaxed)),
+          overwrite_(other.overwrite_), sealed_(other.sealed_), published_(other.published_) {}
+
+    /** Abandon previous unpublished output and adopt a stopped source owner. */
     posix_pwrite_sink& operator=(posix_pwrite_sink&& other) noexcept {
         if (this != &other) {
-            close_fd();
-            _fd = other._fd;
-            _next_offset.store(other._next_offset.load(std::memory_order_relaxed),
-                               std::memory_order_relaxed);
-            _last_error_message = std::move(other._last_error_message);
-            other._fd = -1;
+            cleanup();
+            descriptor_ = std::exchange(other.descriptor_, -1);
+            directory_descriptor_ = std::exchange(other.directory_descriptor_, -1);
+            temporary_name_ = std::move(other.temporary_name_);
+            destination_name_ = std::move(other.destination_name_);
+            extent_.store(other.extent_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            overwrite_ = other.overwrite_;
+            sealed_ = other.sealed_;
+            published_ = other.published_;
         }
         return *this;
     }
 
-    /// Sinks exclusively own their file descriptor.
-    posix_pwrite_sink(const posix_pwrite_sink&) = delete;
+    /** Abandon unfinished output after the caller has joined every dependent task. */
+    ~posix_pwrite_sink() { cleanup(); }
 
-    /// Sinks cannot copy file-descriptor ownership.
-    posix_pwrite_sink& operator=(const posix_pwrite_sink&) = delete;
-
-    /// Close the owned file descriptor.
-    ~posix_pwrite_sink() {
-        close_fd();
-    }
-
-    /// Open `path` for writing, truncating any existing contents.
-    /// Returns the sink or an error message on failure.
+    /** Create a mode-0600 sibling with exclusive creation and a pinned parent directory.
+     * The final path is untouched until publish(), even if it already exists.
+     */
     [[nodiscard]] static std::expected<posix_pwrite_sink, std::string>
-    try_open(std::string_view path) {
-        std::string null_terminated_path{path};
-        const int fd = ::open(null_terminated_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) {
-            return std::unexpected(
-                fmt::format("open('{}', O_WRONLY | O_CREAT | O_TRUNC) failed: {}",
-                            null_terminated_path,
-                            std::strerror(errno)));
-        }
+    try_open(std::string_view path, bool overwrite = false) {
+        if (path.empty() || path.find('\0') != std::string_view::npos)
+            return std::unexpected("output path is empty or contains NUL");
+        const auto slash = path.find_last_of('/');
+        const auto basename = slash == std::string_view::npos ? path : path.substr(slash + 1);
+        const auto parent = slash == std::string_view::npos ? std::string_view{"."}
+            : slash == 0 ? std::string_view{"/"} : path.substr(0, slash);
+        if (basename.empty() || basename == "." || basename == "..")
+            return std::unexpected("output path does not name a regular file");
+        const std::string parent_path{parent};
+        const int directory = ::open(parent_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory < 0) return std::unexpected(system_error("open output directory", errno));
         posix_pwrite_sink sink;
-        sink._fd = fd;
-        return sink;
+        sink.directory_descriptor_ = directory;
+        sink.destination_name_ = basename;
+        sink.overwrite_ = overwrite;
+        static std::atomic<std::uint64_t> next_temporary{};
+        const auto epoch = std::chrono::steady_clock::now().time_since_epoch().count();
+        for (std::size_t attempt = 0; attempt < 128; ++attempt) {
+            const auto serial = next_temporary.fetch_add(1, std::memory_order_relaxed);
+            sink.temporary_name_ = fmt::format(".bioseq-{}-{}-{}", ::getpid(), epoch, serial);
+            sink.descriptor_ = ::openat(directory, sink.temporary_name_.c_str(),
+                O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            if (sink.descriptor_ >= 0) return sink;
+            const int error = errno;
+            sink.temporary_name_.clear(); // an existing collision is not ours to unlink
+            if (error != EEXIST)
+                return std::unexpected(system_error("create private output", error));
+        }
+        return std::unexpected("could not allocate a unique private output name");
     }
 
-    /// Reserves a byte range and returns its starting offset for `write_at`.
-    /// Concurrent reservations advance the same atomic counter.
-    [[nodiscard]] std::uint64_t reserve_offset(std::size_t byte_count) noexcept {
-        return _next_offset.fetch_add(static_cast<std::uint64_t>(byte_count),
-                                      std::memory_order_relaxed);
+    /** Reserve a checked extent; the caller assigns these ranges in record order. */
+    [[nodiscard]] std::expected<std::uint64_t, std::string>
+    reserve_offset(std::size_t byte_count) {
+        if (descriptor_ < 0 || sealed_) return std::unexpected("output is closed or sealed");
+        auto offset = extent_.load(std::memory_order_relaxed);
+        for (;;) {
+            if (!representable_range(offset, byte_count))
+                return std::unexpected("output file extent exceeds the supported offset range");
+            if (extent_.compare_exchange_weak(offset, offset + byte_count,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) return offset;
+        }
     }
 
-    /// Write `size` bytes starting at `offset`. Caller MUST have
-    /// reserved this offset range via `reserve_offset(size)`.
-    [[nodiscard]] sink_write_result
-    write_at(const std::uint8_t* src, std::size_t size, std::uint64_t offset) noexcept {
-        sink_write_result result;
-        std::size_t bytes_remaining = size;
-        const std::uint8_t* cursor = src;
-        std::uint64_t cursor_offset = offset;
-        while (bytes_remaining > 0) {
-            const ssize_t n_written =
-                ::pwrite(_fd, cursor, bytes_remaining, static_cast<off_t>(cursor_offset));
-            if (n_written < 0) {
-                if (errno == EINTR)
-                    continue;
-                _last_error_message = fmt::format("pwrite(fd={}, size={}, offset={}) failed: {}",
-                                                  _fd,
-                                                  bytes_remaining,
-                                                  cursor_offset,
-                                                  std::strerror(errno));
-                result.has_error = true;
-                result.bytes_written = size - bytes_remaining;
-                return result;
+    /** Write a fully reserved range, handling interruptions and short writes. */
+    [[nodiscard]] std::expected<std::size_t, std::string>
+    write_at(std::span<const std::byte> bytes, std::uint64_t offset) {
+        if (descriptor_ < 0 || sealed_) return std::unexpected("output is closed or sealed");
+        const auto extent = extent_.load(std::memory_order_relaxed);
+        if (!representable_range(offset, bytes.size()) || offset > extent || bytes.size() > extent - offset)
+            return std::unexpected("positioned write lies outside its reserved output extent");
+        std::size_t written{};
+        constexpr auto maximum_write = static_cast<std::size_t>(std::numeric_limits<ssize_t>::max());
+        while (written < bytes.size()) {
+            const auto remaining = bytes.size() - written;
+            const auto count = remaining < maximum_write ? remaining : maximum_write;
+            const auto result = ::pwrite(descriptor_, bytes.data() + written, count,
+                                         static_cast<off_t>(offset + written));
+            if (result < 0) {
+                const int error = errno;
+                if (error == EINTR) continue;
+                return std::unexpected(system_error("pwrite", error));
             }
-            const std::size_t advanced = static_cast<std::size_t>(n_written);
-            cursor += advanced;
-            cursor_offset += advanced;
-            bytes_remaining -= advanced;
+            if (result == 0) return std::unexpected("pwrite made no progress");
+            written += static_cast<std::size_t>(result);
         }
-        result.bytes_written = size;
-        return result;
+        return written;
     }
 
-    /// Closes the file without fsync. Repeated calls after closing succeed.
-    [[nodiscard]] std::expected<void, std::string> close() noexcept {
-        if (_fd < 0)
-            return {};
-        const int rc_close = ::close(_fd);
-        const int saved_errno = errno;
-        const int closed_fd = _fd;
-        _fd = -1;
-        if (rc_close < 0) {
-            return std::unexpected(
-                fmt::format("close(fd={}) failed: {}", closed_fd, std::strerror(saved_errno)));
+    /** Append all bytes on the owning thread and return their replay offset. */
+    [[nodiscard]] std::expected<std::uint64_t, std::string>
+    append_bytes(std::span<const std::byte> bytes) {
+        const auto offset = reserve_offset(bytes.size());
+        if (!offset) return std::unexpected(offset.error());
+        const auto written = write_at(bytes, *offset);
+        if (!written) return std::unexpected(written.error());
+        return *offset;
+    }
+
+    /** Read a sealed immutable range without mutating a shared file cursor. */
+    [[nodiscard]] std::expected<std::size_t, std::string>
+    read_at(std::uint64_t offset, std::span<std::byte> destination) const {
+        if (descriptor_ < 0 || !sealed_) return std::unexpected("replay source is not sealed and open");
+        const auto extent = size_bytes();
+        if (!representable_range(offset, destination.size()) || offset > extent)
+            return std::unexpected("replay read lies outside the file");
+        const auto available = extent - offset;
+        const auto wanted = available < destination.size()
+            ? static_cast<std::size_t>(available) : destination.size();
+        std::size_t consumed{};
+        constexpr auto maximum_read = static_cast<std::size_t>(std::numeric_limits<ssize_t>::max());
+        while (consumed < wanted) {
+            const auto remaining = wanted - consumed;
+            const auto count = remaining < maximum_read ? remaining : maximum_read;
+            const auto result = ::pread(descriptor_, destination.data() + consumed, count,
+                                       static_cast<off_t>(offset + consumed));
+            if (result < 0) {
+                const int error = errno;
+                if (error == EINTR) continue;
+                return std::unexpected(system_error("pread", error));
+            }
+            if (result == 0) return std::unexpected("replay file ended before its sealed extent");
+            consumed += static_cast<std::size_t>(result);
         }
+        return consumed;
+    }
+
+    /** Flush accepted bytes and freeze the file for independent replay readers. */
+    /** Borrow one immutable replay payload; the mapping never owns the file. */
+    [[nodiscard]] std::expected<mapped_read_window, std::string> map_read_at(
+            std::uint64_t offset, std::size_t bytes) const {
+        if (!sealed_ || descriptor_ < 0 || offset > size_bytes() || bytes > size_bytes() - offset)
+            return std::unexpected(std::string{"replay mapping lies outside a sealed file"});
+        return mapped_read_window::open(descriptor_, offset, bytes);
+    }
+
+    [[nodiscard]] std::expected<void, std::string> seal() {
+        if (sealed_) return {};
+        if (descriptor_ < 0) return std::unexpected("cannot seal a closed output");
+        if (::fsync(descriptor_) != 0) return std::unexpected(system_error("fsync output", errno));
+        sealed_ = true;
         return {};
     }
 
-    /// Returns the total bytes reserved, including ranges whose writes failed.
-    [[nodiscard]] std::uint64_t reserved_byte_count() const noexcept {
-        return _next_offset.load(std::memory_order_relaxed);
-    }
-
-    /// Return the most recent write diagnostic.
-    [[nodiscard]] std::string last_error_message() const {
-        return _last_error_message;
-    }
-
-    /// Return the owned file descriptor, or -1 after close.
-    [[nodiscard]] int fd() const noexcept {
-        return _fd;
-    }
-
-  private:
-    /// Close the owned descriptor when one is active.
-    void close_fd() noexcept {
-        if (_fd >= 0) {
-            ::close(_fd);
-            _fd = -1;
+    /** Publish only after all output tasks finish; default creates without replacement. */
+    [[nodiscard]] std::expected<void, std::string> publish(io_caller_checkpoint checkpoint = {}) {
+        if (published_) return {};
+        const auto flushed = seal();
+        if (!flushed) return flushed;
+        const int closing = std::exchange(descriptor_, -1);
+        if (::close(closing) != 0) return std::unexpected(system_error("close output", errno));
+        // All work and file fsync are complete. A rejected checkpoint still owns
+        // only the private name, so ordinary unwinding removes it safely.
+        checkpoint();
+        if (overwrite_) {
+            if (::renameat(directory_descriptor_, temporary_name_.c_str(),
+                           directory_descriptor_, destination_name_.c_str()) != 0)
+                return std::unexpected(system_error("publish output", errno));
+            temporary_name_.clear();
+        } else {
+            // Same-directory hard-link creation is an atomic no-replace publication.
+            if (::linkat(directory_descriptor_, temporary_name_.c_str(),
+                         directory_descriptor_, destination_name_.c_str(), 0) != 0)
+                return std::unexpected(system_error("publish output without replacement", errno));
+            if (::unlinkat(directory_descriptor_, temporary_name_.c_str(), 0) == 0)
+                temporary_name_.clear();
         }
+        published_ = true;
+        if (::fsync(directory_descriptor_) != 0)
+            return std::unexpected(system_error("output published but directory fsync", errno));
+        return {};
     }
 
-    int _fd = -1;
-    std::atomic<std::uint64_t> _next_offset{0};
-    std::string _last_error_message;
+    /** Resize a stopped unsealed owner, for mapped allocation/final truncation. */
+    [[nodiscard]] std::expected<void, std::string> resize_file(std::uint64_t bytes) {
+        if (descriptor_ < 0 || sealed_ || !representable_range(bytes, 0))
+            return std::unexpected("invalid output resize");
+        if (::ftruncate(descriptor_, static_cast<off_t>(bytes)) != 0)
+            return std::unexpected(system_error("resize output", errno));
+        return {};
+    }
+
+    /** Return the owned descriptor for a checked shared mapping. */
+    [[nodiscard]] int fd() const noexcept { return descriptor_; }
+    /** Return reserved logical bytes, retained even after publication. */
+    [[nodiscard]] std::uint64_t size_bytes() const noexcept {
+        return extent_.load(std::memory_order_relaxed);
+    }
 };
+static_assert(io_sink<posix_pwrite_sink>);
+static_assert(positional_byte_source<posix_pwrite_sink>);
 
-/// Writes reserved ranges by copying bytes into a shared file mapping.
-/// The capacity hint sets the mapped file size and musi cover the output.
-/// `close()` removes the mapping and resizes the file to the reservation
-/// count. Destruction alone releases resources without resizing the file.
+/** Optional mapped output uses the same staging lifecycle and checked reservations. */
 class mmap_pwrite_sink {
-  public:
-    /// Construct a closed sink without a mapping.
+    posix_pwrite_sink file_;
+    std::byte* mapping_{};
+    std::size_t capacity_{};
+public:
     mmap_pwrite_sink() = default;
-
-    /// Transfer mapping ownership and the reservation cursor.
-    mmap_pwrite_sink(mmap_pwrite_sink&& other) noexcept
-        : _fd(other._fd), _addr(other._addr), _capacity(other._capacity),
-          _next_offset(other._next_offset.load(std::memory_order_relaxed)),
-          _last_error_message(std::move(other._last_error_message)) {
-        other._fd = -1;
-        other._addr = nullptr;
-        other._capacity = 0;
-    }
-
-    /// Sinks exclusively own their mapping and file descriptor.
     mmap_pwrite_sink(const mmap_pwrite_sink&) = delete;
-
-    /// Sinks cannot copy mapping ownership.
     mmap_pwrite_sink& operator=(const mmap_pwrite_sink&) = delete;
+    /** Move only after all tasks using the source have joined. */
+    mmap_pwrite_sink(mmap_pwrite_sink&& other) noexcept
+        : file_(std::move(other.file_)), mapping_(std::exchange(other.mapping_, nullptr)),
+          capacity_(std::exchange(other.capacity_, 0)) {}
+    /** Unmap abandoned output; the underlying owner removes its private file. */
+    ~mmap_pwrite_sink() { if (mapping_ != nullptr) ::munmap(mapping_, capacity_); }
 
-    /// Unmap the region and close its backing descriptor.
-    ~mmap_pwrite_sink() {
-        cleanup();
-    }
-
-    /// Creates or truncates a file and maps it for reading  and writing.
-    /// `capacity_hint` sets its size Zero requests one 4096-byte region.
+    /** Create a private mapping; final output is exposed only by publish(). */
     [[nodiscard]] static std::expected<mmap_pwrite_sink, std::string>
-    try_open(std::string_view path, std::size_t capacity_hint) {
-        std::string null_terminated_path{path};
-        const int fd = ::open(null_terminated_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        if (fd < 0) {
-            return std::unexpected(fmt::format("open('{}', O_RDWR | O_CREAT | O_TRUNC) failed: {}",
-                                               null_terminated_path,
-                                               std::strerror(errno)));
-        }
-        if (capacity_hint == 0)
-            capacity_hint = 4096;
-        if (::ftruncate(fd, static_cast<off_t>(capacity_hint)) < 0) {
-            const std::string err = fmt::format(
-                "ftruncate(fd={}, {}) failed: {}", fd, capacity_hint, std::strerror(errno));
-            ::close(fd);
-            return std::unexpected(err);
-        }
-        void* addr = ::mmap(nullptr, capacity_hint, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
-        if (addr == MAP_FAILED) {
-            const std::string err = fmt::format(
-                "mmap(fd={}, size={}) failed: {}", fd, capacity_hint, std::strerror(errno));
-            ::close(fd);
-            return std::unexpected(err);
-        }
+    try_open(std::string_view path, std::size_t capacity, bool overwrite = false) {
+        if (capacity == 0) return std::unexpected("mapped output capacity must be positive");
+        auto opened = posix_pwrite_sink::try_open(path, overwrite);
+        if (!opened) return std::unexpected(opened.error());
+        const auto resized = opened->resize_file(capacity);
+        if (!resized) return std::unexpected(resized.error());
+        void* address = ::mmap(nullptr, capacity, PROT_READ | PROT_WRITE, MAP_SHARED, opened->fd(), 0);
+        if (address == MAP_FAILED)
+            return std::unexpected(fmt::format("map private output failed: {}", std::strerror(errno)));
         mmap_pwrite_sink sink;
-        sink._fd = fd;
-        sink._addr = static_cast<std::uint8_t*>(addr);
-        sink._capacity = capacity_hint;
+        sink.file_ = std::move(*opened);
+        sink.mapping_ = static_cast<std::byte*>(address);
+        sink.capacity_ = capacity;
         return sink;
     }
 
-    /// Reserves a range by advancing the shared byte counter. Capacity is checked
-    /// later by `write_at`, so even a failed write keeps its reservation.
-    /// The counter assigns offsets only and does not publish the written bytes.
-    [[nodiscard]] std::uint64_t reserve_offset(std::size_t byte_count) noexcept {
-        return _next_offset.fetch_add(static_cast<std::uint64_t>(byte_count),
-                                      std::memory_order_relaxed);
+    /** Reserve the next caller-ordered range and reject inadequate mapping hints. */
+    [[nodiscard]] std::expected<std::uint64_t, std::string> reserve_offset(std::size_t bytes) {
+        const auto offset = file_.reserve_offset(bytes);
+        if (!offset) return std::unexpected(offset.error());
+        if (*offset > capacity_ || bytes > capacity_ - *offset)
+            return std::unexpected("mapped output capacity is smaller than the requested extent");
+        return *offset;
     }
 
-    /// Copies bytes into a range previously claimed with `reserve_offset`.
-    /// Returns an error if the range ends beyond the mapping. The reservation
-    /// remains counted after that failure.
-    [[nodiscard]] sink_write_result
-    write_at(const std::uint8_t* src, std::size_t size, std::uint64_t offset) noexcept {
-        sink_write_result result;
-        if (offset + size > _capacity) {
-            _last_error_message =
-                fmt::format("mmap_pwrite_sink: write at offset {} of size {} exceeds "
-                            "capacity {} (caller did not pass a sufficient size hint)",
-                            offset,
-                            size,
-                            _capacity);
-            result.has_error = true;
-            return result;
-        }
-        std::memcpy(_addr + offset, src, size);
-        result.bytes_written = size;
-        return result;
+    /** Copy a reserved nonoverlapping range, returning an immutable diagnostic. */
+    [[nodiscard]] std::expected<std::size_t, std::string>
+    write_at(std::span<const std::byte> bytes, std::uint64_t offset) {
+        if (mapping_ == nullptr || offset > capacity_ || bytes.size() > capacity_ - offset
+            || offset > file_.size_bytes() || bytes.size() > file_.size_bytes() - offset)
+            return std::unexpected("mapped write lies outside its reserved extent");
+        if (!bytes.empty()) std::memcpy(mapping_ + offset, bytes.data(), bytes.size());
+        return bytes.size();
     }
 
-    /// Unmaps the file, resizes it to the reserved byte count, and closes it.
-    [[nodiscard]] std::expected<void, std::string> close() noexcept {
-        if (_fd < 0)
-            return {};
-        const std::size_t actual_size =
-            static_cast<std::size_t>(_next_offset.load(std::memory_order_relaxed));
-        if (_addr != nullptr) {
-            ::munmap(_addr, _capacity);
-            _addr = nullptr;
+    /** Flush, unmap and trim the staged file before atomic publication. */
+    [[nodiscard]] std::expected<void, std::string> publish(io_caller_checkpoint checkpoint = {}) {
+        if (mapping_ != nullptr) {
+            if (::msync(mapping_, capacity_, MS_SYNC) != 0)
+                return std::unexpected(fmt::format("sync mapped output failed: {}", std::strerror(errno)));
+            if (::munmap(mapping_, capacity_) != 0)
+                return std::unexpected(fmt::format("unmap output failed: {}", std::strerror(errno)));
+            mapping_ = nullptr;
+            const auto resized = file_.resize_file(file_.size_bytes());
+            if (!resized) return resized;
         }
-        if (::ftruncate(_fd, static_cast<off_t>(actual_size)) < 0) {
-            const std::string err = fmt::format(
-                "ftruncate(fd={}, {}) failed: {}", _fd, actual_size, std::strerror(errno));
-            ::close(_fd);
-            _fd = -1;
-            return std::unexpected(err);
+        return file_.publish(checkpoint);
+    }
+
+    /** Retain the logical byte count after final publication. */
+    [[nodiscard]] std::uint64_t size_bytes() const noexcept { return file_.size_bytes(); }
+};
+static_assert(io_sink<mmap_pwrite_sink>);
+
+
+/** Admitted immutable bytes, spilling only when resident growth cannot be reserved.
+ * Files use the existing exclusive private staging owner and disappear without publication.
+ */
+class admitted_byte_buffer {
+    parallelism::memory_permit permit_;
+    std::vector<std::byte> bytes_;
+    std::optional<posix_pwrite_sink> file_;
+    std::optional<mapped_read_window> mapped_;
+    std::size_t size_{};
+    bool sealed_{};
+
+    /** Keep current bytes resident when possible; otherwise transfer them once to private storage. */
+    [[nodiscard]] std::expected<void, std::string> grow(std::size_t wanted) {
+        if (file_ || wanted <= bytes_.capacity()) return {};
+        const auto doubled = bytes_.capacity() > std::numeric_limits<std::size_t>::max() / 2u
+            ? wanted : bytes_.capacity() * 2u;
+        const auto capacity = std::max(std::max(wanted, doubled), std::size_t{64u});
+        if (capacity > std::numeric_limits<std::size_t>::max() - bytes_.capacity())
+            return std::unexpected("byte-buffer growth accounting overflows");
+        const auto peak = capacity + bytes_.capacity();
+        bool admitted = permit_ && permit_.grow_to(peak);
+        if (!permit_) {
+            auto permit = parallelism::memory_admission_controller::instance().try_reserve(peak);
+            if (permit) { permit_ = std::move(*permit); admitted = true; }
         }
-        const int closed_fd = _fd;
-        _fd = -1;
-        if (::close(closed_fd) < 0) {
-            return std::unexpected(
-                fmt::format("close(fd={}) failed: {}", closed_fd, std::strerror(errno)));
+        if (admitted) { bytes_.reserve(capacity); permit_.shrink_to(bytes_.capacity()); return {}; }
+        if (bytes_.capacity() > std::numeric_limits<std::size_t>::max() - 4096u)
+            return std::unexpected("byte-buffer spill accounting overflows");
+        const auto spill_peak = bytes_.capacity() + 4096u;
+        admitted = permit_ && permit_.grow_to(spill_peak);
+        if (!permit_) {
+            auto permit = parallelism::memory_admission_controller::instance().try_reserve(spill_peak);
+            if (permit) { permit_ = std::move(*permit); admitted = true; }
         }
+        if (!admitted) return std::unexpected("cannot admit private byte-buffer ownership");
+        auto opened = posix_pwrite_sink::try_open("/tmp/bioseq_byte_spool", true);
+        if (!opened) return std::unexpected(opened.error());
+        if (!bytes_.empty()) {
+            const auto written = opened->append_bytes(bytes_);
+            if (!written) return std::unexpected(written.error());
+        }
+        file_.emplace(std::move(*opened));
+        std::vector<std::byte>{}.swap(bytes_);
+        permit_.shrink_to(4096u);
         return {};
     }
-
-    /// Return the total byte count claimed by producers.
-    [[nodiscard]] std::uint64_t reserved_byte_count() const noexcept {
-        return _next_offset.load(std::memory_order_relaxed);
-    }
-
-    /// Returns the most recent write diagnostic.
-    [[nodiscard]] std::string last_error_message() const {
-        return _last_error_message;
-    }
-
-  private:
-    /// Release the mapping before closing its backing descriptor.
-    void cleanup() noexcept {
-        if (_addr != nullptr) {
-            ::munmap(_addr, _capacity);
-            _addr = nullptr;
+public:
+    /** Start empty; no allocation or IO occurs until bytes arrive. */
+    admitted_byte_buffer() = default;
+    admitted_byte_buffer(const admitted_byte_buffer&) = delete;
+    admitted_byte_buffer& operator=(const admitted_byte_buffer&) = delete;
+    admitted_byte_buffer(admitted_byte_buffer&&) noexcept = default;
+    /** Release previous storage before its permit, then adopt a stopped owner's storage. */
+    admitted_byte_buffer& operator=(admitted_byte_buffer&& other) noexcept {
+        if (this != &other) {
+            mapped_.reset();
+            file_.reset();
+            std::vector<std::byte>{}.swap(bytes_);
+            permit_.release();
+            permit_ = std::move(other.permit_);
+            bytes_ = std::move(other.bytes_);
+            file_ = std::move(other.file_);
+            mapped_ = std::move(other.mapped_);
+            size_ = other.size_;
+            sealed_ = other.sealed_;
         }
-        if (_fd >= 0) {
-            ::close(_fd);
-            _fd = -1;
-        }
+        return *this;
     }
 
-    int _fd = -1;
-    std::uint8_t* _addr = nullptr;
-    std::size_t _capacity = 0;
-    std::atomic<std::uint64_t> _next_offset{0};
-    std::string _last_error_message;
+    /** Append synchronous bytes after successful existing-ledger admission. */
+    [[nodiscard]] std::expected<void, std::string> append(std::span<const std::byte> bytes) {
+        if (sealed_ || bytes.size() > std::numeric_limits<std::size_t>::max() - size_)
+            return std::unexpected("private byte-buffer size overflows or is already sealed");
+        if (bytes.empty()) return {};
+        if (auto reserved = grow(size_ + bytes.size()); !reserved) return reserved;
+        if (file_) {
+            const auto written = file_->append_bytes(bytes);
+            if (!written) return std::unexpected(written.error());
+        } else bytes_.insert(bytes_.end(), bytes.begin(), bytes.end());
+        size_ += bytes.size();
+        return {};
+    }
+    /** Text and binary consumers share one byte owner and admission path. */
+    [[nodiscard]] std::expected<void, std::string> append(std::string_view bytes) {
+        return append(std::as_bytes(std::span{bytes.data(), bytes.size()}));
+    }
+    /** Patch a reserved prefix, such as an auxiliary array count, before sealing. */
+    [[nodiscard]] std::expected<void, std::string> patch_prefix(std::span<const std::byte> bytes) {
+        if (sealed_ || bytes.size() > size_) return std::unexpected("byte-buffer prefix patch is out of bounds or sealed");
+        if (file_) {
+            const auto written = file_->write_at(bytes, 0u);
+            if (!written) return std::unexpected(written.error());
+        } else std::copy(bytes.begin(), bytes.end(), bytes_.begin());
+        return {};
+    }
+    /** Freeze an immutable contiguous view, mapping private storage only on the spill path. */
+    [[nodiscard]] std::expected<void, std::string> seal() {
+        if (sealed_) return {};
+        if (file_) {
+            if (auto sealed = file_->seal(); !sealed) return sealed;
+            if (size_ != 0u) {
+                auto mapped = file_->map_read_at(0u, size_);
+                if (!mapped) return std::unexpected(mapped.error());
+                mapped_.emplace(std::move(*mapped));
+            }
+        }
+        sealed_ = true;
+        return {};
+    }
+    /** Borrow only frozen bytes; owner lifetime bounds every returned view. */
+    [[nodiscard]] std::span<const std::byte> view() const noexcept {
+        if (!sealed_) return {};
+        return mapped_ ? mapped_->bytes() : std::span<const std::byte>{bytes_};
+    }
+    /** Borrow frozen text without allocating a second copy. */
+    [[nodiscard]] std::string_view text() const noexcept {
+        const auto bytes = view();
+        return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    }
+    /** Logical file or resident size, independent of the current backing. */
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    /** Retained memory charged to the existing controller, for bounded queues. */
+    [[nodiscard]] std::uint64_t accounted_capacity_bytes() const noexcept { return permit_.bytes(); }
 };
 
 } // namespace bioseq::io

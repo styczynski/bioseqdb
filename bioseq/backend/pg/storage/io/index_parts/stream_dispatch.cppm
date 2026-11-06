@@ -52,6 +52,8 @@ extern "C" {
 
 export module bioseq.postgres.storage.io:stream_dispatch;
 
+import bioseq.io.sinks;
+
 import bioseq.common.logging; // Load progress logiing
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
@@ -86,6 +88,9 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
+import :record_ingestion;
+import bioseq.io.record_schema;
+import bioseq.io.identifier_parser.preservation;
 
 // Load records one packed chunk at a time.
 
@@ -125,7 +130,7 @@ struct typed_load_quality_encoder final : load_quality_encoder {
             raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
                 fmt::format("invalid {} quality byte {} at quality offset {} in record '{}'{}",
                     alphabet_name.view(), encoded.offending_byte,
-                    offset + encoded.consumed_bytes, header,
+                    offset + encoded.consumed_bytes, header.substr(0u, 256u),
                     std::is_same_v<Alphabet, seqan3::phred42>
                         ? "; select phred63 explicitly for scores above phred42" : ""));
         }
@@ -180,14 +185,19 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     pg_identifier_writer& tuple_writer;
     /// Caller-owned completed-record counter.
     std::int64_t& records;
-    /// Owning copy of the current record header.
-    std::string header;
+    /// Admitted or private-file raw header ownership remains alive until the next record.
+    bioseq::io::admitted_byte_buffer header_owner;
+    std::string_view header;
     /// Current logical sequence length in letters.
     sequence_size_t total_bp = 0;
     /// Writer that stores fragments as this record arrives.
     bioseq::storage::sequence_stream_writer writer;
     bioseq::storage::sequence_stream_writer quality_writer;
     std::unique_ptr<load_quality_encoder> quality_encoder = make_load_quality_encoder(ctx.cols);
+    std::optional<idp::text_record_shape> preserved_shape;
+    std::optional<idp::canonical_header> canonical_header;
+    std::unique_ptr<bioseq::io::decoded_record> preserved_ranks;
+    std::uint64_t observed_quality{};
 
     /// Discard local provisional data on every exit. PostgreSQL error rollback
     /// removes fragment rows; only end_record publishes a parent/source locator.
@@ -199,14 +209,43 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
     /// Copy the header and start storing a new sequence version.
     /// @param h Header bytes copied into this sink.
     /// @throws postgres_error If the header is too long or writer setup fails.
-    void begin_record(std::string_view h) {
-        if (h.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-            raise_load_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-                                    "FASTA/FASTQ header exceeds INT_MAX");
-        }
-        header.assign(h);
+    void begin_record_owned(bioseq::io::admitted_byte_buffer&& incoming_header) {
+        header_owner = std::move(incoming_header);
+        const auto h = header_owner.text();
+        header = h;
         total_bp = 0;
-        writer.begin(ctx.main_relid,
+        observed_quality = 0;
+        preserved_shape.reset();
+        preserved_ranks.reset();
+        canonical_header.reset();
+        auto parsed_header = idp::parse_canonical_header(h);
+        if (!parsed_header) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, parsed_header.error());
+        canonical_header = std::move(*parsed_header);
+        if (canonical_header) {
+            constexpr std::size_t scalar_capacity = 4096u;
+            auto scalar_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
+            if (!scalar_permit) raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit canonical descriptor scratch");
+            preserved_shape.emplace();
+            const auto parsed = idp::decode_preservation_record(canonical_header->payload,
+                *preserved_shape, true, scalar_capacity);
+            if (!parsed) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, parsed.error());
+            const auto& sequence = preserved_shape->sequences[0];
+            const auto& quality = preserved_shape->sequences[1];
+            if (sequence.alphabet_code && *sequence.alphabet_code != k_column_alphabet_code)
+                raise_load_error_as_cpp(ERRCODE_DATATYPE_MISMATCH, "canonical sequence alphabet differs from destination");
+            if (quality.alphabet_code && ctx.cols.quality_attno
+                && *quality.alphabet_code != ctx.cols.quality_alphabet_code)
+                raise_load_error_as_cpp(ERRCODE_DATATYPE_MISMATCH, "canonical quality alphabet differs from destination");
+            if (quality.present && quality.storage == bioseq::io::preservation_storage::rank_hex) {
+                preserved_ranks = std::make_unique<bioseq::io::decoded_record>();
+                const auto decoded = idp::decode_preservation_record(canonical_header->payload,
+                    *preserved_ranks, true, scalar_capacity);
+                if (!decoded) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, decoded.error());
+            }
+            canonical_header->payload_storage = bioseq::io::admitted_byte_buffer{};
+            canonical_header->payload = {};
+        }
+        if (!preserved_shape || preserved_shape->sequences[0].present) writer.begin(ctx.main_relid,
                      ctx.db_oid,
                      ctx.spc_oid,
                      ctx.main_relfilenode,
@@ -217,7 +256,7 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                      static_cast<std::uint8_t>(p_column_byte_width),
                      ctx.cap_bytes,
                      ctx.caches);
-        if (quality_encoder) {
+        if (quality_encoder && (!preserved_shape || (preserved_shape->sequences[1].present && !preserved_ranks))) {
             quality_encoder->reset();
             quality_writer.begin(ctx.main_relid, ctx.db_oid, ctx.spc_oid, ctx.main_relfilenode,
                 ctx.main_storage_id, ctx.cols.quality_attno, ctx.parent_td,
@@ -227,7 +266,15 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
 
     void quality_chunk(std::span<const std::uint8_t> bytes, std::size_t offset) {
         if (!quality_encoder) raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION, "FASTQ requires a quality destination");
-        quality_encoder->append(bytes, offset, header, quality_writer);
+        if (offset != observed_quality)
+            raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "quality chunks arrived out of order");
+        if (preserved_shape && (!preserved_shape->sequences[1].present || preserved_ranks)) {
+            const auto original = preserved_ranks
+                ? preserved_ranks->sequence_source(bioseq::io::record_field_role::quality)
+                : std::optional<bioseq::storage::borrowed_rank_window_source>{};
+            validate_preserved_text_quality(original, bytes, offset);
+        } else quality_encoder->append(bytes, offset, header, quality_writer);
+        observed_quality += bytes.size();
     }
 
     /// Append packed sequence data to the fragment writer.
@@ -238,7 +285,10 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
             ((static_cast<std::size_t>(c.logical_length) + col_lpu - 1) / col_lpu) *
             p_column_byte_width;
         const auto* p = reinterpret_cast<const std::uint8_t*>(c.words.data());
-        writer.append_packed_bytes(std::span<const std::uint8_t>{p, bytes}, c.logical_length);
+        if (preserved_shape && !preserved_shape->sequences[0].present && c.logical_length != 0)
+            raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "canonical NULL sequence must have an empty native body");
+        if (!preserved_shape || preserved_shape->sequences[0].present)
+            writer.append_packed_bytes(std::span<const std::uint8_t>{p, bytes}, c.logical_length);
         total_bp += c.logical_length;
     }
 
@@ -249,13 +299,39 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
             (total_bp == 0) ? 0
                             : static_cast<std::uint16_t>(
                                   ((total_bp + col_lpu - 1) / col_lpu) * col_lpu - total_bp);
-        auto pending_source = writer.finish(total_bp, last_pad);
+        if (preserved_shape) {
+            const auto& shape = *preserved_shape;
+            if (shape.sequences[0].present && shape.sequences[1].present
+                && shape.sequences[0].original_length != shape.sequences[1].original_length)
+                raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION,
+                    "canonical sequence and quality original lengths disagree");
+            const auto expected = shape.sequences[0].present ? shape.sequences[0].original_length : 0;
+            if (total_bp != expected)
+                raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "canonical sequence body differs from its original length");
+            if (quality_encoder && observed_quality != total_bp)
+                raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "canonical quality body length differs from sequence body");
+            if (quality_encoder && shape.sequences[1].present && !preserved_ranks
+                && shape.sequences[1].original_length != observed_quality)
+                raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "canonical quality body differs from its original length");
+        }
+        std::optional<bioseq::storage::pending_sequence_source> pending_source;
+        if (!preserved_shape || preserved_shape->sequences[0].present)
+            pending_source.emplace(writer.finish(total_bp, last_pad));
         std::optional<bioseq::storage::pending_sequence_source> pending_quality;
         std::uint16_t quality_padding = 0;
-        if (quality_encoder) {
+        if (quality_encoder && (!preserved_shape || preserved_shape->sequences[1].present)) {
             inject_load_failure(1);
-            quality_padding = quality_encoder->finish(total_bp, quality_writer);
-            pending_quality.emplace(quality_writer.finish(total_bp, quality_padding));
+            if (preserved_ranks) {
+                const auto original = preserved_ranks->sequence_source(bioseq::io::record_field_role::quality);
+                if (!original) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "preserved quality ranks are incomplete");
+                auto staged = stage_loaded_sequence(ctx, *original, ctx.cols.quality_attno,
+                    ctx.cols.quality_alphabet_code, ctx.cols.quality_byte_width);
+                quality_padding = staged.stub->padding_letters;
+                pending_quality.emplace(std::move(staged.pending));
+            } else {
+                quality_padding = quality_encoder->finish(total_bp, quality_writer);
+                pending_quality.emplace(quality_writer.finish(total_bp, quality_padding));
+            }
         }
         write_parent_row(ctx,
                          tuple_writer,
@@ -264,7 +340,9 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
                          static_cast<std::uint8_t>(p_column_byte_width),
                          last_pad,
                          total_bp,
-                         std::move(pending_source), pending_quality ? &*pending_quality : nullptr, quality_padding);
+                         pending_source ? &*pending_source : nullptr, pending_quality ? &*pending_quality : nullptr, quality_padding,
+                         preserved_shape && preserved_shape->header_is_null, preserved_shape.has_value(),
+                         canonical_header ? &*canonical_header : nullptr);
         ++records;
     }
 };
@@ -286,7 +364,7 @@ template <typename p_storage_unit> struct queued_load_event {
     /// Operation selected for this event.
     kind_t kind = kind_t::chunk;
     /// Owning record header for `begin_record`.
-    std::string header{};
+    bioseq::io::admitted_byte_buffer header{};
     /// Owning packed units for `chunk`.
     std::vector<p_storage_unit> words{};
     std::vector<std::uint8_t> quality{};
@@ -313,10 +391,9 @@ template <typename p_storage_unit> class load_event_queue {
     /// @return False if the queue closes before the event can be added.
     bool push(queued_load_event<p_storage_unit>&& event) {
         std::unique_lock<std::mutex> lock(mu_);
-        const auto bytes = event.header.size() + event.words.size() * sizeof(p_storage_unit) + event.quality.size();
-        if (bytes > byte_capacity_) throw std::length_error("load queue event exceeds its byte budget");
-        not_full_.wait(lock, [this, bytes] { return closed_ ||
-            (queue_.size() < capacity_ && bytes <= byte_capacity_ - queued_bytes_); });
+        const auto bytes = event.header.accounted_capacity_bytes() + event.words.size() * sizeof(p_storage_unit) + event.quality.size();
+        not_full_.wait(lock, [this, bytes] { return closed_ || queue_.empty() ||
+            (queue_.size() < capacity_ && queued_bytes_ <= byte_capacity_ && bytes <= byte_capacity_ - queued_bytes_); });
         if (closed_) {
             return false;
         }
@@ -335,7 +412,7 @@ template <typename p_storage_unit> class load_event_queue {
         if (queue_.empty()) {
             return false;
         }
-        queued_bytes_ -= queue_.front().header.size() + queue_.front().words.size() * sizeof(p_storage_unit)
+        queued_bytes_ -= queue_.front().header.accounted_capacity_bytes() + queue_.front().words.size() * sizeof(p_storage_unit)
             + queue_.front().quality.size();
         event = std::move(queue_.front());
         queue_.pop_front();
@@ -405,10 +482,10 @@ struct queued_load_stream_sink {
 
     /// Enqueue a copied record header.
     /// @param h Header bytes copied before return.
-    void begin_record(std::string_view h) {
+    void begin_record_owned(bioseq::io::admitted_byte_buffer&& header) {
         queued_load_event<col_unit_t> event;
         event.kind = queued_load_event<col_unit_t>::kind_t::begin_record;
-        event.header.assign(h);
+        event.header = std::move(header);
         push_or_closed(std::move(event));
     }
 
@@ -530,7 +607,7 @@ template <sequence_alphabet p_alphabet,
         while (queue.pop(event)) {
             switch (event.kind) {
             case queued_load_event<col_unit_t>::kind_t::begin_record:
-                sink.begin_record(event.header);
+                sink.begin_record_owned(std::move(event.header));
                 break;
             case queued_load_event<col_unit_t>::kind_t::chunk:
                 sink.chunk(bioseq::io::packed_sequence_chunk<col_unit_t>{

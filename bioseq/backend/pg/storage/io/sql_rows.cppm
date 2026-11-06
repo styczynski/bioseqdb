@@ -52,6 +52,38 @@ static_assert(std::is_aggregate_v<column_mapping>);
 /** FASTQ quality codec; NULL uses the declared destination or phred42. */
 struct [[bioseq_sql::type({.schema = bioseq::sql::fixed_schema<"bioseq">})]] load_options {
     std::optional<text*> phred_type;
+    [[bioseq_sql::column({.sql_type = bioseq::sql::pg::regclass})]]
+    std::optional<Oid> reference_table;
+};
+
+/** Complete imported alignment facts, in original zero-based source coordinates.
+ * CIGAR and sequence orientation describe stored values independently of FLAG.
+ * Header context identifiers are local to the destination relation's IO metadata.
+ */
+struct [[bioseq_sql::type({.schema = bioseq::sql::fixed_schema<"bioseq">})]] alignment {
+    std::optional<std::int32_t> flag;
+    std::optional<std::int32_t> mapq;
+    std::optional<text*> reference_name;
+    std::optional<std::int64_t> reference_length;
+    std::optional<std::int64_t> target_start;
+    std::optional<std::int64_t> target_end;
+    std::optional<std::int64_t> query_length;
+    std::optional<std::int64_t> query_start;
+    std::optional<std::int64_t> query_end;
+    std::optional<text*> mate_reference;
+    std::optional<std::int64_t> mate_start;
+    std::optional<std::int64_t> template_length;
+    [[bioseq_sql::column({.sql_type = bioseq::sql::custom_type<"bioseq.seq">})]]
+    std::optional<Datum> cigar;
+    [[bioseq_sql::column({.sql_type = bioseq::sql::pg::jsonb})]]
+    std::optional<Datum> aux;
+    std::optional<text*> source_orientation;
+    std::optional<text*> cigar_form;
+    std::optional<std::int64_t> header_context_id;
+    std::optional<text*> qname;
+    std::optional<std::int64_t> template_id;
+    std::optional<std::int64_t> segment_id;
+    std::optional<std::int64_t> reference_id;
 };
 
 }  // namespace bioseq::storage::load_pg::composite_rows

@@ -96,6 +96,24 @@
       },
       "description": "Native dna5: one exact forward 5k-symbol query planted in a 30k-symbol reference"
     },
+    "NATIVE_DNA15_EXACT": {
+      "data": {
+        "alphabet": "dna15",
+        "kmer_size": 15,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000,
+        "fragment_length_stddev": 0,
+        "reference_length": 30000,
+        "substitution_rate": 0,
+        "insertion_rate": 0,
+        "deletion_rate": 0,
+        "insertion_length_mean": 1,
+        "deletion_length_mean": 1,
+        "reverse_complement_rate": 0,
+        "seed": 7890123
+      },
+      "description": "Native dna15 (all IUPAC ranks): one exact forward 5k-symbol query planted in a 30k-symbol reference"
+    },
     "NATIVE_AA10LI_EXACT": {
       "data": {
         "alphabet": "aa10li",
@@ -2769,6 +2787,7 @@
       "for": {
         "NATIVE_DNA4_EXACT": 5,
         "NATIVE_DNA5_EXACT": 5,
+        "NATIVE_DNA15_EXACT": 5,
         "NATIVE_AA10LI_EXACT": 5,
         "NATIVE_AA10MURPHY_EXACT": 5,
         "NATIVE_AA20_EXACT": 5,
@@ -2787,6 +2806,7 @@
         "exact_test_case_iterations": {
           "NATIVE_DNA4_EXACT": 5,
           "NATIVE_DNA5_EXACT": 5,
+          "NATIVE_DNA15_EXACT": 5,
           "NATIVE_AA10LI_EXACT": 5,
           "NATIVE_AA10MURPHY_EXACT": 5,
           "NATIVE_AA20_EXACT": 5,

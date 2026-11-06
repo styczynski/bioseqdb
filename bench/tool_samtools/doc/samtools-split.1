@@ -1,0 +1,171 @@
+'\" t
+.TH samtools-split 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools split \- splits a file by read group.
+.\"
+.\" Copyright (C) 2008-2011, 2013-2018,2023-2024 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+.PP
+samtools split
+.RI [ options ]
+.IR merged.sam | merged.bam | merged.cram
+
+.SH DESCRIPTION
+.PP
+Splits a file by read group, or a specified tag,
+producing one or more output files
+matching a common prefix (by default based on the input filename).
+
+Unless the \fB-d\fR option is used, the file will be split according to the
+.B @RG
+tags listed in the header.
+Records without an RG tag or with an RG tag undefined in the header will cause
+the program to exit with an error unless the \fB-u\fR option is used.
+
+RG values defined in the header but with no records will produce an output file
+only containing a header.
+
+If the
+.BI "-d " TAG
+option is used, the file will be split on the value in the given aux tag.
+Only string (type \fBZ\fR) and integer (type \fBi\fR in SAM,
+plus equivalents in BAM/CRAM) tags are currently supported.
+Unless the \fB-u\fR option is used, the program will exit with an error if
+it finds a record without the given tag.
+
+Note that attempting to split on a tag with high cardinality may result
+in the creation of a large number of output files.
+To prevent this, the \fB-M\fR option can be used to set a limit on the
+number of splits made.
+
+Using
+.B -d RG
+behaves in a similar way to the default (without \fB-d\fR),
+opening an output file for each \fB@RG\fR line in the header.
+However, unlike the default,
+new output files will be opened for any RG tags found in the alignment records
+irrespective of if they have a matching header \fB@RG\fR line.
+
+The \fB-u\fR option may be used to specify the output filename for any
+records with a missing or unrecognised tag.  This option will always write
+out a file even if there are no records.
+
+Output format defaults to BAM.  For SAM or CRAM then either set the format with
+\fB--output-fmt\fR or use \fB-f\fR to set the file extension e.g.
+\fB-f %*_%#.sam\fR. 
+
+.SH OPTIONS
+.TP 14
+.BI "-u " FILE1
+.RI "Put reads with no tag or an unrecognised tag into " FILE1
+.TP
+.BI "-h " FILE2
+.RI "Use the header from " FILE2 " when writing the file given in the " -u
+option.
+This header completely replaces the one from the input file.
+It must be compatible with the input file header, which means it must
+have the same number of references listed in the @SQ lines and the
+references must be in the same order and have the same lengths.
+.TP
+.BI "-f " STRING
+Output filename format string (see below)
+["%*_%#.%."]
+.TP
+.BI "-d " TAG
+Split reads by TAG value into distinct files. Only the TAG key must be 
+supplied with the option. The value of the TAG has to be a string (i.e.
+.BR key:Z:value ") or an integer (" key:i:value ")."
+
+Using this option changes the default filename format string to "%*_%!.%.",
+so that tag values appear in the output file names.
+This can be overridden by using the \fB-f\fR option.
+.TP
+.BI "-p " NUMBER
+Pad numeric values in \fB%#\fR and \fB%!\fR format expansions to this many
+digits using leading zeros.
+For \fB%!\fR, only integer tag values will be padded.
+String tag values will be left unchanged,
+even if the value only includes digits.
+.TP
+.BI "-M,--max-split " NUM
+Limit the number of files created by the \fB-d\fR option to \fINUM\fR (default
+100).
+This prevents accidents where trying to split on a tag with high cardinality
+could result in the creation of a very large number of output files.
+Once the file limit is reached,
+any tag values not already seen will be treated as unmatched and the program
+will exit with an error unless the \fB-u\fR option is in use.
+
+If desired, the limit can be removed using \fB-M -1\fR,
+although in practice the number of outputs will still be restricted by
+system limits on the number of files that can be open at once.
+
+If splitting by read group, and the read group count in the header
+is higher than the requested limit then the limit will be raised to match.
+.TP
+.B -v
+Verbose output
+.TP
+.BI --no-PG
+Do not add a @PG line to the header of the output file.
+.PP
+Format string expansions:
+.TS
+center;
+lb l .
+%%	%
+%*	basename
+%#	index (of @RG in the header, or count of TAG values seen so far)
+%!	@RG ID or TAG value
+%.	output format filename extension
+.TE
+.TP
+.BI "-@, --threads " INT
+Number of input/output compression threads to use in addition to main thread [0].
+
+.SH AUTHOR
+.PP
+Written by Martin Pollard from the Sanger Institute.
+
+.SH SEE ALSO
+.IR samtools (1),
+.IR samtools-addreplacerg (1)
+.PP
+Samtools website: <http://www.htslib.org/>

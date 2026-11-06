@@ -266,7 +266,10 @@ using sequence_packed_equality_resolver = sequence_packed_equality_kernel (*)(
 inline constexpr std::size_t sequence_rank_io_chunk_capacity = 1024u;
 
 /** Native rank-table operations supplied by the selected Highway target. */
-enum class sequence_rank_transform : std::uint8_t { translate_triplets, synthesize_triplets };
+enum class sequence_rank_transform : std::uint8_t {
+    translate_triplets, synthesize_triplets, synthesize_paired_nibbles, collapse_equal_triplets, map_bytes, pack_nibbles,
+    unpack_nibbles, reverse_bytes, validate_phred, validate_fastq, validate_missing_quality
+};
 
 /** Scalar-only ABI; input/output are disjoint bounded native-rank tiles.
  * Forward lookup uses one entry per source triplet; inverse entries pack three

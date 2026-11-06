@@ -23,9 +23,13 @@ struct translation_options {
     incomplete_codon_policy trailing{incomplete_codon_policy::reject};
 };
 
+/** Missing canonical representatives either fail or preserve the residue via an NNN envelope. */
+enum class missing_codon_policy : std::uint8_t { reject, preserve_with_ambiguous_triplet };
+
 /** Representative codons use one deterministic source-rank right-inverse policy. */
 struct back_translation_options {
     seqan3::genetic_code code{seqan3::genetic_code::canonical};
+    missing_codon_policy missing{missing_codon_policy::reject};
 };
 
 /** Checked forward geometry; source offsets use the selected whole-view orientation. */
@@ -132,19 +136,51 @@ template<seqan3::aminoacid_alphabet Source, seqan3::nucleotide_alphabet Destinat
 template<seqan3::aminoacid_alphabet Source, seqan3::nucleotide_alphabet Destination>
 inline constexpr auto reverse_translation_ranks = make_reverse_translation_table<Source, Destination>();
 
-/** Native triplet bytes derived from the same optional representative codons. */
+/** Select the shared representative; NNN is allowed only when no representative exists. */
 template<seqan3::aminoacid_alphabet Source, seqan3::nucleotide_alphabet Destination>
-inline constexpr auto reverse_translation_gather = [] {
-    static_assert(3u * std::numeric_limits<std::uint8_t>::digits <= std::numeric_limits<std::uint32_t>::digits);
-    std::array<std::uint32_t, seqan3::alphabet_size<Source>> values{};
+[[nodiscard]] constexpr std::optional<std::array<std::uint8_t, 3>> select_representative_codon(
+        std::size_t rank, missing_codon_policy missing) {
     constexpr const auto& representatives = reverse_translation_ranks<Source, Destination>;
-    for (std::size_t rank = 0; rank < representatives.size(); ++rank)
-        if (representatives[rank])
-            for (std::size_t base = 0; base < representatives[rank]->size(); ++base)
-                values[rank] |= static_cast<std::uint32_t>((*representatives[rank])[base])
-                    << (base * std::numeric_limits<std::uint8_t>::digits);
+    if (rank >= representatives.size()) return std::nullopt;
+    if (representatives[rank]) return representatives[rank];
+    if (missing != missing_codon_policy::preserve_with_ambiguous_triplet) return std::nullopt;
+    constexpr auto unknown = seqan3::assign_char_to('N', Destination{});
+    if constexpr (seqan3::to_char(unknown) != 'N') return std::nullopt;
+    constexpr auto rank_unknown = static_cast<std::uint8_t>(seqan3::to_rank(unknown));
+    return std::array{rank_unknown, rank_unknown, rank_unknown};
+}
+
+/** Native triplet bytes derived solely from the shared selected representative policy. */
+template<seqan3::aminoacid_alphabet Source, seqan3::nucleotide_alphabet Destination>
+[[nodiscard]] constexpr auto make_reverse_translation_gather(missing_codon_policy missing) {
+    std::array<std::uint32_t, seqan3::alphabet_size<Source>> values{};
+    for (std::size_t rank = 0u; rank < values.size(); ++rank) {
+        const auto codon = select_representative_codon<Source, Destination>(rank, missing);
+        if (codon)
+            for (std::size_t base = 0u; base < codon->size(); ++base)
+                values[rank] |= static_cast<std::uint32_t>((*codon)[base]) << (8u * base);
+    }
     return values;
-}();
+}
+
+/** Default inverse codebook preserves the existing rejecting public conversion policy. */
+template<seqan3::aminoacid_alphabet Source, seqan3::nucleotide_alphabet Destination>
+inline constexpr auto reverse_translation_gather =
+    make_reverse_translation_gather<Source, Destination>(missing_codon_policy::reject);
+
+/** A consumer receives bounded original-rank tiles and owns only destination layout. */
+template<class Consumer, bool Reverse>
+concept back_translation_tile_consumer = requires(Consumer& consumer,
+        std::span<const std::uint8_t> ranks, std::size_t position, bool final_tile, std::size_t symbols) {
+    typename Consumer::codon_alphabet;
+    typename Consumer::result_type;
+    requires seqan3::nucleotide_alphabet<typename Consumer::codon_alphabet>;
+    { consumer.begin(symbols) } -> std::same_as<std::expected<void, sequence_conversion_error>>;
+    { consumer.template consume<Reverse>(ranks, position, final_tile) }
+        -> std::same_as<std::expected<void, sequence_conversion_error>>;
+    { consumer.finish(symbols) }
+        -> std::same_as<std::expected<typename Consumer::result_type, sequence_conversion_error>>;
+};
 
 namespace translation_detail {
 
@@ -169,7 +205,7 @@ template<sequence_conversion_sink Writer>
 } // namespace translation_detail
 } // namespace bioseq::sequences
 
-namespace bioseq::sequences::translation_detail {
+export namespace bioseq::sequences::translation_detail {
 
 /** Borrow bounded native tiles, invoke the selected target, and immediately pack output. */
 template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
@@ -213,48 +249,96 @@ template<seqan3::nucleotide_alphabet Source, sequence_conversion_sink Writer>
     return finish(writer, geometry.output_symbols);
 }
 
-/** Expand bounded amino-acid rank tiles through the same generated numerical entry. */
-template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
+/** Read each original protein window once and feed the shared checked codon policy. */
+template<bool Reverse, seqan3::aminoacid_alphabet Source, class Consumer>
+    requires back_translation_tile_consumer<Consumer, Reverse>
 [[nodiscard]] auto back_translate_rank_windows(const storage::borrowed_rank_window_source& source,
-        std::size_t begin, std::size_t end, Writer& writer,
-        simd::sequence_rank_transform_kernel transform)
-    -> std::expected<rank_pack_result, sequence_conversion_error> {
-    using destination = typename Writer::traits::alphabet_type;
-    static_assert(seqan3::nucleotide_alphabet<destination>);
-    constexpr const auto& representatives = reverse_translation_ranks<Source, destination>;
-    constexpr const auto& table = reverse_translation_gather<Source, destination>;
+        std::size_t begin, std::size_t end, const back_translation_options& options, Consumer& consumer)
+    -> std::expected<typename Consumer::result_type, sequence_conversion_error> {
+    using destination = typename Consumer::codon_alphabet;
+    if (options.code != seqan3::genetic_code::canonical)
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::unsupported_genetic_code});
+    if (options.missing != missing_codon_policy::reject
+        && options.missing != missing_codon_policy::preserve_with_ambiguous_triplet)
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::output_contract_violation});
+    if (begin > end || end > source.symbol_count)
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::invalid_interval});
+    if (source.orientation != storage::sequence_transform::identity
+        || source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
+    const auto projected = common::checked_mul(end - begin, std::size_t{3u});
+    if (!projected)
+        return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::size_overflow});
+    const auto prepared = consumer.begin(*projected);
+    if (!prepared) return std::unexpected(prepared.error());
     constexpr auto capacity = simd::sequence_rank_io_chunk_capacity;
-    static_assert(capacity <= std::numeric_limits<std::size_t>::max() / 3u);
-    if (transform == nullptr) return std::unexpected(sequence_conversion_error{
-        sequence_conversion_error_code::output_contract_violation});
     std::array<std::uint8_t, capacity> scratch{};
-    std::array<std::uint8_t, 3u * capacity> output{};
-    for (auto position = begin; position < end;) {
-        const auto count = std::min(capacity, end - position);
-        const auto input = source.read_checked(position, count, scratch);
-        if (!input) return std::unexpected(sequence_conversion_error{
+    std::size_t consumed{};
+    while (consumed < end - begin) {
+        const auto count = std::min(capacity, end - begin - consumed);
+        std::size_t position = begin + consumed;
+        if constexpr (Reverse) position = end - consumed - count;
+        const auto ranks = source.read_checked(position, count, scratch);
+        if (!ranks) return std::unexpected(sequence_conversion_error{
             .code = sequence_conversion_error_code::source_read_failed, .input_position = position});
-        for (std::size_t index = 0; index < count; ++index) {
-            const auto rank = (*input)[index];
-            if (rank >= representatives.size() || !representatives[rank])
+        for (std::size_t index = 0u; index < count; ++index) {
+            const auto rank = (*ranks)[index];
+            if (rank >= seqan3::alphabet_size<Source>
+                || !select_representative_codon<Source, destination>(rank, options.missing))
                 return std::unexpected(sequence_conversion_error{
-                    .code = rank >= representatives.size()
+                    .code = rank >= seqan3::alphabet_size<Source>
                         ? sequence_conversion_error_code::invalid_source_rank
                         : sequence_conversion_error_code::unrepresentable_symbol,
-                    .input_position = position + index, .oriented_position = position + index,
-                    .source_rank = rank});
+                    .input_position = position + index, .source_rank = rank});
         }
-        const auto destination_ranks = std::span<std::uint8_t>{output.data(), 3u * count};
-        if (!transform(simd::sequence_rank_transform::synthesize_triplets, *input,
-                       seqan3::alphabet_size<Source>, table, destination_ranks))
-            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::output_contract_violation});
-        const auto status = simd::active_target::append_native_ranks_chunk(
-            std::span<const std::uint8_t>{destination_ranks}, writer);
-        if (status != rank_pack_status::ok) return std::unexpected(packing_failure(status));
-        position += count;
+        const auto written = consumer.template consume<Reverse>(*ranks, position, count == end - begin - consumed);
+        if (!written) return std::unexpected(written.error());
+        consumed += count;
     }
-    return finish(writer, 3u * (end - begin));
+    return consumer.finish(*projected);
 }
+
+/** Adapt the existing packed destination to the single inverse source traversal. */
+template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
+struct packed_backtranslation_consumer {
+    using codon_alphabet = typename Writer::traits::alphabet_type;
+    using result_type = rank_pack_result;
+    Writer& writer;
+    simd::sequence_rank_transform_kernel transform{};
+    std::span<const std::uint32_t> table;
+
+    /** Check even empty conversions before finalizing destination storage. */
+    [[nodiscard]] std::expected<void, sequence_conversion_error> begin([[maybe_unused]] std::size_t count) {
+        if (transform == nullptr || table.size() != seqan3::alphabet_size<Source>)
+            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::output_contract_violation});
+        return {};
+    }
+
+    /** Synthesize one bounded codon tile and append it through the existing rank packer. */
+    template<bool Reverse>
+    [[nodiscard]] std::expected<void, sequence_conversion_error> consume(
+            std::span<const std::uint8_t> ranks, std::size_t position, [[maybe_unused]] bool final_tile) {
+        static_assert(!Reverse);
+        constexpr auto capacity = simd::sequence_rank_io_chunk_capacity;
+        if (ranks.size() > capacity)
+            return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::output_contract_violation});
+        std::array<std::uint8_t, 3u * capacity> storage{};
+        const auto output = std::span{storage}.first(3u * ranks.size());
+        if (!transform(simd::sequence_rank_transform::synthesize_triplets, ranks,
+                seqan3::alphabet_size<Source>, table, output))
+            return std::unexpected(sequence_conversion_error{
+                .code = sequence_conversion_error_code::output_contract_violation, .input_position = position});
+        const auto status = simd::active_target::append_native_ranks_chunk(std::span<const std::uint8_t>{output}, writer);
+        if (status != rank_pack_status::ok) return std::unexpected(packing_failure(status));
+        return {};
+    }
+
+    /** Preserve packed word counts and padding from the existing writer. */
+    [[nodiscard]] std::expected<rank_pack_result, sequence_conversion_error> finish(std::size_t count) {
+        return translation_detail::finish(writer, count);
+    }
+};
+
 } // namespace bioseq::sequences::translation_detail
 
 export namespace bioseq::sequences {
@@ -293,7 +377,9 @@ template<seqan3::aminoacid_alphabet Source, sequence_conversion_sink Writer>
     if (source.orientation != storage::sequence_transform::identity
         || source.alphabet_code != supported_storage_alphabets::template index_of<Source>())
         return std::unexpected(sequence_conversion_error{sequence_conversion_error_code::incompatible_alphabets});
-    return translation_detail::back_translate_rank_windows<Source>(source, begin, end, writer, transform);
+    const auto table = make_reverse_translation_gather<Source, typename Writer::traits::alphabet_type>(options.missing);
+    translation_detail::packed_backtranslation_consumer<Source, Writer> consumer{writer, transform, table};
+    return translation_detail::back_translate_rank_windows<false, Source>(source, begin, end, options, consumer);
 }
 
 /** Convert native sequence ranks into caller-admitted packed storage.

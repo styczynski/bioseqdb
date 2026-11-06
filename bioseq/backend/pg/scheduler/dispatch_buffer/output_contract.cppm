@@ -4,6 +4,8 @@
  */
 module;
 #include <cstdint>
+#include <cstddef>
+#include <optional>
 struct TupleTableSlot;
 
 export module bioseq.postgres.scheduler.dispatch_buffer.output_contract;
@@ -23,6 +25,9 @@ struct dispatch_next_output {
     std::int64_t sequence_rowno = -1;
     std::uint64_t query_ordinal = 0;
     const bioseq::simd::match_result* match = nullptr;
+    /** Borrowed input selectors, valid only until this output batch is cleared. */
+    std::size_t operand_entry_index{};
+    std::optional<std::size_t> operand_query_index;
 };
 
 } // namespace bioseq::scheduler

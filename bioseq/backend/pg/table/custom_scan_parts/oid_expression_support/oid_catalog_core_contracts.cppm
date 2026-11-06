@@ -34,6 +34,10 @@ export struct bioseq_stub_oids {
     Oid secondary_chain_score_oid;
     Oid is_reverse_oid;
     Oid is_primary_oid;
+    Oid export_alignment_status_oid;
+    Oid alignment_ordinal_oid;
+    Oid alignment_query_sequence_oid;
+    Oid alignment_reference_sequence_oid;
     Oid has_cigar_oid;
     Oid divergence_oid;
     Oid cigar_oid;
@@ -100,5 +104,7 @@ is_bioseq_projection_funcid(const Oid funcid, const bioseq_stub_oids& o) noexcep
            funcid == o.chain_score_oid || funcid == o.dp_max_score_oid ||
            funcid == o.seed_count_oid || funcid == o.secondary_chain_score_oid ||
            funcid == o.is_reverse_oid || funcid == o.is_primary_oid ||
+           funcid == o.export_alignment_status_oid || funcid == o.alignment_ordinal_oid ||
+           funcid == o.alignment_query_sequence_oid || funcid == o.alignment_reference_sequence_oid ||
            funcid == o.has_cigar_oid || funcid == o.divergence_oid || funcid == o.cigar_oid;
 }

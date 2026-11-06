@@ -12,6 +12,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <libassert/assert.hpp>
 #include <string>
 #include <span>
@@ -66,6 +67,25 @@ struct alignas(64) fastq_parser_state {
     bool quality_pending_cr = false;
     /// Borrowed pointers to the batch's shared storage.
     std::vector<char>* header_storage = nullptr;
+    raw_header_buffer* streamed_header = nullptr;
+
+    /** Count the selected batch or admitted streaming header owner. */
+    [[nodiscard]] std::size_t header_size() const noexcept {
+        return streamed_header ? streamed_header->size() : header_storage->size();
+    }
+    /** Borrow a completed header for bounded diagnostics. */
+    [[nodiscard]] std::string_view header_view() const noexcept {
+        return streamed_header ? streamed_header->view()
+            : std::string_view{header_storage->data() + header_start_offset, header_storage->size() - header_start_offset};
+    }
+    /** Append raw bytes and normalize a split final carriage return once. */
+    [[nodiscard]] std::expected<void, std::string> append_header(std::string_view bytes, bool complete) {
+        if (streamed_header) return streamed_header->append_fragment(bytes, complete);
+        header_storage->insert(header_storage->end(), bytes.begin(), bytes.end());
+        if (complete && header_storage->size() > header_start_offset && header_storage->back() == '\r')
+            header_storage->pop_back();
+        return {};
+    }
     std::vector<std::uint8_t>* quality_storage = nullptr;
 
     /// Reset record-local progress while keeping attached batch storage.
@@ -179,8 +199,7 @@ template <sequence_alphabet p_alphabet,
     const auto reject_quality_byte = [&](unsigned byte, std::size_t field_offset,
                                          std::size_t failure_cursor,
                                          std::size_t file_position) -> record_parse_result {
-        const std::string header(state.header_storage->data() + state.header_start_offset,
-            state.header_storage->size() - state.header_start_offset);
+        const std::string header{state.header_view().substr(0u, 256u)};
         state.rollback_current_record();
         emit_failure(failure_fn, input_failure_kind::invalid_quality_byte,
             "invalid FASTQ quality byte {} at quality offset {} in record '{}' (file position {})",
@@ -202,7 +221,7 @@ template <sequence_alphabet p_alphabet,
             return record_parse_result{parse_outcome::abort, parse_cursor};
         }
         // Snapshot record-start offsets for emit_record.
-        state.header_start_offset = state.header_storage->size();
+        state.header_start_offset = state.header_size();
         state.body.record_start_offset = state.body.output_storage->size();
         state.quality_start_offset = state.quality_storage->size();
         parse_cursor += 1;
@@ -214,22 +233,15 @@ template <sequence_alphabet p_alphabet,
         const std::size_t remaining_bytes = slab_size - parse_cursor;
         const std::size_t newline_offset =
             simd::scan_first_byte('\n', slab_data + parse_cursor, remaining_bytes);
+        const auto appended = state.append_header(
+            {reinterpret_cast<const char*>(slab_data + parse_cursor), newline_offset}, newline_offset != remaining_bytes);
+        if (!appended) {
+            emit_failure(failure_fn, "{}", appended.error());
+            return record_parse_result{parse_outcome::abort, parse_cursor};
+        }
         if (newline_offset == remaining_bytes) {
-            state.header_storage->insert(
-                state.header_storage->end(),
-                reinterpret_cast<const char*>(slab_data + parse_cursor),
-                reinterpret_cast<const char*>(slab_data + parse_cursor + remaining_bytes));
             parse_cursor = slab_size;
             return need_more();
-        }
-        state.header_storage->insert(
-            state.header_storage->end(),
-            reinterpret_cast<const char*>(slab_data + parse_cursor),
-            reinterpret_cast<const char*>(slab_data + parse_cursor + newline_offset));
-        // The terminating carriage return may have arrived in an earlier refill.
-        if (state.header_storage->size() > state.header_start_offset &&
-            state.header_storage->back() == '\r') {
-            state.header_storage->pop_back();
         }
         parse_cursor += newline_offset + 1;
         state.progress = fastq_parser_progress::at_body_line_start;
@@ -393,7 +405,7 @@ template <sequence_alphabet p_alphabet,
 
     // Finish the packed sequence and emit the completed record.
     if (state.progress == fastq_parser_progress::finished_record) {
-        const std::size_t header_size = state.header_storage->size() - state.header_start_offset;
+        const std::size_t header_size = state.header_size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] = bioseq::simd::active_target::
             finalize_encode_state<p_storage_unit, bits_per_char, letters_per_unit>(state.body);

@@ -27,6 +27,7 @@ import bioseq.postgres.configuration.core;
 import bioseq.postgres.vectorization.execution;
 import bioseq.postgres.vectorization.aggregator_node;
 import bioseq.postgres.sequences.random;
+import bioseq.postgres.storage.io.exporting;
 
 using namespace bioseq::postgres::support;
 
@@ -541,6 +542,7 @@ column_planner_hook(Query* parse,
 			bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
 				bioseq::settings::vectorization::enabled, bioseq::settings::planner::index_scan::enabled,
 				(stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
+            stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(parse, stmt);
 			bioseq::postgres::extension::cache_provider::
 				bioseq_cache_provider_after_planned_statement(stmt);
 			return stmt;
@@ -599,6 +601,7 @@ column_planner_hook(Query* parse,
 	PG_END_TRY();
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() returning");
 
+    stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(parse, stmt);
 	bioseq::postgres::extension::cache_provider::
 		bioseq_cache_provider_after_planned_statement(stmt);
 	return stmt;

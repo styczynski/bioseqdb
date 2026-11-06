@@ -16,12 +16,12 @@ module;
 #include <fstream>
 #include <functional>
 #include <map>
+#include <limits>
 #include <simdjson.h>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -35,6 +35,7 @@ import bioseq.sequences;
 import bioseq.io.reader;
 import bioseq.io.options;
 import bioseq.io.writer;
+import bioseq.parallelism.pool;
 
 namespace bioseq::io::benchmark::detail {
 
@@ -178,13 +179,16 @@ template <bool p_is_fasta>
     return input;
 }
 
-/// Write the prepared batches with the requested number of producer threads.
+/// Write prepared batches within the current shared-arena participant budget.
 template <bool p_is_fasta>
 [[nodiscard]] io_measurement
 run_bioseq_writer(const writer_input& input, std::size_t thread_count, bool use_mmap_sink = false) {
     constexpr auto file_type =
         p_is_fasta ? sequence_file_format::fasta : sequence_file_format::fastq;
     writer_options options{};
+    options.overwrite = true;
+    concurrency_options concurrency{};
+    concurrency.worker_count = thread_count;
     if (use_mmap_sink) {
         // Leave room for record formatting when reserving the mapped output file.
         // The capacity hint must be large enough for the complete result.
@@ -194,47 +198,16 @@ run_bioseq_writer(const writer_input& input, std::size_t thread_count, bool use_
             estimated_output_bytes > 4096 ? estimated_output_bytes : 4096;
     }
     auto writer_or_err =
-        sequence_writer<seq::dna4, file_type>::open(input.output_scratch_path, options);
+        sequence_writer<seq::dna4, file_type>::open(input.output_scratch_path, options, concurrency);
     if (!writer_or_err) {
         bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer open failed: {}",
                                          writer_or_err.error());
         return {};
     }
     auto& writer = *writer_or_err;
-    const std::size_t batches_total = input.batches.size();
-    if (thread_count <= 1 || batches_total <= 1) {
-        for (const auto& batch : input.batches) {
-            if (!writer.write_batch(batch)) {
-                bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer write_batch failed");
-                (void)writer.close();
-                return {};
-            }
-        }
-    } else {
-        const std::size_t resolved_threads =
-            thread_count > batches_total ? batches_total : thread_count;
-        std::atomic<bool> any_failure{false};
-        // Write one disjoint range of batches from a producer thread.
-        auto run_shard = [&any_failure, &batches_total, &input, &resolved_threads, &writer](
-                             std::size_t shard_index) {
-            const std::size_t shard_start = (batches_total * shard_index) / resolved_threads;
-            const std::size_t shard_end = (batches_total * (shard_index + 1)) / resolved_threads;
-            for (std::size_t batch_index = shard_start; batch_index < shard_end; ++batch_index) {
-                if (!writer.write_batch(input.batches[batch_index])) {
-                    any_failure.store(true, std::memory_order_relaxed);
-                    return;
-                }
-            }
-        };
-        std::vector<std::thread> shard_threads;
-        shard_threads.reserve(resolved_threads);
-        for (std::size_t shard_index = 0; shard_index < resolved_threads; ++shard_index) {
-            shard_threads.emplace_back(run_shard, shard_index);
-        }
-        for (auto& thread : shard_threads)
-            thread.join();
-        if (any_failure.load(std::memory_order_relaxed)) {
-            (void)writer.close();
+    for (const auto& batch : input.batches) {
+        if (!writer.write_batch(batch)) {
+            bioseq_log<logging_level::error>("[bioseq.io.benchmark] ordered writer failed");
             return {};
         }
     }
@@ -319,32 +292,41 @@ template <bool p_is_fasta>
     return result;
 }
 
-/// Select the writer implementation from  the configured algorithm name.
+/** Resolve the existing algorithm's requested total budget; zero rejects an unknown name. */
+[[nodiscard]] std::size_t writer_worker_budget(std::string_view algorithm) {
+    if (algorithm == "bioseq_writer_sync_fasta" || algorithm == "bioseq_writer_sync_fastq"
+        || algorithm == "naive_ofstream_fasta" || algorithm == "naive_ofstream_fastq") return 1u;
+    if (algorithm == "bioseq_writer_parallel4_fasta" || algorithm == "bioseq_writer_parallel4_fastq"
+        || algorithm == "bioseq_writer_mmap_fasta" || algorithm == "bioseq_writer_mmap_fastq") return 4u;
+    if (algorithm == "bioseq_writer_parallel8_fasta" || algorithm == "bioseq_writer_parallel8_fastq") return 8u;
+    return 0u;
+}
+
+/** Prepare the existing writer variant outside timing, including single-caller native baselines. */
+[[nodiscard]] io_pool_scope prepare_writer_iteration(std::string_view algorithm, std::size_t repeat) {
+    const auto requested = writer_worker_budget(algorithm);
+    io_pool_scope preparation{static_cast<std::int64_t>(requested)};
+    if (!preparation.error.empty()) return preparation;
+    const auto& pool = parallelism::global_pool::instance();
+    bioseq_log<logging_level::info>(
+        "writer budget: algorithm={} repeat={} requested_workers={} pool_limit={} "
+        "framework_limit={} active_workers=unobserved",
+        algorithm, repeat, requested, pool.maximum_concurrency(), preparation.framework_limit);
+    return preparation;
+}
+
+/// Select the writer implementation using the same budget resolver as untimed preparation.
 [[nodiscard]] io_measurement dispatch_writer(std::string_view algo, const writer_input& input) {
-    if (algo == "bioseq_writer_sync_fasta")
-        return run_bioseq_writer<true>(input, 1);
-    if (algo == "bioseq_writer_parallel4_fasta")
-        return run_bioseq_writer<true>(input, 4);
-    if (algo == "bioseq_writer_parallel8_fasta")
-        return run_bioseq_writer<true>(input, 8);
-    // Exercise mapped output with four producers. A positive capacity hint
-    // selects the mmap sink in sequence_writer.
-    if (algo == "bioseq_writer_mmap_fasta")
-        return run_bioseq_writer<true>(input, 4, /*use_mmap_sink=*/true);
-    if (algo == "bioseq_writer_sync_fastq")
-        return run_bioseq_writer<false>(input, 1);
-    if (algo == "bioseq_writer_parallel4_fastq")
-        return run_bioseq_writer<false>(input, 4);
-    if (algo == "bioseq_writer_parallel8_fastq")
-        return run_bioseq_writer<false>(input, 8);
-    if (algo == "bioseq_writer_mmap_fastq")
-        return run_bioseq_writer<false>(input, 4, /*use_mmap_sink=*/true);
-    if (algo == "naive_ofstream_fasta")
-        return run_naive_ofstream<true>(input);
-    if (algo == "naive_ofstream_fastq")
-        return run_naive_ofstream<false>(input);
-    bioseq_log<logging_level::error>("[bioseq.io.benchmark] unknown writer algorithm '{}'", algo);
-    return {};
+    const auto workers = writer_worker_budget(algo);
+    if (workers == 0u) {
+        bioseq_log<logging_level::error>("[bioseq.io.benchmark] unknown writer algorithm '{}'", algo);
+        return {};
+    }
+    if (algo == "naive_ofstream_fasta") return run_naive_ofstream<true>(input);
+    if (algo == "naive_ofstream_fastq") return run_naive_ofstream<false>(input);
+    const bool use_mmap_sink = algo == "bioseq_writer_mmap_fasta" || algo == "bioseq_writer_mmap_fastq";
+    if (algo.ends_with("_fasta")) return run_bioseq_writer<true>(input, workers, use_mmap_sink);
+    return run_bioseq_writer<false>(input, workers, use_mmap_sink);
 }
 
 /// Run the selected writer after input batches and an output path are ready.
@@ -426,12 +408,16 @@ template <bool p_is_fasta>
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));
     // Reject empty output even if a record-count comparison could match zero.
     metrics.emplace("output_bytes_nonzero", output.bytes_written > 0 ? 1.0 : 0.0);
-    const double match = input.is_fastq ? roundtrip_match<false>(input.output_scratch_path,
-                                                                 input.source_record_count,
-                                                                 input.expected_content_hash_fastq)
-                                        : roundtrip_match<true>(input.output_scratch_path,
-                                                                input.source_record_count,
-                                                                input.expected_content_hash_fasta);
+    // A rejected budget or failed write must not validate a prior variant's file.
+    const bool measured_output = output.bytes_written > 0u
+        && output.observed_record_count == input.source_record_count;
+    const double match = !measured_output ? std::numeric_limits<double>::quiet_NaN()
+        : input.is_fastq ? roundtrip_match<false>(input.output_scratch_path,
+                                                input.source_record_count,
+                                                input.expected_content_hash_fastq)
+                        : roundtrip_match<true>(input.output_scratch_path,
+                                               input.source_record_count,
+                                               input.expected_content_hash_fasta);
     metrics.emplace("roundtrip_record_match", match);
     return metrics;
 }

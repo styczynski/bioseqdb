@@ -54,6 +54,7 @@ import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipel
 import bioseq.postgres.storage.manager;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.scanner.source_provider_contract;
+import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.column.table_access;
 
@@ -147,6 +148,8 @@ class tuple_dispatch_buffer {
          */
         std::optional<bioseq::storage::sequence_locator> seq_loc;
         std::optional<bioseq::storage::sequence_locator> per_row_query_loc;
+        std::uint16_t seq_locator_padding{};
+        std::uint16_t per_row_query_locator_padding{};
         /*
          * Keep  a read-only wrapper for an expanded slice without flattening
          * its piece tree. The batch owns the wrapper and keeps its source
@@ -212,6 +215,8 @@ class tuple_dispatch_buffer {
         buffered_scan_entry* entry;
         std::uint64_t query_ordinal;
         const ::bioseq::simd::match_result* match;
+        std::size_t operand_entry_index{};
+        std::optional<std::size_t> operand_query_index;
     };
 
     struct join_query_ref {
@@ -931,6 +936,61 @@ class tuple_dispatch_buffer {
      * Raise a PostgreSQL error if a cursor points to missing data.
      */
     [[nodiscard]] std::optional<next_output> read_next_output();
+
+    /** Borrow the exact evaluated alignment input; promote locators only for requested helpers.
+     * Flat and expanded values retain batch ownership. A locator's expanded recipe is created
+     * in result_context through its original physical column and the statement's index policy.
+     */
+    [[nodiscard]] Datum retained_operand(std::size_t entry_index,
+            std::optional<std::size_t> query_index, bool query, MemoryContext result_context) {
+        if (entry_index >= buffered_entries.size() || result_context == nullptr)
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq retained alignment operand has no live batch owner")));
+        auto& entry = buffered_entries[entry_index];
+        if (query && query_index) {
+            if (!join_mode || *query_index >= join_queries.size()
+                || join_queries[*query_index].query_slot == nullptr)
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("bioseq retained join query operand has no live slot")));
+            bool is_null{};
+            const auto value = slot_getattr(join_queries[*query_index].query_slot,
+                join_query_slot_seq_resno, &is_null);
+            return is_null ? Datum{0} : value;
+        }
+        if (query && !per_row_mode()) {
+            if (mmsearch_state.query_varlena.empty()) return Datum{0};
+            return PointerGetDatum(mmsearch_state.query_varlena.data());
+        }
+        const bool is_null = query ? entry.per_row_query_is_null : entry.seq_is_null;
+        if (is_null) return Datum{0};
+        const auto recipe = query ? entry.per_row_query_recipe_datum : entry.seq_recipe_datum;
+        if (recipe != Datum{0}) return recipe;
+        const auto& locator = query ? entry.per_row_query_loc : entry.seq_loc;
+        if (locator) {
+            const auto attribute = query ? mmsearch_state.per_row_query_attno
+                : join_mode ? join_target_storage_seq_attno : mmsearch_state.seq_attno;
+            if (attribute <= 0 || source_provider == nullptr)
+                ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                    errmsg("bioseq retained locator operand lost its physical source")));
+            bioseq::storage::validate_exact_pg_sequence_source_provider(source_provider,
+                user_relid, user_main_database_oid, user_main_tablespace_oid,
+                user_main_relfilenode, scan_snapshot, result_context, attribute);
+            const auto stub = bioseq::storage::alloc_locator_stub_datum_in(result_context,
+                query ? mmsearch_state.query_alphabet_code : mmsearch_state.alphabet_code,
+                query ? mmsearch_state.query_storage_unit_byte_width : mmsearch_state.storage_unit_byte_width,
+                query ? entry.per_row_query_locator_padding : entry.seq_locator_padding,
+                locator->logical_length, *locator);
+            return bioseq::storage::promote_pg_sequence_locator(source_provider, attribute, stub,
+                result_context, nullptr, 0u, entry.sequence_rowno < 0 ? std::nullopt
+                    : std::optional<std::uint64_t>{static_cast<std::uint64_t>(entry.sequence_rowno)},
+                read_sequence_index_active);
+        }
+        const auto* header = query ? entry.per_row_query_hdr() : entry.seq_hdr();
+        if (header == nullptr)
+            ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                errmsg("bioseq non-NULL alignment operand lost its retained representation")));
+        return PointerGetDatum(const_cast<bioseq::pg_types::seq*>(header));
+    }
 
     /* True while this batch is ready for the custom scan to drain its results. */
     [[nodiscard]] constexpr bool has_finished_writing() const {

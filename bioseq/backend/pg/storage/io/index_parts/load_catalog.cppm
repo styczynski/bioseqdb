@@ -55,6 +55,8 @@ extern "C" {
 
 export module bioseq.postgres.storage.io:load_catalog;
 
+import bioseq.io.sinks;
+
 import bioseq.common.logging; // Load diagnostics.
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
@@ -79,6 +81,9 @@ import bioseq.io.file_kind;                    // detect_sequence_file_kind, seq
 import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
 
 import bioseq.io.identifier_parser.formats;
+import bioseq.io.identifier_parser.preservation;
+import bioseq.io.simd;
+import bioseq.parallelism.memory_admission;
 import bioseq.io.identifier_parser; // Map input header fields to destination columns.
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
@@ -182,8 +187,14 @@ void finish_load_write_states(load_context& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
+/** Plain decoded options used only on the PostgreSQL caller thread. */
+struct load_request_options {
+    std::optional<std::string> phred_type;
+    std::optional<Oid> reference_table;
+};
+
 /** Decode generated nullable load options without relying on composite layout. */
-[[nodiscard]] std::optional<std::string> parse_load_options(HeapTupleHeader header) {
+[[nodiscard]] load_request_options parse_load_options(HeapTupleHeader header) {
     using codec = bioseq::postgres::storage::io::sql_row_codecs::load_options_codec;
     auto* descriptor = bioseq::postgres::support::invoke_pg_as_cpp([header] {
         return lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId(header), HeapTupleHeaderGetTypMod(header));
@@ -200,56 +211,99 @@ void finish_load_write_states(load_context& ctx) {
             });
         }
         bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { ReleaseTupleDesc(descriptor); });
-        return name;
+        return {std::move(name), options.reference_table};
     } catch (...) {
         bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { ReleaseTupleDesc(descriptor); });
         throw;
     }
 }
 
-/** Resolve and, if needed, add a FASTQ quality column before any live writer exists. */
-void prepare_quality_destination(Oid relid, const std::string& name,
-        std::optional<std::string> requested) {
+/** Create one nullable IO destination under the existing owner/lock/DDL contract.
+ * The type SQL is produced internally from registry names, never caller text. */
+void prepare_load_destination(Oid relid, const std::string& name, const std::string& type_sql) {
     if (name.empty() || name.size() >= NAMEDATALEN || name.find('\0') != std::string::npos)
-        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "invalid quality destination name");
-    if (requested && *requested == "phred") *requested = "phred42";
-    const auto code = requested ? pgseq_supported_alphabets::try_index_of_name(requested->c_str())
-                               : std::optional<pgseq_supported_alphabets::alphabet_code_t>{};
-    if (requested && (!code || !is_quality_alphabet_code(*code)))
-        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
-            "phred_type must be phred, phred42, phred63 or phred68-legacy");
-    // Recheck after acquiring the stronger lock; never hold row/fragment resources during DDL.
-    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &requested, &code] {
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "invalid IO destination name");
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &type_sql] {
         Relation relation = table_open(relid, RowExclusiveLock);
-        AttrNumber attno = get_attnum(relid, name.c_str());
-        if (attno == InvalidAttrNumber) {
+        if (get_attnum(relid, name.c_str()) == InvalidAttrNumber) {
             table_close(relation, RowExclusiveLock);
             relation = table_open(relid, AccessExclusiveLock);
-            attno = get_attnum(relid, name.c_str());
-            if (attno == InvalidAttrNumber) {
+            if (get_attnum(relid, name.c_str()) == InvalidAttrNumber) {
                 if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
                     ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                         errmsg("must be owner of table %s", RelationGetRelationName(relation)),
-                        errhint("Ask the table owner to predeclare quality column \"%s\" before loading FASTQ.", name.c_str())));
+                        errhint("Ask the table owner to predeclare IO destination column \"%s\".", name.c_str())));
                 const auto* qualified = quote_qualified_identifier(
                     get_namespace_name(RelationGetNamespace(relation)), RelationGetRelationName(relation));
                 const auto* quoted = quote_identifier(name.c_str());
-                const auto* alphabet = requested ? requested->c_str() : "phred42";
-                char* command = psprintf("ALTER TABLE %s ADD COLUMN %s bioseq.seq('%s')", qualified, quoted, alphabet);
-                // ALTER TABLE rejects a relation with another live relcache
-                // reference. Keep our exclusive lock, but release the descriptor
-                // before entering utility execution and reopen its new shape.
+                char* command = psprintf("ALTER TABLE %s ADD COLUMN %s %s", qualified, quoted, type_sql.c_str());
                 table_close(relation, NoLock);
                 relation = nullptr;
-                if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "cannot connect SPI for quality column DDL");
-                const int status = SPI_execute(command, false, 0);
-                if (status != SPI_OK_UTILITY) elog(ERROR, "quality column DDL failed");
+                if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "cannot connect SPI for IO destination DDL");
+                if (SPI_execute(command, false, 0) != SPI_OK_UTILITY) elog(ERROR, "IO destination DDL failed");
                 SPI_finish();
                 CommandCounterIncrement();
                 relation = table_open(relid, NoLock);
-                attno = get_attnum(relid, name.c_str());
             }
         }
+        table_close(relation, NoLock);
+    });
+}
+
+/** Reuse the unique declared quality column unless the caller explicitly maps it. */
+[[nodiscard]] std::string resolve_quality_destination_name(Oid relid, std::optional<std::string> requested) {
+    if (requested) return *requested;
+    std::string name;
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name] {
+        Relation relation = table_open(relid, RowExclusiveLock);
+        const auto descriptor = RelationGetDescr(relation);
+        for (int index = 0; index < descriptor->natts; ++index) {
+            const auto* attribute = TupleDescAttr(descriptor, index);
+            if (attribute->attisdropped || attribute->atttypid != load_seq_type_oid() || attribute->atttypmod < 0
+                || !is_quality_alphabet_code(compact_sequence_stdc_type_params::decode(attribute->atttypmod).alphabet_code)) continue;
+            if (!name.empty()) ereport(ERROR, (errcode(ERRCODE_AMBIGUOUS_COLUMN),
+                errmsg("multiple quality columns; specify column_mapping")));
+            name = NameStr(attribute->attname);
+        }
+        table_close(relation, NoLock);
+    });
+    return name.empty() ? "quality" : name;
+}
+
+/** Inspect the first canonical text envelope before automatic destination DDL.
+ * Prefix windows grow only after existing memory admission succeeds. */
+[[nodiscard]] std::optional<idp::text_record_shape> inspect_text_record_shape(const char* path,
+        bioseq::io::sequence_file_format format) {
+    const auto raw = bioseq::io::read_first_sequence_header(path, format, bioseq::io::default_reader_options);
+    if (!raw) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, raw.error());
+    if (!*raw) return std::nullopt;
+    const auto canonical = idp::parse_canonical_header((**raw).text(), idp::canonical_parse_mode::shape);
+    if (!canonical) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, canonical.error());
+    if (!*canonical) return std::nullopt;
+    // Only SQL identifiers/type names and decimal descriptors allocate strings here.
+    constexpr std::size_t scalar_capacity = 4096u;
+    auto scalar_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
+    if (!scalar_permit) raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit canonical descriptor scratch");
+    idp::text_record_shape shape;
+    const auto decoded = idp::decode_preservation_record((**canonical).payload, shape, true, scalar_capacity);
+    if (!decoded) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, decoded.error());
+    return shape;
+}
+
+/** Resolve a quality destination, creating its exact declared codec when absent. */
+void prepare_quality_destination(Oid relid, const std::string& name,
+        std::optional<std::string> requested, std::string_view default_alphabet = "phred42") {
+    if (requested && *requested == "phred") *requested = "phred42";
+    const auto code = requested ? pgseq_supported_alphabets::try_index_of_name(requested->c_str())
+                               : std::optional<pgseq_supported_alphabets::alphabet_code_t>{};
+    if (requested && (!code || !is_quality_alphabet_code(*code)
+            || pgseq_supported_alphabets::name_of_alphabet_code(*code) != *requested))
+        raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
+            "phred_type must be phred, phred42, phred63, phred94 or phred68-legacy");
+    prepare_load_destination(relid, name, "bioseq.seq('" + requested.value_or(std::string{default_alphabet}) + "')");
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &code] {
+        Relation relation = table_open(relid, RowExclusiveLock);
+        const auto attno = get_attnum(relid, name.c_str());
         if (attno <= 0) ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION), errmsg("quality destination is missing")));
         auto* attr = TupleDescAttr(RelationGetDescr(relation), attno - 1);
         const auto type = compact_sequence_stdc_type_params::decode(attr->atttypmod < 0 ? 0 : attr->atttypmod);
@@ -266,6 +320,36 @@ void prepare_quality_destination(Oid relid, const std::string& name,
     });
 }
 
+/** Select one full alignment composite, or add its default nullable destination. */
+[[nodiscard]] std::string prepare_alignment_destination(Oid relid, std::optional<std::string> requested) {
+    std::string name = requested.value_or(std::string{});
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &requested] {
+        Relation relation = table_open(relid, RowExclusiveLock);
+        const auto type_oid = bioseq_type_oid_missing_ok("alignment");
+        const auto descriptor = RelationGetDescr(relation);
+        for (int index = 0; index < descriptor->natts; ++index) {
+            const auto* attribute = TupleDescAttr(descriptor, index);
+            if (attribute->attisdropped || attribute->atttypid != type_oid) continue;
+            if (requested && name != NameStr(attribute->attname)) continue;
+            if (!requested && !name.empty())
+                ereport(ERROR, (errcode(ERRCODE_AMBIGUOUS_COLUMN), errmsg("multiple alignment destinations; specify column_mapping")));
+            name = NameStr(attribute->attname);
+        }
+        table_close(relation, NoLock);
+    });
+    if (name.empty()) name = "alignment";
+    prepare_load_destination(relid, name, "bioseq.alignment");
+    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name] {
+        Relation relation = table_open(relid, RowExclusiveLock);
+        const auto attno = get_attnum(relid, name.c_str());
+        const auto* attribute = TupleDescAttr(RelationGetDescr(relation), attno - 1);
+        if (attribute->atttypid != bioseq_type_oid_missing_ok("alignment") || attribute->attidentity || attribute->attgenerated)
+            ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH), errmsg("alignment destination must be a writable bioseq.alignment column")));
+        table_close(relation, NoLock);
+    });
+    return name;
+}
+
 // Map header fields to typed columns.
 
 /** @brief Column number and type information needed to convert header values. */
@@ -277,66 +361,6 @@ struct column_attr {
     /// Type modifier passed to the input  function, such, as a text length limit.
     std::int32_t atttypmod;
 };
-
-/// Read header-to-column mappings from a bioseq.column_mapping array.
-/// @param arr Borrowed PostgreSQL array whose element type is checked.
-/// @return A vector of mappings whose strings live in the current PostgreSQL memory context.
-/// @throws PostgreSQL ERROR for an invalid element type, a NULL element or a NULL column name.
-[[nodiscard]] std::vector<idp::user_column_mapping> parse_column_mapping_array(ArrayType* arr) {
-    std::vector<idp::user_column_mapping> maps;
-    const Oid mapping_type_oid = ARR_ELEMTYPE(arr);
-    Datum* elems = nullptr;
-    bool* nulls = nullptr;
-    int nelems = 0;
-    bioseq::postgres::support::invoke_pg_as_cpp([arr, mapping_type_oid, &elems, &nulls, &nelems] {
-        deconstruct_array(arr, mapping_type_oid, -1, false, 'd', &elems, &nulls, &nelems);
-    });
-    TupleDesc cmdesc = bioseq::postgres::support::invoke_pg_as_cpp(
-        [mapping_type_oid] { return lookup_rowtype_tupdesc(mapping_type_oid, -1); });
-    const MemoryContext mapping_result_context = CurrentMemoryContext;
-    std::exception_ptr failure;
-    try {
-        column_mapping_codec::validate_descriptor(cmdesc);
-        for (int i = 0; i < nelems; ++i) {
-            if (nulls[i]) {
-                raise_load_error_as_cpp(ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                                        fmt::format("columns[] element {} is NULL", i + 1));
-            }
-            HeapTupleHeader th = bioseq::postgres::support::pg_datum::to_heap_tuple_header(
-                bioseq::postgres::support::pg_datum::from_raw(elems[i]));
-            HeapTupleData tmp{};
-            tmp.t_len = HeapTupleHeaderGetDatumLength(th);
-            tmp.t_data = th;
-            const column_mapping_row mapping =
-                column_mapping_codec::deform(&tmp, cmdesc, mapping_result_context);
-            if (!mapping.column_name.has_value() || *mapping.column_name == nullptr) {
-                raise_load_error_as_cpp(ERRCODE_NULL_VALUE_NOT_ALLOWED,
-                                        fmt::format("columns[{}].column_name is NULL", i + 1));
-            }
-            const char* col = bioseq::postgres::support::invoke_pg_as_cpp(
-                [value = *mapping.column_name] { return text_to_cstring(value); });
-            const char* ds =
-                !mapping.data_source.has_value() || *mapping.data_source == nullptr
-                    ? ""
-                    : bioseq::postgres::support::invoke_pg_as_cpp(
-                          [value = *mapping.data_source] { return text_to_cstring(value); });
-            maps.push_back(idp::user_column_mapping{std::string_view{col}, std::string_view{ds}});
-        }
-    } catch (...) {
-        failure = std::current_exception();
-    }
-    try {
-        bioseq::postgres::support::invoke_pg_as_cpp([cmdesc] { ReleaseTupleDesc(cmdesc); });
-    } catch (...) {
-        if (failure == nullptr) {
-            failure = std::current_exception();
-        }
-    }
-    if (failure != nullptr) {
-        std::rethrow_exception(failure);
-    }
-    return maps;
-}
 
 /// Prepare header parsing and conversion into the target columns.
 /// Cache type input functions and defaults before reading records, eeping any
@@ -382,7 +406,7 @@ void setup_typed_column_mapping(load_context& ctx,
             continue;
         }
         const std::int16_t attno = static_cast<std::int16_t>(i + 1);
-        if (attno == seq_attno || attno == ctx.cols.quality_attno) {
+        if (attno == seq_attno || attno == ctx.cols.quality_attno || attno == ctx.cols.alignment_attno) {
             continue;
         }
         if (attr->attidentity != '\0' || attr->attgenerated != '\0') {
@@ -411,19 +435,18 @@ void setup_typed_column_mapping(load_context& ctx,
         col_attrs.push_back(column_attr{attno, attr->atttypid, attr->atttypmod});
     }
 
-    // Preserve the whole header when AUTO has one text destination and no
-    // explicit mapping.
-    if (requested_fmt == idp::header_format::automatic && user_maps.empty() &&
-        columns.size() == 1 && columns[0].is_text) {
-        ctx.parser_active = false;
-        ctx.effective_fmt = idp::header_format::plain;
-        ctx.cols.header_attno = col_attrs[0].attno;
-    } else {
+    // Canonical headers must pass through routing even with a sole text
+    // destination. Ordinary headers retain the existing whole-header behavior.
+    const bool preserve_whole_header =
+        requested_fmt == idp::header_format::automatic && user_maps.empty() &&
+        columns.size() == 1 && columns[0].is_text;
     ctx.parser_active = true;
 
     // Sample headers to choose the format for  automatic parsing.
-    idp::header_format effective_fmt = requested_fmt;
-    if (requested_fmt == idp::header_format::automatic) {
+    idp::header_format effective_fmt = preserve_whole_header
+        ? idp::header_format::plain : requested_fmt;
+    if (requested_fmt == idp::header_format::automatic && !preserve_whole_header
+        && kind.format != bioseq::io::sequence_file_format::sam && kind.format != bioseq::io::sequence_file_format::bam) {
         const auto samples = bioseq::io::sample_sequence_headers(
             path, kind.format, bioseq::io::default_reader_options);
         std::vector<std::string_view> views;
@@ -499,8 +522,6 @@ void setup_typed_column_mapping(load_context& ctx,
             .io_param = io_param,
             .typmod = ca.atttypmod,
         });
-    }
-
     }
 
     // Prepare default expressions once, then evaluate them separately for each row.

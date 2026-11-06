@@ -71,7 +71,8 @@ namespace bioseq::sequences {
 template<class Alphabet>
 concept quality_alphabet = std::same_as<Alphabet, seqan3::phred42>
     || std::same_as<Alphabet, seqan3::phred63>
-    || std::same_as<Alphabet, seqan3::phred68solexa>;
+    || std::same_as<Alphabet, seqan3::phred68solexa>
+    || std::same_as<Alphabet, seqan3::phred94>;
 
 template<quality_alphabet Alphabet>
 struct quality_alphabet_traits {
@@ -461,6 +462,14 @@ struct supported_alphabets {
         return widths[code];
     }
 
+    /** Return the exact rank cardinality for checked alphabet-erased IO. */
+    [[nodiscard]] static constexpr std::optional<std::size_t> cardinality_for_code(
+        std::size_t code) noexcept {
+        constexpr std::array cardinalities{p_entries::cardinality...};
+        if (code >= cardinalities.size()) return std::nullopt;
+        return cardinalities[code];
+    }
+
 
     /** @brief Smallest unsigned integer type representing every pack index. */
     using alphabet_code_t = typename boost::uint_t<
@@ -691,16 +700,18 @@ using supported_biological_alphabets = supported_alphabets<
     alphabet_entry<seq::aa10li, "aa10li">,
     alphabet_entry<seq::aa10murphy, "aa10murphy">,
     alphabet_entry<seq::aa20, "aa20">,
-    alphabet_entry<seq::aa27, "aa27">>;
+    alphabet_entry<seq::aa27, "aa27">,
+    alphabet_entry<seq::dna15, "dna15">>;
 
-/** One physical registry: existing biological and CIGAR codes never move. */
+/** One physical registry shared by biological, CIGAR and quality storage. */
 using supported_storage_alphabets = typename decltype(
     []<class... Entries>(std::tuple<Entries...>) {
         return std::type_identity<supported_alphabets<Entries...,
             alphabet_entry<bioseq::cigar_symbol, "cigar">,
             alphabet_entry<seq::phred42, "phred42">,
             alphabet_entry<seq::phred63, "phred63">,
-            alphabet_entry<seq::phred68solexa, "phred68-legacy">>>{};
+            alphabet_entry<seq::phred68solexa, "phred68-legacy">,
+            alphabet_entry<seq::phred94, "phred94">>>{};
     }(supported_biological_alphabets::alphabet_entries_tuple{}))::type;
 
 /** Filter dispatch by capability while retaining physical registry codes. */
@@ -731,13 +742,13 @@ using supported_quality_alphabets = storage_alphabet_view<true>;
 [[nodiscard]] constexpr bool is_quality_alphabet_code(std::uint8_t code) noexcept {
     return code == supported_storage_alphabets::index_of<seq::phred42>()
         || code == supported_storage_alphabets::index_of<seq::phred63>()
-        || code == supported_storage_alphabets::index_of<seq::phred68solexa>();
+        || code == supported_storage_alphabets::index_of<seq::phred68solexa>()
+        || code == supported_storage_alphabets::index_of<seq::phred94>();
 }
 
-static_assert(supported_storage_alphabets::index_of<bioseq::cigar_symbol>() == 6);
-static_assert(supported_quality_alphabets::index_of<seq::phred42>() == 7);
-static_assert(supported_quality_alphabets::index_of<seq::phred63>() == 8);
-static_assert(supported_quality_alphabets::index_of<seq::phred68solexa>() == 9);
+static_assert(supported_storage_alphabets::index_of<bioseq::cigar_symbol>()
+    == supported_biological_alphabets::alphabet_count);
+static_assert(bioseq::sequences::quality_alphabet_traits<seq::phred94>::score_max == 93);
 
 // Force every capability initializer, including false-valued CIGAR/quality
 // members, before the compiler-backed registry visitor reads their APValues.

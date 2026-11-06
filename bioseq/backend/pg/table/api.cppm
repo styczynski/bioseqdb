@@ -10,6 +10,11 @@ module;
 export module bioseq.postgres.table:api;
 
 export import :table_access_method_contracts;
+// Export binding reuses the registered OIDs and exact lazy-expression classifier;
+// their definitions remain owned by the existing table planner modules.
+export import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+export import :custom_scan_slice_path_expression_contract;
+export import :custom_scan_join_ownership_semantic_admission_contracts;
 
 /* Other modules import bioseq.postgres.table, which re-exports these
  * declarations. Keeping implementation partitions out of  that interface

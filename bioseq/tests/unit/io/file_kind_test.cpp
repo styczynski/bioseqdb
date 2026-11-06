@@ -23,7 +23,7 @@ TEST_CASE("file_utils: FASTA extensions map to FASTA",
         const auto kind = detect_sequence_file_kind(path);
         REQUIRE(kind.has_value());
         REQUIRE(kind->format == sequence_file_format::fasta);
-        REQUIRE(kind->is_gzip_suffix == false);
+        REQUIRE(kind->compression == bioseq::io::sequence_compression::none);
     }
 }
 
@@ -33,7 +33,7 @@ TEST_CASE("file_utils: FASTQ extensions map to FASTQ",
         const auto kind = detect_sequence_file_kind(path);
         REQUIRE(kind.has_value());
         REQUIRE(kind->format == sequence_file_format::fastq);
-        REQUIRE(kind->is_gzip_suffix == false);
+        REQUIRE(kind->compression == bioseq::io::sequence_compression::none);
     }
 }
 
@@ -42,7 +42,7 @@ TEST_CASE("file_utils: case-insensitive extension match",
     const auto kind = detect_sequence_file_kind("a.FASTA");
     REQUIRE(kind.has_value());
     REQUIRE(kind->format == sequence_file_format::fasta);
-    REQUIRE(kind->is_gzip_suffix == false);
+    REQUIRE(kind->compression == bioseq::io::sequence_compression::none);
 
     const auto kind_q = detect_sequence_file_kind("READS.FQ");
     REQUIRE(kind_q.has_value());
@@ -54,17 +54,17 @@ TEST_CASE("file_utils: gzip suffixes are stripped and flagged",
     const auto fastq_gz = detect_sequence_file_kind("a.fastq.gz");
     REQUIRE(fastq_gz.has_value());
     REQUIRE(fastq_gz->format == sequence_file_format::fastq);
-    REQUIRE(fastq_gz->is_gzip_suffix == true);
+    REQUIRE(fastq_gz->compression == bioseq::io::sequence_compression::gzip);
 
     const auto fasta_bgz = detect_sequence_file_kind("x.fasta.bgz");
     REQUIRE(fasta_bgz.has_value());
     REQUIRE(fasta_bgz->format == sequence_file_format::fasta);
-    REQUIRE(fasta_bgz->is_gzip_suffix == true);
+    REQUIRE(fasta_bgz->compression == bioseq::io::sequence_compression::bgzf);
 
     const auto fa_bgzf = detect_sequence_file_kind("genome.fa.bgzf");
     REQUIRE(fa_bgzf.has_value());
     REQUIRE(fa_bgzf->format == sequence_file_format::fasta);
-    REQUIRE(fa_bgzf->is_gzip_suffix == true);
+    REQUIRE(fa_bgzf->compression == bioseq::io::sequence_compression::bgzf);
 }
 
 TEST_CASE("file_utils: unrecognised extension is an error",

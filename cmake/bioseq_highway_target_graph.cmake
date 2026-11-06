@@ -425,3 +425,30 @@ if(NOT BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS STREQUAL
   message(FATAL_ERROR
     "Highway template ownership and final-provider exclusion diverged")
 endif()
+
+# Runtime dispatch and every generated target kernel are non-PostgreSQL owners.
+# Share their BMI/object closure between the extension and standalone IO consumers.
+# The scheduler's highway_registry partition remains owned by the PG target.
+add_library(bioseq_highway_runtime STATIC)
+set_target_properties(bioseq_highway_runtime PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_highway_runtime
+  PRIVATE
+    ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
+    "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
+  PUBLIC FILE_SET bioseq_highway_runtime_modules
+    TYPE CXX_MODULES
+    BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+    FILES
+      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES}
+      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS})
+target_link_libraries(bioseq_highway_runtime PUBLIC
+  bioseq_modules_nopg
+  bioseq_highway_fixed_target
+  bioseq_highway_target_policy)
+add_dependencies(bioseq_highway_runtime bioseq_highway_target_modules)

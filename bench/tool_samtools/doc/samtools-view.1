@@ -1,0 +1,702 @@
+'\" t
+.TH samtools-view 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools view \- views and converts SAM/BAM/CRAM files
+.\"
+.\" Copyright (C) 2008-2011, 2013-2022, 2024, 2026-25 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+.PP
+.B samtools view
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+.RI [ region ...]
+
+.SH DESCRIPTION
+.PP
+With no options or regions specified, prints all alignments in the specified
+input alignment file (in SAM, BAM, or CRAM format) to standard output
+in SAM format (with no header).
+
+You may specify one or more space-separated region specifications after the
+input filename to restrict output to only those alignments which overlap the
+specified region(s). Use of region specifications requires a coordinate-sorted
+and indexed input file (in BAM or CRAM format).
+
+The
+.BR -b ,
+.BR -C ,
+.BR -1 ,
+.BR -u ,
+.BR -h ,
+.BR -H ,
+and
+.B -c
+options change the output format from the default of headerless SAM, and the
+.B -o
+and
+.B -U
+options set the output file name(s).
+
+The
+.B -t
+and
+.B -T
+options provide additional reference data. One of these two options is required
+when SAM input does not contain @SQ headers, and the
+.B -T
+option is required whenever writing CRAM output.
+
+The
+.BR -L ,
+.BR -M ,
+.BR -N ,
+.BR -r ,
+.BR -R ,
+.BR -n ,
+.BR -d ,
+.BR -D ,
+.BR -s ,
+.BR -q ,
+.BR -l ,
+.BR -m ,
+.BR -f ,
+.BR -F ,
+.BR -G ,
+and
+.B --rf
+options filter the alignments that will be included in the output to only those
+alignments that match certain criteria.
+
+The
+.BR -p ,
+option sets the UNMAP flag on filtered alignments then writes them to the output
+file.
+
+The
+.BR -x ,
+.BR -B ,
+.BR --add-flags ,
+and
+.B --remove-flags
+options modify the data which is contained in each alignment.
+
+The
+.B -X
+option can be used to allow user to specify customized index file location(s) if the data
+folder does not contain any index file. See
+.B EXAMPLES
+section for sample of usage.
+
+Finally, the
+.B -@
+option can be used to allocate additional threads to be used for compression, and the
+.B -?
+option requests a long help message.
+
+.TP
+.B REGIONS:
+.RS
+Regions can be specified as: RNAME[:STARTPOS[-ENDPOS]] and all position
+coordinates are 1-based.
+
+Important note: when multiple regions are given, some alignments may be output
+multiple times if they overlap more than one of the specified regions.
+
+Examples of region specifications:
+.TP 10
+.B chr1
+Output all alignments mapped to the reference sequence named `chr1' (i.e. @SQ SN:chr1).
+.TP
+.B chr2:1000000
+The region on chr2 beginning at base position 1,000,000 and ending at the
+end of the chromosome.
+.TP
+.B chr3:1000-2000
+The 1001bp region on chr3 beginning at base position 1,000 and ending at base
+position 2,000 (including both end positions).
+.TP
+.B '*'
+Output the unmapped reads at the end of the file.
+(This does not include any unmapped reads placed on a reference sequence
+alongside their mapped mates.)
+.TP
+.B .
+Output all alignments.
+(Mostly unnecessary as not specifying a region at all has the same effect.)
+.RE
+
+
+.SH OPTIONS
+.TP 10
+.BR -b ", " --bam
+Output in the BAM format.
+.TP
+.BR -C ", " --cram
+Output in the CRAM format (requires -T).
+.TP
+.BR -1 ", " --fast
+Enable fast compression.  This also changes the default output format to
+BAM, but this can be overridden by the explicit format options or
+using a filename with a known suffix.
+.TP
+.BR -u ", " --uncompressed
+Output uncompressed data. This also changes the default output format to
+BAM, but this can be overridden by the explicit format options or
+using a filename with a known suffix.
+
+This option saves time spent on compression/decompression and is thus
+preferred when the output is piped to another samtools command.
+.TP
+.BR -h ", " --with-header
+Include the header in the output.
+.TP
+.BR -H ", " --header-only
+Output the header only.
+.TP
+.B --no-header
+When producing SAM format, output alignment records but not headers.
+This is the default; the option can be used to reset the effect of
+.BR -h / -H .
+.TP
+.BR -c ", " --count
+Instead of printing the alignments, only count them and print the
+total number. All filter options, such as
+.BR -f ,
+.BR -F ,
+and
+.BR -q ,
+are taken into account.
+.RB "The " -p " option is ignored in this mode."
+.TP
+.BI "--save-counts " FILE
+Save data on the number of records processed, accepted and rejected by any
+filter options to
+.IR FILE .
+The data is stored in JSON format.
+The counts only include records that are processed through the filtering
+options.
+Any records skipped while iterating over regions will not be included,
+so the number processed may be less than the total number of records in the
+file.
+If used with the \fB--fetch-pairs\fR option,
+counts will be given for records processed during the second pass over the data.
+.TP
+.BR -? ", " --help
+Output long help and exit immediately.
+.TP
+.BI "-o " FILE ", --output " FILE
+Output to
+.I FILE [stdout].
+.TP
+.BI "-U " FILE ", --unoutput " FILE ", --output-unselected " FILE
+Write alignments that are
+.I not
+selected by the various filter options to
+.IR FILE .
+When this option is used, all alignments (or all alignments intersecting the
+.I regions
+specified) are written to either the output file or this file, but never both.
+.TP
+.BR -p ", " --unmap
+Set the UNMAP flag on alignments that are not selected by the filter options.
+These alignments are then written to the normal output.  When the
+\fB--unoutput\fR option is used, the alignments modified by \fB-p\fR are
+output to the unoutput file instead.  Note this combination does not necessarily
+mean all unmapped reads are written to the unoutput file, as some
+non-filtered alignments may have already been unmapped.  To achieve
+this, filter flags must contain a filter on MAPPED.
+.TP
+.BI "-t " FILE ", --fai-reference " FILE
+A tab-delimited
+.IR FILE .
+Each line must contain the reference name in the first column and the length of
+the reference in the second column, with one line for each distinct reference.
+Any additional fields beyond the second column are ignored. This file also
+defines the order of the reference sequences in sorting. If you run:
+`samtools faidx <ref.fa>', the resulting index file
+.I <ref.fa>.fai
+can be used as this
+.IR FILE .
+.TP
+.BI "-T " FILE ", --reference " FILE
+A FASTA format reference
+.IR FILE ,
+optionally compressed by
+.B bgzip
+and ideally indexed by
+.B samtools
+.BR faidx .
+If an index is not present one will be generated for you, if the reference
+file is local.
+
+If the reference file is not local,
+but is accessed instead via an https://, s3:// or other URL,
+the index file will need to be supplied by the server alongside the reference.
+It is possible to have the reference and index files in different locations
+by supplying both to this option separated by the string "##idx##",
+for example:
+
+.B -T ftp://x.com/ref.fa##idx##ftp://y.com/index.fa.fai
+
+However, note that only the location of the reference will be stored
+in the output file header.
+If this method is used to make CRAM files, the cram reader may not be able to
+find the index, and may not be able to decode the file unless it can get
+the references it needs using a different method.
+.TP
+.BI "-L " FILE ", --target-file " FILE ", --targets-file " FILE
+Only output alignments overlapping the input BED
+.I FILE
+[null].
+.TP
+.BR -M ", " --use-index
+Use the multi-region iterator on the union of a BED file and
+command-line region arguments.  This avoids re-reading the same regions
+of files so can sometimes be much faster.  Note this also removes
+duplicate sequences.  Without this a sequence that overlaps multiple
+regions specified on the command line will be reported multiple times.
+The usage of a BED file is optional and its path has to be preceded by
+.BR -L
+option.
+.TP
+.BI "--region-file " FILE ", --regions-file " FILE
+Use an index and multi-region iterator to only output alignments
+overlapping the input BED
+.IR FILE .
+Equivalent to
+.BI "-M -L " FILE
+or
+.B --use-index --target-file
+.IR FILE .
+.TP
+.BI "-N " FILE ", --qname-file " FILE
+Output only alignments with read names listed in
+.IR FILE .
+If \fIFILE\fR starts with \fB^\fR then the operation is negated and
+only outputs alignment with read groups not listed in \fIFILE\fR.
+It is not permissible to mix both the filter-in and filter-out style
+syntax in the same command.
+.TP
+.BI "-r " STR ", --read-group " STR
+Output alignments in read group
+.I STR
+[null].
+Note that records with no
+.B RG
+tag will also be output when using this option.
+This behaviour may change in a future release.
+.TP
+.BI "-R " FILE ", --read-group-file " FILE
+Output alignments in read groups listed in
+.I FILE
+[null].
+If \fIFILE\fR starts with \fB^\fR then the operation is negated and
+only outputs alignment with read names not listed in \fIFILE\fR.
+It is not permissible to mix both the filter-in and filter-out style
+syntax in the same command.
+Note that records with no
+.B RG
+tag will also be output when using this option.
+This behaviour may change in a future release.
+.TP
+.BR -n ", " --exclude-no-read-group
+Do not output alignments that have no read group.
+.TP
+.BI "-d " STR1[:STR2] ", --tag " STR1[:STR2]
+Only output alignments with tag
+.I STR1
+and associated value
+.IR STR2 ,
+which can be a string or an integer [null].
+The value can be omitted, in which case only the tag is considered.
+
+Note that this option does not specify a tag type.
+For example, use
+.B -d XX:42
+to select alignments with an
+.B XX:i:42
+field, not
+.BR "-d XX:i:42" .
+.TP
+.BI "-D " STR:FILE ", --tag-file " STR:FILE
+Only output alignments with tag
+.I STR
+and associated values listed in
+.I FILE
+[null].
+.TP
+.BI "-q " INT ", --min-MQ " INT
+Skip alignments with MAPQ smaller than
+.I INT
+[0].
+.TP
+.BI "-l " STR ", --library " STR
+Only output alignments in library
+.I STR
+[null].
+.TP
+.BI "-m " INT ", --min-qlen " INT
+Only output alignments with number of CIGAR bases consuming query
+sequence \(>=
+.I INT
+[0]
+.TP
+.BI "-e " STR ", --expr " STR
+Only include alignments that match the filter expression \fISTR\fR.
+The syntax for these expressions is described in the main samtools(1) man page
+under the FILTER EXPRESSIONS heading.
+.TP
+.BI "-f " FLAG ", --require-flags " FLAG
+Only output alignments with all bits set in
+.I FLAG
+present in the FLAG field.
+.I FLAG
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names.
+
+
+For a list of flag names see
+.IR samtools-flags (1).
+.TP
+.BI "-F " FLAG ", --excl-flags " FLAG ", --exclude-flags " FLAG
+Do not output alignments with any bits set in
+.I FLAG
+present in the FLAG field.
+.I FLAG
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names.
+.TP
+.BI "--rf " FLAG " , --incl-flags " FLAG ", --include-flags " FLAG
+Only output alignments with any bit set in
+.I FLAG
+present in the FLAG field.
+.I FLAG
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names.
+.TP
+.BI "-G " FLAG
+Do not output alignments with all bits set in
+.I INT
+present in the FLAG field.  This is the opposite of \fI-f\fR such
+that \fI-f12 -G12\fR is the same as no filtering at all.
+.I FLAG
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names.
+.TP
+.BI "-x " STR ", --remove-tag " STR
+Read tag(s) to exclude from output (repeatable) [null].  This can be a
+single tag or a comma separated list.  Alternatively the option itself
+can be repeated multiple times.
+
+If the list starts with a `^' then it is negated and treated as a
+request to remove all tags except those in \fISTR\fR. The list may be
+empty, so \fB-x ^\fR will remove all tags.
+
+Note that tags will only be removed from reads that pass filtering.
+.TP
+.BI "--keep-tag " STR
+This keeps \fIonly\fR tags listed in \fISTR\fR and is directly equivalent
+to \fB--remove-tag ^\fR\fISTR\fR.  Specifying an empty list will remove
+all tags.  If both \fB--keep-tag\fR and \fB--remove-tag\fR are
+specified then \fB--keep-tag\fR has precedence.
+
+Note that tags will only be removed from reads that pass filtering.
+.TP
+.BR -B ", " --remove-B
+Collapse the backward CIGAR operation.
+.TP
+.BI "--add-flags " FLAG
+Adds flag(s) to read.
+.I FLAG
+can be specified in hex by beginning with `0x' (i.e. /^0x[0-9A-F]+/),
+in octal by beginning with `0' (i.e. /^0[0-7]+/), as a decimal number
+not beginning with '0' or as a comma-separated list of flag names.
+.TP
+.BI "--remove-flags " FLAG
+Remove flag(s) from read.
+.I FLAG
+is specified in the same way as with the
+.B "--add-flags"
+option.
+.TP
+.BI "--subsample " FLOAT
+Output only a proportion of the input alignments, as specified by 0.0 \(<=
+.I FLOAT
+\(<= 1.0, which gives the fraction of templates/pairs to be kept.
+This subsampling acts in the same way on all of the alignment records in
+the same template or read pair, so it never keeps a read but not its mate.
+.TP
+.BI "--subsample-seed " INT | auto
+Subsampling seed used to influence
+.I which
+subset of reads is kept.
+.\" Reads are retained based on a score computed by hashing their QNAME
+.\" field and the seed value.
+If the value is the literal string
+.BR auto ,
+the seed is derived from a hash of the input file's header text.  Because
+each subsampling run appends an
+.B @CO
+header line recording the fraction and seed used (and, unless
+.B --no-PG
+is given, a
+.B @PG
+line as well), re-subsampling a file in \fBauto\fR mode will automatically
+produce a different seed at each step, ensuring the expected fraction of
+reads is retained.
+When subsampling data that has previously been subsampled using an explicit
+seed, be sure to use a different seed value from those used previously;
+otherwise more reads will be retained than expected.
+[auto]
+.TP
+.BI "-s " FLOAT
+Subsampling shorthand option:
+.BI "-s " INT . FRAC
+is equivalent to
+.BI "--subsample-seed " INT " --subsample"
+.RI 0. FRAC .
+.I INT
+may also be the literal string
+.BR auto .
+.TP
+.BI "-@ " INT ", --threads " INT
+Number of BAM compression threads to use in addition to main thread [0].
+.TP
+.BR -P ", " --fetch-pairs
+Retrieve pairs even when the mate is outside of the requested region.
+Enabling this option also turns on the multi-region iterator (\fB-M\fR).
+A region to search must be specified, either on the command-line, or using
+the \fB-L\fR option.
+The input file must be an indexed regular file.
+
+This option first scans the requested region, using the \fBRNEXT\fR and
+\fBPNEXT\fR fields of the records that have the PAIRED flag set and pass
+other filtering options to find where paired reads are located.
+These locations are used to build an expanded region list, and a set of
+\fBQNAME\fRs to allow from the new regions.
+It will then make a second pass, collecting all reads from the
+originally-specified region list together with reads from additional locations
+that match the allowed set of \fBQNAME\fRs.
+Any other filtering options used will be applied to all reads found during this
+second pass.
+
+As this option links reads using \fBRNEXT\fR and \fBPNEXT\fR,
+it is important that these fields are set accurately.
+Use 'samtools fixmate' to correct them if necessary.
+
+Note that this option does not work with the \fB-c, --count\fR;
+\fB-U, --output-unselected\fR; or \fB-p, --unmap\fR options.
+.TP
+.B -S
+Ignored for compatibility with previous samtools versions.
+Previously this option was required if input was in SAM format, but now the
+correct format is automatically detected by examining the first few characters
+of input.
+.TP
+.BR -X ", " --customized-index
+Include customized index file as a part of arguments. See
+.B EXAMPLES
+section for sample of usage.
+.TP
+.BI "-z " FLAGs ", --sanitize " FLAGs
+Perform some sanity checks on the state of SAM record fields, fixing
+up common mistakes made by aligners.  These include soft-clipping
+alignments when they extend beyond the end of the reference, marking
+records as unmapped when they have reference * or position 0, and
+ensuring unmapped alignments have no CIGAR or mapping quality for
+unmapped alignments and no MD, NM, CG or SM tags.
+
+\fIFLAGs\fR is a comma-separated list of keywords chosen from the
+following list.
+
+.RS
+.TP
+unmap
+The UNMAPPED BAM flag. This is set for reads with position <= 0,
+reference name "*" or reads starting beyond the end of the
+reference. Note CIGAR "*" is permitted for mapped data so does not
+trigger this.
+.TP
+pos
+Position and reference name fields.  These may be cleared when a
+sequence is unmapped due to the coordinates being beyond the end of
+the reference.  Selecting this may change the sort order of the file,
+so it is not a part of the \fBon\fR compound argument.
+.TP
+mqual
+Mapping quality.  This is set to zero for unmapped reads.
+.TP
+cigar
+Modifies CIGAR fields, either by adding soft-clips for reads that
+overlap the end of the reference or by clearing it for unmapped
+reads.
+.TP
+cigdup
+Canonicalises CIGAR by collapsing neighbouring elements with identical
+opcodes (provided the length field does not extend beyond 28-bits
+which is problematic for BAM).  So for example 2M 3M becomes 5M, with
+spaces added for clarity only.
+.TP
+cigarx
+Replaces CIGAR "=" and "X" codes with "M".  While "=" and "X" are
+valid codes, they are not supported by CRAM so this can aid validation
+and also improve support by some third party tools that do not cope
+with "=" and "X".  Note this implicitly also enables \fBcigdup\fR so
+10=1X9= becomes 10M1M9M which then becomes 20M.
+.TP
+aux
+For unmapped data, some auxiliary fields are meaningless and will be
+removed.  These include NM, MD, CG and SM.
+.TP
+off
+Perform no sanity fixing.  This is the default
+.TP
+on
+Sanitize data in a way that guarantees the same sort order.  This is
+everything except for \fBpos\fR as it cannot be checked and
+\fBcigarx\fR as it is not erroneous data.
+.TP
+all
+All sanitizing options except \fBcigarx\fR, including \fBpos\fR.
+Combine with \fBall,cigarx\fR to perform the "=" and "X" replacement too.
+.RE
+
+.TP
+.B --no-PG
+Do not add a @PG line to the header of the output file.
+.TP
+.B --remove-ur
+Remove all the UR tags from @SQ lines in the header.
+
+.SH EXAMPLES
+.IP o 2
+Import SAM to BAM when
+.B @SQ
+lines are present in the header:
+.EX 2
+samtools view -bo aln.bam aln.sam
+.EE
+If
+.B @SQ
+lines are absent:
+.EX 2
+samtools faidx ref.fa
+samtools view -bt ref.fa.fai -o aln.bam aln.sam
+.EE
+where
+.I ref.fa.fai
+is generated automatically by the
+.B faidx
+command.
+
+.IP o 2
+Convert a BAM file to a CRAM file using a local reference sequence.
+.EX 2
+samtools view -C -T ref.fa -o aln.cram aln.bam
+.EE
+
+.IP o 2
+Convert a BAM file to a CRAM with NM and MD tags stored verbatim
+rather than calculating on the fly during CRAM decode, so that mixed
+data sets with MD/NM only on some records, or NM calculated using
+different definitions of mismatch, can be decoded without change.  The
+second command demonstrates how to decode such a file.  The request to
+not decode MD here is turning off auto-generation of both MD and NM;
+it will still emit the MD/NM tags on records that had these stored
+verbatim.
+.EX 2
+samtools view -C --output-fmt-option store_md=1 --output-fmt-option store_nm=1 -o aln.cram aln.bam
+samtools view --input-fmt-option decode_md=0 -o aln.new.bam aln.cram
+.EE
+.IP o 2
+An alternative way of achieving the above is listing multiple options
+after the \fB--output-fmt\fR or \fB-O\fR option.  The commands below
+are equivalent to the two above.
+.EX 2
+samtools view -O cram,store_md=1,store_nm=1 -o aln.cram aln.bam
+samtools view --input-fmt cram,decode_md=0 -o aln.new.bam aln.cram
+.EE
+
+.IP o 2
+Include customized index file as a part of arguments.
+.EX 2
+samtools view [options] -X /data_folder/data.bam /index_folder/data.bai chrM:1-10
+.EE
+
+.IP o 2
+Output alignments in read group \fBgrp2\fR (records with no \fBRG\fR tag will also be in the output).
+.EX 2
+samtools view -r grp2 -o /data_folder/data.rg2.bam /data_folder/data.bam
+.EE
+
+.IP o 2
+Only keep reads with tag \fBBC\fR and were the barcode
+matches the barcodes listed in the barcode file.
+.EX 2
+samtools view -D BC:barcodes.txt -o /data_folder/data.barcodes.bam /data_folder/data.bam
+.EE
+
+.IP o 2
+Only keep reads with tag \fBRG\fR and read group \fBgrp2\fR.
+This does almost the same than \fB-r grp2\fR but will not keep records without the \fBRG\fR tag.
+.EX 2
+samtools view -d RG:grp2 -o /data_folder/data.rg2_only.bam /data_folder/data.bam
+.EE
+
+.IP o 2
+Remove the actions of samtools markdup.  Clear the duplicate flag and remove the \fBdt\fR tag, keep the header.
+.EX 2
+samtools view -h --remove-flags DUP -x dt -o /data_folder/dat.no_dup_markings.bam /data_folder/data.bam
+.EE
+
+.SH AUTHOR
+.PP
+Written by Heng Li from the Sanger Institute.
+
+.SH SEE ALSO
+.IR samtools (1),
+.IR samtools-tview (1),
+.IR sam (5)
+.PP
+Samtools website: <http://www.htslib.org/>

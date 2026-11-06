@@ -95,6 +95,46 @@ read_cigar_payload_header(std::span<const std::byte> payload) noexcept {
     return header;
 }
 
+/** Encode one already validated canonical run with deterministic zero padding.
+ * This record codec is shared by indexed payloads and bounded IO replay storage.
+ */
+template<cigar_operation_alphabet Alphabet>
+[[nodiscard]] std::array<std::byte, sizeof(cigar_run_value<Alphabet>)>
+encode_cigar_run_record(cigar_run_value<Alphabet> run) noexcept {
+    std::array<std::byte, sizeof(cigar_run_value<Alphabet>)> record{};
+    const auto rank = seqan3::to_rank(run.operation);
+    std::memcpy(record.data(), std::addressof(run.length), sizeof(run.length));
+    std::memcpy(record.data() + sizeof(run.length), std::addressof(rank), sizeof(rank));
+    return record;
+}
+
+/** Decode one canonical record, validating count, alphabet rank, space and padding. */
+template<cigar_operation_alphabet Alphabet>
+[[nodiscard]] std::expected<cigar_run_value<Alphabet>, cigar_error>
+decode_cigar_run_record(std::span<const std::byte> bytes,
+        cigar_space space = cigar_space::compatibility, std::size_t input_offset = 0u) {
+    using run_type = cigar_run_value<Alphabet>;
+    using rank_type = seqan3::alphabet_rank_t<Alphabet>;
+    static_assert(sizeof(Alphabet) == sizeof(rank_type));
+    static_assert(sizeof(run_type) >= sizeof(typename run_type::length_type) + sizeof(rank_type));
+    if (bytes.size() != sizeof(run_type) || !valid_cigar_space(space))
+        return std::unexpected(cigar_error{cigar_error_code::invalid_encoding, input_offset});
+    typename run_type::length_type length{};
+    rank_type rank{};
+    std::memcpy(std::addressof(length), bytes.data(), sizeof(length));
+    std::memcpy(std::addressof(rank), bytes.data() + sizeof(length), sizeof(rank));
+    if (length == 0u) return std::unexpected(cigar_error{cigar_error_code::zero_count, input_offset});
+    if (rank >= seqan3::alphabet_size<Alphabet>)
+        return std::unexpected(cigar_error{cigar_error_code::invalid_operation, input_offset});
+    for (std::size_t padding = sizeof(length) + sizeof(rank); padding < bytes.size(); ++padding)
+        if (bytes[padding] != std::byte{})
+            return std::unexpected(cigar_error{cigar_error_code::invalid_encoding, input_offset});
+    const auto operation = Alphabet{}.assign_rank(rank);
+    if (!visible_in_space(operation, space))
+        return std::unexpected(cigar_error{cigar_error_code::invalid_operation, input_offset});
+    return run_type{length, operation};
+}
+
 /** Shared indexed decoder; never assumes the backing bytes are contiguous. */
 template<cigar_operation_alphabet Alphabet, cigar_byte_reader Reader>
 class cigar_rle_reader {
@@ -141,28 +181,12 @@ public:
     /** Decode a record using a previously validated cardinality. */
     [[nodiscard]] std::expected<run_type, cigar_error> run_at(
         std::uint32_t index, std::uint32_t run_count_value) const {
-        static_assert(sizeof(Alphabet) == sizeof(seqan3::alphabet_rank_t<Alphabet>));
-        static_assert(sizeof(run_type) >= sizeof(typename run_type::length_type) + sizeof(seqan3::alphabet_rank_t<Alphabet>));
         if (index >= run_count_value)
             return std::unexpected(cigar_error{cigar_error_code::invalid_encoding, index});
         std::array<std::byte, sizeof(run_type)> bytes{};
         const auto copied = reader_.read_bytes(cigar_run_offset<Alphabet>(run_count_value, index), bytes);
         if (!copied) return std::unexpected(copied.error());
-        typename run_type::length_type length{};
-        using rank_type = seqan3::alphabet_rank_t<Alphabet>;
-        rank_type rank{};
-        std::memcpy(std::addressof(length), bytes.data(), sizeof(length));
-        std::memcpy(std::addressof(rank), bytes.data() + sizeof(length), sizeof(rank));
-        if (length == 0u) return std::unexpected(cigar_error{cigar_error_code::zero_count, index});
-        if (rank >= seqan3::alphabet_size<Alphabet>)
-            return std::unexpected(cigar_error{cigar_error_code::invalid_operation, index});
-        for (std::size_t padding = sizeof(length) + sizeof(rank); padding < bytes.size(); ++padding)
-            if (bytes[padding] != std::byte{})
-                return std::unexpected(cigar_error{cigar_error_code::invalid_encoding, index});
-        const auto operation = Alphabet{}.assign_rank(rank);
-        if (!visible_in_space(operation, space_))
-            return std::unexpected(cigar_error{cigar_error_code::invalid_operation, index});
-        return run_type{length, operation};
+        return decode_cigar_run_record<Alphabet>(bytes, space_, index);
     }
     /** Read one canonical record, checking the prefix before addressing it. */
     [[nodiscard]] std::expected<run_type, cigar_error> run_at(std::uint32_t index) const {
@@ -297,10 +321,7 @@ public:
             std::memcpy(destination_.data() + cigar_checkpoint_offset(written_runs_ / cigar_checkpoint_stride),
                         std::addressof(checkpoint), sizeof(checkpoint));
         }
-        std::array<std::byte, sizeof(run_type)> record{};
-        const auto rank = seqan3::to_rank(run.operation);
-        std::memcpy(record.data(), std::addressof(run.length), sizeof(run.length));
-        std::memcpy(record.data() + sizeof(run.length), std::addressof(rank), sizeof(rank));
+        const auto record = encode_cigar_run_record(run);
         std::memcpy(destination_.data() + cigar_run_offset<Alphabet>(expected_runs_, written_runs_),
                     record.data(), record.size());
         logical_length_ = *sum;

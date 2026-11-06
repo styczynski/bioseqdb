@@ -1,0 +1,192 @@
+# First field:
+#   INIT = initialisation, not counted in testing
+#   P = expected to pass
+#   F = expected to fail
+
+# Second field:
+#   Filename of expected output
+
+# Third onwards; command to execute. $fmt is replaced by the current file
+# format, ie sam, bam or cram. $samtools is a pointer to the desired
+# samtools binary. This can be useful for testing older versions.
+
+# # Create variant formats
+INIT x $samtools view -C mpileup.1.bam > mpileup.1.cram
+INIT x $samtools view -C mpileup.2.bam > mpileup.2.cram
+INIT x $samtools view -C mpileup.3.bam > mpileup.3.cram
+INIT x $samtools index mpileup.1.cram
+INIT x $samtools index mpileup.2.cram
+INIT x $samtools index mpileup.3.cram
+INIT x $samtools view -h mpileup.1.bam > mpileup.1.sam
+INIT x $samtools view -S -b overlap50.sam > overlap50.bam
+INIT x $samtools view -S -C overlap50.sam > overlap50.cram
+INIT x $samtools view -S -b anomalous.sam > anomalous.bam 
+INIT x $samtools view -S -C anomalous.sam > anomalous.cram 
+INIT x $samtools view -S -b indels.sam > indels.bam  
+INIT x $samtools view -S -C indels.sam > indels.cram 
+INIT x gunzip -c expected/1.out.f3-6.gz | $awk -v OFS='\t' '{print "CHROMOSOME_I", NR, $0}' > expected/1.out
+INIT x $samtools view -b -o xx#depth1.bam xx#depth1.sam
+INIT x $samtools view -b -o xx#depth2.bam xx#depth2.sam
+INIT x $samtools view -b -o xx#depth3.bam xx#depth3.sam
+INIT x $samtools index xx#depth1.bam
+INIT x $samtools index xx#depth2.bam
+INIT x $samtools index xx#depth3.bam
+
+# Nasty file corner cases
+P 1.out $samtools mpileup -B -Q0 -x -f ce.fa ce#large_seq.bam 
+P 2.out $samtools mpileup -Q0 -x -f ce.fa ce#unmap.bam
+P 3.out $samtools mpileup -Q0 -x -f ce.fa ce#unmap1.bam
+P 4.out $samtools mpileup -Q0 -x -f ce.fa ce#unmap2.bam
+P 5.out $samtools mpileup -Q0 -x -f c1.fa c1#clip.bam
+P 6.out $samtools mpileup -Q0 -x -f c1.fa c1#pad1.bam
+P 7.out $samtools mpileup -Q0 -x -f c1.fa c1#pad2.bam
+
+# I'm not convinced this case is valid, but I also don't know if it's even
+# possible to encode this data in a pileup format output.
+P 8.out $samtools mpileup -Q0 -x -f c1.fa c1#pad3.bam
+P 9.out $samtools mpileup -Q0 -x -f xx.fa xx#minimal.bam
+P 10.out $samtools mpileup -Q0 -x -f xx.fa xx#triplet.bam
+
+# Test basic pileup options
+P 13.out $samtools mpileup -x mpileup.1.$fmt
+P 14.out $samtools mpileup -x mpileup.[123].$fmt
+P 15.out ls -1 mpileup.[123].$fmt > 15.list.tmp; $samtools mpileup -x -b 15.list.tmp
+P 16.out $samtools mpileup -x -f mpileup.ref.fa mpileup.1.$fmt
+P 17.out $samtools mpileup -x -B -f mpileup.ref.fa mpileup.1.$fmt
+P 18.out $samtools mpileup -x -B -f mpileup.ref.fa mpileup.1.$fmt 
+P 19.out $samtools mpileup -x -f mpileup.ref.fa mpileup.1.$fmt 
+P 20.out $samtools mpileup -x -6 -f mpileup.ref.fa mpileup.1.$fmt 
+P 21.out $samtools mpileup -x -E -f mpileup.ref.fa mpileup.1.$fmt 
+P 22.out $samtools mpileup -x -R -f mpileup.ref.fa mpileup.1.$fmt 
+
+# -x option
+P 23.out $samtools mpileup    -f mpileup.ref.fa overlap50.$fmt 
+P 24.out $samtools mpileup -x -f mpileup.ref.fa overlap50.$fmt 
+
+# -6 for Illumina format input
+P 25.out $samtools mpileup -x -6 -f mpileup.ref.fa overlapIllumina.bam 
+
+# -A for anomalous read pairs
+P 26.out $samtools mpileup    -x -Q0 anomalous.$fmt
+P 27.out $samtools mpileup -A -x -Q0 anomalous.$fmt
+
+# -B
+P 28.out $samtools mpileup -B -x -Q1 -f mpileup.ref.fa mpileup.1.$fmt 
+
+# -q; filter by mapping quality
+P 29.out $samtools mpileup -q 61 1read.bam
+P 30.out $samtools mpileup -q 60 1read.bam
+
+# -Q filter by base quality
+P 31.out $samtools mpileup -Q 7 1read.bam
+P 32.out $samtools mpileup -Q 8 1read.bam
+
+# -E
+P 33.out $samtools mpileup    -x -f mpileup.ref.fa mpileup-E.bam
+P 34.out $samtools mpileup -E -x -f mpileup.ref.fa mpileup-E.bam
+
+# -G for excluding RG. All bar one:
+P 35.out $samtools view mpileup.1.bam|sed -n 's/.*RG:Z://;s/[^A-Z0-9].*//p'|sort -u |grep -v ERR013140 > 35.rg.tmp;$samtools mpileup -G 35.rg.tmp mpileup.1.bam
+
+# Region based options
+# SAM indices don't exist (no tabix support due to header?)
+# CRAM index currently fails
+P 37.out $samtools mpileup -x -r 17		mpileup.1.$fmt
+P 38.out $samtools mpileup -x -r 17:4000 	mpileup.1.$fmt
+P 39.out $samtools mpileup -x -r 17:4,000-4,010 mpileup.1.$fmt
+P 40.out $samtools mpileup -l regions 		ce#5b.$fmt
+P 41.out $samtools mpileup -l regions -r CHROMOSOME_V:40-60 ce#5b.$fmt
+P 42.out $samtools mpileup -l regions -r CHROMOSOME_I:40-60 ce#5b.$fmt
+
+# --rf and --ff
+P 43.out $samtools view -h -f 16 mpileup.1.bam | $samtools mpileup -x -
+P 44.out $samtools view -h mpileup.1.bam | $samtools mpileup -x --rf 0x10 -
+P 45.out $samtools view -h -F 16 mpileup.1.bam | $samtools mpileup -x -
+P 46.out $samtools view -h mpileup.1.bam | $samtools mpileup -x --ff 0x714 -
+
+# -d; depth
+P 47.out $samtools mpileup -x -d 8500 -B -f mpileup.ref.fa deep.sam|$awk '{print $4}'
+
+# Pileup output options; -s/O
+P 76.out $samtools mpileup -Q0 -s -x -f mpileup.ref.fa mpileup.1.bam
+P 77.out $samtools mpileup -Q0 -O -x -f mpileup.ref.fa mpileup.1.bam
+
+# A more synthetic output-BP (-O) vs output-BP-5 test.
+P 80.out $samtools mpileup --output-BP   output-BP.sam
+P 81.out $samtools mpileup --output-BP-5 output-BP.sam
+
+# Reverse strand deletions; --reverse-del
+P 78.out $samtools mpileup --reverse-del mpileup.1.bam
+
+# Extra columns and tags; --output-extra
+P 79.out $samtools mpileup -O --output-extra POS,FLAG,NM,QNAME,RG,ENDPOS ../dat/view.001.sam
+
+# -a and -aa.  See depth.reg too
+P a0.out  $samtools mpileup -Q40 -r 17:1-4200 -f mpileup.ref.fa -a mpileup.1.$fmt
+P a1.out  $samtools mpileup -ABQ0 -a  xx#depth1.sam
+P a2.out  $samtools mpileup -ABQ0 -a  xx#depth2.sam
+P a3.out  $samtools mpileup -ABQ0 -a  xx#depth1.sam xx#depth2.sam
+P a4.out  $samtools mpileup -ABQ0 -aa xx#depth1.sam
+P a5.out  $samtools mpileup -ABQ0 -aa xx#depth2.sam
+P a6.out  $samtools mpileup -ABQ0 -aa xx#depth1.sam xx#depth2.sam
+
+# -a with regions / bed
+P a8.out  $samtools mpileup -ABQ0 -a -r xx:5-16 xx#depth1.bam xx#depth2.bam
+P a9.out  $samtools mpileup -ABQ0 -a -l xx.bed  xx#depth1.bam xx#depth2.bam
+P a10.out $samtools mpileup -ABQ0 -a -r xx:8-13 xx#depth1.bam xx#depth2.bam
+P a11.out $samtools mpileup -ABQ0 -a -l xx.bed2 xx#depth1.bam xx#depth2.bam
+
+# -aa with regions/bed
+P a13.out $samtools mpileup -ABQ0 -a -a -r xx:5-16 xx#depth1.bam xx#depth2.bam
+P a14.out $samtools mpileup -ABQ0 -a -a -l xx.bed  xx#depth1.bam xx#depth2.bam
+
+# -a with additional columns (-s and -O)
+P a15.out $samtools mpileup -ABQ0 -a -s  xx#depth1.sam xx#depth2.sam
+P a16.out $samtools mpileup -ABQ0 -a -O  xx#depth1.sam xx#depth2.sam
+P a17.out $samtools mpileup -ABQ0 -a -sO xx#depth1.sam xx#depth2.sam
+
+# Various boundary cases (see samtools#579 and #374)
+# These are the same regions tested as in depth.reg.
+P m5_all1.out  $samtools mpileup -ABQ0               xx#depth3.bam
+P m5_all2.out  $samtools mpileup -ABQ0 -a            xx#depth3.bam
+P m5_all3.out  $samtools mpileup -ABQ0 -aa           xx#depth3.bam
+P m5_blank.out $samtools mpileup -ABQ0     -r xy:5-6 xx#depth3.bam
+P m5_blank.out $samtools mpileup -ABQ0 -a  -r xy:5-6 xx#depth3.bam
+P m5_xy1.out   $samtools mpileup -ABQ0 -aa -r xy:5-6 xx#depth3.bam
+P m5_xx1.out   $samtools mpileup -ABQ0     -r xx:4-10 xx#depth3.bam
+P m5_xx2.out   $samtools mpileup -ABQ0 -a  -r xx:4-10 xx#depth3.bam
+P m5_xx2.out   $samtools mpileup -ABQ0 -aa -r xx:4-10 xx#depth3.bam
+P m5_blank.out $samtools mpileup -ABQ0     -r xx:9    xx#depth3.bam
+P m5_blank.out $samtools mpileup -ABQ0 -a  -r xx:9    xx#depth3.bam
+P m5_xx3.out   $samtools mpileup -ABQ0 -aa -r xx:9    xx#depth3.bam
+P m5_b3.out    $samtools mpileup -ABQ0     -l xx.bed3 xx#depth3.bam
+P m5_b3aa.out  $samtools mpileup -ABQ0 -aa -l xx.bed3 xx#depth3.bam
+
+# Fail as -a shouldn't output xn:16-20 (it doesn't with -r)
+F m5_b3a.out   $samtools mpileup -ABQ0 -a  -l xx.bed3 xx#depth3.bam
+
+# -a with multiple chromosomes (see samtools#2018)
+P mp_2018a.out  $samtools mpileup -aB  -f mp_2018.fa mp_2018.sam
+P mp_2018aa.out $samtools mpileup -aaB -f mp_2018.fa mp_2018.sam
+
+# compound I and D ops along with Pads.
+P mp_D.out      $samtools mpileup -ABQ0 -f mp.fa mp_D.sam
+P mp_DI.out     $samtools mpileup -ABQ0 -f mp.fa mp_DI.sam
+P mp_I.out      $samtools mpileup -ABQ0 -f mp.fa mp_I.sam
+P mp_ID.out     $samtools mpileup -ABQ0 -f mp.fa mp_ID.sam
+P mp_N.out      $samtools mpileup -ABQ0 -f mp.fa mp_N.sam
+P mp_N2.out     $samtools mpileup -ABQ0 -f mp.fa mp_N2.sam
+P mp_P.out      $samtools mpileup -ABQ0 -f mp.fa mp_P.sam
+P mp_ID_rev.out $samtools mpileup -ABQ0 --reverse-del -f mp.fa mp_ID_rev.sam
+
+# Mpileup format simplifications by omitting indels
+P mp1_d.out     $samtools mpileup --no-output-del mpileup.1.bam
+P mp1_dd.out    $samtools mpileup --no-output-del --no-output-del mpileup.1.bam
+P mp1_i.out     $samtools mpileup --no-output-ins mpileup.1.bam
+P mp1_ii.out    $samtools mpileup --no-output-ins --no-output-ins mpileup.1.bam
+P mp1_iidd.out  $samtools mpileup --no-output-del --no-output-del --no-output-ins --no-output-ins mpileup.1.bam
+P mp1_ends.out  $samtools mpileup --no-output-ends mpileup.1.bam
+
+# Base modifications
+P mp2.out       $samtools mpileup -x -Q0 --output-mods mod1.sam
+P mp2-noins.out $samtools mpileup -x -Q0 --output-mods --no-output-ins-mods mod1.sam

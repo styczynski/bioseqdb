@@ -150,7 +150,7 @@ static_assert(
     !nullable_deleted_rows<chunk_group_codec::update>);
 
 static_assert(row_mask_codec::field_count == 8);
-static_assert(options_codec::field_count == 5);
+static_assert(options_codec::field_count == 6);
 static_assert(stripe_codec::field_count == 9);
 static_assert(chunk_codec::field_count == 14);
 static_assert(index_policy_codec::field_count == 7);

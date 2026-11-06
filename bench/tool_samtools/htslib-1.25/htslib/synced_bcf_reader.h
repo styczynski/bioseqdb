@@ -1,0 +1,502 @@
+/// @file htslib/synced_bcf_reader.h
+/// Stream through multiple VCF files.
+/*
+    Copyright (C) 2012-2017, 2019-2026 Genome Research Ltd.
+
+    Author: Petr Danecek <pd3@sanger.ac.uk>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.  */
+
+/*
+    The synced_bcf_reader allows to keep multiple VCFs open and stream them
+    using the next_line iterator in a seamless matter without worrying about
+    chromosomes and synchronizing the sites. This is used by vcfcheck to
+    compare multiple VCFs simultaneously and is used also for merging,
+    creating intersections, etc.
+
+    The synced_bcf_reader also provides API for reading indexed BCF/VCF,
+    hiding differences in BCF/VCF opening, indexing and reading.
+
+
+    Example of usage:
+
+        bcf_srs_t *sr = bcf_sr_init();
+        bcf_sr_set_opt(sr, BCF_SR_PAIR_LOGIC, BCF_SR_PAIR_BOTH_REF);
+        bcf_sr_set_opt(sr, BCF_SR_REQUIRE_IDX);
+        for (i=0; i<nfiles; i++)
+            bcf_sr_add_reader(sr,files[i]);
+        while ( bcf_sr_next_line(sr) )
+        {
+            for (i=0; i<nfiles; i++)
+            {
+                bcf1_t *line = bcf_sr_get_line(sr,i);
+                ...
+            }
+        }
+        if ( sr->errnum ) error("Error: %s\n", bcf_sr_strerror(sr->errnum));
+        bcf_sr_destroy(sr);
+*/
+
+#ifndef HTSLIB_SYNCED_BCF_READER_H
+#define HTSLIB_SYNCED_BCF_READER_H
+
+#include "hts.h"
+#include "vcf.h"
+#include "tbx.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+    When reading multiple files in parallel, duplicate records within each
+    file will be reordered and offered in intuitive order. For example,
+    when reading two files, each with unsorted SNP and indel record, the
+    reader should return the SNP records together and the indel records
+    together. The logic of compatible records can vary depending on the
+    application and can be set using the PAIR_* defined below.
+
+    The COLLAPSE_* definitions will be deprecated in future versions, please
+    use the PAIR_* definitions instead.
+*/
+#define COLLAPSE_NONE   0   // require the exact same set of alleles in all files
+#define COLLAPSE_SNPS   1   // allow different alleles, as long as they all are SNPs
+#define COLLAPSE_INDELS 2   // the same as above, but with indels
+#define COLLAPSE_ANY    4   // any combination of alleles can be returned by bcf_sr_next_line()
+#define COLLAPSE_SOME   8   // at least some of the ALTs must match
+#define COLLAPSE_BOTH  (COLLAPSE_SNPS|COLLAPSE_INDELS)
+
+#define BCF_SR_PAIR_SNPS       (1<<0)  // allow different alleles, as long as they all are SNPs
+#define BCF_SR_PAIR_INDELS     (1<<1)  // the same as above, but with indels
+#define BCF_SR_PAIR_ANY        (1<<2)  // any combination of alleles can be returned by bcf_sr_next_line()
+#define BCF_SR_PAIR_SOME       (1<<3)  // at least some of multiallelic ALTs must match. Implied by all the others with the exception of EXACT
+#define BCF_SR_PAIR_SNP_REF    (1<<4)  // allow REF-only records with SNPs
+#define BCF_SR_PAIR_INDEL_REF  (1<<5)  // allow REF-only records with indels
+#define BCF_SR_PAIR_EXACT      (1<<6)  // require the exact same set of alleles in all files
+#define BCF_SR_PAIR_ID         (1<<7)  // require matching IDs (overlap)
+#define BCF_SR_PAIR_BOTH       (BCF_SR_PAIR_SNPS|BCF_SR_PAIR_INDELS)
+#define BCF_SR_PAIR_BOTH_REF   (BCF_SR_PAIR_SNPS|BCF_SR_PAIR_INDELS|BCF_SR_PAIR_SNP_REF|BCF_SR_PAIR_INDEL_REF)
+
+typedef enum
+{
+    BCF_SR_REQUIRE_IDX,
+    BCF_SR_PAIR_LOGIC,          // combination of the PAIR_* values above
+    BCF_SR_ALLOW_NO_IDX,        // allow to proceed even if required index is not present (at the user's risk)
+    BCF_SR_REGIONS_OVERLAP,     // include overlapping records with POS outside the regions: 0=no, 1=VCF line overlap, 2=true variant overlap [1]
+    BCF_SR_TARGETS_OVERLAP      // include overlapping records with POS outside the targets: 0=no, 1=VCF line overlap, 2=true variant overlap [0]
+}
+bcf_sr_opt_t;
+
+struct bcf_sr_region_t;
+
+typedef struct bcf_sr_regions_t
+{
+    // for reading from tabix-indexed file (big data)
+    tbx_t *tbx;             // tabix index
+    hts_itr_t *itr;         // tabix iterator
+    kstring_t line;         // holder of the current line, set only when reading from tabix-indexed files
+    htsFile *file;
+    char *fname;
+    int is_bin;             // is open in binary mode (tabix access)
+    char **als;             // parsed alleles if targets_als set and _regions_match_alleles called
+    kstring_t als_str;      // block of parsed alleles
+    int nals, mals;         // number of set alleles and the size of allocated array
+    int als_type;           // alleles type, currently VCF_SNP or VCF_INDEL
+
+    // user handler to deal with skipped regions without a counterpart in VCFs
+    void (*missed_reg_handler)(struct bcf_sr_regions_t *, void *);
+    void *missed_reg_data;
+
+    // for in-memory regions (small data)
+    struct bcf_sr_region_t *regs; // the regions
+
+    // shared by both tabix-index and in-memory regions
+    void *seq_hash;         // keys: sequence names, values: index to seqs
+    char **seq_names;       // sequence names
+    int nseqs;              // number of sequences (chromosomes) in the file
+    int iseq;               // current position: chr name, index to snames
+    hts_pos_t start, end;   // current position: start, end of the region (0-based)
+    int prev_seq;
+    hts_pos_t prev_start, prev_end;
+    int overlap;            // see BCF_SR_REGIONS_OVERLAP/BCF_SR_TARGETS_OVERLAP
+}
+bcf_sr_regions_t;
+
+typedef struct bcf_sr_t
+{
+    htsFile *file;
+    tbx_t *tbx_idx;
+    hts_idx_t *bcf_idx;
+    bcf_hdr_t *header;
+    hts_itr_t *itr;
+    char *fname;
+    bcf1_t **buffer;                // cached VCF records. First is the current record synced across the reader
+    int nbuffer, mbuffer;           // number of cached records (including the current record); number of allocated records
+    int nfilter_ids, *filter_ids;   // -1 for ".", otherwise filter id as returned by bcf_hdr_id2int
+    int *samples, n_smpl;   // list of columns in the order consistent with bcf_srs_t.samples
+}
+bcf_sr_t;
+
+typedef enum
+{
+    bcf_sr_ok = 0,        // No error
+    open_failed HTS_DEPRECATED_ENUM("Use bcf_sr_open_failed instead") = 0,
+    not_bgzf,             // Input file not BGZF compressed
+    idx_load_failed,      // Couldn't load the index
+    file_type_error,      // Unsupported file type
+    api_usage_error,      // API used incorrectly
+    header_error,         // Header could not be read
+    no_eof,               // Input file does not have an EOF block
+    no_memory,            // Ran out of memory
+    vcf_parse_error,      // Invalid VCF line
+    bcf_read_error,       // Error reading file
+    noidx_error,          // Input file not indexed, and streaming not possible
+    bcf_sr_open_failed,   // Failed to open the input file
+    bcf_sr_seek_error,    // Failed to seek to next location
+    bcf_sr_regions_error, // Failed to read the regions list
+    bcf_sr_samples_error, // Failed to read the samples list
+}
+bcf_sr_error;
+
+typedef struct bcf_srs_t
+{
+    // Parameters controlling the logic
+    int collapse;           // Do not access directly, use bcf_sr_set_pairing_logic() instead
+    char *apply_filters;    // If set, sites where none of the FILTER strings is listed
+                            // will be skipped. Active only at the time of
+                            // initialization, that is during the add_reader()
+                            // calls. Therefore, each reader can be initialized with different
+                            // filters.
+    int require_index;  // Some tools do not need random access
+    int max_unpack;     // When reading VCFs and knowing some fields will not be needed, boost performance of vcf_parse1
+    int *has_line;      // Corresponds to return value of bcf_sr_next_line but is not limited by sizeof(int). Use bcf_sr_has_line macro to query.
+    bcf_sr_error errnum;
+
+    // Auxiliary data
+    bcf_sr_t *readers;
+    int nreaders;
+    int streaming;      // reading mode: index-jumping or streaming
+    int explicit_regs;  // was the list of regions se by bcf_sr_set_regions or guessed from tabix index?
+    char **samples; // List of samples
+    bcf_sr_regions_t *regions, *targets;    // see bcf_sr_set_[targets|regions] for description
+    int targets_als;    // subset to targets not only by position but also by alleles?
+    int targets_exclude;
+    kstring_t tmps;
+    int n_smpl;
+
+    int n_threads;      // Simple multi-threaded decoding / encoding.
+    htsThreadPool *p;   // Our pool, but it can be used by others if needed.
+    void *aux;          // Opaque auxiliary data
+}
+bcf_srs_t;
+
+/** Allocate and initialize a bcf_srs_t struct.
+ *  @return Pointer to a bcf_srs_t struct on success; NULL on failure.
+ *  The bcf_srs_t struct returned by a successful call should be freed
+ *  via bcf_sr_destroy() when it is no longer needed.
+ */
+HTSLIB_EXPORT
+bcf_srs_t *bcf_sr_init(void);
+
+/** Destroy a bcf_srs_t struct */
+HTSLIB_EXPORT
+void bcf_sr_destroy(bcf_srs_t *readers);
+
+
+/** Return a string describing a synced reader error
+ *  @param errnum  Error code (see enum bcf_sr_error)
+ *  @return a char pointer to the error string
+ *  @note The string returned should be treated as const.  The caller should
+ *        not try to edit or free it.
+ */
+
+HTSLIB_EXPORT
+char *bcf_sr_strerror(int errnum);
+
+/** Set an option in the synced reader
+ *  @param readers  Synced reader struct
+ *  @param opt      Option to set
+ *  @return 0 on success, 1 if the option was not recognised
+ */
+
+HTSLIB_EXPORT
+int bcf_sr_set_opt(bcf_srs_t *readers, bcf_sr_opt_t opt, ...);
+
+
+/**
+ * Allocate a thread-pool for use by the synced reader.
+ * @param n_threads size of thread pool
+ *
+ * @return 0 if the call succeeded, or <0 on error.
+ */
+HTSLIB_EXPORT
+int bcf_sr_set_threads(bcf_srs_t *files, int n_threads);
+
+/** Deallocates thread memory, if owned by us. */
+HTSLIB_EXPORT
+void bcf_sr_destroy_threads(bcf_srs_t *files);
+
+/**
+ *  Open new reader
+ *  @param readers holder of the open readers
+ *  @param fname   the VCF file
+ *
+ *  @return 1 if the call succeeded, or 0 on error.
+ *
+ *  See also the bcf_srs_t data structure for parameters controlling
+ *  the reader's logic.
+ *  Invokes bcf_sr_add_hreader with opened file
+ */
+HTSLIB_EXPORT
+int bcf_sr_add_reader(bcf_srs_t *readers, const char *fname);
+
+/**
+ *  Open new reader using htsfile
+ *  @param readers  holder of the open readers
+ *  @param file_ptr htsfile already opened
+ *  @param autoclose close file along with reader or not, 1 - close, 0 - do not close
+ *  @param idxname index file name for file in @file_ptr
+ *
+ *  @return 1 if the call succeeded, or 0 on error.
+ *
+ *  See also the bcf_srs_t data structure for parameters controlling
+ *  the reader's logic.
+ *  If idxname is NULL, uses file_ptr->fn to find index file.
+ *  With idxname as NULL, index file must be present along with the file with
+ *  default name
+ *
+ *  If the call succeeds, and @p autoclose is 1, ownership of @p file_ptr
+ *  passes to @p readers, and the file will be closed automatically when either
+ *  the reader is removed by bcf_sr_remove_reader(), or when all readers
+ *  are closed by bcf_sr_destroy().  If this function fails, ownership of
+ *  the file remains with the caller and the caller is responsible for cleaning
+ *  it up.
+ */
+HTSLIB_EXPORT
+int bcf_sr_add_hreader(bcf_srs_t *readers, htsFile *file_ptr, int autoclose,
+    const char *idxname);
+
+
+/**
+ *  Remove a reader
+ *  @param  files      holder of the open readers
+ *  @param  reader_idx index of the reader in the bcf_srs_t::readers array
+ *
+ *  Removes the specified reader, and cleans up associated internal data
+ *  structures.  If @p reader_idx was not the last one, all later readers
+ *  will be renumbered to fill the gap.
+ *
+ *  If autoclose was true when adding the reader via bcf_sr_add_hreader(),
+ *  the underlying file handle will also be closed.
+ */
+HTSLIB_EXPORT
+void bcf_sr_remove_reader(bcf_srs_t *files, int reader_idx);
+
+/**
+ * Synced reader iterator
+ * @param  readers    holder of the open readers
+ * @return Number of readers with current line on success
+ *         0 when finished, or on error
+ *
+ * Returns the number of readers which have the current line
+ * (bcf_sr_t.buffer[0]) set at this position. Use the bcf_sr_has_line macro to
+ * determine which of the readers are set.
+ *
+ * A return value of 0 indicates either that the iterator finished, or
+ * there was an error.  Callers must check @p readers->errnum to tell
+ * these states apart.
+ */
+HTSLIB_EXPORT
+int bcf_sr_next_line(bcf_srs_t *readers);
+
+#define bcf_sr_has_line(readers, i) (readers)->has_line[i]
+#define bcf_sr_get_line(_readers, i) ((_readers)->has_line[i] ? ((_readers)->readers[i].buffer[0]) : (bcf1_t *) NULL)
+#define bcf_sr_swap_line(_readers, i, lieu) { bcf1_t *tmp = lieu; lieu = (_readers)->readers[i].buffer[0]; (_readers)->readers[i].buffer[0] = tmp; }
+#define bcf_sr_region_done(_readers,i) (!(_readers)->has_line[i] && !(_readers)->readers[i].nbuffer ? 1 : 0)
+#define bcf_sr_get_header(_readers, i) (_readers)->readers[i].header
+#define bcf_sr_get_reader(_readers, i) &((_readers)->readers[i])
+
+
+/**
+ *  Set all readers to selected position
+ *  @param seq  sequence name; NULL to seek to start
+ *  @param pos  0-based coordinate
+ *  @return Number of readers with iterators over the new sequence on success
+ *          0 on failure
+ *
+ *  @note Callers must check @p readers->errnum to detect failures
+ */
+HTSLIB_EXPORT
+int bcf_sr_seek(bcf_srs_t *readers, const char *seq, hts_pos_t pos);
+
+/**
+ * Set active samples
+ * @param readers holder of the open readers
+ * @param samples this can be one of: file name with one sample per line;
+ *                or column-separated list of samples; or '-' for a list of
+ *                samples shared by all files. If first character is the
+ *                exclamation mark, all but the listed samples are included.
+ * @param is_file 0: list of samples; 1: file with sample names
+ *
+ * @return 1 if the call succeeded, or 0 on error.
+ */
+HTSLIB_EXPORT
+int bcf_sr_set_samples(bcf_srs_t *readers, const char *samples, int is_file);
+
+/** Set targets filter
+ *  @param readers   holder of the open readers
+ *  @param targets   list of regions, one-based and inclusive.
+ *  @param is_fname  0: targets is a comma-separated list of regions (chr,chr:from-to)
+ *                   1: targets is a tabix indexed file with a list of regions
+ *                      (<chr,pos> or <chr,from,to>)
+ *  @param alleles   One-based index of column listing alleles (see below)
+ *  @return 0 if the call succeeded, or -1 on error.
+ *
+ *  Both bcf_sr_set_targets() and bcf_sr_set_regions() behave the same way,
+ *  unlisted positions will be skipped by bcf_sr_next_line().
+ *  However, there is an important difference: regions uses an
+ *  index to jump to desired positions while targets streams the whole files
+ *  and merely skip unlisted positions.
+ *
+ *  Moreover, bcf_sr_set_targets() accepts an optional parameter @p alleles which
+ *  is interpreted as a 1-based column index in the tab-delimited file where
+ *  alleles are listed. This in principle enables to perform the COLLAPSE_*
+ *  logic also with tab-delimited files. However, the current implementation
+ *  considers the alleles merely as a suggestion for prioritizing one of possibly
+ *  duplicate VCF lines. It is up to the caller to examine targets->als if
+ *  perfect match is sought after. Note that the duplicate positions in targets
+ *  file are currently not supported.
+ *  Targets (but not regions) can be prefixed with "^" to request logical complement,
+ *  for example "^X,Y,MT" indicates that sequences X, Y and MT should be skipped.
+ *
+ *  API notes:
+ *  - bcf_sr_set_targets MUST be called before the first call to bcf_sr_add_reader()
+ *  - calling bcf_sr_set_regions AFTER readers have been initialized will
+ *    reposition the readers and discard all previous regions.
+ */
+HTSLIB_EXPORT
+int bcf_sr_set_targets(bcf_srs_t *readers, const char *targets, int is_file, int alleles);
+
+/** Set region list
+ *  @param readers   holder of the open readers
+ *  @param targets   list of regions, one-based and inclusive.
+ *  @param is_fname  0: targets is a comma-separated list of regions (chr,chr:from-to)
+ *                   1: targets is a tabix indexed file with a list of regions
+ *                      (<chr,pos> or <chr,from,to>)
+ *  @return 0 if the call succeeded, or -1 on error.
+ *
+ *  Both bcf_sr_set_targets() and bcf_sr_set_regions() behave the same way,
+ *  unlisted positions will be skipped by bcf_sr_next_line().
+ *  However, there is an important difference: regions uses an
+ *  index to jump to desired positions while targets streams the whole files
+ *  and merely skip unlisted positions.
+ *
+ *  API notes:
+ *  - calling bcf_sr_set_regions AFTER readers have been initialized will
+ *    reposition the readers and discard all previous regions.
+ */
+HTSLIB_EXPORT
+int bcf_sr_set_regions(bcf_srs_t *readers, const char *regions, int is_file);
+
+/**
+ *  Create a regions list
+ *  @param regions regions can be either a comma-separated list of regions
+ *                 (chr|chr:pos|chr:from-to|chr:from-) or VCF, BED, or
+ *                 tab-delimited file (the default). Uncompressed files
+ *                 are stored in memory while bgzip-compressed and tabix-indexed
+ *                 region files are streamed.
+ *  @param is_file 0: regions is a comma-separated list of regions
+ *                    (chr|chr:pos|chr:from-to|chr:from-)
+ *                 1: VCF, BED or tab-delimited file
+ *  @param chr     Column index of chromosome
+ *  @param from    Column index of start position (1-based, inclusive)
+ *  @param to      Column index of end position (1-based, inclusive)
+ *  @return Pointer to a populated bcf_sr_regions_t struct on success
+ *          NULL on failure
+ *
+ *  The bcf_sr_regions_t struct returned by a successful call should be freed
+ *  via bcf_sr_regions_destroy() when it is no longer needed.
+ *
+ *  These @p chr, @p from and @p tp  parameters are ignored when reading
+ *  from VCF, BED or tabix-indexed files. When end position column is not
+ *  present, supply 'from' in place of 'to'. When 'to' is negative, first
+ *  abs(to) will be attempted and if that fails, 'from' will be used instead.
+ *
+ *  If chromosome name contains the characters ':' or '-', it should
+ *  be put in curly brackets, for example as "{weird-chr-name:1-2}:1000-2000"
+ */
+HTSLIB_EXPORT
+bcf_sr_regions_t *bcf_sr_regions_init(const char *regions, int is_file, int chr, int from, int to);
+
+HTSLIB_EXPORT
+void bcf_sr_regions_destroy(bcf_sr_regions_t *regions);
+
+/*
+ *  Seek regions to the chromosome block
+ *  @param regions Pointer to regions list
+ *  @param chr     Chromosome to seek to
+ *  Returns 0 on success or -1 on failure. Sets reg->seq appropriately and
+ *  reg->start,reg->end to -1.
+ */
+HTSLIB_EXPORT
+int bcf_sr_regions_seek(bcf_sr_regions_t *regions, const char *chr);
+
+/**
+ *  Retrieve next region.
+ *  @return  0 on success
+ *          -1 when all regions have been read
+ *          -2 on failure
+ *
+ *  The fields reg->seq, reg->start and reg->end are filled with the
+ *  genomic coordinates on success or with NULL,-1,-1 when no region is
+ *  available. The coordinates are 0-based, inclusive.
+ */
+HTSLIB_EXPORT
+int bcf_sr_regions_next(bcf_sr_regions_t *reg);
+
+/** Check if interval seq:start-end overlaps any regions
+ *  @param reg   Regions list
+ *  @param seq   Reference name
+ *  @param start Start of interval in seq (0-based, inclusive)
+ *  @param end   End of interval in seq (0-based, inclusive)
+ *  @return  0 if the position is in regions
+ *          -1 if the position is not in the regions and more regions exist
+ *          -2 if not in the regions and there are no more regions left
+ *          -3 on failure
+ *
+ *  Checks if the interval <start,end> overlaps any of
+ *  the regions, the coordinates are 0-based, inclusive. The coordinate queries
+ *  must come in ascending order.
+ */
+HTSLIB_EXPORT
+int bcf_sr_regions_overlap(bcf_sr_regions_t *reg, const char *seq, hts_pos_t start, hts_pos_t end);
+
+/*
+ *  bcf_sr_regions_flush() - calls repeatedly regs->missed_reg_handler() until
+ *  all remaining records are processed.
+ *  Returns 0 on success, <0 on error.
+ */
+HTSLIB_EXPORT
+int bcf_sr_regions_flush(bcf_sr_regions_t *regs);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

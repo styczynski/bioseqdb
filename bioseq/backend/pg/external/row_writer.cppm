@@ -27,6 +27,7 @@ extern "C" {
 
 export module bioseq.postgres.external.row_writer;
 
+import bioseq.common.json_string;
 import bioseq.postgres.external.relation;
 import bioseq.external.provider.base;
 import bioseq.external.provider.model;
@@ -58,42 +59,7 @@ namespace {
 /* PostgreSQL value conversion helpers. */
 /* ======================================================================== */
 
-/**
- * @brief Appends text with JSON string escaping, without surrounding quotes.
- *
- * Escapes quotation marks, backslashes, and  control bytes. Bytes at or above
- * 0x80 pass through unchanged.
- */
-inline void
-append_json_escaped(std::string& output, std::string_view text)
-{
-	static constexpr auto k_hex_digits = std::to_array("0123456789abcdef");
-	static_assert(k_hex_digits.size() == 17u);
-	static_assert(sizeof(k_hex_digits) == sizeof("0123456789abcdef"));
-	static_assert(alignof(decltype(k_hex_digits)) == alignof(char));
-	for (const unsigned char byte_value : text)
-	{
-		switch (byte_value)
-		{
-			case '"':  output += "\\\""; break;
-			case '\\': output += "\\\\"; break;
-			case '\n': output += "\\n"; break;
-			case '\r': output += "\\r"; break;
-			case '\t': output += "\\t"; break;
-			default:
-				if (byte_value < 0x20)
-				{
-					output += "\\u00";
-					output += k_hex_digits[(byte_value >> 4) & 0x0F];
-					output += k_hex_digits[byte_value & 0x0F];
-				}
-				else
-				{
-					output += static_cast<char>(byte_value);
-				}
-		}
-	}
-}
+using bioseq::common::append_json_escaped;
 
 /** @brief Sets one tuple column to SQL NULL. */
 inline void

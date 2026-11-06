@@ -1025,7 +1025,7 @@ struct type_role_binding {
         result += "\nRETURNS "
             + render_c_routine_result(source, graph);
     }
-    result += "\nAS 'MODULE_PATHNAME', '" + source.name
+    result += "\nAS 'MODULE_PATHNAME', '" + generated_routine_c_symbol(entity, graph)
         + "'\nLANGUAGE C";
     if (procedure) {
         result += option_is(source, "security", "definer")

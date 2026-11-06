@@ -333,6 +333,7 @@ void compute_mapping_quality(std::span<alignment_region> regions,
         .has_cigar = region.has_alignment && !region.cigar.empty(),
         .cigar = std::move(region.cigar),
         .edit_distance = region.edit_distance,
+        .has_dp_score = region.has_alignment,
     };
 }
 

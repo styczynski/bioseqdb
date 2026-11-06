@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "purpose": "Unmodified upstream samtools and bundled HTSlib benchmark source; not linked into Bioseq production.",
+  "acquired_at_utc": "2026-11-06T12:14:56+00:00",
+  "archive": {
+    "url": "https://github.com/samtools/samtools/releases/download/1.25/samtools-1.25.tar.bz2",
+    "size_bytes": 9521878,
+    "sha256": "8bbd2b3cb447953149a74ab0b00e3ec4e88a789a27b8373a31fa6b5b2dee02b1",
+    "digest_source": "https://api.github.com/repos/samtools/samtools/releases/tags/1.25",
+    "extracted_root": "samtools-1.25",
+    "all_upstream_files_preserved": true
+  },
+  "samtools": {
+    "version": "1.25",
+    "repository": "https://github.com/samtools/samtools",
+    "tag_object": "17b11c98dba4f877975a6e0de4150ca850164f47",
+    "commit": "7162950d0988480faeddeb49f03520737e13a9c4",
+    "github_tag_signature_verified": true,
+    "path": ".",
+    "license": "LICENSE"
+  },
+  "htslib": {
+    "version": "1.25",
+    "repository": "https://github.com/samtools/htslib",
+    "tag_object": "c47ecce850186a26ebe540f707c391f19a521da8",
+    "commit": "20b9f2a85371732a10f4ea285b9708ceb2dd41e2",
+    "github_tag_signature_verified": true,
+    "path": "htslib-1.25",
+    "license": "htslib-1.25/LICENSE"
+  },
+  "bundled_htscodecs": {
+    "version": "1.6.7",
+    "path": "htslib-1.25/htscodecs",
+    "license": "htslib-1.25/htscodecs/LICENSE.md",
+    "pin": "Contained in the SHA-256-pinned full release archive."
+  },
+  "upstream_file_count": 1963,
+  "upstream_content_bytes": 35028407,
+  "file_manifest": "source_manifest.json",
+  "commit_source_checks": [
+    {
+      "path": "sam_view.c",
+      "source_url": "https://raw.githubusercontent.com/samtools/samtools/7162950d0988480faeddeb49f03520737e13a9c4/sam_view.c",
+      "sha256": "3bf646d0ef754e3927a259051d23f85c3c63d118a420710e48c1c5c7fcbb79a7"
+    },
+    {
+      "path": "LICENSE",
+      "source_url": "https://raw.githubusercontent.com/samtools/samtools/7162950d0988480faeddeb49f03520737e13a9c4/LICENSE",
+      "sha256": "3567b264a6bd25b207b7a66b5c6a3d913a7766488cb3596c595e0caef937016d"
+    },
+    {
+      "path": "htslib-1.25/sam.c",
+      "source_url": "https://raw.githubusercontent.com/samtools/htslib/20b9f2a85371732a10f4ea285b9708ceb2dd41e2/sam.c",
+      "sha256": "81ac11b468edaec79e561e23c633f45f752f9d4f58e792db95197871c24288c4"
+    },
+    {
+      "path": "htslib-1.25/bgzf.c",
+      "source_url": "https://raw.githubusercontent.com/samtools/htslib/20b9f2a85371732a10f4ea285b9708ceb2dd41e2/bgzf.c",
+      "sha256": "a946f48716a26647f59882e03b8ac5e7ac8ba24ccc983b20032f779f4de48130"
+    }
+  ],
+  "repository_added_files": [
+    "source_lock.json",
+    "source_manifest.json"
+  ],
+  "modifications_to_upstream_files": [],
+  "build_policy": "Build/test/benchmark only through bioseq-build MCP; no configure/make or benchmark was run during source acquisition."
+}

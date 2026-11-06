@@ -8,9 +8,11 @@
 module;
 
 #include <concepts>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -20,11 +22,16 @@ module;
 
 export module bioseq.io.reader;
 
+import bioseq.io.fasta;
+
+import bioseq.io.sinks;
+
 export import :types;
 // Export these dependencies so importing code can instantiate the reader
 // templates with the helper definitions available.
 export import :batch_pipeline;
 export import :stream_pipeline;
+export import :alignment_read;
 import bioseq.common.logging;
 import bioseq.sequences;
 import bioseq.io.options;
@@ -172,8 +179,42 @@ stream_sequences_file(const char* path,
         });
 }
 
-/// Reads up to `max_bytes` from the decoded start of a file for header sampling.
-/// Uses the same source selection as `stream_sequences_file`.
+/** Read one raw header through bounded source windows, preserving large fields in admitted storage. */
+[[nodiscard]] inline std::expected<std::optional<admitted_byte_buffer>, std::string> read_first_sequence_header(
+        const char* path, sequence_file_format format, const reader_options& options = default_reader_options) {
+    const auto failure = [](std::string&&) {};
+    return detail::with_selected_source(path, options, failure,
+        [format](auto&& source) -> std::expected<std::optional<admitted_byte_buffer>, std::string> {
+            std::array<std::uint8_t, 16384> scratch{};
+            raw_header_buffer header;
+            bool started{};
+            for (;;) {
+                const auto read = source.read_into(scratch.data(), scratch.size());
+                if (read.has_error) return std::unexpected(std::string{"cannot read the first sequence header"});
+                std::size_t position{};
+                if (!started) {
+                    while (position < read.bytes_read && (scratch[position] == '\r' || scratch[position] == '\n')) ++position;
+                    if (position < read.bytes_read) {
+                        if (scratch[position] != (format == sequence_file_format::fasta ? '>' : '@'))
+                            return std::optional<admitted_byte_buffer>{};
+                        ++position;
+                        started = true;
+                    }
+                }
+                if (started) {
+                    const auto count = simd::scan_first_byte('\n', scratch.data() + position, read.bytes_read - position);
+                    const bool complete = count != read.bytes_read - position || read.is_eof;
+                    const auto appended = header.append_fragment(
+                        {reinterpret_cast<const char*>(scratch.data() + position), count}, complete);
+                    if (!appended) return std::unexpected(appended.error());
+                    if (complete) return std::optional<admitted_byte_buffer>{header.take()};
+                }
+                if (read.is_eof || read.bytes_read == 0u) return std::optional<admitted_byte_buffer>{};
+            }
+        });
+}
+
+/// Read a bounded decoded prefix through the same source selection as stream_sequences_file.
 [[nodiscard]] inline std::expected<std::string, std::string>
 read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_options& options) {
     const std::string_view path_view{path};

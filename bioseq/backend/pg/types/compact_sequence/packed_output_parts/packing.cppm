@@ -985,6 +985,54 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
     return {result, false};
 }
 
+/** Retain a compact Datum for the read-session lifetime without flattening trees.
+ * Flat values are copied in their packed representation. An expanded readonly
+ * value acquires an independent expanded owner rooted in the session context.
+ */
+export [[nodiscard]] inline Datum retain_pg_sequence_datum(
+    pg_sequence_read_session& session, Datum input) {
+    const bioseq::postgres::support::memory_context_scope context{session.payload_context};
+    return bioseq::postgres::support::invoke_pg_as_cpp([input] {
+        if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
+            const auto readonly = MakeExpandedObjectReadOnly(input, false, -1);
+            return pg_sequence_ro_datum(acquire_writable_pg_sequence(readonly).value);
+        }
+        return PointerGetDatum(PG_DETOAST_DATUM_COPY(input));
+    });
+}
+
+/** Retain a bound sequence and borrow caller-thread rank windows from its owner.
+ * The session owns both the original packed/tree Datum and alphabet-specialized
+ * callback state. This is shared by export rows and reference lookup for import.
+ * already_retained requires input to be owned by this same session and avoids
+ * copying an admitted prefix row a second time during export replay.
+ */
+export [[nodiscard]] inline bioseq::storage::borrowed_rank_window_source retain_pg_rank_source(
+    pg_sequence_read_session& session, Datum input, bool already_retained = false) {
+    const auto retained = already_retained ? input : retain_pg_sequence_datum(session, input);
+    const auto descriptor = bioseq::postgres::support::invoke_pg_as_cpp([retained] {
+        return classify_and_describe_sequence(retained);
+    });
+    if (!descriptor.alphabet_bound || pgseq_is_cigar_alphabet(descriptor.alphabet_code))
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                errmsg("rank windows require a bound biological or quality sequence alphabet")));
+        });
+    bioseq::storage::borrowed_rank_window_source source;
+    pgseq_supported_rank_packed_alphabets::dispatch_alphabet_by_code(descriptor.alphabet_code,
+        [&session, retained, descriptor, &source]<class Alphabet>() {
+            auto* owner = bioseq::postgres::support::invoke_pg_as_cpp([&session, retained, descriptor] {
+                return make_pg_sequence_call_owner<Alphabet>(session, retained, descriptor);
+            });
+            source = owner->view().template borrow_rank_source<false>();
+        });
+    if (!source.read_at) bioseq::postgres::support::invoke_pg_as_cpp([] {
+        ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH), errmsg("unsupported sequence rank alphabet")));
+    });
+    return source;
+}
+
+
 /// Obtain a read handle without taking ownership of the input.
 /// Expanded input is borrowed. Flat  input is copied into an expanded value
 /// owned by the curret memory context.

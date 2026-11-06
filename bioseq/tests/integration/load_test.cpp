@@ -963,7 +963,7 @@ TEST_CASE("quality SQL statistics and FASTQ publication", "[component:bioseq][la
     REQUIRE(indexed[0][1] == indexed[0][2]); REQUIRE(indexed[0][1] == indexed[0][3]);
     it::exec_sql(ctx, "CREATE TABLE quality_named(header text, seq bioseq.seq('dna4')) USING bioseq");
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_named','" + path +
-        "',columns=>ARRAY[ROW('scores','quality')::bioseq.column_mapping], options=>ROW('phred63')::bioseq.load_options)") == 2);
+        "',columns=>ARRAY[ROW('scores','quality')::bioseq.column_mapping], options=>ROW('phred63',NULL)::bioseq.load_options)") == 2);
     const auto named = it::query_rows(ctx, "SELECT scores::text FROM quality_named ORDER BY header");
     REQUIRE(named[0][0] == "!+5I");
     { std::ofstream file(path, std::ios::binary); file << "@bad\nAAAA\n+\nKKKK\n"; }
@@ -1417,11 +1417,11 @@ TEST_CASE("FASTQ declared codecs and transactional quality setup",
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_declared','" + fastq + "')") == 1);
     REQUIRE(it::query_one(ctx, "SELECT quality::text FROM quality_declared")[0] == "a@~");
     REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fastq +
-        "',options=>ROW('phred63')::bioseq.load_options)").sqlstate == "22023");
+        "',options=>ROW('phred63',NULL)::bioseq.load_options)").sqlstate == "22023");
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('quality_declared','" + fasta + "')") == 1);
     REQUIRE_FALSE(it::query_one(ctx, "SELECT quality::text FROM quality_declared WHERE header='fasta'")[0]);
     REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fasta +
-        "',options=>ROW('phred42')::bioseq.load_options)").sqlstate == "22023");
+        "',options=>ROW('phred42',NULL)::bioseq.load_options)").sqlstate == "22023");
     REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fasta +
         "',columns=>ARRAY[ROW('quality','quality')::bioseq.column_mapping])").sqlstate == "22023");
     it::exec_sql(ctx, "CREATE TABLE quality_ddl(header text,seq bioseq.seq('dna4')) USING bioseq");
@@ -1440,12 +1440,14 @@ TEST_CASE("FASTQ declared codecs and transactional quality setup",
     { std::ofstream file(fastq, std::ios::binary); file << "@permitted\nACG\n+\n!!!\n"; }
     it::exec_sql(ctx, "DROP ROLE IF EXISTS bioseq_quality_test_importer; "
         "CREATE ROLE bioseq_quality_test_importer NOLOGIN; "
+        "GRANT pg_read_server_files TO bioseq_quality_test_importer; "
         "GRANT USAGE ON SCHEMA bioseq TO bioseq_quality_test_importer; "
         "GRANT INSERT ON quality_ddl TO bioseq_quality_test_importer; "
         "SET ROLE bioseq_quality_test_importer");
     const auto ddl_permission = it::sql_error(ctx, "SELECT bioseq.load('quality_ddl','" + fastq + "')");
     const auto insert_permission = it::sql_error(ctx, "SELECT bioseq.load('quality_declared','" + fastq + "')");
     it::exec_sql(ctx, "RESET ROLE; REVOKE INSERT ON quality_ddl FROM bioseq_quality_test_importer; "
+        "REVOKE pg_read_server_files FROM bioseq_quality_test_importer; "
         "REVOKE USAGE ON SCHEMA bioseq FROM bioseq_quality_test_importer; DROP ROLE bioseq_quality_test_importer");
     REQUIRE(ddl_permission.sqlstate == "42501");
     REQUIRE(ddl_permission.contains("predeclare"));

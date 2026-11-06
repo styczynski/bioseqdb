@@ -14,6 +14,8 @@ module;
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
+#include <oneapi/tbb/global_control.h>
 #include <random>
 #include <simdjson.h>
 #include <stdexcept>
@@ -21,6 +23,7 @@ module;
 #include <string_view>
 #include <system_error>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 module bioseq.io.benchmark:common;
@@ -32,6 +35,9 @@ import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.common.context;
 import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.mode;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.io.reader;
@@ -53,6 +59,63 @@ using bioseq::io::sequence_batch;
 using bioseq::io::sequence_file_format;
 using bioseq::io::sequence_writer;
 using bioseq::io::writer_options;
+
+/** Untimed shared-arena scope; measured IO owners must join before restoration. */
+struct io_pool_scope {
+    parallelism::pool_config previous;
+    std::size_t framework_limit{};
+    bool was_active{};
+    bool restore{};
+    std::string error;
+
+    /** Reject an implementation-specific budget without changing the active arena. */
+    explicit io_pool_scope(std::string failure) : error{std::move(failure)} {}
+
+    /** Configure the existing pool to an admitted total participant budget before timing. */
+    explicit io_pool_scope(std::int64_t requested) {
+        auto& pool = parallelism::global_pool::instance();
+        previous = {pool.maximum_concurrency(), pool.get_mode()};
+        was_active = pool.is_active();
+        framework_limit = oneapi::tbb::global_control::active_value(
+            oneapi::tbb::global_control::max_allowed_parallelism);
+        if (requested <= 0 || static_cast<std::uint64_t>(requested) > framework_limit
+            || static_cast<std::uint64_t>(requested) > std::numeric_limits<unsigned>::max()) {
+            error = "IO worker budget is nonpositive or exceeds the framework concurrency ceiling";
+            return;
+        }
+        try {
+            pool.configure(parallelism::pool_config{
+                .maximum_concurrency = static_cast<unsigned>(requested),
+                .mode = parallelism::pipeline_concurrency_mode::dispatch_parallel});
+            restore = true;
+        } catch (...) {
+            // A failed constructor has no destructor. configure may already
+            // have removed the previous arena before allocation failed.
+            pool.shutdown();
+            throw;
+        }
+    }
+    io_pool_scope(const io_pool_scope&) = delete;
+    io_pool_scope& operator=(const io_pool_scope&) = delete;
+    /** Transfer the only restoration obligation when returning a prepared iteration. */
+    io_pool_scope(io_pool_scope&& other) noexcept
+        : previous{other.previous}, framework_limit{other.framework_limit},
+          was_active{other.was_active}, restore{std::exchange(other.restore, false)},
+          error{std::move(other.error)} {}
+    io_pool_scope& operator=(io_pool_scope&&) = delete;
+    /** Restore the prior configuration after timing and counter snapshots have ended. */
+    void restore_previous() {
+        if (!restore) return;
+        auto& pool = parallelism::global_pool::instance();
+        if (was_active) pool.configure(previous);
+        else pool.shutdown();
+        restore = false;
+    }
+    /** On an exceptional escape, release the temporary arena without restoration allocation. */
+    ~io_pool_scope() {
+        if (restore) parallelism::global_pool::instance().shutdown();
+    }
+};
 
 using benchmark_alphabet = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using benchmark_batch = sequence_batch<benchmark_alphabet>;

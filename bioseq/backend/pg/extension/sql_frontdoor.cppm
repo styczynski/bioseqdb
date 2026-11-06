@@ -152,6 +152,38 @@ std::int64_t query_len(
  * Return -1 if the planner leaves this placeholder as a direct call.
  * @ingroup bioseq_sql_public_api
  */
+/** Internal helpers must never manufacture alignment metadata without a scan owner. */
+std::int64_t export_alignment_status(Datum sequence) {
+    static_cast<void>(sequence);
+    bioseq::postgres::support::raise_sql_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+        {.message = "alignment export status requires an owning mmsearch custom scan"});
+    std::unreachable();
+}
+
+/** Return the owning scan's stable alignment ordinal through its placeholder only. */
+std::int64_t alignment_ordinal(Datum sequence) {
+    static_cast<void>(sequence);
+    bioseq::postgres::support::raise_sql_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+        {.message = "alignment ordinal requires an owning mmsearch custom scan"});
+    std::unreachable();
+}
+
+/** An owning scan supplies the retained query; direct calls fail explicitly. */
+Datum alignment_query_sequence(Datum sequence) {
+    static_cast<void>(sequence);
+    bioseq::postgres::support::raise_sql_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+        {.message = "alignment query sequence requires an owning mmsearch custom scan"});
+    std::unreachable();
+}
+
+/** An owning scan supplies the retained reference; direct calls fail explicitly. */
+Datum alignment_reference_sequence(Datum sequence) {
+    static_cast<void>(sequence);
+    bioseq::postgres::support::raise_sql_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+        {.message = "alignment reference sequence requires an owning mmsearch custom scan"});
+    std::unreachable();
+}
+
 std::int64_t query_start(
         Datum el) {
     static_cast<void>(el);

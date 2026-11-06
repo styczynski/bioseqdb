@@ -773,6 +773,20 @@ export {
             initStringInfo(&meta_buf);
             bool first = true;
             const bioseq_stub_oids& oids_snapshot = get_cached_stub_oids();
+            // Inspect the plan for plain EXPLAIN as well as an executed scan.
+            std::pair<const bioseq_stub_oids*, unsigned> retained_operands{&oids_snapshot, 0u};
+            const auto inspect_operand = [](Oid function, void* opaque) -> bool {
+                auto& state = *static_cast<std::pair<const bioseq_stub_oids*, unsigned>*>(opaque);
+                if (function == state.first->alignment_query_sequence_oid) state.second |= 1u;
+                if (function == state.first->alignment_reference_sequence_oid) state.second |= 2u;
+                return false;
+            };
+            static_cast<void>(check_functions_in_node(
+                reinterpret_cast<Node*>(node->ss.ps.plan->targetlist), inspect_operand, &retained_operands));
+            if (retained_operands.second != 0u)
+                ExplainPropertyText("Bioseq Retained Alignment Operands",
+                    retained_operands.second == 3u ? "query, reference"
+                    : retained_operands.second == 1u ? "query" : "reference", es);
             Relation scan_rel = node->ss.ss_currentRelation;
             for (auto tgt : postgres_list<TargetEntry>(node->ss.ps.plan->targetlist)) {
                 if (tgt == nullptr) {

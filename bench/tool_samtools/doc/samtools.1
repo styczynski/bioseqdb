@@ -1,0 +1,1533 @@
+'\" t
+.TH samtools 1 "27 October 2026" "samtools-1.25" "Bioinformatics tools"
+.SH NAME
+samtools \- Utilities for the Sequence Alignment/Map (SAM) format
+.\"
+.\" Copyright (C) 2008-2011, 2013-2026 Genome Research Ltd.
+.\" Portions copyright (C) 2010, 2011 Broad Institute.
+.\"
+.\" Author: Heng Li <lh3@sanger.ac.uk>
+.\" Author: Joshua C. Randall <jcrandall@alum.mit.edu>
+.\"
+.\" Permission is hereby granted, free of charge, to any person obtaining a
+.\" copy of this software and associated documentation files (the "Software"),
+.\" to deal in the Software without restriction, including without limitation
+.\" the rights to use, copy, modify, merge, publish, distribute, sublicense,
+.\" and/or sell copies of the Software, and to permit persons to whom the
+.\" Software is furnished to do so, subject to the following conditions:
+.\"
+.\" The above copyright notice and this permission notice shall be included in
+.\" all copies or substantial portions of the Software.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+.\" IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+.\" FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+.\" THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+.\" LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+.\" FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+.\" DEALINGS IN THE SOFTWARE.
+.
+.\" For code blocks and examples (cf groff's Ultrix-specific man macros)
+.de EX
+
+.  in +\\$1
+.  nf
+.  ft CR
+..
+.de EE
+.  ft
+.  fi
+.  in
+
+..
+.
+.SH SYNOPSIS
+.PP
+samtools addreplacerg -r 'ID:fish' -r 'LB:1334' -r 'SM:alpha' -o output.bam input.bam
+.PP
+samtools ampliconclip -b bed.file input.bam
+.PP
+samtools ampliconstats primers.bed in.bam
+.PP
+samtools bedcov aln.sorted.bam
+.PP
+samtools calmd in.sorted.bam ref.fasta
+.PP
+samtools cat out.bam in1.bam in2.bam in3.bam
+.PP
+samtools checksum in.bam
+.PP
+samtools collate -o aln.name_collated.bam aln.sorted.bam
+.PP
+samtools consensus -o out.fasta in.bam
+.PP
+samtools coverage aln.sorted.bam
+.PP
+samtools cram-size -v -o out.size in.cram
+.PP
+samtools depad input.bam
+.PP
+samtools depth aln.sorted.bam
+.PP
+samtools dict -a GRCh38 -s "Homo sapiens" ref.fasta
+.PP
+samtools faidx ref.fasta
+.PP
+samtools fasta input.bam > output.fasta
+.PP
+samtools fastq input.bam > output.fastq
+.PP
+samtools fixmate in.namesorted.sam out.bam
+.PP
+samtools flags PAIRED,UNMAP,MUNMAP
+.PP
+samtools flagstat aln.sorted.bam
+.PP
+samtools fqidx ref.fastq
+.PP
+samtools head in.bam
+.PP
+samtools idxstats aln.sorted.bam
+.PP
+samtools import input.fastq > output.bam
+.PP
+samtools index aln.sorted.bam
+.PP
+samtools markdup in.algnsorted.bam out.bam
+.PP
+samtools merge out.bam in1.bam in2.bam in3.bam
+.PP
+samtools mpileup -f ref.fasta -r chr3:1,000-2,000 in1.bam in2.bam
+.PP
+samtools phase input.bam
+.PP
+samtools quickcheck in1.bam in2.cram
+.PP
+samtools reference -o ref.fa in.cram
+.PP
+samtools reheader in.header.sam in.bam > out.bam
+.PP
+samtools reset -o /tmp/reset.bam processed.bam
+.PP
+samtools samples input.bam
+.PP
+samtools sort -T /tmp/aln.sorted -o aln.sorted.bam aln.bam
+.PP
+samtools split merged.bam
+.PP
+samtools stats aln.sorted.bam
+.PP
+samtools targetcut input.bam
+.PP
+samtools tview aln.sorted.bam ref.fasta
+.PP
+samtools view -bt ref_list.txt -o aln.bam aln.sam.gz
+
+.SH DESCRIPTION
+.PP
+Samtools is a set of utilities that manipulate alignments in the SAM
+(Sequence Alignment/Map), BAM, and CRAM formats.
+It converts between the formats, does sorting, merging and indexing,
+and can retrieve reads in any regions swiftly.
+
+Samtools is designed to work on a stream. It regards an input file `-'
+as the standard input (stdin) and an output file `-' as the standard
+output (stdout). Several commands can thus be combined with Unix
+pipes. Samtools always output warning and error messages to the standard
+error output (stderr).
+
+Samtools is also able to open files on remote FTP or
+HTTP(S) servers if the file name starts with `ftp://', `http://', etc.
+Samtools checks the current working directory for the index file and
+will download the index upon absence. Samtools does not retrieve the
+entire alignment file unless it is asked to do so.
+
+If an index is needed, samtools looks for the index suffix
+appended to the filename, and if that isn't found it tries again
+without the filename suffix (for example \fBin.bam.bai\fR followed by
+\fBin.bai\fR).  However if an index is in a completely different
+location or has a different name, both the main data filename and
+index filename can be pasted together with \fB##idx##\fR.  For
+example \fB/data/in.bam##idx##/indices/in.bam.bai\fR may be used to
+explicitly indicate where the data and index files reside.
+
+.SH COMMANDS
+
+Each command has its own man page which can be viewed using
+e.g. \fBman samtools-view\fR or with a recent GNU man using
+\fBman samtools view\fR.  Below we have a brief summary of syntax
+and sub-command description.
+
+Options common to all sub-commands are documented below in the GLOBAL
+COMMAND OPTIONS section.
+
+.TP 10 \"-------- view
+.B view
+samtools view
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+.RI [ region ...]
+
+With no options or regions specified, prints all alignments in the specified
+input alignment file (in SAM, BAM, or CRAM format) to standard output
+in SAM format (with no header by default).
+
+You may specify one or more space-separated region specifications after the
+input filename to restrict output to only those alignments which overlap the
+specified region(s). Use of region specifications requires a coordinate-sorted
+and indexed input file.
+
+Options exist to change the output format from SAM to BAM or CRAM, so
+this command also acts as a file format conversion utility.
+
+.TP \"-------- tview
+.B tview
+samtools tview
+.RB [ -p
+.IR chr:pos ]
+.RB [ -s
+.IR STR ]
+.RB [ -d
+.IR display ]
+.RI <in.sorted.bam>
+.RI [ref.fasta]
+
+Text alignment viewer (based on the ncurses library). In the viewer,
+press `?' for help and press `g' to check the alignment start from a
+region in the format like `chr10:10,000,000' or `=10,000,000' when
+viewing the same reference sequence.
+
+.TP \"-------- quickcheck
+.B quickcheck
+samtools quickcheck
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+[ ... ]
+
+Quickly check that input files appear to be intact. Checks that beginning of the
+file contains a valid header (all formats) containing at least one target
+sequence and then seeks to the end of the file and checks that an end-of-file
+(EOF) is present and intact (BAM only).
+
+Data in the middle of the file is not read since that would be much more time
+consuming, so please note that this command will not detect internal corruption,
+but is useful for testing that files are not truncated before performing more
+intensive tasks on them.
+
+This command will exit with a non-zero exit code if any input files don't have a
+valid header or are missing an EOF block. Otherwise it will exit successfully
+(with a zero exit code).
+
+.TP \"-------- checksum
+.B checksum
+samtools checksum
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+
+samtools checksum produces a CRC32 based checksum of data contained
+within a BAM file.  This can either be order and orientation agnostic
+for purposes of validating all the sequencing data has passed through
+the entire pipeline from FASTQ through alignment and sorting, or full
+alignment information and order aware for the purposes of validating
+format conversions and while file data processing.
+
+.TP \"-------- head
+.B head
+samtools head
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+
+Prints the input file's headers and optionally also its first few alignment
+records. This command always displays the headers as they are in the file,
+never adding an extra @PG header itself.
+
+.TP \"-------- index
+.B index
+samtools index
+.RB [ -bc ]
+.RB [ -m
+.IR INT ]
+.IR aln.sam.gz | aln.bam | aln.cram
+.RI [ out.index ]
+
+Index a coordinate-sorted SAM, BAM or CRAM file for fast random access.
+Note for SAM this only works if the file has been BGZF compressed first.
+(Starting from Samtools 1.16, this command can also be given several
+alignment filenames, which are indexed individually.)
+
+This index is needed when
+.I region
+arguments are used to limit
+.B samtools view
+and similar commands to particular regions of interest.
+
+If an output filename is given, the index file will be written to
+.IR out.index .
+Otherwise, for a CRAM file
+.IR aln.cram ,
+index file
+.IB aln.cram .crai
+will be created; for a BAM or SAM file
+.IR aln.bam ,
+either
+.IB aln.bam .bai
+or
+.IB aln.bam .csi
+will be created, depending on the index format selected.
+
+.TP \"-------- sort
+.B sort
+.na
+samtools sort
+.RB [ -l
+.IR level ]
+.RB [ -m
+.IR maxMem ]
+.RB [ -o
+.IR out.bam ]
+.RB [ -O
+.IR format ]
+.RB [ -n ]
+.RB [ -t
+.IR tag ]
+.RB [ -T
+.IR tmpprefix ]
+.RB [ -@
+.IR threads "] [" in.sam | in.bam | in.cram ]
+.ad
+
+Sort alignments by leftmost coordinates, or by read name when
+.B -n
+is used.
+An appropriate
+.B @HD-SO
+sort order header tag will be added or an existing one updated if necessary.
+
+The sorted output is written to standard output by default, or to the
+specified file
+.RI ( out.bam )
+when
+.B -o
+is used.
+This command will also create temporary files
+.IB tmpprefix . %d .bam
+as needed when the entire alignment data cannot fit into memory
+(as controlled via the
+.B -m
+option).
+
+Consider using
+.B samtools collate
+instead if you need name collated data without a full lexicographical sort.
+
+Note that if the sorted output file is to be indexed with
+.BR "samtools index" ,
+the default coordinate sort must be used.
+Thus the
+.B -n
+and
+.B -t
+options are incompatible with
+.BR "samtools index" .
+
+.TP \"-------- collate
+.B collate
+samtools collate
+.RI [ options ]
+.IR in.sam | in.bam | in.cram " [" <prefix> "]"
+
+Shuffles and groups reads together by their names.
+A faster alternative to a full query name sort,
+.B collate
+ensures that reads of the same name are grouped together in contiguous groups,
+but doesn't make any guarantees about the order of read names between groups.
+
+The output from this command should be suitable for any operation that
+requires all reads from the same template to be grouped together.
+
+.TP \"-------- cram-size
+.B cram-size
+samtools cram-size
+.RI [ options ]
+.IR in.cram
+
+Produces a summary of CRAM block Content ID numbers and their
+associated Data Series stored within them.  Optionally a more detailed
+breakdown of how each data series is encoded per container may also be
+listed using the \fB-e\fR or \fB--encodings\fR option.
+
+.TP \"-------- idxstats
+.B idxstats
+samtools idxstats
+.IR in.sam | in.bam | in.cram
+
+Retrieve and print stats in the index file corresponding to the input file.
+Before calling idxstats, the input BAM file should be indexed by samtools index.
+
+If run on a SAM or CRAM file or an unindexed BAM file, this command
+will still produce the same summary statistics, but does so by reading
+through the entire file.  This is far slower than using the BAM
+indices.
+
+The output is TAB-delimited with each line consisting of reference sequence
+name, sequence length, # mapped reads and # unmapped reads. It is written to
+stdout.
+
+.TP \"-------- flagstat
+.B flagstat
+samtools flagstat
+.IR in.sam | in.bam | in.cram
+
+Does a full pass through the input file to calculate and print statistics
+to stdout.
+
+Provides counts for each of 13 categories based primarily on bit flags in
+the FLAG field. Each category in the output is broken down into QC pass and
+QC fail, which is presented as "#PASS + #FAIL" followed by a description of
+the category.
+
+.TP \"-------- flags
+.B flags
+samtools flags
+.IR INT | STR [,...]
+
+Convert between textual and numeric flag representation.
+
+.B FLAGS:
+.TS
+rb l l .
+0x1	PAIRED	paired-end (or multiple-segment) sequencing technology
+0x2	PROPER_PAIR	each segment properly aligned according to the aligner
+0x4	UNMAP	segment unmapped
+0x8	MUNMAP	next segment in the template unmapped
+0x10	REVERSE	SEQ is reverse complemented
+0x20	MREVERSE	SEQ of the next segment in the template is reverse complemented
+0x40	READ1	the first segment in the template
+0x80	READ2	the last segment in the template
+0x100	SECONDARY	secondary alignment
+0x200	QCFAIL	not passing quality controls
+0x400	DUP	PCR or optical duplicate
+0x800	SUPPLEMENTARY	supplementary alignment
+.TE
+
+.TP \"-------- stats
+.B stats
+samtools stats
+.RI [ options ]
+.IR in.sam | in.bam | in.cram
+.RI [ region ...]
+
+samtools stats collects statistics from BAM files and outputs in a text format.
+The output can be visualized graphically using plot-bamstats.
+
+
+.TP \"-------- bedcov
+.B bedcov
+samtools bedcov
+.RI [ options ]
+.IR region.bed " " in1.sam | in1.bam | in1.cram "[...]"
+
+Reports the total read base count (i.e. the sum of per base read depths)
+for each genomic region specified in the supplied BED file. The regions
+are output as they appear in the BED file and are 0-based.
+Counts for each alignment file supplied are reported in separate columns.
+
+.TP \"-------- depth
+.B depth
+samtools depth
+.RI [ options ]
+.RI "[" in1.sam | in1.bam | in1.cram " [" in2.sam | in2.bam | in2.cram "] [...]]"
+
+Computes the read depth at each position or region.
+
+.TP \"-------- ampliconstats
+.B ampliconstats
+samtools ampliconstats
+.RI [ options ]
+.IR primers.bed
+.IR in.sam | in.bam | in.cram [...]
+
+samtools ampliconstats collects statistics from one or more input
+alignment files and produces tables in text format.  The output can be
+visualized graphically using plot-ampliconstats.
+
+The alignment files should have previously been clipped of primer
+sequence, for example by \fBsamtools ampliconclip\fR and the sites of
+these primers should be specified as a bed file in the arguments.
+
+.TP \"-------- mpileup
+.B mpileup
+samtools mpileup
+.RB [ -EB ]
+.RB [ -C
+.IR capQcoef ]
+.RB [ -r
+.IR reg ]
+.RB [ -f
+.IR in.fa ]
+.RB [ -l
+.IR list ]
+.RB [ -Q
+.IR minBaseQ ]
+.RB [ -q
+.IR minMapQ ]
+.I in.bam
+.RI [ in2.bam
+.RI [ ... ]]
+
+Generate textual pileup for one or multiple BAM files.  For VCF and
+BCF output, please use the
+.B bcftools mpileup
+command instead.
+Alignment records are grouped by sample (SM) identifiers in @RG header lines.
+If sample identifiers are absent, each input file is regarded as one sample.
+
+See the samtools-mpileup man page for a description of the pileup format and options.
+
+.TP \"-------- consensus
+.B consensus
+samtools consensus
+.RB [ options ]
+.I in.bam
+
+Generate consensus from a SAM, BAM or CRAM file based on the contents
+of the alignment records.  The consensus is written either as FASTA,
+FASTQ, or a pileup oriented format.
+
+The default output for FASTA and FASTQ formats include one base per
+non-gap consensus.  Hence insertions with respect to the aligned
+reference will be included and deletions removed.  This behaviour can
+be adjusted.
+
+Two consensus calling algorithms are offered.  The default computes a
+heterozygous consensus in a Bayesian manner, derived from the "Gap5"
+consensus algorithm.  A simpler base frequency counting method is also
+available.
+
+
+.TP \"-------- reference
+.B reference
+samtools reference
+.RB [ options ]
+.I in.bam
+
+Generate a reference from a SAM, BAM or CRAM file based on the
+contents of the SEQuence field and the MD:Z: auxiliary tags, or from
+the embedded reference blocks within a CRAM file (provided it was
+constructed using the \fBembed_ref=1\fR option).
+
+.TP \"-------- coverage
+.B coverage
+samtools coverage
+.RI [ options ]
+.RI "[" in1.sam | in1.bam | in1.cram " [" in2.sam | in2.bam | in2.cram "] [...]]"
+
+Produces a histogram or table of coverage per chromosome.
+
+.TP \"-------- merge
+.B merge
+samtools merge
+.RB [ -nur1f ]
+.RB [ -h
+.IR inh.sam ]
+.RB [ -t
+.IR tag ]
+.RB [ -R
+.IR reg ]
+.RB [ -b
+.IR list "] " out.bam " " in1.bam " [" in2.bam " " in3.bam " ... " inN.bam ]
+
+Merge multiple sorted alignment files, producing a single sorted output file
+that contains all the input records and maintains the existing sort order.
+
+If
+.BR -h
+is specified the @SQ headers of input files will be merged into the specified header, otherwise they will be merged
+into a composite header created from the input headers.
+If the @SQ headers differ in order this may require the output file to be re-sorted after merge.
+
+The ordering of the records in the input files must match the usage of the
+\fB-n\fP and \fB-t\fP command-line options.  If they do not, the output
+order will be undefined.  See
+.B sort
+for information about record ordering.
+
+.TP \"-------- split
+.B split
+samtools split
+.RI [ options ]
+.IR merged.sam | merged.bam | merged.cram
+
+Splits a file by read group, producing one or more output files
+matching a common prefix (by default based on the input filename)
+each containing one read-group.
+
+.TP \"-------- cat
+.B cat
+samtools cat
+.RB [ -b
+.IR list ]
+.RB [ -h
+.IR header.sam ]
+.RB [ -o
+.IR out.bam "] " in1.bam " " in2.bam " [ ... ]"
+
+Concatenate BAMs or CRAMs. Although this works on either BAM or CRAM,
+all input files must be the same format as each other. The sequence
+dictionary of each input file must be identical, although this command
+does not check this. This command uses a similar trick to
+.B reheader
+which enables fast BAM concatenation.
+
+.TP \"-------- import
+.B import
+samtools import
+.RI [ options ]
+.IR in.fastq " [ ... ]"
+
+Converts one or more FASTQ files to unaligned SAM, BAM or CRAM.  These
+formats offer a richer capability of tracking sample meta-data via the
+SAM header and per-read meta-data via the auxiliary tags.  The
+.B fastq
+command may be used to reverse this conversion.
+
+.TP \"-------- fastq fasta
+.B fastq/a
+samtools fastq
+.RI [ options ]
+.I in.bam
+.br
+samtools fasta
+.RI [ options ]
+.I in.bam
+
+Converts a BAM or CRAM into either FASTQ or FASTA format depending on the
+command invoked. The files will be automatically compressed if the
+file names have a .gz, .bgz, or .bgzf extension.
+
+The input to this program must be collated by name.
+Use
+.B samtools collate
+or
+.B samtools sort -n
+to ensure this.
+
+.TP \"-------- faidx
+.B faidx
+samtools faidx <ref.fasta> [region1 [...]]
+
+Index reference sequence in the FASTA format or extract subsequence from
+indexed reference sequence. If no region is specified,
+.B faidx
+will index the file and create
+.I <ref.fasta>.fai
+on the disk. If regions are specified, the subsequences will be
+retrieved and printed to stdout in the FASTA format.
+
+The input file can be compressed in the
+.B BGZF
+format.
+
+FASTQ files can be read and indexed by this command.  Without using
+.B --fastq
+any extracted subsequence will be in FASTA format.
+
+.TP \"-------- fqidx
+.B fqidx
+samtools fqidx <ref.fastq> [region1 [...]]
+
+Index reference sequence in the FASTQ format or extract subsequence from
+indexed reference sequence. If no region is specified,
+.B fqidx
+will index the file and create
+.I <ref.fastq>.fai
+on the disk. If regions are specified, the subsequences will be
+retrieved and printed to stdout in the FASTQ format.
+
+The input file can be compressed in the
+.B BGZF
+format.
+
+.B samtools fqidx
+should only be used on fastq files with a small number of entries.
+Trying to use it on a file containing millions of short sequencing reads
+will produce an index that is almost as big as the original file, and
+searches using the index will be very slow and use a lot of memory.
+
+.TP \"-------- dict
+.B dict
+samtools dict
+.IR ref.fasta | ref.fasta.gz
+
+Create a sequence dictionary file from a fasta file.
+
+.TP \"-------- calmd
+.B calmd
+samtools calmd
+.RB [ -Eeubr ]
+.RB [ -C
+.IR capQcoef "] " aln.bam " " ref.fasta
+
+Generate the MD tag. If the MD tag is already present, this command will
+give a warning if the MD tag generated is different from the existing
+tag. Output SAM by default.
+
+Calmd can also read and write CRAM files although in most cases it is
+pointless as CRAM recalculates MD and NM tags on the fly.  The one
+exception to this case is where both input and output CRAM files
+have been / are being created with the \fIno_ref\fR option.
+
+.TP \"-------- fixmate
+.B fixmate
+.na
+samtools fixmate
+.RB [ -rpcm ]
+.RB [ -O
+.IR format ]
+.I in.nameSrt.bam out.bam
+.ad
+
+Fill in mate coordinates, ISIZE and mate related flags from a
+name-sorted alignment.
+
+.TP \"-------- markdup
+.B markdup
+.na
+samtools markdup
+.RB [ -l
+.IR length ]
+.RB [ -r ]
+.RB [ -s ]
+.RB [ -T ]
+.RB [ -S ]
+.I in.algsort.bam out.bam
+.ad
+
+Mark duplicate alignments from a coordinate sorted file that
+has been run through \fBsamtools fixmate\fR with the \fB-m\fR option.  This program
+relies on the MC and ms tags that fixmate provides.
+
+.TP \"-------- rmdup
+.B rmdup
+samtools rmdup [-sS] <input.srt.bam> <out.bam>
+
+.B This command is obsolete.  Use markdup instead.
+
+.TP \"-------- addreplacerg
+.B addreplacerg
+samtools addreplacerg
+.RB [ -r
+.I rg-line
+|
+.B -R
+.IR rg-ID ]
+.RB [ -m
+.IR mode ]
+.RB [ -l
+.IR level ]
+.RB [ -o
+.IR out.bam ]
+.I in.bam
+
+Adds or replaces read group tags in a file.
+
+.TP \"-------- reheader
+.B reheader
+samtools reheader
+.RB [ -iP ]
+.I in.header.sam in.bam
+
+Replace the header in
+.I in.bam
+with the header in
+.IR in.header.sam .
+This command is much faster than replacing the header with a
+BAM\(->SAM\(->BAM conversion.
+
+By default this command outputs the BAM or CRAM file to standard
+output (stdout), but for CRAM format files it has the option to
+perform an in-place edit, both reading and writing to the same file.
+No validity checking is performed on the header, nor that it is suitable
+to use with the sequence data itself.
+
+.TP \"-------- targetcut
+.B targetcut
+samtools targetcut
+.RB [ -Q
+.IR minBaseQ ]
+.RB [ -i
+.IR inPenalty ]
+.RB [ -0
+.IR em0 ]
+.RB [ -1
+.IR em1 ]
+.RB [ -2
+.IR em2 ]
+.RB [ -f
+.IR ref "] " in.bam
+
+This command identifies target regions by examining the continuity of read depth, computes
+haploid consensus sequences of targets and outputs a SAM with each sequence corresponding
+to a target. When option
+.B -f
+is in use, BAQ will be applied. This command is
+.B only
+designed for cutting fosmid clones from fosmid pool sequencing [Ref. Kitzman et al. (2010)].
+
+.TP \"-------- phase
+.B phase
+samtools phase
+.RB [ -AF ]
+.RB [ -k
+.IR len ]
+.RB [ -b
+.IR prefix ]
+.RB [ -q
+.IR minLOD ]
+.RB [ -Q
+.IR minBaseQ "] " in.bam
+
+Call and phase heterozygous SNPs.
+
+.TP \"-------- depad
+.B depad
+samtools depad
+.RB [ -SsCu1 ]
+.RB [ -T
+.IR ref.fa ]
+.RB [ -o
+.IR output "] " in.bam
+
+Converts a BAM aligned against a padded reference to a BAM aligned
+against the depadded reference.  The padded reference may contain
+verbatim "*" bases in it, but "*" bases are also counted in the
+reference numbering.  This means that a sequence base-call aligned
+against a reference "*" is considered to be a cigar match ("M" or "X")
+operator (if the base-call is "A", "C", "G" or "T").  After depadding
+the reference "*" bases are deleted and such aligned sequence
+base-calls become insertions.  Similarly transformations apply for
+deletions and padding cigar operations.
+
+.TP \"-------- ampliconclip
+.B ampliconclip
+samtools ampliconclip
+.RB [ -o
+.IR out.file ]
+.RB [ -f
+.IR stat.file ]
+.RB [ --soft-clip ]
+.RB [ --hard-clip ]
+.RB [ --both-ends ]
+.RB [ --strand ]
+.RB [ --clipped ]
+.RB [ --fail ]
+.RB [ --no-PG ]
+.B -b
+.I bed.file in.file
+
+Clip reads in a SAM compatible file based on data from a BED file.
+
+.TP \"-------- samples
+.B samples
+samtools samples
+.RB [ -o
+.IR out.file ]
+.RB [ -i ]
+.RB [ -T
+.IR TAG ]
+.RB [ -f
+.IR refs.fasta ]
+.RB [ -F
+.IR refs_list ]
+.RB [ -X ]
+
+Prints the samples from alignment files
+
+.TP 10 \"-------- reset
+.B reset
+samtools reset
+.RB [ -o
+.IR FILE ]
+.RB [ -x / --remove-tag
+.IR tag_list ]
+.RB [ --keep-tag
+.IR tag_list ]
+.RB [  --reject-PG
+.IR pgid ]
+.RB [ --no-RG ]
+.RB [ --no-PG ]
+[...]
+
+Removes alignment information from records, producing an unaligned
+SAM, BAM or CRAM file.  Flags are reset, header tags are updated or
+removed as appropriate, and auxiliary tags are removed or retained as
+specified.  Note that the sort order is unchanged.
+
+.SH SAMTOOLS OPTIONS
+These are options that are passed after the \fBsamtools\fR command,
+before any sub-command is specified.
+.EE
+.TP \"-------- help etc
+.BR help ,\  --help
+Display a brief usage message listing the samtools commands available.
+If the name of a command is also given, e.g.,
+.BR samtools\ help\ view ,
+the detailed usage message for that particular command is displayed.
+
+.TP
+.B --version
+Display the version numbers and copyright information for samtools and
+the important libraries used by samtools.
+
+.TP
+.B --version-only
+Display the full samtools version number in a machine-readable format.
+.PP
+.SH GLOBAL COMMAND OPTIONS
+.PP
+Several long-options are shared between multiple samtools sub-commands:
+\fB--input-fmt\fR, \fB--input-fmt-option\fR, \fB--output-fmt\fR,
+\fB--output-fmt-option\fR, \fB--reference\fR, \fB--write-index\fR,
+and \fB--verbosity\fR.
+The input format is auto-detected and specifying the format
+is unnecessary, so this option is rarely offered.
+Note that not all subcommands have all options.  Consult the subcommand
+help for more details.
+.PP
+Format strings recognised are "sam", "sam.gz", "bam" and "cram".  They may be
+followed by a comma separated list of options as \fIkey\fR or
+\fIkey\fR=\fIvalue\fR. See below for examples.
+.PP
+The \fBfmt-option\fR arguments accept either a single \fIoption\fR or
+\fIoption\fR=\fIvalue\fR.  Note that some options only work on some
+file formats and only on read or write streams.  If value is
+unspecified for a boolean option, the value is assumed to be 1.  The
+valid options are as follows.
+.RS 0
+.\" General purpose
+.TP 4
+.BI level= INT
+Output only. Specifies the compression level from 1 to 9, or 0 for
+uncompressed.  If the output format is SAM, this also enables BGZF
+compression, otherwise SAM defaults to uncompressed.
+.TP
+.BI nthreads= INT
+Specifies the number of threads to use during encoding and/or
+decoding.  For BAM this will be encoding only.  In CRAM the threads
+are dynamically shared between encoder and decoder.
+.TP
+.BI filter= STRING
+Apply filter STRING to all incoming records, rejecting any that do not
+satisfy the expression.  See the FILTER EXPRESSIONS section below for
+specifics.
+.\" CRAM specific
+.TP
+.BI reference= fasta_file
+Specifies a FASTA reference file for use in CRAM encoding or decoding.
+It usually is not required for decoding except in the situation of the
+MD5 not being obtainable via the REF_PATH or REF_CACHE environment variables.
+.TP
+.BI decode_md= 0|1
+CRAM input only; defaults to 1 (on).  CRAM does not typically store
+MD and NM tags, preferring to generate them on the fly.  When this
+option is 0 missing MD, NM tags will not be generated.  It can be
+particularly useful when combined with a file encoded using store_md=1
+and store_nm=1.
+.TP
+.BI store_md= 0|1
+CRAM output only; defaults to 0 (off).  CRAM normally only stores MD
+tags when the reference is unknown and lets the decoder generate these
+values on-the-fly (see decode_md).
+.TP
+.BI store_nm= 0|1
+CRAM output only; defaults to 0 (off).  CRAM normally only stores NM
+tags when the reference is unknown and lets the decoder generate these
+values on-the-fly (see decode_md).
+.TP
+.BI ignore_md5= 0|1
+CRAM input only; defaults to 0 (off).  When enabled, md5 checksum
+errors on the reference sequence and block checksum errors within CRAM
+are ignored.  Use of this option is strongly discouraged.
+.TP
+.BI required_fields= bit-field
+CRAM input only; specifies which SAM columns need to be populated.
+By default all fields are used.  Limiting the decode to specific
+columns can have significant performance gains.  The bit-field is a
+numerical value constructed from the following table.
+.TS
+rb l .
+0x1	SAM_QNAME
+0x2	SAM_FLAG
+0x4	SAM_RNAME
+0x8	SAM_POS
+0x10	SAM_MAPQ
+0x20	SAM_CIGAR
+0x40	SAM_RNEXT
+0x80	SAM_PNEXT
+0x100	SAM_TLEN
+0x200	SAM_SEQ
+0x400	SAM_QUAL
+0x800	SAM_AUX
+0x1000	SAM_RGAUX
+.TE
+.TP
+.BI name_prefix= string
+CRAM input only; defaults to output filename.  Any sequences with
+auto-generated read names will use \fIstring\fR as the name prefix.
+.TP
+.BI multi_seq_per_slice= -1|0|1
+CRAM output only; defaults to -1 (auto).  By default CRAM generates one
+container per reference sequence, except in the case of many small
+references (such as a fragmented assembly).  Specifying 0 or 1 turns
+off the automatic selection and never / always permits multiple
+references per container.
+.TP
+.BI version= major.minor
+CRAM output only.  Specifies the CRAM version number.  Acceptable
+values are "2.1", "3.0", and "3.1".
+.TP
+.BI seqs_per_slice= INT
+CRAM output only; defaults to 10000.
+.TP
+.BI slices_per_container= INT
+CRAM output only; defaults to 1.  The effect of having multiple slices
+per container is to share the compression header block between
+multiple slices.  This is unlikely to have any significant impact
+unless the number of sequences per slice is reduced.  (Together these
+two options control the granularity of random access.)
+.TP
+.BI embed_ref= 0|1|2
+CRAM output only; defaults to 0 (off).  If 1, this will store portions
+of the reference sequence in each slice, permitting decode without
+having requiring an external copy of the reference sequence.  If 2,
+this will create a consensus from the sequence (and MD:Z tag if
+present) and embed this instead of the external reference.  This is
+also automatically selected when the external reference is unavailable.
+.TP
+.BI no_ref= 0|1
+CRAM output only; defaults to 0 (off).  If 1, sequences will be stored
+verbatim with no reference encoding.  This can be useful if no
+reference is available for the file.
+.TP
+.BI use_bzip2= 0|1
+CRAM output only; defaults to 0 (off).  Permits use of bzip2 in CRAM
+block compression.
+.TP
+.BI use_lzma= 0|1
+CRAM output only; defaults to 0 (off).  Permits use of lzma in CRAM
+block compression.
+.TP
+.BI use_arith= 0|1
+CRAM \(>= 3.1 output only; enables use of arithmetic entropy coding in
+CRAM block compression.  This is off by default, but enabled for
+archive mode.  This is significantly slower but sometimes smaller than
+the standard rANS entropy encoder.
+.TP
+.BI use_fqz= 0|1
+CRAM \(>= 3.1 output only; enables and disables the fqzcomp quality
+compression method.  This is on by default for version 3.1 and above
+only when the small and archive profiles are in use.
+.TP
+.BI use_tok= 0|1
+CRAM \(>= 3.1 output only; enables and disables the name tokeniser
+compression method.  This is on by default for version 3.1 and above.
+.TP
+.BI lossy_names= 0|1
+CRAM output only; defaults to 0 (off).  If 1, templates with all
+members within the same CRAM slice will have their read names
+removed.  New names will be automatically generated during decoding.
+Also see the \fBname_prefix\fR option.
+.TP
+.B fast, normal, small, archive
+CRAM output only.  Set the CRAM compression profile.  This is a
+simplified way of setting many output options at once.  It changes the
+following options according to the profile in use.  The "normal"
+profile is the default.
+
+.TS
+lb l l l l .
+Option	\fBfast\fR	\fBnormal\fR	\fBsmall\fR	\fBarchive\fR
+level	1	5	6	7
+use_bzip2	off	off	on	on
+use_lzma	off	off	off	on if level>7
+use_tok(*)	off	on	on	on
+use_fqz(*)	off	off	on	on
+use_arith(*)	off	off	off	on
+seqs_per_slice	10000	10000	25000	100000
+.TE
+
+(*) \fBuse_tok\fR, \fBuse_fqz\fR and \fBuse_arith\fR are only
+enabled for CRAM version 3.1 and above.
+
+The \fBlevel\fR listed is only the default value, and will not be set
+if it has been explicitly changed already.  Additionally
+\fBbases_per_slice\fR is set to \fB500*seqs_per_slice\fR unless previously
+explicitly set.
+
+.TP
+.BI remove_ur= 0|1
+CRAM output only; defaults to 0.  Remove all the UR tags from SQ lines in the
+header.
+
+.TP
+.B fastq_name2
+FASTQ input only.  Indicates that the names are not the first word in
+the header, but the second.  This is a FASTQ variant commonly used in
+the SRA and ENA archives.
+
+.TP
+.B fastq_casava
+FASTQ input and output only.  The Illumina CASAVA identifiers are
+stored in the second word of the FASTQ header lines and store read
+meta-data.  The CASAVA tag defines the data held in the READ1, READ2
+and QCFAIL flags and the barcode auxiliary tag ("BC" by default).
+This option may be used to both read and write CASAVA identifiers.
+
+.TP
+.BI fastq_barcode= TAG
+FASTQ input and output only.  When the \fBfastq_casava\fR option is
+used, this controls the name of the barcode aux tag to be used. \fITAG\fR
+defaults to "BC" if not specified.
+
+.TP
+.BI fastq_aux= LIST
+FASTQ input and output only.  Processes SAM format auxiliary tags
+following the other fields on the record identifier lines.  If no
+\fB=\fR\fILIST\fR is specified or \fILIST\fR is "1" then all aux tags
+listed are copied to/from the SAM record.  Otherwise it is a comma
+separated list of 2-letter tag types and is used to control which tags
+are processed with any others being omitted.
+
+Note as commas are used to separate options in the \fB--output-fmt\fR
+string detailing file format and options combined together, you will
+need to use the \fB--output-fmt-option\fR option if you want to
+specify a comma separated list of tag types.
+
+.TP
+.B fastq_rnum
+FASTQ output only.  If set, paired reads will have "/1" and "/2"
+appended to their read names.  This has no effect on unpaired reads.
+When reading FASTQ these suffixes are automatically detected
+and processed irrespective of the \fBfastq_rnum\fR option.
+
+.TP
+.BI fastq_umi= TAGLIST
+FASTQ input and output only.  When reading from a FASTQ file this
+indicates to extract the UMI tag from the read name and to put it in
+the TAG specified (which defaults to `RX' if no tag name is given).
+The UMI is assumed to be the 8th colon-separated element, conforming
+to Illumina BCL to FASTQ conversion specifications.  However see the
+\fBfastq_umi_regexp\fR option for altering this.
+
+When converting from SAM to FASTQ, \fITAGLIST\fR is a comma separated
+list of tags which are checked in turn for their presence.  The string
+from the first tag found is then appended to the end of the read-name.
+There is no regexp available in this case and the data is always
+appended to the end of the name, or if hash-number is present (for
+example `name#49') to just prior to the hash character.  The
+\fITAGLIST\fR defaults to `OX,RX'.
+
+.TP
+.BI fastq_umi_regex= REGEX
+FASTQ input only.  Specifies the regular expression used for finding
+UMI strings in a read name.  Any text within the single bracketted
+element will be used as the UMI string.  Text matched by that string
+will be removed from the read name, with anything to the right of it
+being moved leftwards.
+This defaults to `^[^:]+:[^:]+:[^:]+:[^:]+:[^:]+:[^:]+:[^:]+:([^:#/]+)'.
+
+.RE
+.PP
+For example:
+.EX 4
+samtools view --input-fmt-option decode_md=0
+    --output-fmt cram,version=3.0 --output-fmt-option embed_ref
+    --output-fmt-option seqs_per_slice=2000 -o foo.cram foo.bam
+
+samtools view -O cram,small -o bar.cram bar.bam
+.EE
+.PP
+The \fB--write-index\fR option enables automatic index creation while
+writing out BAM, CRAM or bgzf SAM files.  Note to get compressed SAM
+as the output format you need to manually request a compression level,
+otherwise all SAM files are uncompressed.  By default SAM and BAM will
+use CSI indices while CRAM will use CRAI indices.  If you need to
+create BAI indices note that it is possible to specify the name of
+the index being written to, and hence the format, by using the
+\fBfilename##idx##indexname\fR notation.
+.PP
+For example: to convert a BAM to a compressed SAM with CSI indexing:
+.EX 4
+samtools view -h -O sam,level=6 --write-index in.bam -o out.sam.gz
+.EE
+.PP
+To convert a SAM to a compressed BAM using BAI indexing:
+.EX 4
+samtools view --write-index in.sam -o out.bam##idx##out.bam.bai
+.EE
+.PP
+The \fB--verbosity \fIINT\fR option sets the verbosity level for samtools
+and HTSlib.  The default is 3 (HTS_LOG_WARNING); 2 reduces warning messages
+and 0 or 1 also reduces some error messages, while values greater than 3
+produce increasing numbers of additional warnings and logging messages.
+
+.PP
+.SH FILTER EXPRESSIONS
+.PP
+Filter expressions are used as an on-the-fly checking of incoming SAM,
+BAM or CRAM records, discarding records that do not match the
+specified expression.
+
+The language used is primarily C style, but with a few differences in
+the precedence rules for bit operators and the inclusion of regular
+expression matching.
+
+The operator precedence, from strongest binding to weakest, is:
+
+.TS
+l lb l .
+Grouping	(, )	E.g. "(1+2)*3"
+Values:	literals, vars	Numbers, strings and variables
+Unary ops:	+, -, !, ~ 	E.g. -10 +10, !10 (not), ~5 (bit not)
+Math ops:	*, /, %	Multiply, division and (integer) modulo
+Math ops:	+, -	Addition / subtraction
+Bit-wise:	&	Integer AND
+Bit-wise	^	Integer XOR
+Bit-wise	|	Integer OR
+Conditionals:	>, >=, <, <=
+Equality:	==, !=, =~, !~	=~ and !~ match regular expressions
+Boolean:	&&, ||	Logical AND / OR
+.TE
+
+Expressions are computed using floating point mathematics, so "10 / 4"
+evaluates to 2.5 rather than 2.  They may be written as integers in
+decimal or "0x" plus hexadecimal, and floating point with or without
+exponents.However operations that require integers first do an
+implicit type conversion, so "7.9 % 5" is 2 and "7.9 & 4.1" is
+equivalent to "7 & 4", which is 4.  Strings are always specified using
+double quotes.  To get a double quote in a string, use backslash.
+Similarly a double backslash is used to get a literal backslash.  For
+example \fBab\\"c\\\\d\fR is the string \fBab"c\\d\fR.
+
+Comparison operators are evaluated as a match being 1 and a mismatch
+being 0, thus "(2 > 1) + (3 < 5)" evaluates as 2.  All comparisons
+involving undefined (null) values are deemed to be false.
+
+The variables are where the file format specifics are accessed from
+the expression.  The variables correspond to SAM fields, for example
+to find paired alignments with high mapping quality and a very large
+insert size, we may use the expression "\fBmapq >= 30 && (tlen >= 100000 || tlen <= -100000)\fR".
+Valid variable names and their data types are:
+
+.TS
+lb l l .
+endpos	int	Alignment end position (1-based)
+flag	int	Combined FLAG field
+flag.paired	int	Single bit, 0 or 1
+flag.proper_pair	int	Single bit, 0 or 2
+flag.unmap	int	Single bit, 0 or 4
+flag.munmap	int	Single bit, 0 or 8
+flag.reverse	int	Single bit, 0 or 16
+flag.mreverse	int	Single bit, 0 or 32
+flag.read1	int	Single bit, 0 or 64
+flag.read2	int	Single bit, 0 or 128
+flag.secondary	int	Single bit, 0 or 256
+flag.qcfail	int	Single bit, 0 or 512
+flag.dup	int	Single bit, 0 or 1024
+flag.supplementary	int	Single bit, 0 or 2048
+hclen	int	Number of hard-clipped bases
+library	string	Library (LB header via RG)
+mapq	int	Mapping quality
+mpos	int	Synonym for pnext
+mrefid	int	Mate reference number (0 based)
+mrname	string	Synonym for rnext
+ncigar	int	Number of cigar operations
+pnext	int	Mate's alignment position (1-based)
+pos	int	Alignment position (1-based)
+qlen	int	Alignment length: no. query bases
+qname	string	Query name
+qual	string	Quality values (raw, 0 based)
+refid	int	Integer reference number (0 based)
+rlen	int	Alignment length: no. reference bases
+rname	string	Reference name
+rnext	string	Mate's reference name
+sclen	int	Number of soft-clipped bases
+seq	string	Sequence
+tlen	int	Template length (insert size)
+[XX]	int / string	XX tag value
+.TE
+
+Flags are returned either as the whole flag value or by checking for a
+single bit.  Hence the filter expression \fBflag.dup\fR is
+equivalent to \fBflag & 1024\fR.
+
+"qlen" and "rlen" are measured using the CIGAR string to count the
+number of query (sequence) and reference bases consumed.  Note "qlen"
+may not exactly match the length of the "seq" field if the sequence is
+"*".
+
+"sclen" and "hclen" are the number of soft and hard-clipped
+bases respectively.  The formula "qlen-sclen" gives the
+number of sequence bases used in the alignment, distinguishing between
+global alignment and local alignment length.
+
+"endpos" is the (1-based inclusive) position of the rightmost mapped base
+of the read, as measured using the CIGAR string, and for mapped reads
+is equivalent to "pos+rlen-1". For unmapped reads, it is the same as
+"pos".
+
+Reference names may be matched either by their string forms ("rname"
+and "mrname") or as the Nth \fB@SQ\fR line (counting from zero) as
+stored in BAM using "tid" and "mtid" respectively.
+
+Auxiliary tags are described in square brackets and these expand to
+either integer or string as defined by the tag itself (\fBXX:Z:\fIstring\fR or
+\fBXX:i:\fIint\fR).  For example \fB[NM]>=10\fR can be used to look
+for alignments with many mismatches and \fB[RG]=~"grp[ABC]-"\fR will
+match the read-group string.
+
+If no comparison is used with an auxiliary tag it is taken simply to
+be a test for the existence of that tag.  So \fB[NM]\fR will return any
+record containing an NM tag, even if that tag is zero (\fBNM:i:0\fR).
+In htslib <= 1.15 negating this with \fB![NM]\fR gave misleading
+results as it was true if the tag did not exist or did exist but was
+zero.  Now this is strictly does-not-exist.  An explicit
+\fBexists([NM])\fR and \fB!exists([NM])\fR function has also been added
+to make this intention clear.
+
+Similarly in htslib <= 1.15 using \fB[NM]!=0\fR was true both when the
+tag existed and was not zero as well as when the tag did not exist.
+From 1.16 onwards all comparison operators are only true for tags that
+exist, so \fB[NM]!=0\fR works as expected.
+
+Some simple functions are available to operate on strings.  These
+treat the strings as arrays of bytes, permitting their length,
+minimum, maximum and average values to be computed.  These are useful
+for processing Quality Scores.
+
+.TS
+lb l .
+length(x)	Length of the string (excluding nul char)
+min(x)	Minimum byte value in the string
+max(x)	Maximum byte value in the string
+avg(x)	Average byte value in the string
+.TE
+
+Note that "avg" is a floating point value and it may be NAN for empty
+strings.  This means that "avg(qual)" does not produce an error for
+records that have both seq and qual of "*".  NAN values will fail any
+conditional checks, so e.g. "avg(qual) > 20" works and will not report
+these records.  NAN also fails all equality, < and > comparisons, and
+returns zero when given as an argument to the \fBexists\fR function.
+It can be negated with \fB!x\fR in which case it becomes true.
+
+Functions that operate on both strings and numerics:
+
+.TS
+lb l .
+exists(x)	True if the value exists (or is explicitly true).
+default(x,d)	Value \fBx\fR if it exists or \fBd\fR if not.
+.TE
+
+Functions that apply only to numeric values:
+
+.TS
+lb l .
+sqrt(x)	Square root of \fBx\fR
+log(x)	Natural logarithm of \fBx\fR
+pow(x, y)	Power function, \fBx\fR to the power of \fBy\fR
+exp(x)	Base-e exponential, equivalent to \fBpow(e,x)\fR
+.TE
+
+.PP
+.SH ENVIRONMENT VARIABLES
+.PP
+.TP
+.B HTS_PATH
+A colon-separated list of directories in which to search for HTSlib plugins.
+If $HTS_PATH starts or ends with a colon or contains a double colon (\fB::\fP),
+the built-in list of directories is searched at that point in the search.
+
+If no HTS_PATH variable is defined, the built-in list of directories
+specified when HTSlib was built is used, which typically includes
+\fB/usr/local/libexec/htslib\fP and similar directories.
+
+.TP
+.B REF_PATH
+A colon separated (semi-colon on Windows) list of locations in which
+to look for sequences identified by their MD5sums.  This can be either
+a list of directories or URLs. Note that if a URL is included then the
+colon in http:// and ftp:// and the optional port number will be
+treated as part of the URL and not a PATH field separator.
+Alternatively a double colon may be used to indicate a single colon
+character. If REF_PATH includes \fB%\fR\fInum\fR\fBs\fR then it is
+replaced with the next \fInum\fR elements of the md5sum.  An implicit
+\fB/%s\fR is also added to each path element if any md5sum digits are
+unused.  For example "REF_PATH=/some/dir/%4s/%s" or
+"REF_PATH=/some/dir/%4s" will search a directory structure with the
+first 4 characters of the md5sum as a subdirectory and the remaining
+28 as the filename within that directory.
+
+Version 1.21 and earlier defaulted to using the EBI's CRAM reference
+server if no REF_PATH was specified.
+This default has been removed to reduce load on the EBI's service.
+It is recommended that a site-wide proxy is set up to allow better sharing
+of downloaded references,
+for example the
+.I ref-cache
+server provided with HTSlib.
+The original behaviour can be restored by including
+\fBhttp://www.ebi.ac.uk/ena/cram/md5/%s\fR in your REF_PATH.
+If that is done,
+it is strongly encouraged you also specify a local REF_CACHE directory.
+
+See <https://www.htslib.org/doc/reference_seqs.html> and
+.B REFERENCE SEQUENCES
+below for more information.
+
+.TP
+.B REF_CACHE
+This can be defined to a single location housing a local cache of
+references.  When REF_CACHE is set any non-local reference will create
+a file in the local REF_CACHE named after the sequence md5sum.  This
+cache will be searched prior to REF_PATH.  If you wish to search
+REF_CACHE but not to further populate it, add the directory to the
+start of REF_PATH instead.
+
+As per REF_PATH, the percent notation (e.g. "dir/%2s/%2s/%s") may be
+used to avoid too many files within a single directory.
+
+To pre-populate the REF_CACHE a script
+\fBmisc/seq_cache_populate.pl\fR is provided in the Samtools
+distribution. This takes a fasta file or a directory of fasta files
+and generates the MD5sum named files.
+
+For example if you use \fBseq_cache_populate -subdirs 2 -root
+/local/ref_cache\fR to create 2 nested subdirectories (the default),
+each consuming 2 characters of the MD5sum, then REF_CACHE must be set
+to \fB/local/ref_cache/%2s/%2s/%s\fR.
+
+.PP
+.SH REFERENCE SEQUENCES
+.PP
+The CRAM format requires use of a reference sequence for both reading
+and writing.
+.PP
+When reading a CRAM the \fB@SQ\fR headers are interrogated to identify
+the reference sequence MD5sum (\fBM5:\fR tag) and the local reference
+sequence filename (\fBUR:\fR tag).  Note that non-local URIs in the UR
+tag are not used, but \fIfile://\fR is supported.  This is a change in
+behaviour, but not documentation, to htslib 1.21.
+.PP
+To create a CRAM the \fB@SQ\fR headers will also be read to identify
+the reference sequences, but M5: and UR: tags may not be present. In
+this case the \fB-T\fR and \fB-t\fR options of samtools view may be
+used to specify the fasta or fasta.fai filenames respectively
+(provided the .fasta.fai file is also backed up by a .fasta file).
+.PP
+The search order to obtain a reference is:
+.IP 1. 3
+Use any local file specified by the command line options (eg -T).
+.IP 2. 3
+Look for MD5 via REF_CACHE environment variable.
+.IP 3. 3
+Look for MD5 in each element of the REF_PATH environment variable.
+.IP 4. 3
+Look for a local file listed in the UR: header tag.
+
+.PP
+.SH EXAMPLES
+.IP o 2
+Import SAM to BAM when
+.B @SQ
+lines are present in the header:
+.EX 2
+samtools view -b aln.sam > aln.bam
+.EE
+If
+.B @SQ
+lines are absent:
+.EX 2
+samtools faidx ref.fa
+samtools view -bt ref.fa.fai aln.sam > aln.bam
+.EE
+where
+.I ref.fa.fai
+is generated automatically by the
+.B faidx
+command.
+
+.IP o 2
+Convert a BAM file to a CRAM file using a local reference sequence.
+.EX 2
+samtools view -C -T ref.fa aln.bam > aln.cram
+.EE
+
+.SH AUTHOR
+.PP
+Heng Li from the Sanger Institute wrote the original C version of
+samtools.  Bob Handsaker from the Broad Institute implemented the BGZF
+library.  Petr Danecek and Heng Li wrote the VCF/BCF implementation.
+James Bonfield from the Sanger Institute developed the CRAM
+implementation.  Other large code contributions have been made by
+John Marshall, Rob Davies, Martin Pollard, Andrew Whitwham, Valeriu Ohan,
+Vasudeva Sarma
+(all while primarily at the Sanger Institute), with numerous other
+smaller but valuable contributions.  See the per-command manual pages
+for further authorship.
+
+.SH SEE ALSO
+.IR samtools-addreplacerg (1),
+.IR samtools-ampliconclip (1),
+.IR samtools-ampliconstats (1),
+.IR samtools-bedcov (1),
+.IR samtools-calmd (1),
+.IR samtools-cat (1),
+.IR samtools-checksum (1),
+.IR samtools-collate (1),
+.IR samtools-consensus (1),
+.IR samtools-coverage (1),
+.IR samtools-cram-size (1),
+.IR samtools-depad (1),
+.IR samtools-depth (1),
+.IR samtools-dict (1),
+.IR samtools-faidx (1),
+.IR samtools-fasta (1),
+.IR samtools-fastq (1),
+.IR samtools-fixmate (1),
+.IR samtools-flags (1),
+.IR samtools-flagstat (1),
+.IR samtools-fqidx (1),
+.IR samtools-head (1),
+.IR samtools-idxstats (1),
+.IR samtools-import (1),
+.IR samtools-index (1),
+.IR samtools-markdup (1),
+.IR samtools-merge (1),
+.IR samtools-mpileup (1),
+.IR samtools-phase (1),
+.IR samtools-quickcheck (1),
+.IR samtools-reference (1),
+.IR samtools-reheader (1),
+.IR samtools-reset (1),
+.IR samtools-rmdup (1),
+.IR samtools-sort (1),
+.IR samtools-split (1),
+.IR samtools-stats (1),
+.IR samtools-targetcut (1),
+.IR samtools-tview (1),
+.IR samtools-view (1),
+.IR bcftools (1),
+.IR sam (5),
+.IR tabix (1)
+.IR ref-cache(1)
+.PP
+Samtools website: <http://www.htslib.org/>
+.br
+File format specification of SAM/BAM,CRAM,VCF/BCF: <http://samtools.github.io/hts-specs>
+.br
+Samtools latest source: <https://github.com/samtools/samtools>
+.br
+HTSlib latest source: <https://github.com/samtools/htslib>
+.br
+Bcftools website: <http://samtools.github.io/bcftools>

@@ -440,7 +440,7 @@ class deflate_block_decoder {
         switch (btype) {
         case 0: {
             _compression_type = block_compression::uncompressed;
-            // This decoder requires zero padding up to the next byte boundary.
+            // RFC 1951 ignores alignment bits before a stored block; they need not be zero.
             const std::size_t pos = reader.bit_position();
             const std::size_t excess = pos % 8;
             if (excess != 0) {
@@ -451,9 +451,6 @@ class deflate_block_decoder {
                     return decode_status::out_of_input;
                 }
                 _padding = static_cast<std::uint8_t>(reader.read_bits(to_read));
-                if (_padding != 0) {
-                    return decode_status::non_zero_padding;
-                }
             } else {
                 _padding = 0;
             }

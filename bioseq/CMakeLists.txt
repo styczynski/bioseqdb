@@ -159,6 +159,12 @@ message("MODULES? ${SRC_MOD_FILES}")
 
 find_package(Intl REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(libdeflate CONFIG REQUIRED)
+if(TARGET libdeflate::libdeflate_static)
+  set(BIOSEQ_LIBDEFLATE_TARGET libdeflate::libdeflate_static)
+else()
+  set(BIOSEQ_LIBDEFLATE_TARGET libdeflate::libdeflate_shared)
+endif()
 find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
@@ -359,9 +365,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # The CIGAR alphabet and RLE range partition are target-neutral sequence owners.
 # Native biological conversion is one additional target-neutral sequence owner.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 353)
+if(NOT _bioseq_nopg_module_count EQUAL 354)
   message(FATAL_ERROR
-        "Domain-neutral module inventory must contain exactly 353 authored units; "
+        "Domain-neutral module inventory must contain exactly 354 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -1003,13 +1009,14 @@ bioseq_collect_authored_sources(
   RECURSE
   INCLUDE_PATTERNS "*.cppm"
   EXCLUDE_PATHS
+    "benchmark/alignment.cppm"
     "benchmark/common.cppm"
     "benchmark/index.cppm"
     "benchmark/lazy_expression.cppm"
     "benchmark/main.cppm"
     "benchmark/readers.cppm"
     "benchmark/writers.cppm"
-  EXPECTED_COUNT 34)
+  EXPECTED_COUNT 43)
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
@@ -1333,6 +1340,7 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   bioseq_common_templating_core
   fmt
   ZLIB::ZLIB
+  ${BIOSEQ_LIBDEFLATE_TARGET}
   reflectcpp::reflectcpp
   libassert::assert
   foonathan_memory
@@ -1404,6 +1412,7 @@ target_link_libraries(bioseq_pipeline_dispatch_owners
     safestring_static
     fmt
     ZLIB::ZLIB
+  ${BIOSEQ_LIBDEFLATE_TARGET}
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory

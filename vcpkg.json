@@ -35,6 +35,7 @@
     },
     "tbb",
     "zlib",
+    "libdeflate",
     "lfreist-hwinfo",
     "md4c",
     "spirv-cross",

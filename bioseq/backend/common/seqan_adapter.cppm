@@ -47,6 +47,7 @@ export {
 #include <seqan3/alphabet/quality/phred42.hpp>
 #include <seqan3/alphabet/quality/phred63.hpp>
 #include <seqan3/alphabet/quality/phred68solexa.hpp>
+#include <seqan3/alphabet/quality/phred94.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
 #include <seqan3/utility/math.hpp>
 }

@@ -10,12 +10,19 @@ module;
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <functional>
+#include <limits>
 #include <sys/stat.h>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "safe_lib.h"
+extern "C" {
+#include "access/detoast.h"
+}
 
 export module bioseq.postgres.storage.metadata:options;
 
@@ -23,27 +30,89 @@ import bioseq.common.checked_arithmetic;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.compression;
 import bioseq.common.logging;
+import bioseq.parallelism.memory_admission;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
+import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.sql.generated.core.storage_metadata_core.entity_handles;
 import bioseq.postgres.storage.metadata.sql_row_codecs;
 import :types;
 import :tuple_ops;
 import :core;
 
-/**
- * @brief Convert a catalog row to columnar table options.
- * @param[in] row Decoded options row.
- * @return Options with the compression name converted to its enum value.
+/** Visit the existing indexed options row with shared catalog/error cleanup.
+ * A missing relation/index yields no result; a missing row is passed as nullptr.
  */
-[[nodiscard]] static column_options options_to_domain(const options_row& row) {
-    return column_options{
-        .stripe_row_limit = static_cast<uint64>(row.stripe_row_limit),
-        .chunk_group_row_limit = static_cast<uint32>(row.chunk_group_row_limit),
-        .compression_algorithm = parse_compression_algorithm(NameStr(row.compression)),
-        .compression_level = row.compression_level,
-    };
+template<class Callback>
+[[nodiscard]] inline auto visit_column_options_row(Oid regclass, LOCKMODE mode,
+    Callback&& callback) -> std::optional<std::invoke_result_t<Callback, Relation, HeapTuple>> {
+    using result_type = std::invoke_result_t<Callback, Relation, HeapTuple>;
+    using bioseq::postgres::support::invoke_pg_as_cpp;
+    auto* relation = invoke_pg_as_cpp([mode] {
+        return bioseq::postgres::support::try_open_postgres_relation(column_options_relation_oid(), mode);
+    });
+    if (!relation) return std::nullopt;
+    Relation index = nullptr;
+    SysScanDesc scan = nullptr;
+    std::optional<result_type> result;
+    std::exception_ptr failure;
+    try {
+        index = invoke_pg_as_cpp([] {
+            return bioseq::postgres::support::try_open_postgres_relation(column_options_index_oid(), AccessShareLock);
+        });
+        if (index) {
+            std::array<ScanKeyData, 1> keys{options_codec::scan_key<&options_row::regclass>(regclass)};
+            scan = invoke_pg_as_cpp([relation, index, &keys] {
+                return systable_beginscan_ordered(relation, index, nullptr, 1, keys.data());
+            });
+            auto* tuple = invoke_pg_as_cpp([scan] { return systable_getnext_ordered(scan, ForwardScanDirection); });
+            result.emplace(std::invoke(callback, relation, tuple));
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    if (scan) record_cleanup_failure(failure, [scan] {
+        invoke_pg_as_cpp([scan] { systable_endscan_ordered(scan); });
+    });
+    if (index) record_cleanup_failure(failure, [index] {
+        invoke_pg_as_cpp([index] { index_close(index, AccessShareLock); });
+    });
+    record_cleanup_failure(failure, [relation, mode] {
+        invoke_pg_as_cpp([relation, mode] { relation_close(relation, mode); });
+    });
+    if (failure) std::rethrow_exception(failure);
+    return result;
+}
+
+/** Read original file contexts using the options catalog's existing relation key.
+ * Returned JSON owns its bytes and is safe after catalog tuples are released.
+ */
+export [[nodiscard]] std::optional<std::string> read_io_provenance(Oid regclass) {
+    const auto found = visit_column_options_row(regclass, AccessShareLock,
+        [](Relation relation, HeapTuple tuple) -> std::optional<std::string> {
+            if (!HeapTupleIsValid(tuple)) return std::nullopt;
+            auto* descriptor = RelationGetDescr(relation);
+            options_codec::validate_descriptor(descriptor);
+            const auto value = bioseq::postgres::support::invoke_pg_as_cpp([tuple, descriptor] {
+                bool is_null = false;
+                const Datum datum = heap_getattr(tuple,
+                    options_codec::attribute_number<&options_row::io_provenance>(), descriptor, &is_null);
+                return is_null ? std::optional<Datum>{} : std::optional<Datum>{datum};
+            });
+            if (!value) return std::nullopt;
+            const auto raw_bytes = bioseq::postgres::support::invoke_pg_as_cpp([value] {
+                return toast_raw_datum_size(*value);
+            });
+            const auto budget = bioseq::common::checked_mul(static_cast<std::uint64_t>(raw_bytes), std::uint64_t{8});
+            const auto admitted = budget
+                ? bioseq::parallelism::memory_admission_controller::instance().try_reserve(*budget)
+                : std::nullopt;
+            if (!admitted) bioseq::postgres::support::raise_sql_error(ERRCODE_OUT_OF_MEMORY,
+                {.message = "Cannot admit table IO provenance serialization"});
+            return bioseq::postgres::support::detail::decode_jsonb(*value).encoded();
+        });
+    return found ? *found : std::nullopt;
 }
 
 /**
@@ -52,78 +121,37 @@ import :core;
  * @return Options, or no value if the options table or index is unavailable.
  */
 export std::optional<column_options> read_column_options(Oid regclass) {
-    ScanKeyData scan_keys[1];
-    scan_keys[0] = options_codec::scan_key<&options_row::regclass>(regclass);
-
-    Relation bioseq_column_options = bioseq::postgres::support::invoke_pg_as_cpp([] {
-        return bioseq::postgres::support::try_open_postgres_relation(column_options_relation_oid(),
-                                                                     AccessShareLock);
-    });
-    if (bioseq_column_options == nullptr) {
-        /* The catalog may disappear during DROP EXTENSION or DROP DATABASE. */
-        return std::nullopt;
-    }
-
-    Relation index = nullptr;
-    SysScanDesc scan_descriptor = nullptr;
-    std::optional<column_options> result;
-    std::exception_ptr failure;
-    try {
-        index = bioseq::postgres::support::invoke_pg_as_cpp([] {
-            return bioseq::postgres::support::try_open_postgres_relation(column_options_index_oid(),
-                                                                         AccessShareLock);
-        });
-        if (index != nullptr) {
-            scan_descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
-                [bioseq_column_options, index, &scan_keys] {
-                    return systable_beginscan_ordered(
-                        bioseq_column_options, index, nullptr, 1, scan_keys);
+    return visit_column_options_row(regclass, AccessShareLock,
+        [](Relation relation, HeapTuple tuple) -> column_options {
+            if (HeapTupleIsValid(tuple)) {
+                auto* descriptor = RelationGetDescr(relation);
+                options_codec::validate_descriptor(descriptor);
+                // Storage settings are read on hot paths. Never deform or copy the
+                // potentially large IO manifest when only these five fields matter.
+                return bioseq::postgres::support::invoke_pg_as_cpp([tuple, descriptor] {
+                    bool is_null = false;
+                    const auto get = [tuple, descriptor, &is_null]<auto member>() {
+                        const Datum value = heap_getattr(tuple,
+                            options_codec::attribute_number<member>(), descriptor, &is_null);
+                        if (is_null) ereport(ERROR, (errmsg("Bioseq storage option unexpectedly contains NULL")));
+                        return value;
+                    };
+                    return column_options{
+                        .stripe_row_limit = static_cast<uint64>(DatumGetInt32(get.template operator()<&options_row::stripe_row_limit>())),
+                        .chunk_group_row_limit = static_cast<uint32>(DatumGetInt32(get.template operator()<&options_row::chunk_group_row_limit>())),
+                        .compression_algorithm = parse_compression_algorithm(NameStr(*DatumGetName(get.template operator()<&options_row::compression>()))),
+                        .compression_level = DatumGetInt32(get.template operator()<&options_row::compression_level>()),
+                    };
                 });
-            HeapTuple heap_tuple = bioseq::postgres::support::invoke_pg_as_cpp([scan_descriptor] {
-                return systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
-            });
-            if (HeapTupleIsValid(heap_tuple)) {
-                const options_row row = options_codec::deform(
-                    heap_tuple, RelationGetDescr(bioseq_column_options), CurrentMemoryContext);
-                result = options_to_domain(row);
-            } else {
-                /* Use the current storage settings when the table has no options row. */
-                result = column_options{
-                    .stripe_row_limit =
-                        static_cast<uint32_t>(bioseq::settings::storage::stripe::row_limit),
-                    .chunk_group_row_limit =
-                        static_cast<uint32_t>(bioseq::settings::storage::chunk_group::row_limit),
-                    .compression_algorithm =
-                        static_cast<bioseq::compression_algorithm>(static_cast<int>(
-                            bioseq::settings::storage::compression::algorithm.get_value())),
-                    .compression_level = bioseq::settings::storage::compression::level,
-                };
             }
-        }
-    } catch (...) {
-        failure = std::current_exception();
-    }
-
-    if (scan_descriptor != nullptr) {
-        record_cleanup_failure(failure, [scan_descriptor] {
-            bioseq::postgres::support::invoke_pg_as_cpp(
-                [scan_descriptor] { systable_endscan_ordered(scan_descriptor); });
+            return column_options{
+                .stripe_row_limit = static_cast<uint32_t>(bioseq::settings::storage::stripe::row_limit),
+                .chunk_group_row_limit = static_cast<uint32_t>(bioseq::settings::storage::chunk_group::row_limit),
+                .compression_algorithm = static_cast<bioseq::compression_algorithm>(
+                    static_cast<int>(bioseq::settings::storage::compression::algorithm.get_value())),
+                .compression_level = bioseq::settings::storage::compression::level,
+            };
         });
-    }
-    if (index != nullptr) {
-        record_cleanup_failure(failure, [index] {
-            bioseq::postgres::support::invoke_pg_as_cpp(
-                [index] { index_close(index, AccessShareLock); });
-        });
-    }
-    record_cleanup_failure(failure, [bioseq_column_options] {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [bioseq_column_options] { relation_close(bioseq_column_options, AccessShareLock); });
-    });
-    if (failure != nullptr) {
-        std::rethrow_exception(failure);
-    }
-    return result;
 }
 
 /**
@@ -146,6 +174,32 @@ export void initialize_column_options(Oid regclass) {
         .compression_level = bioseq::settings::storage::compression::level};
 
     write_column_options(regclass, &default_options, false);
+}
+
+/** Persist imported IO metadata without replacing storage configuration.
+ * Importers validate and rebase their neutral manifest before this catalog update.
+ * Existing relation-drop lifecycle deletes this row and its provenance together.
+ */
+export void write_io_provenance(Oid regclass, std::string_view json) {
+    const bioseq::postgres::support::jsonb_value owned{std::string{json}};
+    const auto encoded = bioseq::postgres::support::detail::encode_jsonb(owned);
+    initialize_column_options(regclass);
+    const auto updated = visit_column_options_row(regclass, RowExclusiveLock,
+        [encoded](Relation relation, HeapTuple tuple) {
+            if (!HeapTupleIsValid(tuple)) return false;
+            options_codec::update change;
+            change.set<&options_row::io_provenance>(std::optional<Datum>{encoded}, CurrentMemoryContext);
+            auto* modified = change.modify(tuple, RelationGetDescr(relation));
+            bioseq::postgres::support::invoke_pg_as_cpp([relation, modified] {
+                CatalogTupleUpdate(relation, &modified->t_self, modified);
+                heap_freetuple(modified);
+                CommandCounterIncrement();
+            });
+            return true;
+        });
+    if (!updated || !*updated) bioseq::postgres::support::raise_sql_error(
+        ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        {.message = "Bioseq options catalog is unavailable for IO provenance"});
 }
 
 /// @brief Save new columnar options for a table, replacing any existing row.

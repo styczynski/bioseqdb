@@ -205,6 +205,13 @@ class dispatch_buffer_runtime {
      * @return Borrowed pointers, or nullopt after the last output.
      */
     [[nodiscard]] std::optional<dispatch_next_output> read_next_output();
+    /** Return the exact retained input; SQL NULL is Datum{0}. Locator promotion is lazy.
+     * The erased runtime bridge is defined in its implementation unit: importing the concrete
+     * buffer here would introduce the contract/implementation module dependency cycle.
+     */
+    [[nodiscard]] Datum retained_operand(const dispatch_next_output& output,
+        bool query, MemoryContext result_context);
+
     /** @return A copy of the last batch's execution counters, including all its waves. */
     [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats execution_stats() const;
     /** @return Whether the configured policy permits reading stored sequence indexes. */

@@ -2941,7 +2941,9 @@ load_sealed_guc_profile_projection(
             command.extension_name,
             command.generated_module_prefix,
             command.fmgr_boundary_module,
-            command.fmgr_prelude);
+            command.fmgr_prelude,
+            command.stage == generation_stage::support
+                ? sql_graph_phase::support_codecs : sql_graph_phase::complete);
 
         if (command.stage == generation_stage::support) {
             if (!active_guc_package) {

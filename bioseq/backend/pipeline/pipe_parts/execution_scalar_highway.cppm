@@ -1185,6 +1185,10 @@ export {
 
         /// Finish any active result-stage timer when upstream signals completion.
         [[gnu::always_inline]] inline void on_completed() noexcept {
+            const auto& parameters = execution_plan->frozen_parameters;
+            finalize_match_result_classification(
+                std::span<match_result>{dst_->results.data(), dst_->results.size()},
+                parameters.compute_mapq, parameters.compute_edit_distance);
             if (host_timing_dst_ != nullptr &&
                 host_timing_dst_->is_alignment_result_host_stage_active) {
                 host_timing_dst_->finish_alignment_result_host_stage(host_stage_now_ns());
