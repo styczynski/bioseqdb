@@ -1818,6 +1818,126 @@ inline void run_safety_analyzer_contract_self_tests() {
         throw std::runtime_error(
             "manifest root join lost generated wrapper provenance");
     }
+    {
+        // Derive two complete owner records from the existing parser fixture.
+        // Their SQL names and arities agree; only their types and C exports differ.
+        auto split_document = parse_json(manifest_json);
+        auto& split_root = std::get<json_value::object>(split_document.value);
+        const auto wrappers_of = [](json_value::object& root) -> json_value::array& {
+            auto& modules = std::get<json_value::array>(root.at("fmgr_entrypoint_modules").value);
+            return std::get<json_value::array>(
+                std::get<json_value::object>(modules.front().value).at("wrappers").value);
+        };
+        const auto owners_of = [](json_value::object& root) -> json_value::array& {
+            return std::get<json_value::array>(root.at("c_symbol_owners").value);
+        };
+        auto& wrappers = wrappers_of(split_root);
+        auto& owners = owners_of(split_root);
+        const auto wrapper_fixture = wrappers.front();
+        const auto owner_fixture = owners.front();
+        wrappers.clear();
+        owners.clear();
+        json_value::array identities, symbols, finfo_symbols;
+        for (const std::string_view source_type : {"regclass", "text"}) {
+            const auto identity = "bioseq.write(" + std::string{source_type} + ",text)";
+            const auto symbol = "write_overload_" + std::to_string(wrappers.size());
+            auto wrapper = wrapper_fixture;
+            auto& wrapper_fields = std::get<json_value::object>(wrapper.value);
+            wrapper_fields["symbol"] = symbol;
+            wrapper_fields["finfo_symbol"] = "pg_finfo_" + symbol;
+            auto& overload = std::get<json_value::object>(
+                std::get<json_value::array>(wrapper_fields.at("overloads").value).front().value);
+            overload["sql_identity"] = identity;
+            overload["sql_arity"] = std::size_t{2};
+            overload["argument_converter_keys"] = json_value::array{
+                source_type == "regclass" ? "argument.oid.by_value[regclass]" : "argument.text.owning",
+                "argument.text.owning"};
+            wrappers.push_back(std::move(wrapper));
+            auto owner = owner_fixture;
+            auto& owner_fields = std::get<json_value::object>(owner.value);
+            owner_fields["symbol"] = symbol;
+            owner_fields["finfo_symbol"] = "pg_finfo_" + symbol;
+            owner_fields["routine_identities"] = json_value::array{identity};
+            owners.push_back(std::move(owner));
+            identities.emplace_back(identity);
+            symbols.emplace_back(symbol);
+            finfo_symbols.emplace_back("pg_finfo_" + symbol);
+        }
+        split_root["c_routine_identity_count"] = std::size_t{2};
+        split_root["c_link_symbol_inventory_count"] = std::size_t{2};
+        split_root["c_finfo_symbol_inventory_count"] = std::size_t{2};
+        split_root["c_routine_identities"] = identities;
+        split_root["c_link_symbols"] = symbols;
+        split_root["c_finfo_symbols"] = finfo_symbols;
+        const manifest_contract split_policy{
+            .expected_parent_count = 2,
+            .expected_symbol_count = 2,
+            .shared_symbols = {},
+        };
+        const auto split_manifest = parse_safety_manifest(render_json(split_document), split_policy);
+        if (split_manifest.owners.size() != 2
+            || split_manifest.owners[0].public_symbol != "write_overload_0"
+            || split_manifest.owners[1].public_symbol != "write_overload_1"
+            || split_manifest.owners[0].overloads.front().sql_identity != "bioseq.write(regclass,text)"
+            || split_manifest.owners[1].overloads.front().sql_identity != "bioseq.write(text,text)") {
+            throw std::runtime_error("same-arity SQL overloads lost their exact generated wrapper bindings");
+        }
+        const auto reject_mapping = [&split_document, &split_policy](auto mutation, std::string_view diagnostic) {
+            auto invalid = split_document;
+            mutation(std::get<json_value::object>(invalid.value));
+            analyzer_test_detail::require_failure([&invalid, &split_policy] {
+                static_cast<void>(parse_safety_manifest(render_json(invalid), split_policy));
+            }, diagnostic);
+        };
+        reject_mapping([owners_of](json_value::object& root) {
+            auto& entries = owners_of(root);
+            std::swap(std::get<json_value::object>(entries[0].value).at("routine_identities"),
+                std::get<json_value::object>(entries[1].value).at("routine_identities"));
+        }, "wrapper overloads differ from owner identities");
+        reject_mapping([owners_of](json_value::object& root) {
+            owners_of(root).pop_back();
+        }, "C symbol owners are incomplete");
+        reject_mapping([owners_of](json_value::object& root) {
+            auto& entries = owners_of(root);
+            entries.back() = entries.front();
+        }, "is duplicated or has the wrong finfo");
+        reject_mapping([wrappers_of](json_value::object& root) {
+            wrappers_of(root).pop_back();
+        }, "has no generated module owner");
+        reject_mapping([owners_of](json_value::object& root) {
+            std::get<json_value::object>(owners_of(root).front().value)["finfo_symbol"] =
+                "pg_finfo_write_overload_1";
+        }, "is duplicated or has the wrong finfo");
+
+        // Even matching owner/wrapper records cannot share across schemas.
+        auto cross_schema = split_document;
+        auto& cross_root = std::get<json_value::object>(cross_schema.value);
+        auto& cross_wrappers = wrappers_of(cross_root);
+        auto& cross_owners = owners_of(cross_root);
+        auto& first_overloads = std::get<json_value::array>(
+            std::get<json_value::object>(cross_wrappers[0].value).at("overloads").value);
+        auto second_overload = std::get<json_value::array>(
+            std::get<json_value::object>(cross_wrappers[1].value).at("overloads").value).front();
+        std::get<json_value::object>(second_overload.value)["sql_identity"] = "other.write(text,text)";
+        first_overloads.push_back(std::move(second_overload));
+        cross_wrappers.resize(1);
+        const json_value::array cross_identities{"bioseq.write(regclass,text)", "other.write(text,text)"};
+        std::get<json_value::object>(cross_owners.front().value)["routine_identities"] = cross_identities;
+        cross_owners.resize(1);
+        cross_root["c_routine_identities"] = cross_identities;
+        cross_root["c_link_symbol_inventory_count"] = std::size_t{1};
+        cross_root["c_finfo_symbol_inventory_count"] = std::size_t{1};
+        cross_root["c_link_symbols"] = json_value::array{"write_overload_0"};
+        cross_root["c_finfo_symbols"] = json_value::array{"pg_finfo_write_overload_0"};
+        const manifest_contract cross_policy{
+            .expected_parent_count = 2,
+            .expected_symbol_count = 1,
+            .shared_symbols = {"write_overload_0"},
+        };
+        analyzer_test_detail::require_failure([&cross_schema, &cross_policy] {
+            static_cast<void>(parse_safety_manifest(render_json(cross_schema), cross_policy));
+        }, "shares a C symbol across different SQL names");
+    }
     std::string legacy_revision_manifest{manifest_json};
     const std::string schema_revision_marker{
         "\"schema_revision\": 1"};

@@ -115,7 +115,8 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
                  errdetail("SPI rc=%d", connect_rc)));
     }
     spi_active = true;
-    const int execute_rc = SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0);
+    const int execute_rc = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+        "bioseq", [ddl] { return SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0); });
     const int finish_rc = SPI_finish();
     spi_active = finish_rc != SPI_OK_FINISH;
     if (execute_rc != SPI_OK_UTILITY || finish_rc != SPI_OK_FINISH) {
@@ -372,7 +373,8 @@ fragment_index_storage::clear_minimizer_generation_storage() {
                          errdetail("SPI rc=%d", discovery_connect_rc)));
             }
             state->spi_active = true;
-            const int owned_rc = SPI_execute(state->owned_shards_sql.c_str(), true, 0);
+            const int owned_rc = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+                "bioseq", [state] { return SPI_execute(state->owned_shards_sql.c_str(), true, 0); });
             if (owned_rc != SPI_OK_SELECT) {
                 ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
@@ -397,7 +399,8 @@ fragment_index_storage::clear_minimizer_generation_storage() {
                                                  static_cast<std::uint32_t>(shard));
             }
 
-            const int discover_rc = SPI_execute(state->discover_sql.c_str(), true, 0);
+            const int discover_rc = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+                "bioseq", [state] { return SPI_execute(state->discover_sql.c_str(), true, 0); });
             if (discover_rc != SPI_OK_SELECT) {
                 ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
@@ -533,7 +536,8 @@ fragment_index_storage::clear_minimizer_generation_storage() {
                          errdetail("SPI rc=%d", verify_connect_rc)));
             }
             state->spi_active = true;
-            const int verify_rc = SPI_execute(state->discover_sql.c_str(), true, 0);
+            const int verify_rc = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+                "bioseq", [state] { return SPI_execute(state->discover_sql.c_str(), true, 0); });
             if (verify_rc != SPI_OK_SELECT) {
                 ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
@@ -736,9 +740,12 @@ fragment_index_storage::clear_minimizer_generation_storage() {
             }
             PG_END_TRY();
         }
+        ErrorData* copied_postgres_error = nullptr;
         char cpp_error_detail[512] = "unknown C++ exception";
         try {
             std::rethrow_exception(state->cpp_error);
+        } catch (bioseq::postgres::support::postgres_error& error) {
+            copied_postgres_error = error.release_error_data();
         } catch (const std::exception& error) {
             const char* message = error.what();
             strlcpy(cpp_error_detail,
@@ -749,6 +756,8 @@ fragment_index_storage::clear_minimizer_generation_storage() {
         }
         state->cpp_error = nullptr;
         delete state;
+        if (copied_postgres_error != nullptr)
+            ReThrowError(copied_postgres_error);
         ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("bioseq current-generation index: generation clear failed"),

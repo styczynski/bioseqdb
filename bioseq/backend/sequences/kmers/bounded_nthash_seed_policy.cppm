@@ -83,6 +83,16 @@ struct bounded_nthash_seed_policy final {
         return seeds;
     }();
 
+    /** One complement lookup per nucleotide alphabet; proteins retain no reverse seed table. */
+    inline static constexpr auto complement_seeds = []() constexpr {
+        std::array<std::uint32_t, canonical_reverse_complement ? alphabet_size : 0u> seeds{};
+        if constexpr (canonical_reverse_complement) {
+            for (std::size_t rank = 0u; rank < seeds.size(); ++rank)
+                seeds[rank] = forward_seeds[complement_rank(static_cast<std::uint32_t>(rank))];
+        }
+        return seeds;
+    }();
+
     /** Scalar native rolling state; exact packed hashers intentionally have a different update API. */
     class scalar_state {
         std::size_t kmer_size_;

@@ -22,7 +22,7 @@ TEST_CASE(
 
   const auto languages = query_one(
       ctx, "WITH extension_routines AS ("
-           "    SELECT p.prokind, l.lanname "
+           "    SELECT p.oid, p.prokind, l.lanname "
            "      FROM pg_catalog.pg_proc AS p "
            "      JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang "
            "      JOIN pg_catalog.pg_depend AS d "
@@ -46,18 +46,41 @@ TEST_CASE(
            "           WHERE prokind IN ('f', 'p') "
            "             AND NOT ("
            "                 (prokind = 'f' AND lanname IN ('c', 'sql')) "
-           "                 OR (prokind = 'p' AND lanname = 'c'))))::text "
+           "                 OR (prokind = 'p' AND lanname = 'c'))))::text, "
+           "       (count(*) FILTER (WHERE prokind = 'f' AND lanname = 'sql' "
+           "            AND oid <> ALL (ARRAY["
+           "              'bioseq.cigar_apply(bioseq.seq,bioseq.seq,bioseq.letter,text,text,boolean)'::regprocedure, "
+           "              'bioseq.cigar_count(bioseq.seq,bioseq.letter[])'::regprocedure, "
+           "              'bioseq.cigar_filter(bioseq.seq,bioseq.letter[])'::regprocedure, "
+           "              'bioseq.cigar_find(bioseq.seq,bioseq.letter,bigint,bigint)'::regprocedure, "
+           "              'bioseq.cigar_op(text,bigint)'::regprocedure, "
+           "              'bioseq.cigar_project(bioseq.seq,bioseq.seq,bioseq.letter,text,text)'::regprocedure, "
+           "              'bioseq.cigar_replace(bioseq.seq,text,bigint,bigint)'::regprocedure, "
+           "              'bioseq.from_array(bioseq.cigar_op[],text)'::regprocedure, "
+           "              'bioseq.list_seq_storage_shards(regclass)'::regprocedure, "
+           "              'bioseq.to_array(bioseq.seq,bioseq.cigar_op)'::regprocedure, "
+           "              'public.aligner_options(int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,float8,float8,"
+           "float8,int4,float8,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,int4,"
+           "bool,bool,bool,int4)'::regprocedure"
+           "])))::text "
            "  FROM extension_routines;");
-  REQUIRE(languages.size() == 5);
+  REQUIRE(languages.size() == 6);
   REQUIRE(std::stoll(languages[0].value()) > 0);
-  REQUIRE(languages[1].value() == "2");
+  REQUIRE(languages[1].value() == "11");
   REQUIRE(languages[2].value() == "1");
   REQUIRE(languages[3].value() == "0");
   REQUIRE(languages[4].value() == "0");
+  REQUIRE(languages[5].value() == "0");
 
   const auto symbols = query_one(
-      ctx, "WITH c_routines AS ("
-           "    SELECT p.proname, p.prosrc "
+      ctx, "WITH expected_derived_symbols(identity, symbol) AS ("
+           "    VALUES "
+           "      ('bioseq.write(regclass,text,bioseq.column_mapping[],jsonb)'"
+           "         ::regprocedure, 'write_overload_0'), "
+           "      ('bioseq.write(text,text,bioseq.column_mapping[],jsonb)'"
+           "         ::regprocedure, 'write_overload_1') "
+           "), c_routines AS ("
+           "    SELECT p.oid, p.proname, p.prosrc "
            "      FROM pg_catalog.pg_proc AS p "
            "      JOIN pg_catalog.pg_language AS l ON l.oid = p.prolang "
            "      JOIN pg_catalog.pg_depend AS d "
@@ -80,11 +103,18 @@ TEST_CASE(
            "SELECT (SELECT count(*) FROM c_routines)::text, "
            "       (SELECT count(DISTINCT prosrc) FROM c_routines)::text, "
            "       (SELECT count(*) FROM c_routines "
-           "         WHERE prosrc <> proname)::text, "
+           "         WHERE prosrc <> proname "
+           "           AND NOT EXISTS ("
+           "             SELECT 1 FROM expected_derived_symbols AS e "
+           "              WHERE e.identity = c_routines.oid "
+           "                AND e.symbol = c_routines.prosrc))::text, "
            "       (SELECT string_agg(prosrc || ':' || identities::text, ',' "
            "                          ORDER BY prosrc) "
-           "          FROM shared);");
-  REQUIRE(symbols.size() == 4);
+           "          FROM shared), "
+           "       (SELECT count(*) FROM expected_derived_symbols AS e "
+           "          JOIN c_routines AS c "
+           "            ON c.oid = e.identity AND c.prosrc = e.symbol)::text;");
+  REQUIRE(symbols.size() == 5);
   REQUIRE(std::stoll(symbols[0].value()) ==
           std::stoll(languages[0].value()) + 1);
   REQUIRE(std::stoll(symbols[1].value()) > 0);
@@ -92,6 +122,7 @@ TEST_CASE(
           std::stoll(symbols[0].value()));
   REQUIRE(symbols[2].value() == "0");
   REQUIRE(symbols[3].value() == "from_array:2,mmsearch:2");
+  REQUIRE(symbols[4].value() == "2");
 
   const auto bpchar = query_one(
       ctx, "WITH extension_routines AS ("

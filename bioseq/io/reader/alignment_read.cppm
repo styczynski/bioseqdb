@@ -362,7 +362,12 @@ template<io_source Source>
         if (!complete_text) return std::unexpected(complete_text.error());
         if (!*complete_text) return std::unexpected(std::string{"BAM header text is truncated"});
         bytes = input.available();
-        const std::string_view text{reinterpret_cast<const char*>(bytes.data() + 8), text_length};
+        std::string_view text{reinterpret_cast<const char*>(bytes.data() + 8), text_length};
+        // BAM l_text includes optional trailing NUL padding; dictionary offsets
+        // still use the complete wire length, never the trimmed text view.
+        while (!text.empty() && text.back() == '\0') text.remove_suffix(1);
+        if (simd::scan_first_byte('\0', reinterpret_cast<const std::uint8_t*>(text.data()), text.size()) != text.size())
+            return std::unexpected(std::string{"BAM header text contains an embedded NUL"});
         std::size_t cursor{};
         while (cursor < text.size()) {
             const auto remaining = text.substr(cursor);
@@ -671,25 +676,11 @@ struct alignment_dictionary_index {
     if (measured->word_count != 0) {
         if (auto attached = destination.attach_cigar_source(slot.cigar); !attached) return attached;
         facts.query_length = measured->geometry.query_before_hard_clipping;
-        if (facts.target_start) facts.target_end = *facts.target_start + measured->geometry.reference_span;
-        std::uint64_t leading{}, trailing{};
-        bool body{};
-        bioseq::borrowed_cigar_cursor cursor{slot.cigar};
-        for (;;) {
-            const auto next = cursor.next();
-            if (!next) return std::unexpected(std::string{"Cannot read native CIGAR clips"});
-            if (!*next) break;
-            const auto character = seqan3::to_char((**next).operation);
-            if (character == 'S' || character == 'H') {
-                if (!body) leading += (**next).length;
-                else trailing += (**next).length;
-            } else body = true;
-        }
-        if ((core.flags & 16u) != 0) std::swap(leading, trailing);
-        if (leading > *facts.query_length || trailing > *facts.query_length - leading)
-            return std::unexpected(std::string{"Native clipping exceeds query length"});
-        facts.query_start = leading;
-        facts.query_end = *facts.query_length - trailing;
+        if (facts.target_start && core.reference_id >= 0)
+            facts.target_end = *facts.target_start + measured->geometry.reference_span;
+        const auto [query_start, query_end] = measured->geometry.original_query_interval((core.flags & 16u) != 0u);
+        facts.query_start = query_start;
+        facts.query_end = query_end;
     } else if (slot.sequence_present) facts.query_length = static_cast<std::uint64_t>(core.sequence_length);
     for (const auto& field : slot.auxiliary_views)
         if (auto restored = restore_native_auxiliary(destination, field); !restored) return restored;
@@ -714,7 +705,7 @@ struct alignment_dictionary_index {
         if (!decoded) return decoded;
         if (!slot.decoded->projected_flag)
             return std::unexpected(std::string{"Canonical alignment payload lacks projected FLAG"});
-        if (*slot.decoded->projected_flag != slot.core.flags)
+        if (*slot.decoded->projected_flag != alignment::defined_sam_flags(slot.core.flags))
             return std::unexpected(std::string{"Canonical projected FLAG differs from native FLAG"});
         if (!slot.decoded->projected_qname || *slot.decoded->projected_qname != slot.qname)
             return std::unexpected(std::string{"Canonical projected QNAME differs from native QNAME"});
@@ -977,10 +968,52 @@ template<bool Packed>
     return sink.finish();
 }
 
-/** Check auxiliary snapshots in either wire format without imposing BAM integer storage widths. */
+/** Validate unchanged original tags and allowed derivations before comparing native aux.
+ * Protein source tags share the writer's conservative invariant policy. Only the
+ * checked NM/MD pair may be newly derived; original payload-only fields cannot be
+ * smuggled into the native domain by changing the redundant projected snapshot.
+ */
 [[nodiscard]] inline std::expected<void, std::string> validate_original_auxiliary_projection(
     const alignment_decoded_slot& slot) {
     const auto expected = slot.decoded->projected_auxiliary();
+    const auto& row = slot.decoded->record;
+    const auto original = row.alignment ? row.alignment->auxiliary : std::span<const auxiliary_field_view>{};
+    const bool protein = slot.decoded->synthetic_codons;
+    const auto find_tag = [](std::span<const auxiliary_field_view> fields, const std::array<char, 2> tag) {
+        return std::find_if(fields.begin(), fields.end(),
+            [tag](const auxiliary_field_view& field) { return field.tag == tag; });
+    };
+    for (const auto& field : original) {
+        if (!alignment::retain_original_native_auxiliary(field, protein, !slot.bam)) continue;
+        const auto projected = find_tag(expected, field.tag);
+        if (projected == expected.end() || !alignment::auxiliary_logically_equal(field, *projected))
+            return std::unexpected(std::string{"Canonical native tag differs from its unchanged original value"});
+    }
+    bool needs_derived_pair{};
+    for (const auto& field : expected) {
+        if (field.tag == std::array{'b', 'q'} || field.tag == std::array{'C', 'G'}
+            || !alignment::valid_native_alignment_summary(field)
+            || (!slot.bam && alignment::auxiliary_has_nonfinite_float(field)))
+            return std::unexpected(std::string{"Canonical projected tag has no valid native representation"});
+        const auto source = find_tag(original, field.tag);
+        const bool retained_source = source != original.end()
+            && alignment::retain_original_native_auxiliary(*source, protein, !slot.bam);
+        if (retained_source && alignment::auxiliary_logically_equal(*source, field)) continue;
+        if (!alignment::derived_alignment_auxiliary_tag(field.tag)
+            || retained_source || !row.sequence
+            || (slot.core.flags & 4u) != 0u || slot.core.reference_id < 0)
+            return std::unexpected(std::string{"Canonical projected tag has no original value or supported derivation"});
+        needs_derived_pair = true;
+    }
+    if (needs_derived_pair) {
+        const auto nm = find_tag(expected, {'N', 'M'});
+        const auto md = find_tag(expected, {'M', 'D'});
+        const auto differences = nm == expected.end() ? std::optional<std::int64_t>{}
+            : alignment::auxiliary_integer_value(*nm);
+        if (!differences || *differences < 0 || *differences > std::numeric_limits<std::uint32_t>::max()
+            || md == expected.end() || md->type != 'Z')
+            return std::unexpected(std::string{"Canonical derived NM/MD pair is missing or has invalid types"});
+    }
     std::size_t matched{};
     for (const auto& field : slot.auxiliary_views) {
         if (field.tag == std::array<char, 2>{'b', 'q'}) continue;
@@ -1002,8 +1035,8 @@ template<bool Packed>
     const auto& metadata = header.metadata();
     const auto source = row.alignment ? *row.alignment : alignment_record_view{};
     const auto bind = [&dictionary, &source, &metadata](std::string_view name,
-        const std::int32_t native_identity, const std::optional<std::uint64_t> original_identity)
-        -> std::expected<std::int32_t, std::string> {
+        const std::int32_t native_identity, const std::optional<std::uint64_t> original_identity,
+        const bool allow_unprojected_missing = false) -> std::expected<std::int32_t, std::string> {
         if (original_identity) {
             const auto found = dictionary.original_ids.find(*original_identity);
             if (found == dictionary.original_ids.end() || found->second != native_identity)
@@ -1023,6 +1056,14 @@ template<bool Packed>
         }
         const auto found = dictionary.originals.find({source.header_context_id, name});
         if (found != dictionary.originals.end()) return found->second;
+        // A context-free declaration is the writer's fallback, but may not
+        // contradict an explicit source context even for a cleared protein mate.
+        if (source.header_context_id && dictionary.originals.contains({std::nullopt, name}))
+            return std::unexpected(std::string{"Original reference context disagrees with its dictionary entry"});
+        // The writer preserves a protein mate that has no binding in this exact
+        // source context, while clearing every native mate field. Do not select
+        // an unrelated context's same-name reference via the generic fallback.
+        if (allow_unprojected_missing) return -1;
         if (!source.header_context_id) {
             const auto unique = dictionary.unambiguous_originals.find(name);
             if (unique != dictionary.unambiguous_originals.end() && unique->second) return *unique->second;
@@ -1030,8 +1071,13 @@ template<bool Packed>
         return std::unexpected(std::string{"Original reference has no unique manifest dictionary entry"});
     };
     const auto reference = bind(source.reference_name, slot.core.reference_id, row.identity.reference_id);
+    const auto original_flags = source.flags.value_or(slot.decoded->projected_flag.value_or(slot.core.flags));
+    const bool allow_unprojected_mate = header.preserved && slot.decoded->projected_flag
+        && slot.decoded->synthetic_codons && (original_flags & 1u) != 0u
+        && slot.core.mate_reference_id == -1 && slot.core.mate_position == -1 && slot.core.template_length == 0;
     const auto mate = bind(source.mate_reference == "=" ? source.reference_name : source.mate_reference,
-        slot.core.mate_reference_id, source.mate_reference == "=" ? row.identity.reference_id : std::nullopt);
+        slot.core.mate_reference_id, source.mate_reference == "=" ? row.identity.reference_id : std::nullopt,
+        allow_unprojected_mate);
     if (!reference || !mate) return std::unexpected(!reference ? reference.error() : mate.error());
     binding.reference_id = *reference;
     binding.mate_reference_id = *mate;
@@ -1051,6 +1097,7 @@ template<bool Packed>
     }
     if (*mate >= 0) {
         const auto& descriptor = metadata.references[static_cast<std::size_t>(*mate)];
+        binding.mate_reference_length = descriptor.length;
         const auto query_code = row.sequence ? std::optional{row.sequence->alphabet_code}
             : slot.decoded->sequence_descriptor(record_field_role::sequence).alphabet_code;
         binding.mate_same_projection_domain = !slot.decoded->synthetic_codons
@@ -1066,6 +1113,7 @@ template<bool Packed>
     if (!frozen) return std::unexpected(frozen.error());
     auto& row = slot.decoded->record;
     const auto& metadata = header.metadata();
+    if (row.alignment) row.alignment->source_bound_interpretation = true;
     if (row.alignment && row.alignment->header_context_id
         && !dictionary.contexts.contains(*row.alignment->header_context_id))
         return std::unexpected(std::string{"Original row refers to an undeclared header context"});
@@ -1102,8 +1150,14 @@ template<bool Packed>
         *bindings, slot.decoded->synthetic_codons);
     if (!projected) return std::unexpected(projected.error());
     const auto& expected = projected->core;
-    const auto& actual = slot.core;
-    if (expected.flags != actual.flags || expected.mapping_quality != actual.mapping_quality
+    auto actual = slot.core;
+    if (!slot.decoded->projected_flag) {
+        // External SAM/BAM leaves coordinates uninterpreted when their
+        // reference is unavailable. Canonical projections remain exact.
+        if (actual.reference_id < 0) actual.position = -1;
+        if (actual.mate_reference_id < 0) actual.mate_position = -1;
+    }
+    if (expected.flags != alignment::defined_sam_flags(actual.flags) || expected.mapping_quality != actual.mapping_quality
         || expected.reference_id != actual.reference_id || expected.position != actual.position
         || expected.mate_reference_id != actual.mate_reference_id || expected.mate_position != actual.mate_position
         || expected.template_length != actual.template_length || expected.sequence_length != actual.sequence_length)
@@ -1340,6 +1394,7 @@ template<io_source Source, class Consumer>
         .maximum_concurrency = static_cast<unsigned>(std::min<std::size_t>(workers, 64)),
         .mode = parallelism::pipeline_concurrency_mode::dispatch_parallel});
     workers = std::max<std::size_t>(1, std::min<std::size_t>(workers, pool.maximum_concurrency()));
+    if (!parallelism::has_parallel_dispatch(pool.get_mode())) workers = 1u;
     const auto target_records = options.concurrency.batch_target_record_count != 0
         ? options.concurrency.batch_target_record_count : workers * 8u;
     auto wave_size = std::max<std::size_t>(1, target_records);
@@ -1372,7 +1427,9 @@ template<io_source Source, class Consumer>
             ++ordinal;
         }
         if (slots.empty()) break;
-        auto group = pool.make_task_group();
+        const bool parallel = workers > 1u && slots.size() > 1u
+            && parallelism::has_parallel_dispatch(pool.get_mode());
+        auto group = parallel ? pool.make_task_group() : parallelism::scoped_task_group{};
         const auto records_per_task = (slots.size() + workers - 1u) / workers;
         for (std::size_t begin = 0; begin < slots.size(); begin += records_per_task) {
             const auto end = std::min(slots.size(), begin + records_per_task);
@@ -1432,10 +1489,16 @@ template<class Consumer>
         }
         if (format == sequence_file_format::bam)
             return std::unexpected(std::string{"Compressed BAM input requires valid BGZF framing: "} + first.error());
-        if (options.io.parallel_gzip_enabled) {
+        const auto& pool = parallelism::global_pool::instance();
+        const bool parallel_allowed = !pool.is_active() || parallelism::has_parallel_dispatch(pool.get_mode());
+        if (options.io.parallel_gzip_enabled && parallel_allowed
+            && mapping->file_size >= options.io.parallel_gzip_min_compressed_bytes) {
             auto source = parallel_gzip_source::try_open_from_mmap(std::move(mapping->source), options);
-            if (!source) return std::unexpected(source.error());
-            return detail::read_alignment_source(*source, format, consumer, options);
+            if (source) return detail::read_alignment_source(*source, format, consumer, options);
+            bioseq_log<logging_level::debug>("[bioseq_io] parallel_gzip_source failed for "
+                                             "'{}': {}; falling back to single-thread gzip_source",
+                                             path, source.error());
+            // Restart only before delivery; a later decode error must not replay consumed records.
         }
     }
     if (format == sequence_file_format::bam) {

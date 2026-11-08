@@ -26,6 +26,7 @@ extern "C" {
 
 module bioseq.postgres.extension;
 
+import :alignment_hook_contract;
 import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.postgres.support;

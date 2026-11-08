@@ -13,8 +13,10 @@ import bioseq.common.seqan_adapter;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.indexing.symbol_counts;
+import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
 import bioseq.sequences.generation;
+import bioseq.sequences.generation.vulkan;
 import bioseq.sequences.cigar;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.lazy_sequence;
@@ -370,6 +372,32 @@ TEST_CASE("GPU and CPU sequence generation produce identical bytes",
         REQUIRE_THROWS_AS(generator.generate_sequences(1), gv::vulkan_runtime_error);
         return;
     }
+    // An explicit GPU request must reject admission denial without CPU fallback.
+    // Restore the existing cap before exercising successful hardware generation.
+    {
+        using generator_type = decltype(generator);
+        using traits = typename generator_type::sequence_type::traits;
+        constexpr auto cdf = gen::make_integer_cdf(
+            gen::alphabet_probability<seq::dna4>::probability());
+        const std::uint64_t units = gp.reference_length / traits::letters_per_unit
+            + static_cast<std::uint64_t>(gp.reference_length % traits::letters_per_unit != 0u);
+        const auto peak = gen::vulkan::estimate_generate_units_peak_bytes<traits>(units, cdf);
+        auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+        const auto reserved_before = admission.reserved_bytes();
+        const auto previous_cap = admission.index_memory_cap_bytes();
+        struct restore_cap {
+            bioseq::parallelism::memory_admission_controller& controller;
+            std::uint64_t value;
+            ~restore_cap() { controller.set_index_memory_cap_bytes(value); }
+        } restore{admission, previous_cap};
+        REQUIRE(peak > 0u);
+        REQUIRE(reserved_before <= (std::numeric_limits<std::uint64_t>::max)() - peak);
+        admission.set_index_memory_cap_bytes(reserved_before + peak - 1u);
+        const auto denied_before = gv::runtime::instance().generate_units_dispatch_count();
+        REQUIRE_THROWS_AS(generator.generate_sequences(1), gv::vulkan_runtime_error);
+        REQUIRE(gv::runtime::instance().generate_units_dispatch_count() == denied_before);
+        REQUIRE(admission.reserved_bytes() == reserved_before);
+    }
     const auto before = gv::runtime::instance().generate_units_dispatch_count();
     auto gpu_or_cpu = generator.generate_sequences(1);
     const auto after = gv::runtime::instance().generate_units_dispatch_count();
@@ -583,225 +611,229 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
     gp.fragment_count = 0;
     gp.seed = 0xB10Cull;
 
-    generator_type generator(gp);
-    auto reference = generator.generate_reference();
-
-    auto lazy = bioseq::storage::make_resident_lazy_sequence(*reference);
-    const auto reference_view =
-        bioseq::storage::make_lazy_sequence_view(lazy);
-    const auto counts =
-        bioseq::indexing::tally_symbol_counts(reference_view);
-    REQUIRE(counts.has_value());
-    const auto probs = gen::alphabet_probability<seq::dna5>::probability();
-
-    for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
-        const double mu = static_cast<double>(gp.reference_length) * probs[rank];
-        const double sigma = std::sqrt(
-            static_cast<double>(gp.reference_length)
-            * probs[rank]
-            * (1.0 - probs[rank]));
-        ASSERT(std::abs(static_cast<double>((*counts)[rank]) - mu) <= 6.0 * sigma,
-               fmt::format("rank {} count {} outside 6 sigma band around {}",
-                           rank, (*counts)[rank], mu));
-    }
-    report_validation(
-        "symbol distribution",
-        fmt::format("counts A/C/G/T/N={}/{}/{}/{}/{}",
-                    (*counts)[0], (*counts)[1], (*counts)[2], (*counts)[3], (*counts)[4]));
-
-    std::uint64_t longest_run = 0;
-    std::uint64_t current_run = 0;
-    traits::letter_unit previous_rank = 0;
-    bool have_previous = false;
-    std::array<std::uint64_t, 16> dinuc{};
-    traits::letter_unit previous_window_rank = 0;
-    bool have_previous_window_rank = false;
-    constexpr std::size_t dinucleotide_window = 200'000'000;
-    for_each_rank_prefix(
-        *reference,
-        gp.reference_length,
-        [&current_run,
-         &previous_rank,
-         &have_previous,
-         &longest_run,
-         &dinuc,
-         &previous_window_rank,
-         &have_previous_window_rank](traits::letter_unit rank, std::size_t pos) {
-            if (!have_previous || rank != previous_rank) {
-                current_run = 1;
-                previous_rank = rank;
-                have_previous = true;
-            } else {
-                ++current_run;
-            }
-            longest_run = std::max(longest_run, current_run);
-
-            if (pos < dinucleotide_window) {
-                if (have_previous_window_rank && previous_window_rank < 4 && rank < 4) {
-                    ++dinuc[static_cast<std::size_t>(previous_window_rank) * 4u + rank];
-                }
-                previous_window_rank = rank;
-                have_previous_window_rank = true;
-            }
-        });
-
-    double entropy = 0.0;
-    for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
-        const double p = static_cast<double>((*counts)[rank])
-            / static_cast<double>(gp.reference_length);
-        if (p > 0.0) {
-            entropy -= p * std::log2(p);
-        }
-    }
-    ASSERT(longest_run < 40, fmt::format("longest run {} >= 40", longest_run));
-    ASSERT(entropy > 1.9, fmt::format("entropy {} <= 1.9", entropy));
-    report_validation(
-        "run length and entropy",
-        fmt::format("longest_run={} entropy={:.6f}", longest_run, entropy));
-
-    double chi2 = 0.0;
-    const double pairs = static_cast<double>(dinucleotide_window - 1);
-    for (std::size_t a = 0; a < 4; ++a) {
-        for (std::size_t b = 0; b < 4; ++b) {
-            const double expected = pairs * probs[a] * probs[b];
-            const double observed = static_cast<double>(dinuc[a * 4 + b]);
-            chi2 += (observed - expected) * (observed - expected) / expected;
-        }
-    }
-    ASSERT(chi2 < 50.0, fmt::format("dinucleotide chi2 {} >= 50", chi2));
-    report_validation(
-        "dinucleotide distribution", fmt::format("chi2={:.4f}", chi2));
-
-    gen::generator_params interval_params = gp;
-    interval_params.fragment_count = 1000;
-    auto interval_pairs =
-        generator_type(interval_params)
-            .generate_fragment_pairs(reference, 0, interval_params.fragment_count);
-    ASSERT(interval_pairs.size() == interval_params.fragment_count,
-           fmt::format("expected {} pairs, got {}",
-                       interval_params.fragment_count, interval_pairs.size()));
-    for (const auto& pair : interval_pairs) {
-        ASSERT(pair.truth_target_start < pair.truth_target_end &&
-               pair.truth_target_end <= interval_params.reference_length,
-               "truth interval out of range");
-        ASSERT(pair.truth_target_end - pair.truth_target_start == pair.original_query_length,
-               "original query length mismatch");
-    }
-    report_validation("truth intervals", fmt::format("pairs={}", interval_pairs.size()));
-
-    gen::generator_params exact_params = gp;
-    exact_params.fragment_count = 200;
-    exact_params.fragment_length_mean = 5000;
-    exact_params.substitution_rate = 0.0;
-    exact_params.insertion_rate = 0.0;
-    exact_params.deletion_rate = 0.0;
-    exact_params.reverse_complement_rate = 0.0;
-    auto exact_pairs = generator_type(exact_params)
-                           .generate_fragment_pairs(reference, 0, exact_params.fragment_count);
-    for (const auto& pair : exact_pairs) {
-        const auto expected = ranks_for_window(
-            *reference, pair.truth_target_start, pair.truth_target_end);
-        const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
-        ASSERT(query == expected, "error-free query differs from target window");
-    }
-    report_validation("exact queries", fmt::format("pairs={}", exact_pairs.size()));
-
-    gen::generator_params substitution_params = exact_params;
-    substitution_params.fragment_count = 2000;
-    substitution_params.substitution_rate = 0.01;
-    auto substitution_pairs =
-        generator_type(substitution_params)
-            .generate_fragment_pairs(reference, 0, substitution_params.fragment_count);
-    std::uint64_t total_bases = 0;
-    std::uint64_t mismatches = 0;
-    for (const auto& pair : substitution_pairs) {
-        const auto expected = ranks_for_window(
-            *reference, pair.truth_target_start, pair.truth_target_end);
-        const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
-        ASSERT(query.size() == expected.size(), "query and target window sizes differ");
-        for (std::size_t i = 0; i < query.size(); ++i) {
-            mismatches += query[i] != expected[i] ? 1u : 0u;
-        }
-        total_bases += query.size();
-    }
-    const double mismatch_rate = static_cast<double>(mismatches) / static_cast<double>(total_bases);
-    const double mismatch_sigma =
-        std::sqrt(substitution_params.substitution_rate
-                  * (1.0 - substitution_params.substitution_rate)
-                  / static_cast<double>(total_bases));
-    ASSERT(std::abs(mismatch_rate - substitution_params.substitution_rate)
-               <= 5.0 * mismatch_sigma,
-           fmt::format("mismatch rate {} outside 5 sigma band", mismatch_rate));
-    report_validation(
-        "substitution rate",
-        fmt::format("mismatch_rate={:.8f} total_bases={}", mismatch_rate, total_bases));
-
-    gen::generator_params indel_params = exact_params;
-    indel_params.fragment_count = 2000;
-    indel_params.insertion_rate = 0.01;
-    indel_params.deletion_rate = 0.01;
-    indel_params.insertion_length_mean = 2.0;
-    indel_params.deletion_length_mean = 2.0;
-    std::uint64_t indel_positions = 0;
-    const auto indel_counts =
-        replay_indel_counts(
-            *reference, indel_params, indel_params.fragment_count, indel_positions);
-    const double event_opportunities = static_cast<double>(indel_counts.visited_positions);
-    const double expected_events = event_opportunities * 0.01;
-    const double event_sigma = std::sqrt(event_opportunities * 0.01 * 0.99);
-    ASSERT(std::abs(static_cast<double>(indel_counts.insertions) - expected_events)
-               <= 5.0 * event_sigma,
-           fmt::format("insertion events {} outside 5 sigma band", indel_counts.insertions));
-    ASSERT(std::abs(static_cast<double>(indel_counts.deletions) - expected_events)
-               <= 5.0 * event_sigma,
-           fmt::format("deletion events {} outside 5 sigma band", indel_counts.deletions));
-    report_validation(
-        "indel rates",
-        fmt::format("ins_events={} del_events={} visited_positions={} original_positions={}",
-                    indel_counts.insertions, indel_counts.deletions,
-                    indel_counts.visited_positions, indel_positions));
-
-    gen::generator_params strand_params = exact_params;
-    strand_params.fragment_count = 4000;
-    strand_params.reverse_complement_rate = 0.5;
-    auto strand_pairs = generator_type(strand_params)
-                            .generate_fragment_pairs(reference, 0, strand_params.fragment_count);
-    std::size_t reverse_count = 0;
-    std::size_t checked_forward = 0;
-    std::size_t checked_reverse = 0;
-    for (const auto& pair : strand_pairs) {
-        reverse_count += pair.is_reverse ? 1u : 0u;
-        if ((pair.is_reverse && checked_reverse < 10) ||
-            (!pair.is_reverse && checked_forward < 10)) {
-            const auto expected = ranks_for_window(
-                *reference,
-                pair.truth_target_start,
-                pair.truth_target_end,
-                pair.is_reverse);
-            const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
-            ASSERT(query == expected, "strand-specific query and target window differ");
-            if (pair.is_reverse) {
-                ++checked_reverse;
-            } else {
-                ++checked_forward;
-            }
-        }
-    }
-    const double reverse_fraction =
-        static_cast<double>(reverse_count) / static_cast<double>(strand_pairs.size());
-    const double reverse_sigma = std::sqrt(0.25 / static_cast<double>(strand_pairs.size()));
-    ASSERT(std::abs(reverse_fraction - 0.5) <= 5.0 * reverse_sigma,
-           fmt::format("reverse fraction {} outside 5 sigma band", reverse_fraction));
-    ASSERT(checked_forward == 10 && checked_reverse == 10,
-           fmt::format("checked forward={} reverse={}", checked_forward, checked_reverse));
-    report_validation(
-        "strand balance", fmt::format("reverse_fraction={:.6f}", reverse_fraction));
-
+    // Release the completed CPU reference, query payloads, and their retained
+    // admission permits before the independent GPU parity allocation.
     {
-        auto repeated_reference = generator_type(gp).generate_reference();
-        ASSERT(reference->packed_units == repeated_reference->packed_units
-                   && reference->padding() == repeated_reference->padding(),
-               "same-seed references differ");
+        generator_type generator(gp);
+        auto reference = generator.generate_reference();
+
+        auto lazy = bioseq::storage::make_resident_lazy_sequence(*reference);
+        const auto reference_view =
+            bioseq::storage::make_lazy_sequence_view(lazy);
+        const auto counts =
+            bioseq::indexing::tally_symbol_counts(reference_view);
+        REQUIRE(counts.has_value());
+        const auto probs = gen::alphabet_probability<seq::dna5>::probability();
+
+        for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
+            const double mu = static_cast<double>(gp.reference_length) * probs[rank];
+            const double sigma = std::sqrt(
+                static_cast<double>(gp.reference_length)
+                * probs[rank]
+                * (1.0 - probs[rank]));
+            ASSERT(std::abs(static_cast<double>((*counts)[rank]) - mu) <= 6.0 * sigma,
+                   fmt::format("rank {} count {} outside 6 sigma band around {}",
+                               rank, (*counts)[rank], mu));
+        }
+        report_validation(
+            "symbol distribution",
+            fmt::format("counts A/C/G/N/T={}/{}/{}/{}/{}",
+                        (*counts)[0], (*counts)[1], (*counts)[2], (*counts)[3], (*counts)[4]));
+
+        std::uint64_t longest_run = 0;
+        std::uint64_t current_run = 0;
+        traits::letter_unit previous_rank = 0;
+        bool have_previous = false;
+        std::array<std::uint64_t, 16> dinuc{};
+        traits::letter_unit previous_window_rank = 0;
+        bool have_previous_window_rank = false;
+        constexpr std::size_t dinucleotide_window = 200'000'000;
+        for_each_rank_prefix(
+            *reference,
+            gp.reference_length,
+            [&current_run,
+             &previous_rank,
+             &have_previous,
+             &longest_run,
+             &dinuc,
+             &previous_window_rank,
+             &have_previous_window_rank](traits::letter_unit rank, std::size_t pos) {
+                if (!have_previous || rank != previous_rank) {
+                    current_run = 1;
+                    previous_rank = rank;
+                    have_previous = true;
+                } else {
+                    ++current_run;
+                }
+                longest_run = std::max(longest_run, current_run);
+
+                if (pos < dinucleotide_window) {
+                    if (have_previous_window_rank && previous_window_rank < 4 && rank < 4) {
+                        ++dinuc[static_cast<std::size_t>(previous_window_rank) * 4u + rank];
+                    }
+                    previous_window_rank = rank;
+                    have_previous_window_rank = true;
+                }
+            });
+
+        double entropy = 0.0;
+        for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
+            const double p = static_cast<double>((*counts)[rank])
+                / static_cast<double>(gp.reference_length);
+            if (p > 0.0) {
+                entropy -= p * std::log2(p);
+            }
+        }
+        ASSERT(longest_run < 40, fmt::format("longest run {} >= 40", longest_run));
+        ASSERT(entropy > 1.9, fmt::format("entropy {} <= 1.9", entropy));
+        report_validation(
+            "run length and entropy",
+            fmt::format("longest_run={} entropy={:.6f}", longest_run, entropy));
+
+        double chi2 = 0.0;
+        const double pairs = static_cast<double>(dinucleotide_window - 1);
+        for (std::size_t a = 0; a < 4; ++a) {
+            for (std::size_t b = 0; b < 4; ++b) {
+                const double expected = pairs * probs[a] * probs[b];
+                const double observed = static_cast<double>(dinuc[a * 4 + b]);
+                chi2 += (observed - expected) * (observed - expected) / expected;
+            }
+        }
+        ASSERT(chi2 < 50.0, fmt::format("dinucleotide chi2 {} >= 50", chi2));
+        report_validation(
+            "dinucleotide distribution", fmt::format("chi2={:.4f}", chi2));
+
+        gen::generator_params interval_params = gp;
+        interval_params.fragment_count = 1000;
+        auto interval_pairs =
+            generator_type(interval_params)
+                .generate_fragment_pairs(reference, 0, interval_params.fragment_count);
+        ASSERT(interval_pairs.size() == interval_params.fragment_count,
+               fmt::format("expected {} pairs, got {}",
+                           interval_params.fragment_count, interval_pairs.size()));
+        for (const auto& pair : interval_pairs) {
+            ASSERT(pair.truth_target_start < pair.truth_target_end &&
+                   pair.truth_target_end <= interval_params.reference_length,
+                   "truth interval out of range");
+            ASSERT(pair.truth_target_end - pair.truth_target_start == pair.original_query_length,
+                   "original query length mismatch");
+        }
+        report_validation("truth intervals", fmt::format("pairs={}", interval_pairs.size()));
+
+        gen::generator_params exact_params = gp;
+        exact_params.fragment_count = 200;
+        exact_params.fragment_length_mean = 5000;
+        exact_params.substitution_rate = 0.0;
+        exact_params.insertion_rate = 0.0;
+        exact_params.deletion_rate = 0.0;
+        exact_params.reverse_complement_rate = 0.0;
+        auto exact_pairs = generator_type(exact_params)
+                               .generate_fragment_pairs(reference, 0, exact_params.fragment_count);
+        for (const auto& pair : exact_pairs) {
+            const auto expected = ranks_for_window(
+                *reference, pair.truth_target_start, pair.truth_target_end);
+            const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
+            ASSERT(query == expected, "error-free query differs from target window");
+        }
+        report_validation("exact queries", fmt::format("pairs={}", exact_pairs.size()));
+
+        gen::generator_params substitution_params = exact_params;
+        substitution_params.fragment_count = 2000;
+        substitution_params.substitution_rate = 0.01;
+        auto substitution_pairs =
+            generator_type(substitution_params)
+                .generate_fragment_pairs(reference, 0, substitution_params.fragment_count);
+        std::uint64_t total_bases = 0;
+        std::uint64_t mismatches = 0;
+        for (const auto& pair : substitution_pairs) {
+            const auto expected = ranks_for_window(
+                *reference, pair.truth_target_start, pair.truth_target_end);
+            const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
+            ASSERT(query.size() == expected.size(), "query and target window sizes differ");
+            for (std::size_t i = 0; i < query.size(); ++i) {
+                mismatches += query[i] != expected[i] ? 1u : 0u;
+            }
+            total_bases += query.size();
+        }
+        const double mismatch_rate = static_cast<double>(mismatches) / static_cast<double>(total_bases);
+        const double mismatch_sigma =
+            std::sqrt(substitution_params.substitution_rate
+                      * (1.0 - substitution_params.substitution_rate)
+                      / static_cast<double>(total_bases));
+        ASSERT(std::abs(mismatch_rate - substitution_params.substitution_rate)
+                   <= 5.0 * mismatch_sigma,
+               fmt::format("mismatch rate {} outside 5 sigma band", mismatch_rate));
+        report_validation(
+            "substitution rate",
+            fmt::format("mismatch_rate={:.8f} total_bases={}", mismatch_rate, total_bases));
+
+        gen::generator_params indel_params = exact_params;
+        indel_params.fragment_count = 2000;
+        indel_params.insertion_rate = 0.01;
+        indel_params.deletion_rate = 0.01;
+        indel_params.insertion_length_mean = 2.0;
+        indel_params.deletion_length_mean = 2.0;
+        std::uint64_t indel_positions = 0;
+        const auto indel_counts =
+            replay_indel_counts(
+                *reference, indel_params, indel_params.fragment_count, indel_positions);
+        const double event_opportunities = static_cast<double>(indel_counts.visited_positions);
+        const double expected_events = event_opportunities * 0.01;
+        const double event_sigma = std::sqrt(event_opportunities * 0.01 * 0.99);
+        ASSERT(std::abs(static_cast<double>(indel_counts.insertions) - expected_events)
+                   <= 5.0 * event_sigma,
+               fmt::format("insertion events {} outside 5 sigma band", indel_counts.insertions));
+        ASSERT(std::abs(static_cast<double>(indel_counts.deletions) - expected_events)
+                   <= 5.0 * event_sigma,
+               fmt::format("deletion events {} outside 5 sigma band", indel_counts.deletions));
+        report_validation(
+            "indel rates",
+            fmt::format("ins_events={} del_events={} visited_positions={} original_positions={}",
+                        indel_counts.insertions, indel_counts.deletions,
+                        indel_counts.visited_positions, indel_positions));
+
+        gen::generator_params strand_params = exact_params;
+        strand_params.fragment_count = 4000;
+        strand_params.reverse_complement_rate = 0.5;
+        auto strand_pairs = generator_type(strand_params)
+                                .generate_fragment_pairs(reference, 0, strand_params.fragment_count);
+        std::size_t reverse_count = 0;
+        std::size_t checked_forward = 0;
+        std::size_t checked_reverse = 0;
+        for (const auto& pair : strand_pairs) {
+            reverse_count += pair.is_reverse ? 1u : 0u;
+            if ((pair.is_reverse && checked_reverse < 10) ||
+                (!pair.is_reverse && checked_forward < 10)) {
+                const auto expected = ranks_for_window(
+                    *reference,
+                    pair.truth_target_start,
+                    pair.truth_target_end,
+                    pair.is_reverse);
+                const auto query = ranks_for_window(pair.query, 0, pair.query.bp_size());
+                ASSERT(query == expected, "strand-specific query and target window differ");
+                if (pair.is_reverse) {
+                    ++checked_reverse;
+                } else {
+                    ++checked_forward;
+                }
+            }
+        }
+        const double reverse_fraction =
+            static_cast<double>(reverse_count) / static_cast<double>(strand_pairs.size());
+        const double reverse_sigma = std::sqrt(0.25 / static_cast<double>(strand_pairs.size()));
+        ASSERT(std::abs(reverse_fraction - 0.5) <= 5.0 * reverse_sigma,
+               fmt::format("reverse fraction {} outside 5 sigma band", reverse_fraction));
+        ASSERT(checked_forward == 10 && checked_reverse == 10,
+               fmt::format("checked forward={} reverse={}", checked_forward, checked_reverse));
+        report_validation(
+            "strand balance", fmt::format("reverse_fraction={:.6f}", reverse_fraction));
+
+        {
+            auto repeated_reference = generator_type(gp).generate_reference();
+            ASSERT(reference->packed_units == repeated_reference->packed_units
+                       && reference->padding() == repeated_reference->padding(),
+                   "same-seed references differ");
+        }
     }
     {
         gen::generator_params gpu_params = gp;
@@ -813,12 +845,42 @@ TEST_CASE("sequence generation preserves large-scale statistical and coordinate 
                 "GPU selection",
                 "generation rejected without a hardware Vulkan device");
         } else {
+            // Hardware availability alone does not admit a 2 Gbp request. Check
+            // the real peak against the existing host policy, without overriding
+            // it; insufficient idle-host capacity must remain a visible failure.
+            auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+            const auto reserved_before = admission.reserved_bytes();
+            constexpr auto cdf = gen::make_integer_cdf(
+                gen::alphabet_probability<seq::dna5>::probability());
+            const std::uint64_t units = gp.reference_length / traits::letters_per_unit
+                + static_cast<std::uint64_t>(gp.reference_length % traits::letters_per_unit != 0u);
+            const auto peak = gen::vulkan::estimate_generate_units_peak_bytes<traits>(units, cdf);
+            {
+                bioseq::parallelism::memory_admission_failure failure{};
+                auto preflight = admission.try_reserve(peak, &failure);
+                INFO(fmt::format(
+                    "2 Gbp DNA5 GPU admission: reason={} requested_bytes={} "
+                    "reserved_bytes={} budget_ceiling_bytes={} allocatable_bytes={} "
+                    "process_footprint_bytes={} system_available_bytes={} "
+                    "system_total_bytes={} process_soft_cap_bytes={} index_cap_bytes={}",
+                    bioseq::parallelism::memory_admission_failure_reason_name(failure.reason),
+                    failure.requested_bytes, failure.reserved_bytes, failure.budget_ceiling_bytes,
+                    failure.allocatable_after_reservations_bytes, failure.process_footprint_bytes,
+                    failure.system_available_bytes, failure.system_total_bytes,
+                    failure.process_soft_cap_bytes, admission.index_memory_cap_bytes()));
+                REQUIRE(preflight.has_value());
+            } // The real generation call obtains its own permit.
+            REQUIRE(admission.reserved_bytes() == reserved_before);
             const auto before = gv::runtime::instance().generate_units_dispatch_count();
-            auto gpu_or_cpu = generator_type(gpu_params).generate_sequences(1).front();
+            const auto gpu_sequences = generator_type(gpu_params).generate_sequences(1);
             const auto after = gv::runtime::instance().generate_units_dispatch_count();
+            REQUIRE(gpu_sequences.size() == 1u);
+            const auto& gpu_or_cpu = gpu_sequences.front();
             ASSERT(after > before,
                    "hardware Vulkan device did not dispatch sequence generation");
-            auto cpu = generator_type(gpu_params).debug_generate_sequences_cpu_only(1).front();
+            const auto cpu_sequences = generator_type(gpu_params).debug_generate_sequences_cpu_only(1);
+            REQUIRE(cpu_sequences.size() == 1u);
+            const auto& cpu = cpu_sequences.front();
             ASSERT(gpu_or_cpu.packed_units == cpu.packed_units && gpu_or_cpu.padding() == cpu.padding(),
                    "GPU and CPU references differ");
             report_validation(

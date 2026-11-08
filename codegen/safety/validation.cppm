@@ -370,18 +370,10 @@ severity_set(const std::vector<postgres_severity>& severities) {
         + ":" + std::to_string(record.upstream_span.end.column);
 }
 
-[[nodiscard]] inline std::string routine_leaf(
+/** Compare qualified SQL names without assuming their C wrappers share the spelling. */
+[[nodiscard]] inline std::string_view routine_name(
     std::string_view identity) {
-    const std::size_t arguments = identity.find('(');
-    const std::string_view qualified =
-        arguments == std::string_view::npos
-        ? identity
-        : identity.substr(0, arguments);
-    const std::size_t separator = qualified.rfind('.');
-    return std::string{
-        separator == std::string_view::npos
-            ? qualified
-            : qualified.substr(separator + 1)};
+    return identity.substr(0, identity.find('('));
 }
 
 [[nodiscard]] inline std::string declaration_leaf(
@@ -1392,11 +1384,11 @@ inline void validate_safety_ledger(
         if (group.sql_identities.size() > 1) {
             actual_shared_symbols.insert(group.public_symbol);
         }
+        const auto sql_name = detail::routine_name(group.sql_identities.front());
         for (const std::string& identity : group.sql_identities) {
             if (!parent_identities.contains(identity)
                 || !grouped_identities.insert(identity).second
-                || detail::routine_leaf(identity)
-                    != group.public_symbol) {
+                || detail::routine_name(identity) != sql_name) {
                 detail::safety_failure(
                     group.public_symbol,
                     "symbol sharing crosses SQL names or misses a parent row");

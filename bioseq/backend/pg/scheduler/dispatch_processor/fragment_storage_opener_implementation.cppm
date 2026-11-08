@@ -82,6 +82,40 @@ typed_dispatch_fragment_read_view::assemble_sequence_segment_for_query(
 }
 
 namespace {
+/**
+ * @brief Recognize a valid native-generation table unsupported by this direct reader.
+ * Check the exact relation identity and existing generation schema contract without
+ * reading payload rows. Missing, direct, or malformed tables remain subject to the
+ * ordinary fragment reader's checks; only a valid native layout permits recompute.
+ */
+[[nodiscard]] bool uses_native_generation_storage(
+    const bioseq::storage::indexing::fragment_index_storage& storage) {
+    const Oid relation_oid = storage.resolve_relid_(false);
+    if (!OidIsValid(relation_oid)) {
+        return false;
+    }
+    const std::string relation_name = storage.this_table_name();
+    const Oid namespace_oid = bioseq::storage::indexing::bioseq_internal_ns();
+    const Oid tablespace_oid = storage.tablespace_oid_;
+    return bioseq::postgres::support::invoke_pg_as_cpp(
+        [relation_oid, namespace_oid, tablespace_oid, &relation_name] {
+            Relation relation = bioseq::postgres::support::try_open_postgres_relation(
+                relation_oid, AccessShareLock);
+            if (relation == nullptr) {
+                return false;
+            }
+            const auto schema =
+                bioseq::storage::indexing::inspect_minimizer_generation_schema(
+                    relation,
+                    nullptr,
+                    {.namespace_oid = namespace_oid,
+                     .relation_name = relation_name,
+                     .tablespace_oid = tablespace_oid});
+            relation_close(relation, AccessShareLock);
+            return static_cast<bool>(schema);
+        });
+}
+
 /** Reopen the concrete reader only inside its owning PG implementation boundary. */
 [[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index
 assemble_fragment_for_canonical_query(
@@ -168,7 +202,13 @@ open_typed_dispatch_fragment_storage(const Oid user_relid,
                                                                     parent_mctx);
     typed_dispatch_fragment_read_view view{std::addressof(storage)};
     try {
-        callback(callback_context, view);
+        // Optional CPU chunk reads have no native-generation owner. Leave the
+        // caller unassembled so its existing admitted recompute path and source
+        // statistics remain authoritative. Required native readers do not use
+        // this opener, and malformed schemas still reach the strict chunk reader.
+        if (!uses_native_generation_storage(storage)) {
+            callback(callback_context, view);
+        }
     } catch (const bioseq::postgres::support::postgres_error&) {
         storage.abandon_after_pg_error_noexcept();
         throw;

@@ -21,7 +21,6 @@ export module bioseq.postgres.column.planner_hook;
 import bioseq.common.logging;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.table;
-import bioseq.postgres.table.types;
 import bioseq.postgres.support;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.vectorization.execution;
@@ -495,6 +494,8 @@ column_planner_hook(Query* parse,
 	 * into a Const. The third argument must stay fixed for the statement. */
 	bioseq_validate_raw_mmsearch_options(parse);
 	bioseq::postgres::random::bind_random_sequence_types(parse);
+    const bool standalone_export_query =
+        bioseq::postgres::storage::io::exporting::is_standalone_export_query(*parse);
 
 	PlannedStmt* stmt;
 	if (previous_planner_hook) {
@@ -542,7 +543,7 @@ column_planner_hook(Query* parse,
 			bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
 				bioseq::settings::vectorization::enabled, bioseq::settings::planner::index_scan::enabled,
 				(stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
-            stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(parse, stmt);
+            stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(standalone_export_query, stmt);
 			bioseq::postgres::extension::cache_provider::
 				bioseq_cache_provider_after_planned_statement(stmt);
 			return stmt;
@@ -601,7 +602,7 @@ column_planner_hook(Query* parse,
 	PG_END_TRY();
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() returning");
 
-    stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(parse, stmt);
+    stmt = bioseq::postgres::storage::io::exporting::replace_top_level_write_in_pg(standalone_export_query, stmt);
 	bioseq::postgres::extension::cache_provider::
 		bioseq_cache_provider_after_planned_statement(stmt);
 	return stmt;

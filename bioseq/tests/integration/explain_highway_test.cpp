@@ -152,9 +152,8 @@ TEST_CASE(
                     target);
     const auto per_row = explain_with_options(ctx, "VERBOSE, COSTS OFF", per_row_sql);
     REQUIRE(plan_contains(per_row, "Custom Scan (BioseqBatchJoin)"));
-    /* PostgreSQL can represent the helper as a PlaceHolderVar or a function call.
-     * These two expression sites refer to the same alignment result. */
-    REQUIRE(plan_contains(per_row, "Bioseq Match Placeholder Sites: 2"));
+    // This projection requests one helper identity; hidden carriers reuse its site.
+    REQUIRE(plan_contains(per_row, "Bioseq Match Placeholder Sites: 1"));
     REQUIRE(plan_contains(per_row, "Bioseq Mmsearch Ownership: per-row recipe"));
     require_complete_generic_highway_pipeline(per_row);
 }

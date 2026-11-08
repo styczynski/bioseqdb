@@ -37,7 +37,7 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_batch_join_execution_execution_callbacks;
 
 import bioseq.indexing.type;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.scheduler.dispatch_buffer.api;
 import bioseq.postgres.support;
@@ -56,7 +56,6 @@ import :custom_scan_execution_stats_contracts;
 import :custom_scan_plan_abi_constants;
 import :custom_scan_planner_aligner_contracts;
 import :custom_scan_planner_method_contracts;
-import :custom_scan_runtime_pipeline_contracts;
 import :custom_scan_batch_join_execution_runtime_state_contracts;
 import :custom_scan_scan_runtime_state_contracts;
 import :custom_scan_semantic_payload_query_sketch_route_contracts;
@@ -903,7 +902,7 @@ export {
         }
     }
 
-    /** Clear buffered work and restart both children for anobher join pass. */
+    /** Clear buffered work and restart both children for another join pass. */
     void bioseq_batch_join_rescan_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_rescan_custom_scan(node);
@@ -937,6 +936,12 @@ export {
                 runtime->current_target_slot = nullptr;
                 runtime->next_query_batch = 0;
                 runtime->active_query_batch_end = 0;
+                // PostgreSQL propagates changed Params through left/right child
+                // links, not custom_ps. Preserve that contract for both children.
+                if (node->ss.ps.chgParam != nullptr) {
+                    UpdateChangedParamSet(runtime->target_child, node->ss.ps.chgParam);
+                    UpdateChangedParamSet(runtime->query_child, node->ss.ps.chgParam);
+                }
                 ExecReScan(runtime->target_child);
                 ExecReScan(runtime->query_child);
             } catch (bioseq::postgres::support::postgres_error& error) {

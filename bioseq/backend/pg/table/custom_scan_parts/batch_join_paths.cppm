@@ -58,6 +58,37 @@ using namespace bioseq::postgres::support;
 export {
 
     /**
+     * @brief Admit a completed nonrecursive SELECT CTE as an opaque query input.
+     *
+     * Resolve the definition only to validate its shape. PostgreSQL's existing
+     * CteScan/InitPlan remains the query child, preserving materialization,
+     * permissions, security filters and once-only evaluation of stored values.
+     */
+    [[nodiscard]] bool batch_join_query_cte_is_supported(
+        PlannerInfo* root, const RangeTblEntry* query_rte) {
+        if (root == nullptr || query_rte == nullptr || query_rte->rtekind != RTE_CTE ||
+            query_rte->self_reference || query_rte->ctename == nullptr)
+            return false;
+        PlannerInfo* owner = root;
+        for (Index level = 0; level < query_rte->ctelevelsup; ++level) {
+            owner = owner->parent_root;
+            if (owner == nullptr)
+                return false;
+        }
+        if (owner->parse == nullptr)
+            return false;
+        for (CommonTableExpr* cte : postgres_list<CommonTableExpr>(owner->parse->cteList)) {
+            if (cte == nullptr || cte->ctename == nullptr ||
+                std::strcmp(cte->ctename, query_rte->ctename) != 0)
+                continue;
+            Query* query = try_cast_pg_node<Query>(cte->ctequery);
+            return !cte->cterecursive && query != nullptr &&
+                   query->commandType == CMD_SELECT && !query->hasModifyingCTE;
+        }
+        return false;
+    }
+
+    /**
      * @brief Plan an inner join with one mmsearch condition.
      *
      * Run the previous hook first. Depending on the operands and child plans,
@@ -116,7 +147,7 @@ export {
             (mmsearch->funcid == oids.mmsearch_with_opts_oid && list_length(mmsearch->args) != 3)) {
             return;
         }
-        if (root->parse == nullptr || root->parse->hasRowSecurity || restriction->pseudoconstant ||
+        if (root->parse == nullptr || restriction->pseudoconstant ||
             restriction->security_level != 0 ||
             !restriction_is_securely_promotable(restriction, joinrel)) {
             return;
@@ -172,6 +203,10 @@ export {
         const bool two_base_inputs = is_base_input(outerrel) && is_base_input(innerrel);
         const bool one_join_one_base = (is_join_input(outerrel) && is_base_input(innerrel)) ||
                                        (is_base_input(outerrel) && is_join_input(innerrel));
+        // Row security may be contained inside an opaque CTE query child.
+        // Only the raw two-input route below can preserve that exact boundary.
+        if (root->parse->hasRowSecurity && (transformed_operands || !two_base_inputs))
+            return;
         /* For nested joins, keep paths with a parameterized BioseqScan that
          * performs this mmsearch. Remove ordinary join filters containing the
          * call, since choosing them by cost would execute the SQL stub. */
@@ -394,8 +429,11 @@ export {
             query_rte != nullptr && query_rte->rtekind == RTE_SUBQUERY &&
             query_rte->subquery != nullptr && !query_rte->security_barrier &&
             !query_rte->subquery->hasRowSecurity;
+        const bool plain_query_cte = batch_join_query_cte_is_supported(root, query_rte);
         if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION || query_rte == nullptr ||
-            (!plain_query_relation && !plain_query_subquery) || target_rte->securityQuals != NIL ||
+            (!plain_query_relation && !plain_query_subquery && !plain_query_cte) ||
+            (root->parse->hasRowSecurity && !plain_query_cte) ||
+            target_rte->securityQuals != NIL ||
             query_rte->securityQuals != NIL || !OidIsValid(target_rte->relid) ||
             !relation_oid_uses_column_table_access_method(target_rte->relid) ||
             batch_join_target_expression_is_forbidden(
@@ -421,6 +459,10 @@ export {
             return;
         }
         if (target_qual_features->has_mmsearch) {
+            // Keep the existing RLS rejection for the parameterized fallback;
+            // the exception above admits only a preserved CTE BatchJoin child.
+            if (root->parse->hasRowSecurity)
+                return;
             /* Keep only fallback paths whose parameterized BioseqScan executes both
              * mmsearch calls. An ordinary Join Filter wogld reach the SQL stub */
             exact_parameterized_bmo_retainer_audit owner_audit{};

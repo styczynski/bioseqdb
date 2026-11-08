@@ -15,7 +15,6 @@ module;
 
 export module bioseq.postgres.table.scan_state;
 
-export import bioseq.postgres.table.alignment_execution;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;

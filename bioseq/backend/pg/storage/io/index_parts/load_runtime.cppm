@@ -63,8 +63,10 @@ import bioseq.common.logging; // Load diagnostics.
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
+import bioseq.postgres.extension.cache_provider.write_notifications;
 import bioseq.postgres.storage.io.sql_rows;
 import bioseq.postgres.storage.io.sql_row_codecs;
+import bioseq.postgres.storage.io.scalar_codec;
 import bioseq.postgres.configuration.core;
 import bioseq.storage.size; // sequence_size_t
 import bioseq.storage.layout;
@@ -102,17 +104,22 @@ import bioseq.postgres.storage.io.provenance;
 /**
  * @brief Finish triggers and release the load's executor state.
  * @param[in,out] ctx Load context whose executor pointers are cleared.
- * @param[in] stable_context Context that  remains alive after executor cleanup.
+ * @param[in] stable_context Context that remains alive after executor cleanup.
+ * @param[in] succeeded Whether queued AFTER triggers may run; transaction abort
+ * discards the query frame on failure instead of firing events for rejected rows.
  * @throws PostgreSQL ERROR if trigger or executor cleanup fails.
  */
-void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
+void teardown_load_executor(load_context& ctx, MemoryContext stable_context, bool succeeded) {
     if (ctx.estate == nullptr) {
         return;
     }
     // FreeExecutorState deletes the executor memory contexts. Switch to a context
     // that survives it so invoke_pg_as_cpp can restore a valid current context.
     MemoryContextSwitchTo(stable_context);
-    bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { AfterTriggerEndQuery(ctx.estate); });
+    if (succeeded)
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { AfterTriggerEndQuery(ctx.estate); });
+    if (ctx.result_rel_info)
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { ExecCloseIndices(ctx.result_rel_info); });
     bioseq::postgres::support::invoke_pg_as_cpp([&ctx] { ExecCloseResultRelations(ctx.estate); });
     bioseq::postgres::support::invoke_pg_as_cpp(
         [&ctx] { ExecCloseRangeTableRelations(ctx.estate); });
@@ -131,7 +138,7 @@ void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
  * Finish the write states separately before calling this function on success.
  *
  * @param[in,out] ctx Load resources to  release.
- * @param[in] commit Unused completion flg.
+ * @param[in] commit Whether the load completed successfully.
  * @param[in] stable_context Context used while releasing executor resources.
  * @throws PostgreSQL ERROR if resource cleanup fails.
  */
@@ -139,14 +146,13 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
     MemoryContextSwitchTo(stable_context);
     // Release the executor before closing the parent table. Repeated calls do nothing
     // once the executor pointer has been cleared.
-    teardown_load_executor(ctx, stable_context);
+    teardown_load_executor(ctx, stable_context, commit);
     if (ctx.slot != nullptr) {
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&ctx] { ExecDropSingleTupleTableSlot(ctx.slot); });
         ctx.slot = nullptr;
     }
     // finish_load_write_states() handles write-state cleanup separately.
-    (void)commit;
     ctx.caches = nullptr;
     const ResourceOwner saved = CurrentResourceOwner;
     if (ctx.parent_rel != nullptr) {
@@ -172,8 +178,6 @@ void initialize_load_context(load_context& ctx, const char* path, bioseq::io::se
         ctx.parent_rel = bioseq::postgres::support::invoke_pg_as_cpp([relid, saved] {
             CurrentResourceOwner = TopTransactionResourceOwner;
             Relation result = table_open(relid, RowExclusiveLock);
-            const auto acl = pg_class_aclcheck(relid, GetUserId(), ACL_INSERT);
-            if (acl != ACLCHECK_OK) aclcheck_error(acl, OBJECT_TABLE, RelationGetRelationName(result));
             CurrentResourceOwner = saved;
             return result;
         });
@@ -384,9 +388,14 @@ struct alignment_load_consumer {
                                     const std::string& quality_name, std::optional<std::string> phred_type,
                                     std::optional<std::string> alignment_name,
                                     std::optional<Oid> reference_table) {
+    const auto target_locator = validate_load_target(relid);
+    // Direct row/catalog writes do not pass through the outer SELECT executor.
+    // Notify once before destination DDL, defaults, triggers or streamed data.
+    bioseq::postgres::extension::cache_provider::notify_relation_write(relid, target_locator);
     const bool fastq = kind.format == bioseq::io::sequence_file_format::fastq;
     const bool alignment_file = kind.format == bioseq::io::sequence_file_format::sam || kind.format == bioseq::io::sequence_file_format::bam;
     const auto text_shape = alignment_file ? std::optional<idp::text_record_shape>{} : inspect_text_record_shape(path, kind.format);
+    if (alignment_file || text_shape) bioseq::postgres::storage::io::require_utf8_io_encoding();
     if (fastq) {
         auto codec = phred_type;
         if (text_shape && text_shape->sequences[1].alphabet_code) {
@@ -405,6 +414,10 @@ struct alignment_load_consumer {
 
     try {
         if (alignment_file) {
+            // Adopt PostgreSQL mode, worker and admission settings before the
+            // neutral reader opens codecs or creates its first decode wave.
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [] { bioseq::postgres::scheduler::backend_sync(); });
             alignment_load_consumer consumer{ctx, path, kind, requested_fmt, user_maps, quality_name,
                 phred_type, alignment_name, load_reference_lookup{reference_table}};
             const auto loaded = bioseq::io::read_alignment_records(path, kind.format, consumer);
@@ -421,10 +434,10 @@ struct alignment_load_consumer {
             ctx.writer_ref = idp::make_identifier_writer_reference(writer);
             n = dispatch_and_stream(ctx, writer, path, kind);
         }
-        teardown_load_executor(ctx, stable_context);
         if (ctx.cols.quality_attno) inject_load_failure(4);
         flush_pending_load_writes(ctx);
         if (ctx.cols.quality_attno) inject_load_failure(5);
+        teardown_load_executor(ctx, stable_context, true);
         MemoryContextSwitchTo(stable_context);
         finish_load_write_states(ctx);
         build_indexes_if_enabled(ctx.main_relid);

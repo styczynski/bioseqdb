@@ -4420,9 +4420,107 @@ def validate_compiler_callback_closure(
         )
 
 
-def _routine_leaf(identity: str) -> str:
-    name = identity.split("(", 1)[0]
-    return name.rsplit(".", 1)[-1]
+def _routine_sql_name(identity: str) -> str:
+    """Return the qualified SQL name independently of its linked C symbol."""
+    return identity.split("(", 1)[0]
+
+
+def _validate_manifest_wrapper_bindings(
+    manifest: dict[str, Any], context: str
+) -> None:
+    """Join generated owner identities/declarations to exact wrapper metadata.
+
+    Type-distinct overloads can have derived C symbols. Their authority is the
+    generated wrapper's concrete SQL binding, never a permissive suffix match.
+    """
+    modules = _array(
+        _field(manifest, "fmgr_entrypoint_modules", context),
+        f"{context}.fmgr_entrypoint_modules",
+    )
+    if _integer(
+        _field(manifest, "fmgr_entrypoint_module_count", context),
+        f"{context}.fmgr_entrypoint_module_count",
+    ) != len(modules):
+        _fail(context, "generated wrapper module count is stale")
+    module_names: set[str] = set()
+    wrapper_bindings: dict[str, dict[str, str]] = {}
+    wrapper_identities: set[str] = set()
+    for module_index, raw_module in enumerate(modules):
+        module_context = f"{context}.fmgr_entrypoint_modules[{module_index}]"
+        module = _object(raw_module, module_context)
+        module_name = _string(
+            _field(module, "module_name", module_context),
+            f"{module_context}.module_name",
+        )
+        if module_name in module_names:
+            _fail(module_context, "generated wrapper module is duplicated")
+        module_names.add(module_name)
+        for wrapper_index, raw_wrapper in enumerate(_array(
+            _field(module, "wrappers", module_context),
+            f"{module_context}.wrappers",
+        )):
+            wrapper_context = f"{module_context}.wrappers[{wrapper_index}]"
+            wrapper = _object(raw_wrapper, wrapper_context)
+            symbol = _string(
+                _field(wrapper, "symbol", wrapper_context),
+                f"{wrapper_context}.symbol",
+            )
+            if symbol in wrapper_bindings:
+                _fail(symbol, "generated wrapper symbol is duplicated")
+            if _field(wrapper, "finfo_symbol", wrapper_context) != f"pg_finfo_{symbol}":
+                _fail(symbol, "generated wrapper finfo differs from its symbol")
+            bindings: dict[str, str] = {}
+            for overload_index, raw_overload in enumerate(_array(
+                _field(wrapper, "overloads", wrapper_context),
+                f"{wrapper_context}.overloads",
+            )):
+                overload_context = f"{wrapper_context}.overloads[{overload_index}]"
+                overload = _object(raw_overload, overload_context)
+                identity = _string(
+                    _field(overload, "sql_identity", overload_context),
+                    f"{overload_context}.sql_identity",
+                )
+                declaration = _string(
+                    _field(overload, "cpp_declaration", overload_context),
+                    f"{overload_context}.cpp_declaration",
+                )
+                if identity in wrapper_identities:
+                    _fail(identity, "generated wrapper identity is duplicated")
+                wrapper_identities.add(identity)
+                bindings[identity] = declaration
+            if not bindings:
+                _fail(symbol, "generated wrapper has no SQL overloads")
+            wrapper_bindings[symbol] = bindings
+
+    generated_symbols: set[str] = set()
+    for owner_index, raw_owner in enumerate(_array(
+        _field(manifest, "c_symbol_owners", context),
+        f"{context}.c_symbol_owners",
+    )):
+        owner_context = f"{context}.c_symbol_owners[{owner_index}]"
+        owner = _object(raw_owner, owner_context)
+        if not _boolean(
+            _field(owner, "generated_wrapper", owner_context),
+            f"{owner_context}.generated_wrapper",
+        ):
+            continue
+        symbol = _string(_field(owner, "symbol", owner_context), f"{owner_context}.symbol")
+        generated_symbols.add(symbol)
+        identities = set(_string_list(
+            _field(owner, "routine_identities", owner_context),
+            f"{owner_context}.routine_identities", allow_empty=False,
+        ))
+        declarations = set(_string_list(
+            _field(owner, "implementation_declarations", owner_context),
+            f"{owner_context}.implementation_declarations", allow_empty=False,
+        ))
+        bindings = wrapper_bindings.get(symbol)
+        if bindings is None or set(bindings) != identities:
+            _fail(symbol, "generated wrapper overloads differ from owner identities")
+        if set(bindings.values()) != declarations:
+            _fail(symbol, "generated wrapper declarations differ from its owner")
+    if set(wrapper_bindings) != generated_symbols:
+        _fail(context, "generated wrapper metadata does not cover exactly its owners")
 
 
 def validate_ledger(
@@ -4617,7 +4715,7 @@ def validate_ledger(
             if (
                 parent is None
                 or identity in grouped_identities
-                or _routine_leaf(identity) != symbol
+                or _routine_sql_name(identity) != _routine_sql_name(identities[0])
                 or parent["public_symbol"] != symbol
                 or parent["generated_wrapper"] != wrapper
             ):
@@ -4847,7 +4945,7 @@ def validate_ledger_manifest_closure(
             if (
                 identity not in identities
                 or identity in identity_to_symbol
-                or _routine_leaf(identity) != symbol
+                or _routine_sql_name(identity) != _routine_sql_name(owner_identities[0])
             ):
                 _fail(
                     context,
@@ -4942,6 +5040,8 @@ def validate_ledger_manifest_closure(
             "ledger-manifest",
             "final evidence contains a non-generated fmgr owner",
         )
+
+    _validate_manifest_wrapper_bindings(manifest, "ledger-manifest")
 
     for ledger in (production, test_indexes):
         ledger_identity_to_symbol = {
@@ -10688,7 +10788,7 @@ def validate_dso_ownership(
             if (
                 identity not in identities
                 or identity in grouped_identities
-                or _routine_leaf(identity) != symbol
+                or _routine_sql_name(identity) != _routine_sql_name(owner_identities[0])
             ):
                 _fail(symbol, "symbol sharing crosses SQL names or identities")
             grouped_identities.add(identity)
@@ -10885,6 +10985,7 @@ def validate_dso_ownership(
             "final code-generation closure still contains handwritten "
             "FMGR export owners",
         )
+    _validate_manifest_wrapper_bindings(manifest, "DSO-manifest")
     visible_symbols: dict[str, list[DynamicSymbol]] = {}
     for symbol in inventory:
         if symbol.defined and symbol.dynamic_visible:
@@ -15596,6 +15697,25 @@ def run_python_self_tests() -> None:
         "self-test accepted artifact arguments",
     )
 
+    def fixture_wrapper_module(
+        bindings: list[tuple[str, str, str]]
+    ) -> dict[str, Any]:
+        """Describe independently linked wrappers for manifest fixtures."""
+        return {
+            "module_name": "fixture.generated.entrypoints",
+            "wrappers": [
+                {
+                    "symbol": symbol,
+                    "finfo_symbol": f"pg_finfo_{symbol}",
+                    "overloads": [{
+                        "sql_identity": identity,
+                        "cpp_declaration": declaration,
+                    }],
+                }
+                for symbol, identity, declaration in bindings
+            ],
+        }
+
     main_symbols = ["array_cat", "seq_concat"]
     identities = [
         "public.array_cat(internal)",
@@ -15631,6 +15751,11 @@ def run_python_self_tests() -> None:
             for symbol, identity in zip(main_symbols, identities, strict=True)
         ],
         "generated_wrapper_symbols": main_symbols,
+        "fmgr_entrypoint_module_count": 1,
+        "fmgr_entrypoint_modules": [fixture_wrapper_module([
+            (symbol, identity, f"fixture::{symbol}")
+            for symbol, identity in zip(main_symbols, identities, strict=True)
+        ])],
         "handwritten_fmgr_export_symbols": [],
         "handwritten_fmgr_export_external_symbols": sorted(
             EXTERNAL_SYMBOLS
@@ -16568,6 +16693,127 @@ def run_python_self_tests() -> None:
         required_absent_symbols=frozenset(),
         required_present_symbols=frozenset(),
     )
+    overload_pairs = [
+        ("write_overload_0", "bioseq.write(regclass,text)"),
+        ("write_overload_1", "bioseq.write(text,text)"),
+    ]
+    overload_manifest = json.loads(json.dumps(manifest))
+    overload_manifest["c_routine_identities"] = [identity for _, identity in overload_pairs]
+    overload_manifest["c_link_symbols"] = [symbol for symbol, _ in overload_pairs]
+    overload_manifest["c_finfo_symbols"] = [f"pg_finfo_{symbol}" for symbol, _ in overload_pairs]
+    overload_manifest["generated_wrapper_symbols"] = [symbol for symbol, _ in overload_pairs]
+    overload_manifest["c_symbol_owners"] = [
+        {
+            "symbol": symbol,
+            "finfo_symbol": f"pg_finfo_{symbol}",
+            "generated_wrapper": True,
+            "routine_identities": [identity],
+            "implementation_declarations": ["fixture::write"],
+        }
+        for symbol, identity in overload_pairs
+    ]
+    overload_manifest["fmgr_entrypoint_modules"] = [fixture_wrapper_module([
+        (symbol, identity, "fixture::write") for symbol, identity in overload_pairs
+    ])]
+    overload_inventory = parse_nm_symbols("\n".join(
+        f"{export} T 1 1"
+        for symbol in overload_manifest["c_link_symbols"] + sorted(EXTERNAL_SYMBOLS)
+        for export in (symbol, f"pg_finfo_{symbol}")
+    ), source_tool="self-test-overload-nm")
+    validate_dso_ownership(overload_manifest, overload_inventory, contract="manifest")
+    overload_ledgers = []
+    validated_overload_ledgers = []
+    for original_ledger in (production_ledger_fixture, test_indexes_ledger_fixture):
+        overload_ledger = json.loads(json.dumps(original_ledger))
+        for parent, group, (symbol, identity) in zip(
+            overload_ledger["parents"], overload_ledger["symbol_groups"], overload_pairs, strict=True
+        ):
+            parent.update(sql_identity=identity, public_symbol=symbol,
+                          qualified_declaration="fixture::write",
+                          generated_wrapper=f"fixture::generated::{symbol}")
+            group.update(public_symbol=symbol, finfo_symbol=f"pg_finfo_{symbol}",
+                         sql_identities=[identity], generated_wrapper=parent["generated_wrapper"])
+        overload_ledgers.append(overload_ledger)
+        validated_overload_ledgers.append(validate_ledger(
+            overload_ledger, validate_provenance(provenance),
+            _artifact_sha256(provenance_raw), fixture_policy,
+        ))
+    validate_profile_pair(*validated_overload_ledgers)
+    validate_ledger_manifest_closure(
+        overload_manifest, *validated_overload_ledgers, policy=fixture_policy,
+    )
+    for mutation, diagnostic in (
+        ("swapped identities", "overloads differ from owner identities"),
+        ("missing wrapper", "overloads differ from owner identities"),
+        ("unknown wrapper", "overloads differ from owner identities"),
+        ("duplicate identity", "wrapper identity is duplicated"),
+        ("wrong finfo", "wrapper finfo differs"),
+        ("wrong declaration", "wrapper declarations differ"),
+        ("stale module count", "wrapper module count is stale"),
+    ):
+        mutated = json.loads(json.dumps(overload_manifest))
+        wrappers = mutated["fmgr_entrypoint_modules"][0]["wrappers"]
+        if mutation == "swapped identities":
+            wrappers[0]["overloads"], wrappers[1]["overloads"] = (
+                wrappers[1]["overloads"], wrappers[0]["overloads"])
+        elif mutation == "missing wrapper":
+            wrappers.pop()
+        elif mutation == "unknown wrapper":
+            wrappers[0].update(symbol="write_overload_99", finfo_symbol="pg_finfo_write_overload_99")
+        elif mutation == "duplicate identity":
+            wrappers[1]["overloads"][0]["sql_identity"] = overload_pairs[0][1]
+        elif mutation == "wrong finfo":
+            wrappers[0]["finfo_symbol"] = wrappers[1]["finfo_symbol"]
+        elif mutation == "wrong declaration":
+            mutated["c_symbol_owners"][0]["implementation_declarations"] = ["fixture::other"]
+        else:
+            mutated["fmgr_entrypoint_module_count"] += 1
+        for validate in (
+            lambda: validate_dso_ownership(mutated, overload_inventory, contract="manifest"),
+            lambda: validate_ledger_manifest_closure(
+                mutated, *validated_overload_ledgers, policy=fixture_policy),
+        ):
+            try:
+                validate()
+            except EvidenceError as error:
+                if diagnostic not in str(error):
+                    raise
+            else:
+                _fail("self-test", f"generated overload ownership accepted {mutation}")
+
+    mismatched_overload_ledger = json.loads(json.dumps(overload_ledgers[0]))
+    mismatched_overload_ledger["parents"][0]["public_symbol"] = overload_pairs[1][0]
+    try:
+        validate_ledger(mismatched_overload_ledger, validate_provenance(provenance),
+                        _artifact_sha256(provenance_raw), fixture_policy)
+    except EvidenceError as error:
+        if "symbol sharing crosses SQL names or misses a parent" not in str(error):
+            raise
+    else:
+        _fail("self-test", "overload group accepted a different parent symbol")
+
+    cross_schema_manifest = json.loads(json.dumps(overload_manifest))
+    cross_schema_manifest["c_routine_identities"][1] = "other.write(text,text)"
+    for field in ("c_link_symbol_inventory_count", "c_finfo_symbol_inventory_count",
+                  "c_wrapper_entity_count", "generated_wrapper_symbol_count", "c_symbol_sharing_group_count"):
+        cross_schema_manifest[field] = 1
+    for field in ("c_link_symbols", "c_finfo_symbols", "generated_wrapper_symbols", "c_symbol_owners"):
+        cross_schema_manifest[field].pop()
+    cross_schema_manifest["c_symbol_owners"][0]["routine_identities"] = list(
+        cross_schema_manifest["c_routine_identities"])
+    cross_schema_manifest["fmgr_entrypoint_modules"][0]["wrappers"] = [{
+        "symbol": overload_pairs[0][0], "finfo_symbol": f"pg_finfo_{overload_pairs[0][0]}",
+        "overloads": [{"sql_identity": identity, "cpp_declaration": "fixture::write"}
+                      for identity in cross_schema_manifest["c_routine_identities"]],
+    }]
+    try:
+        validate_dso_ownership(cross_schema_manifest, overload_inventory, contract="manifest")
+    except EvidenceError as error:
+        if "symbol sharing crosses SQL names or identities" not in str(error):
+            raise
+    else:
+        _fail("self-test", "one generated symbol accepted names from different SQL schemas")
+
     legacy_revision_manifest = json.loads(json.dumps(manifest))
     legacy_revision_manifest["manifest_version"] = 1
     try:
@@ -16620,6 +16866,10 @@ def run_python_self_tests() -> None:
             }
         ],
         "generated_wrapper_symbols": [cache_symbol],
+        "fmgr_entrypoint_module_count": 1,
+        "fmgr_entrypoint_modules": [fixture_wrapper_module([
+            (cache_symbol, "bioseq_cache.cache_lookup(text)", "fixture::cache_lookup"),
+        ])],
         "handwritten_fmgr_export_symbols": [],
         "handwritten_fmgr_export_external_symbols": [],
         "handwritten_fmgr_export_owners": [],
@@ -16752,6 +17002,7 @@ def run_python_self_tests() -> None:
         }
     )
     incremental_manifest["c_symbol_owners"][1]["generated_wrapper"] = False
+    incremental_manifest["fmgr_entrypoint_modules"][0]["wrappers"].pop()
     validate_dso_ownership(
         incremental_manifest,
         inventory,

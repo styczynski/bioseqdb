@@ -116,6 +116,8 @@ set(BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_LINKS
   simdjson::simdjson
   nlohmann_json_schema_validator::validator
   TBB::tbb
+  # Alignment IO codecs use the generated native Highway dispatch inventory.
+  bioseq_highway_runtime
   # The shared no-PG module set contains the Vulkan shader compiler. Keep
   # these targets aligned with bioseq_benchmark so importing production
   # parallelism modules cannot leave glslang symbols unresolved.

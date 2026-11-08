@@ -11,6 +11,7 @@ extern "C" {
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "storage/relfilelocator.h"
 #include "utils/errcodes.h"
 #include "utils/plancache.h"
 }
@@ -24,6 +25,7 @@ export module bioseq.postgres.extension.cache_provider:provider;
 
 import :plan_recipe;
 import bioseq.cache.provider_api;
+import bioseq.postgres.extension.cache_provider.write_notifications;
 import bioseq.postgres.support;
 import bioseq.postgres.table;
 
@@ -238,6 +240,41 @@ void reset_registration(std::size_t index) noexcept {
         && api->planner_bridge->after_planned_statement != nullptr;
 }
 
+/**
+ * Notify the compatible bound cache before a direct table mutation.
+ * Pack the physical locator field-by-field, matching the existing cache ABI's
+ * pg_rel_file_locator identity (kind 1), without C++ structure padding.
+ * The cache owns transaction/savepoint tracking and coarse fallback on failure.
+ */
+void record_direct_relation_write(Oid relation_oid, const RelFileLocator& locator) {
+    const bioseq_cache_api* const api = g_bound_api;
+    if (g_cache_api_slot == nullptr || *g_cache_api_slot != api
+        || !cache_api_valid(api) || api->instance_cookie != g_bound_api_cookie) {
+        bioseq::postgres::support::raise_sql_error(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            {.message = "Bioseq query-cache write observer lost its compatible API binding"});
+    }
+    constexpr std::uint32_t pg_rel_file_locator_kind = 1;
+    constexpr std::size_t locator_bytes =
+        sizeof(locator.spcOid) + sizeof(locator.dbOid) + sizeof(locator.relNumber);
+    bioseq_cache_physical_identity identity{
+        .struct_size = static_cast<std::uint32_t>(sizeof(bioseq_cache_physical_identity)),
+        .kind = pg_rel_file_locator_kind,
+        .length = static_cast<std::uint32_t>(locator_bytes),
+    };
+    static_assert(locator_bytes <= sizeof(identity.bytes));
+    std::size_t offset = 0;
+    std::memcpy(identity.bytes + offset, &locator.spcOid, sizeof(locator.spcOid));
+    offset += sizeof(locator.spcOid);
+    std::memcpy(identity.bytes + offset, &locator.dbOid, sizeof(locator.dbOid));
+    offset += sizeof(locator.dbOid);
+    std::memcpy(identity.bytes + offset, &locator.relNumber, sizeof(locator.relNumber));
+    bioseq::postgres::support::invoke_pg_as_cpp([api, relation_oid, &identity] {
+        api->record_relation_write(static_cast<std::uint32_t>(MyDatabaseId),
+            static_cast<std::uint32_t>(relation_oid), &identity);
+    });
+}
+
 /** @brief Check that a returned token names this provider and has valid  ownership ids. */
 [[nodiscard]] bool registration_valid(
         const bioseq_cache_provider_registration& registration,
@@ -284,6 +321,7 @@ extern "C" bioseq_cache_status bind_cache_api(
     }
     if (all_providers_registered() && g_bound_api == api
         && g_bound_api_cookie == api->instance_cookie) {
+        set_relation_write_observer(&record_direct_relation_write);
         return bioseq_cache_status_ok;
     }
     try {
@@ -296,6 +334,7 @@ extern "C" bioseq_cache_status bind_cache_api(
              * unregister callback. */
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [] { ResetPlanCache(); });
+            set_relation_write_observer(nullptr);
             g_bound_api = nullptr;
             g_bound_api_cookie = 0;
             for (std::size_t index = 0;
@@ -307,6 +346,9 @@ extern "C" bioseq_cache_status bind_cache_api(
 
         g_bound_api = api;
         g_bound_api_cookie = api->instance_cookie;
+        // Partial registration can still leave cacheable scans, so observe
+        // writes until the last registration and its API binding are retired.
+        set_relation_write_observer(&record_direct_relation_write);
         for (std::size_t index = 0;
              index < k_provider_descriptor_count;
              ++index) {
@@ -332,6 +374,7 @@ extern "C" bioseq_cache_status bind_cache_api(
                         any_registered = any_registered || registered;
                     }
                     if (!any_registered) {
+                        set_relation_write_observer(nullptr);
                         g_bound_api = nullptr;
                         g_bound_api_cookie = 0;
                     }

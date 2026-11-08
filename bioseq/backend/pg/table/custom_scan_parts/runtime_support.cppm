@@ -25,7 +25,6 @@ export import :custom_scan_runtime_placeholder_contracts;
 export import :custom_scan_runtime_match_contracts;
 export import :custom_scan_scan_feature_contracts;
 export import :custom_scan_scan_runtime_state_contracts;
-export import :custom_scan_runtime_pipeline_contracts;
 export import :custom_scan_execution_stats_contracts;
 export import :custom_scan_batch_join_execution_runtime_state_contracts;
 export import :custom_scan_per_row_join_runtime_contracts;

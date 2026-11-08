@@ -148,7 +148,7 @@ inline void run_internal_ddl(const char* ddl) {
     if (connect_status != SPI_OK_CONNECT) {
         minimizer_generation_storage_error("SPI_connect failed while running index DDL");
     }
-    const int execute_status = bioseq::postgres::support::invoke_pg_as_cpp(
+    const int execute_status = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
         [ddl] { return SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0); });
     if (execute_status != SPI_OK_UTILITY && execute_status != SPI_OK_SELECT) {
         minimizer_generation_storage_error("index DDL returned an unexpected SPI status");
@@ -290,7 +290,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
             "(user_relid, main_relfilenode, column_attno, index_name) "
             "DO UPDATE SET last_updated = EXCLUDED.last_updated";
         const int execute_status =
-            bioseq::postgres::support::invoke_pg_as_cpp([&argument_types, &argument_values] {
+            bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", [&argument_types, &argument_values] {
                 return SPI_execute_with_args(k_statement,
                                              static_cast<int>(argument_types.size()),
                                              argument_types.data(),
@@ -405,7 +405,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
                                               "  AND column_attno = $3 "
                                               "  AND index_name = $4";
         const int execute_status =
-            bioseq::postgres::support::invoke_pg_as_cpp([&argument_types, &argument_values] {
+            bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", [&argument_types, &argument_values] {
                 return SPI_execute_with_args(k_statement,
                                              static_cast<int>(argument_types.size()),
                                              argument_types.data(),

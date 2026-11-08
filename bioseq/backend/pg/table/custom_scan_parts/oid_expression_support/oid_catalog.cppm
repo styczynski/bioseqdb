@@ -15,6 +15,7 @@ extern "C" {
 #include "optimizer/planmain.h"
 #include "storage/dsm.h"
 #include "storage/shmem.h"
+#include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -66,7 +67,10 @@ export {
         return result;
     }
 
-    /** @brief Resolves a function by schema, name, and exact argument OIDs. */
+    /** @brief Resolves trusted extension identities by exact catalog signature.
+     * Internal helper lookup must not require the caller's schema USAGE. This
+     * only identifies an object; ordinary SQL name and execution ACLs remain
+     * PostgreSQL's responsibility at the public API and executor boundaries. */
     [[nodiscard]] Oid exact_function_oid(const char* schema_name,
                                          const char* function_name,
                                          std::initializer_list<Oid> argument_types,
@@ -75,13 +79,24 @@ export {
             if (!OidIsValid(argument_type))
                 return InvalidOid;
         }
-        List* qualified_name =
-            list_make2(makeString(pstrdup(schema_name)), makeString(pstrdup(function_name)));
-        const Oid function_oid = LookupFuncName(qualified_name,
-                                                static_cast<int>(argument_types.size()),
-                                                argument_types.begin(),
-                                                missing_ok);
-        list_free_deep(qualified_name);
+        const Oid namespace_oid = get_namespace_oid(schema_name, missing_ok);
+        if (!OidIsValid(namespace_oid)) return InvalidOid;
+        auto* const arguments = buildoidvector(argument_types.begin(),
+            static_cast<int>(argument_types.size()));
+        const HeapTuple tuple = SearchSysCache3(PROCNAMEARGSNSP,
+            CStringGetDatum(function_name), PointerGetDatum(arguments), ObjectIdGetDatum(namespace_oid));
+        pfree(arguments);
+        Oid function_oid = InvalidOid;
+        if (HeapTupleIsValid(tuple)) {
+            const auto* procedure = reinterpret_cast<Form_pg_proc>(GETSTRUCT(tuple));
+            // Match LookupFuncName: aggregates/windows are functions; procedures are not.
+            if (procedure->prokind != PROKIND_PROCEDURE) function_oid = procedure->oid;
+            ReleaseSysCache(tuple);
+        }
+        if (!OidIsValid(function_oid) && !missing_ok)
+            ereport(ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION),
+                errmsg("required extension function %s.%s with the exact argument types does not exist",
+                    schema_name, function_name)));
         return function_oid;
     }
 
@@ -130,6 +145,13 @@ export {
             if (!exact_function_exists_missing_ok("bioseq", function_name, {ANYELEMENTOID})) {
                 return false;
             }
+        }
+        constexpr std::array<const char*, 4> private_projection_functions{
+            "export_alignment_status", "alignment_ordinal",
+            "alignment_query_sequence", "alignment_reference_sequence"};
+        for (const char* function_name : private_projection_functions) {
+            if (!exact_function_exists_missing_ok("bioseq_internal", function_name, {ANYELEMENTOID}))
+                return false;
         }
         // A CIGAR projection carries a sequence Datum, including its alphabet;
         // accepting the former text result would corrupt rewritten placeholders.
@@ -236,10 +258,14 @@ export {
         result.secondary_chain_score_oid = resolve("bioseq.secondary_chain_score(anyelement)");
         result.is_reverse_oid = resolve("bioseq.is_reverse(anyelement)");
         result.is_primary_oid = resolve("bioseq.is_primary(anyelement)");
-        result.export_alignment_status_oid = resolve("bioseq_internal.export_alignment_status(anyelement)");
-        result.alignment_ordinal_oid = resolve("bioseq_internal.alignment_ordinal(anyelement)");
-        result.alignment_query_sequence_oid = resolve("bioseq_internal.alignment_query_sequence(anyelement)");
-        result.alignment_reference_sequence_oid = resolve("bioseq_internal.alignment_reference_sequence(anyelement)");
+        result.export_alignment_status_oid = exact_function_oid(
+            "bioseq_internal", "export_alignment_status", {ANYELEMENTOID}, /*missing_ok=*/false);
+        result.alignment_ordinal_oid = exact_function_oid(
+            "bioseq_internal", "alignment_ordinal", {ANYELEMENTOID}, /*missing_ok=*/false);
+        result.alignment_query_sequence_oid = exact_function_oid(
+            "bioseq_internal", "alignment_query_sequence", {ANYELEMENTOID}, /*missing_ok=*/false);
+        result.alignment_reference_sequence_oid = exact_function_oid(
+            "bioseq_internal", "alignment_reference_sequence", {ANYELEMENTOID}, /*missing_ok=*/false);
         result.has_cigar_oid = resolve("bioseq.has_cigar(anyelement)");
         result.divergence_oid = resolve("bioseq.divergence(anyelement)");
         result.cigar_oid = resolve("bioseq.cigar(anyelement)");

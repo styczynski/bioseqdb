@@ -16,6 +16,7 @@ module;
 
 export module bioseq.io.identifier_parser.canonical;
 
+import bioseq.common.json_string;
 import bioseq.parallelism.memory_admission;
 
 import bioseq.io.sinks;
@@ -48,6 +49,7 @@ struct canonical_header {
     admitted_byte_buffer alphabet_storage;
     admitted_byte_buffer payload_storage;
     std::string_view header;
+    bool header_is_empty{true};
     std::string_view alphabet;
     std::string_view payload;
     parallelism::memory_permit fields_permit;
@@ -134,15 +136,19 @@ template<header_text_sink Sink>
     std::array<char, 768> scratch{};
     std::size_t used{};
     std::size_t position{};
+    bioseq::common::json_utf8_state unicode;
     while (position < input.size()) {
         const auto safe = bioseq::io::simd::scan_header_unreserved_prefix(input.data() + position, input.size() - position);
         if (safe != 0u) {
+            if (unicode.continuation_bytes != 0u)
+                return std::unexpected("invalid UTF-8 continuation in canonical header");
             if (used != 0u) {
                 if (auto written = sink.append({scratch.data(), used}); !written) return written;
                 used = 0u;
             }
             if (auto written = sink.append(input.substr(position, safe)); !written) return written;
             position += safe;
+            unicode.byte_offset += safe;
             continue;
         }
         if (input[position] != '%') return std::unexpected("unescaped byte in canonical sequence header");
@@ -150,13 +156,19 @@ template<header_text_sink Sink>
         const auto high = header_hex_value(input[position + 1u]);
         const auto low = header_hex_value(input[position + 2u]);
         if (high >= 16u || low >= 16u) return std::unexpected("invalid percent escape in canonical sequence header");
-        scratch[used++] = static_cast<char>((high << 4u) | low);
+        const auto character = static_cast<unsigned char>((high << 4u) | low);
+        if (const auto decoded = bioseq::common::consume_json_utf8_byte(unicode, character); !decoded)
+            return std::unexpected("canonical header: " + decoded.error());
+        ++unicode.byte_offset;
+        scratch[used++] = static_cast<char>(character);
         position += 3u;
         if (used == scratch.size()) {
             if (auto written = sink.append({scratch.data(), used}); !written) return written;
             used = 0u;
         }
     }
+    if (const auto complete = bioseq::common::finish_json_string(unicode); !complete)
+        return std::unexpected("canonical header: " + complete.error());
     return sink.append({scratch.data(), used});
 }
 
@@ -259,6 +271,7 @@ parse_canonical_header(std::string_view input, canonical_parse_mode mode = canon
     if (!input.substr(prefix_end).starts_with(" [bq=1] "))
         return std::unexpected("unsupported or malformed canonical sequence header version");
     canonical_header decoded;
+    decoded.header_is_empty = prefix_end == 0u;
     if (mode == canonical_parse_mode::shape) {
         if (const auto valid = validate_header_percent(input.substr(0, prefix_end)); !valid)
             return std::unexpected(valid.error());
@@ -323,6 +336,8 @@ parse_canonical_header(std::string_view input, canonical_parse_mode mode = canon
                 metadata.discriminator = value[0];
             } else if (value != "n:") {
                 return std::unexpected("canonical metadata requires s: text or n: null");
+            } else {
+                metadata.discriminator = 'n';
             }
             if (const auto stored = decoded.append_field(std::move(metadata)); !stored) return std::unexpected(stored.error());
         }

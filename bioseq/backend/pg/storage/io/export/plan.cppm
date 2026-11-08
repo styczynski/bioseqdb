@@ -2,6 +2,7 @@
 module;
 #include <bioseq/pg_compat.h>
 extern "C" {
+#include "access/table.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_type_d.h"
 #include "executor/executor.h"
@@ -15,6 +16,7 @@ extern "C" {
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 }
@@ -150,10 +152,17 @@ inline bool contains_export_call(Node* expression, void*) {
     if (request.destination.empty() || request.destination.find('\0') != std::string::npos)
         export_binding_error("file_path must be a nonempty server path without NUL");
     if (request.relation) request.query = invoke_pg_as_cpp([relation = *request.relation] {
-        const char* name = get_rel_name(relation);
-        if (!name) ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE), errmsg("export relation no longer exists")));
-        const char* qualified = quote_qualified_identifier(get_namespace_name(get_rel_namespace(relation)), name);
-        return std::string{"SELECT * FROM "} + qualified;
+        // regclass input does not lock its OID. Lock before copying names so a
+        // concurrent rename/drop cannot redirect this request to a replacement.
+        auto* const source = try_table_open(relation, AccessShareLock);
+        if (!source) ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE), errmsg("export relation no longer exists")));
+        const char* namespace_name = get_namespace_name(RelationGetNamespace(source));
+        if (!namespace_name) ereport(ERROR, (errcode(ERRCODE_UNDEFINED_SCHEMA),
+            errmsg("export relation namespace no longer exists")));
+        const char* qualified = quote_qualified_identifier(namespace_name, RelationGetRelationName(source));
+        const auto query_text = std::string{"SELECT * FROM "} + qualified;
+        table_close(source, NoLock); // Keep the source lock until transaction end.
+        return query_text;
     });
     const auto options = decode_export_options(request.options, request.destination);
     auto* rewritten = invoke_pg_as_cpp([&request] {
@@ -167,6 +176,22 @@ inline bool contains_export_call(Node* expression, void*) {
     auto* query = static_cast<Query*>(linitial(rewritten));
     if (query->commandType != CMD_SELECT || query->hasModifyingCTE || query->utilityStmt
         || query->rowMarks != NIL) export_binding_error("bioseq.write accepts a SELECT without modifying CTEs or row locks");
+    if (request.relation) {
+        // A relation lock does not stabilize its schema's name. Verify the one
+        // generated FROM entry after normal analysis/rewrite has locked it.
+        // PostgreSQL 17+ retains a rewritten view's original OID in this RTE.
+        const auto* source_node = query->jointree && list_length(query->jointree->fromlist) == 1
+            ? static_cast<const Node*>(linitial(query->jointree->fromlist)) : nullptr;
+        const auto range_index = source_node && IsA(source_node, RangeTblRef)
+            ? reinterpret_cast<const RangeTblRef*>(source_node)->rtindex : 0;
+        const auto* source = range_index > 0 && range_index <= list_length(query->rtable)
+            ? static_cast<const RangeTblEntry*>(list_nth(query->rtable, range_index - 1)) : nullptr;
+        if (!source || (source->rtekind != RTE_RELATION && source->rtekind != RTE_SUBQUERY)
+            || source->relid != *request.relation)
+            bioseq::postgres::support::raise_sql_error(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                {.message = "bioseq.write could not preserve the requested relation identity",
+                 .hint = "Retry the same regclass request after concurrent schema changes finish."});
+    }
     if (contains_export_call(reinterpret_cast<Node*>(query), nullptr))
         export_binding_error("bioseq.write source cannot recursively export another file");
     auto mappings = request.mappings ? bioseq::postgres::storage::io::parse_column_mapping_array(*request.mappings)
@@ -262,18 +287,32 @@ inline void finish_export_receiver(DestReceiver*) {}
     return output.count;
 }
 
-/** Optimize only a standalone constant write call; dynamic invocations use fmgr. */
-[[nodiscard]] inline PlannedStmt* try_replace_top_level_write(const Query& outer,
+/** Record the source-free SQL shape before PostgreSQL mutates the query.
+ * A synthetic RTE_RESULT can also replace a one-row VALUES relation, so its
+ * finalized shape alone cannot establish that the caller omitted FROM/quals. */
+[[nodiscard]] inline bool is_standalone_export_query(const Query& outer) {
+    return outer.commandType == CMD_SELECT && outer.rtable == NIL
+        && !outer.hasAggs && !outer.hasWindowFuncs && !outer.hasTargetSRFs
+        && !outer.hasSubLinks && outer.cteList == NIL && !outer.setOperations
+        && outer.groupClause == NIL && outer.groupingSets == NIL && !outer.havingQual
+        && outer.distinctClause == NIL && outer.sortClause == NIL
+        && !outer.limitOffset && !outer.limitCount && outer.rowMarks == NIL
+        && outer.jointree && outer.jointree->fromlist == NIL && !outer.jointree->quals
+        && list_length(outer.targetList) == 1;
+}
+
+/** Optimize only a standalone constant write call; dynamic invocations use fmgr.
+ * The caller supplies eligibility captured before standard_planner, which adds
+ * a dummy one-row RTE_RESULT even for a SELECT without FROM. */
+[[nodiscard]] inline PlannedStmt* try_replace_top_level_write(const bool standalone_query,
     PlannedStmt* statement) {
-    if (outer.commandType != CMD_SELECT || outer.hasAggs || outer.hasWindowFuncs
-        || outer.hasTargetSRFs || outer.hasSubLinks || outer.cteList != NIL
-        || outer.setOperations || outer.groupClause != NIL || outer.groupingSets != NIL
-        || outer.havingQual || outer.distinctClause != NIL || outer.sortClause != NIL
-        || outer.limitOffset || outer.limitCount || outer.rowMarks != NIL
-        || !outer.jointree || outer.jointree->fromlist != NIL || outer.jointree->quals
-        || list_length(outer.targetList) != 1 || statement->rtable != NIL
-        || statement->subplans != NIL || statement->paramExecTypes != NIL
+    if (!standalone_query || statement->subplans != NIL || statement->paramExecTypes != NIL
         || !IsA(statement->planTree, Result)) return statement;
+    if (statement->rtable != NIL) {
+        if (list_length(statement->rtable) != 1) return statement;
+        const auto* singleton = static_cast<const RangeTblEntry*>(linitial(statement->rtable));
+        if (singleton->rtekind != RTE_RESULT) return statement;
+    }
     auto* result = reinterpret_cast<Result*>(statement->planTree);
     if (result->plan.lefttree || result->plan.righttree || result->plan.qual != NIL
         || result->plan.initPlan != NIL || result->resconstantqual
@@ -315,11 +354,11 @@ inline void finish_export_receiver(DestReceiver*) {}
     return replacement;
 }
 /** Preserve the existing PostgreSQL error boundary when invoked by planner_hook. */
-[[nodiscard]] inline PlannedStmt* replace_top_level_write_in_pg(const Query* query,
+[[nodiscard]] inline PlannedStmt* replace_top_level_write_in_pg(const bool standalone_query,
     PlannedStmt* statement) {
     const auto result = bioseq::postgres::support::invoke_postgres_callback(
-        [query, statement]() -> Datum {
-            return PointerGetDatum(try_replace_top_level_write(*query, statement));
+        [standalone_query, statement]() -> Datum {
+            return PointerGetDatum(try_replace_top_level_write(standalone_query, statement));
         });
     return reinterpret_cast<PlannedStmt*>(DatumGetPointer(result));
 }

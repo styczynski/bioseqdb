@@ -20,7 +20,8 @@ namespace {
 MemoryContext column_cache_context = nullptr;
 dlist_head* cache_entries = nullptr;
 std::uint64_t allocated_bytes = 0;
-List* chunk_groups_in_use = NIL;
+dlist_head chunk_groups_in_use = DLIST_STATIC_INIT(chunk_groups_in_use);
+bool column_cache_reset_pending = false;
 column_cache_statistics cache_statistics{};
 
 /** One cached column buffer. Keep `list_node` first; key by persistent storage
@@ -31,14 +32,17 @@ struct column_cache_entry {
     std::uint64_t stripe_id = 0;
     std::uint64_t chunk_id = 0;
     std::uint64_t read_count = 0;
-    std::uint64_t length = 0;
+    std::uint64_t length = 0;  // Retained allocation bytes, including buffer-context overhead.
     void* storage = nullptr;
+    MemoryContext storage_context = nullptr;
     std::uint32_t column_id = 0;
 };
 
-/** One relation's current storage generation and chunk protected from eviction. */
+/** One stripe reader's current chunk, released when its owning context resets. */
 struct active_chunk_group {
-    std::uint64_t relation_id = 0;
+    dlist_node list_node{};
+    MemoryContext owner_context = nullptr;
+    MemoryContextCallback cleanup_callback{};
     std::uint64_t storage_id = 0;
     std::uint64_t stripe_id = 0;
     std::uint64_t chunk_id = 0;
@@ -52,7 +56,10 @@ struct active_chunk_group {
 
 /** @brief Check whether a reader still needs this cached chunk group. */
 [[nodiscard]] bool entry_is_in_use(const column_cache_entry& entry) {
-    for (const auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
+    dlist_iter iterator;
+    dlist_foreach(iterator, &chunk_groups_in_use) {
+        const auto* active = dlist_container(
+            active_chunk_group, list_node, iterator.cur);
         if (active->storage_id == entry.storage_id
             && active->stripe_id == entry.stripe_id
             && active->chunk_id == entry.chunk_id) {
@@ -64,11 +71,7 @@ struct active_chunk_group {
 
 /** @brief Release the cache-owned buffer referenced by an entry. */
 void release_entry_storage(column_cache_entry& entry) noexcept {
-    auto* buffer = static_cast<StringInfo>(entry.storage);
-    if (buffer->data != nullptr) {
-        pfree(buffer->data);
-    }
-    pfree(buffer);
+    MemoryContextDelete(entry.storage_context);
 }
 
 /** Find a column buffer and count this lookup if it is present. */
@@ -102,6 +105,9 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
  * buffers must stay alive even whev the cache exceeds its configured size.
  */
 void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
+    if (cache_entries == nullptr) {
+        return;
+    }
     std::uint64_t current_read_count = 0;
 
     while (bytes_to_release > 0) {
@@ -142,6 +148,58 @@ void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
     }
 }
 
+/**
+ * Reclaim unborrowed buffers after a reset or reader release. Borrowed buffers
+ * remain alive until their final owner finishes; no callback deletes its current
+ * memory context.
+ */
+void reclaim_column_cache() noexcept {
+    if (column_cache_context == nullptr) {
+        column_cache_reset_pending = false;
+        return;
+    }
+    if (column_cache_reset_pending) {
+        evict_column_cache_bytes(allocated_bytes);
+    } else {
+        const std::uint64_t capacity = cache_capacity_bytes();
+        if (allocated_bytes > capacity) {
+            evict_column_cache_bytes(allocated_bytes - capacity);
+        }
+    }
+    if (column_cache_reset_pending && dlist_is_empty(&chunk_groups_in_use)
+        && CurrentMemoryContext != column_cache_context) {
+        MemoryContextDelete(column_cache_context);
+        column_cache_context = nullptr;
+        cache_entries = nullptr;
+        allocated_bytes = 0;
+        column_cache_reset_pending = false;
+    }
+}
+
+/**
+ * Release one reader's pin before its stripe allocations disappear. This also
+ * runs for errors and subtransaction cleanup, independently of the current GUC.
+ */
+void release_chunk_group_owner(void* argument) noexcept {
+    auto* active = static_cast<active_chunk_group*>(argument);
+    dlist_delete(&active->list_node);
+    reclaim_column_cache();
+}
+
+/** @return This stripe context's reusable lease, or null before its first fill. */
+[[nodiscard]] active_chunk_group* find_chunk_group_owner(
+        MemoryContext owner_context) noexcept {
+    dlist_iter iterator;
+    dlist_foreach(iterator, &chunk_groups_in_use) {
+        auto* active = dlist_container(
+            active_chunk_group, list_node, iterator.cur);
+        if (active->owner_context == owner_context) {
+            return active;
+        }
+    }
+    return nullptr;
+}
+
 /** @brief Count entries currently linked into the cache list. */
 [[nodiscard]] std::uint64_t count_column_cache_entries() noexcept {
     if (cache_entries == nullptr) {
@@ -164,104 +222,107 @@ void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
  */
 export [[nodiscard]] MemoryContext get_column_cache_memory_context() {
     if (column_cache_context == nullptr) {
-        const std::uint64_t capacity = cache_capacity_bytes();
+        // This parent owns only cache metadata; buffers have separately charged children.
         column_cache_context = AllocSetContextCreate(
-            TopMemoryContext,
-            "Bioseq Decompression Cache",
-            0,
-            static_cast<std::uint64_t>(capacity * 0.1),
-            capacity);
+            TopMemoryContext, "Bioseq Decompression Cache", ALLOCSET_DEFAULT_SIZES);
         std::memset(&cache_statistics, 0, sizeof(cache_statistics));
         cache_entries = nullptr;
     }
     return column_cache_context;
 }
 
-/** Free all cached buffers and clear the current size and entry list. */
+/**
+ * Clear unborrowed buffers now and defer shared-context deletion until every
+ * live reader releases its pin. An auxiliary index fetch may end while another
+ * reader still holds Datums pointing into these immutable buffers.
+ */
 export void reset_column_cache() noexcept {
-    if (column_cache_context != nullptr) {
-        MemoryContextDelete(column_cache_context);
-        column_cache_context = nullptr;
-        chunk_groups_in_use = NIL;
-    }
-    allocated_bytes = 0;
-    cache_entries = nullptr;
+    column_cache_reset_pending = true;
+    reclaim_column_cache();
 }
 
 /**
- * @brief Protect this relation's current  chunk group from eviction.
- *
- * Advancing a reader replaces the previously protected group for that relation,
- * including after TRUNCATE gives it a new persistent storage identity.
+ * Protect the current physical chunk for one stripe reader. Its memory context
+ * is unique to the reader; a nested scan of the same relation owns a separate
+ * lease. Reuse one reset callback per stripe lifetime, not one per chunk visit.
  */
 export void mark_chunk_group_in_use(
-        std::uint64_t relation_id,
+        MemoryContext owner_context,
         std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint32_t chunk_id) {
-    bool found_relation = false;
-    bioseq::postgres::support::memory_context_scope cache_scope{
-        get_column_cache_memory_context()};
-
-    for (auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
-        if (active->relation_id == relation_id) {
-            active->storage_id = storage_id;
-            active->stripe_id = stripe_id;
-            active->chunk_id = chunk_id;
-            found_relation = true;
-        }
+    active_chunk_group* active = find_chunk_group_owner(owner_context);
+    if (active == nullptr) {
+        active = static_cast<active_chunk_group*>(MemoryContextAllocZero(
+            owner_context, sizeof(active_chunk_group)));
+        active->owner_context = owner_context;
+        active->cleanup_callback.func = release_chunk_group_owner;
+        active->cleanup_callback.arg = active;
+        MemoryContextRegisterResetCallback(owner_context, &active->cleanup_callback);
+        dlist_push_tail(&chunk_groups_in_use, &active->list_node);
     }
-    if (!found_relation) {
-        auto* active = bioseq::postgres::support::allocate_zeroed_object<active_chunk_group>();
-        active->relation_id = relation_id;
-        active->storage_id = storage_id;
-        active->stripe_id = stripe_id;
-        active->chunk_id = chunk_id;
-        chunk_groups_in_use = lappend(chunk_groups_in_use, active);
-    }
+    active->storage_id = storage_id;
+    active->stripe_id = stripe_id;
+    active->chunk_id = chunk_id;
+    reclaim_column_cache();
 }
 
 /**
- * @brief Store a decompressed column buffer, replacing an existing entry.
- * @param storage `StringInfo` allocated in the column-cache memory context.
+ * @brief Store a decompressed buffer or reuse the immutable existing entry.
+ * @param storage Complete `StringInfo` owned by `storage_context`.
+ * @param storage_context Temporary child of the reader context, no longer current.
  *
- * With caching enabled, the cache owns the buffer If caching is disabled,
- * this function leaves ownership with the caller.
+ * Allocate cache metadata before publishing the completed buffer context. The
+ * no-error reparent transfers ownership without copying; failed decompression or
+ * metadata allocation leaves the temporary context with its reader. A duplicate
+ * key keeps the canonical buffer alive and deletes the redundant input context.
+ * If caching is disabled, this function leaves ownership with the reader.
+ * @return The buffer to decode; it may be the canonical existing cache entry.
  */
-export void add_column_cache_entry(
+export [[nodiscard]] void* add_column_cache_entry(
         std::uint64_t storage_id,
         std::uint64_t stripe_id,
         std::uint64_t chunk_id,
         std::uint32_t column_id,
-        void* storage) {
+        void* storage,
+        MemoryContext storage_context) {
     if (!bioseq::settings::column_cache::enabled) {
-        return;
+        return storage;
     }
 
     bioseq::postgres::support::memory_context_scope cache_scope{
         get_column_cache_memory_context()};
     if (cache_entries == nullptr) {
-        cache_entries = bioseq::postgres::support::allocate_zeroed_object<dlist_head>();
+        cache_entries = bioseq::postgres::support::invoke_pg_as_cpp([] {
+            return bioseq::postgres::support::allocate_zeroed_object<dlist_head>();
+        });
     }
 
     column_cache_entry* entry = find_column_cache_entry(
         storage_id, stripe_id, chunk_id, column_id);
     if (entry != nullptr) {
-        release_entry_storage(*entry);
-        allocated_bytes -= entry->length;
-    } else {
-        entry = bioseq::postgres::support::allocate_zeroed_object<column_cache_entry>();
-        entry->storage_id = storage_id;
-        entry->stripe_id = stripe_id;
-        entry->chunk_id = chunk_id;
-        entry->column_id = column_id;
-        dlist_push_tail(cache_entries, &entry->list_node);
+        if (entry->storage_context != storage_context) {
+            MemoryContextDelete(storage_context);
+        }
+        return entry->storage;
     }
 
-    const std::uint64_t storage_size =
-        static_cast<StringInfo>(storage)->len;
+    entry = bioseq::postgres::support::invoke_pg_as_cpp([] {
+        return bioseq::postgres::support::allocate_zeroed_object<column_cache_entry>();
+    });
+    entry->storage_id = storage_id;
+    entry->stripe_id = stripe_id;
+    entry->chunk_id = chunk_id;
+    entry->column_id = column_id;
+    const std::uint64_t storage_size = static_cast<std::uint64_t>(
+        MemoryContextMemAllocated(storage_context, true));
     entry->storage = storage;
+    entry->storage_context = storage_context;
     entry->length = storage_size;
+    // PostgreSQL guarantees reparenting cannot ERROR. Publish only after every
+    // potentially failing allocation and while outside the buffer context.
+    MemoryContextSetParent(storage_context, column_cache_context);
+    dlist_push_tail(cache_entries, &entry->list_node);
     allocated_bytes += storage_size;
     if (allocated_bytes >= cache_statistics.maximum_cache_size) {
         cache_statistics.maximum_cache_size = allocated_bytes;
@@ -274,6 +335,7 @@ export void add_column_cache_entry(
             + (allocated_bytes - capacity));
     }
     ++cache_statistics.writes;
+    return storage;
 }
 
 /**

@@ -41,20 +41,6 @@ using dynamic_export_index = std::map<
     std::vector<const dso_symbol_occurrence*>,
     std::less<>>;
 
-[[nodiscard]] inline std::string dso_routine_leaf(
-    std::string_view identity) {
-    const std::size_t arguments = identity.find('(');
-    const std::string_view qualified =
-        arguments == std::string_view::npos
-        ? identity
-        : identity.substr(0, arguments);
-    const std::size_t separator = qualified.rfind('.');
-    return std::string{
-        separator == std::string_view::npos
-            ? qualified
-            : qualified.substr(separator + 1)};
-}
-
 [[nodiscard]] inline dynamic_export_index
 index_dynamic_exports(const dso_inventory& inventory) {
     dynamic_export_index result;
@@ -106,6 +92,15 @@ inline void validate_dso_ownership(
         detail::safety_failure(
             "DSO", "main SQL identity/symbol totals are not exact");
     }
+    std::map<std::string, const safety_parent_row*, std::less<>> parents_by_identity;
+    for (const safety_parent_row& parent : production.parents) {
+        if (parent.sql_identity.empty() || parent.public_symbol.empty()
+            || parent.generated_wrapper.empty()
+            || !parents_by_identity.emplace(parent.sql_identity, &parent).second) {
+            detail::safety_failure(
+                "DSO", "main parent identity or ownership is empty or duplicated");
+        }
+    }
     std::set<std::string, std::less<>> main_symbols;
     std::set<std::string, std::less<>> generated_symbols;
     std::set<std::string, std::less<>> main_identities;
@@ -126,18 +121,27 @@ inline void validate_dso_ownership(
         if (group.sql_identities.size() > 1) {
             shared_symbols.insert(group.public_symbol);
         }
+        const auto sql_name = detail::routine_name(group.sql_identities.front());
         for (const std::string& identity : group.sql_identities) {
             if (!main_identities.insert(identity).second
-                || dso_detail::dso_routine_leaf(identity)
-                    != group.public_symbol) {
+                || detail::routine_name(identity) != sql_name) {
                 detail::safety_failure(
                     group.public_symbol,
-                    "main symbol is shared across different SQL names");
+                    "main symbol is shared across different SQL names or duplicates an identity");
+            }
+            const auto parent = parents_by_identity.find(identity);
+            if (parent == parents_by_identity.end()) {
+                detail::safety_failure(
+                    identity, "main symbol group has no parent identity");
+            }
+            if (parent->second->public_symbol != group.public_symbol
+                || parent->second->generated_wrapper != group.generated_wrapper) {
+                detail::safety_failure(
+                    identity, "parent and symbol-group ownership disagree");
             }
         }
     }
-    if (main_identities.size()
-        != contract.main_identity_count) {
+    if (main_identities.size() != parents_by_identity.size()) {
         detail::safety_failure(
             "DSO", "main symbol groups do not cover every SQL identity");
     }

@@ -450,9 +450,14 @@ export {
          * parent Result or Projection to them. It then visits this child
          * and resolves its outputs against custom_scan_tlist. */
         cscan->scan.plan.targetlist = output_tlist;
+        // PostgreSQL passes base/parameter scan clauses to PlanCustomPath,
+        // not the join restrictions retained on CustomPath. Keep both lists:
+        // the latter owns ordinary ON/WHERE predicates as well as mmsearch.
+        // Pointer union avoids evaluating shared RestrictInfo nodes twice.
+        List* join_restrictions = list_union_ptr(best_path->custom_restrictinfo, clauses);
         postgres_list<RestrictInfo> executable_join_restrictions;
         std::size_t removed_mmsearch_occurrences = 0u;
-        for (RestrictInfo* candidate : postgres_list<RestrictInfo>(clauses)) {
+        for (RestrictInfo* candidate : postgres_list<RestrictInfo>(join_restrictions)) {
             const std::size_t occurrences =
                 candidate == nullptr
                     ? 0u
@@ -482,13 +487,13 @@ export {
         for (Plan* child : postgres_list<Plan>(custom_plans)) {
             per_row_audit_mmsearch_plan(child, ownership_audit, oids);
         }
-        /* An upper UPDATE can consume the  join restriction before this
-         * callback, leaving NIL clauses. Accept the checked private mmsearch
-         * expression in that case. Otherwise require exactly one removed
-         * occurrence, with no copy left in either child or the join filters. */
+        /* Preserve the existing private-owner fallback only when neither the
+         * retained path nor PostgreSQL's callback supplied restrictions. An
+         * empty callback alone never permits discarding retained join quals. */
         const bool callback_ownership_valid =
             removed_mmsearch_occurrences == 1u ||
-            (removed_mmsearch_occurrences == 0u && clauses == NIL && private_mmsearch_recipe_valid);
+            (removed_mmsearch_occurrences == 0u && join_restrictions == NIL
+                && private_mmsearch_recipe_valid);
         if (!callback_ownership_valid || removed_mmsearch_occurrences > 1u ||
             !ownership_audit.clean()) {
             ereport(ERROR,

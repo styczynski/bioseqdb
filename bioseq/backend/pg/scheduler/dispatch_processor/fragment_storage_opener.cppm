@@ -33,8 +33,10 @@ using typed_dispatch_fragment_read_callback =
     void (*)(void* context, typed_dispatch_fragment_read_view& storage);
 
 /**
- * Open a stored-index reader and call @p callback znce. Close the reader
- * on return, or abandon its PostgreSQL handles after a server error.
+ * Open an optional direct-chunk reader and call @p callback for that layout.
+ * A valid native-generation layout skips the callback so the caller can
+ * recompute; required native readers use their own retained generation owner.
+ * Close on return, or abandon PostgreSQL handles after a server error.
  * The callback must not save the borrowed view for later use.
  */
 void

@@ -234,8 +234,12 @@ requires bounded_nthash_seeded_alphabet<
             table_values);
     } else {
         // Native rank gather scales with lane count, not alphabet cardinality.
+        constexpr const auto* seeds = [] {
+            if constexpr (p_complement) return seed_policy::complement_seeds.data();
+            else return seed_policy::forward_seeds.data();
+        }();
         return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
-            [&simd_tag, &ranks] [[gnu::always_inline]] (auto stream_constant) {
+            [&simd_tag, &ranks, seeds] [[gnu::always_inline]] (auto stream_constant) {
                 constexpr std::size_t k_stream_index = decltype(stream_constant)::value;
                 const hn::Rebind<std::int32_t, p_simd_tag> signed_tag;
                 // Inactive padded lanes may contain unused rank bit patterns.
@@ -243,7 +247,7 @@ requires bounded_nthash_seeded_alphabet<
                     hn::Lt(ranks[k_stream_index], hn::Set(simd_tag,
                         static_cast<std::uint32_t>(seed_policy::alphabet_size))),
                     ranks[k_stream_index], hn::Zero(simd_tag));
-                return hn::GatherIndex(simd_tag, seed_policy::forward_seeds.data(),
+                return hn::GatherIndex(simd_tag, seeds,
                     hn::BitCast(signed_tag, indices));
             });
     }

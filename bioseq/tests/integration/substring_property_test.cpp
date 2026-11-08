@@ -40,7 +40,7 @@ constexpr std::string_view k_self_sequence = k_padded_target;
 /** @brief Seeds one target and its embedded probe. */
 void seed_substring_table(const connection_test_context& ctx, std::string_view table_name) {
     exec_sqlf(ctx,
-              "SET bioseq.index.insert_maintenance.enabled = on;"
+              "SET bioseq.index.insert_maintenance.enabled = off;"
               "SET bioseq.aligner.chaining.minimum_score = 10;"
               "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
     create_seq_table(
@@ -55,11 +55,12 @@ void seed_substring_table(const connection_test_context& ctx, std::string_view t
             seq_row{.pk = 1,
                     .sequences = {std::string(k_padded_target), std::string(k_probe_sequence)}},
         });
+    publish_default_fixture_indexes(ctx, table_name);
 }
 
 /** @brief Seeds equal query and target columns for self-alignment. */
 void seed_self_alignment_table(const connection_test_context& ctx, std::string_view table_name) {
-    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -72,6 +73,7 @@ void seed_self_alignment_table(const connection_test_context& ctx, std::string_v
             seq_row{.pk = 1,
                     .sequences = {std::string(k_self_sequence), std::string(k_self_sequence)}},
         });
+    publish_default_fixture_indexes(ctx, table_name);
 }
 
 } // namespace

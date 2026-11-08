@@ -638,10 +638,7 @@ sequence_storage_manager<
             wrote_one = true;
         }
         appendStringInfoString(buf, ";");
-        if (SPI_connect() == SPI_OK_CONNECT) {
-            SPI_execute(buf->data, false, 0);
-            SPI_finish();
-        }
+        drop_sequence_storage_relations_checked(buf->data);
     }
 
     for (std::size_t i = 0; i < rows.size(); i += k_drop_batch_size) {
@@ -660,10 +657,7 @@ sequence_storage_manager<
             wrote_one = true;
         }
         appendStringInfoString(buf, ";");
-        if (SPI_connect() == SPI_OK_CONNECT) {
-            SPI_execute(buf->data, false, 0);
-            SPI_finish();
-        }
+        drop_sequence_storage_relations_checked(buf->data);
     }
 
     sequence_sub_table_manager::delete_shards_for_main(db_oid, spc_oid, main_relfilenode);

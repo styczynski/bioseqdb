@@ -283,55 +283,6 @@ export {
         }
     }
 
-    [[nodiscard]] std::uint32_t slice_project_build_ir_node(slice_project_ir_builder& builder,
-                                                            Node* expression) {
-        check_stack_depth();
-        if (expression == nullptr)
-            return 0u;
-        const auto operation = slice_project_node_opcode(expression, *builder.oids);
-        if (!operation.has_value()) {
-            return slice_project_add_producer(builder, expression);
-        }
-        builder.found = true;
-        const slice_project_opcode opcode = *operation;
-        if (opcode == slice_project_opcode::slice || opcode == slice_project_opcode::concat ||
-            opcode == slice_project_opcode::reverse ||
-            opcode == slice_project_opcode::reverse_complement) {
-            builder.piece_boundaries = bioseq::common::saturating_add(builder.piece_boundaries, 1u);
-        }
-        if (List* arguments = slice_project_call_arguments(expression); arguments != NIL) {
-            for (Node* argument : postgres_list<Node>(arguments)) {
-                if (slice_project_node_opcode(argument, *builder.oids).has_value()) {
-                    (void)slice_project_build_ir_node(builder, argument);
-                } else if (exprType(argument) == builder.oids->bioseq_seq_type_oid) {
-                    (void)slice_project_add_producer(builder, argument);
-                }
-            }
-            FuncExpr* function = try_cast_pg_node<FuncExpr>(expression);
-            if (opcode == slice_project_opcode::materialize && function != nullptr) {
-                Node* source = reinterpret_cast<Node*>(linitial(arguments));
-                const std::uint32_t producer_id = slice_project_add_producer(builder, source);
-                const bool as_array = function->funcid == builder.oids->seq_to_array_oid;
-                slice_project_add_boundary(builder,
-                                           source,
-                                           producer_id,
-                                           as_array ? materialization_mechanism::letter_array
-                                                    : materialization_mechanism::text,
-                                           materialization_reason::sql_conversion,
-                                           true);
-            }
-        } else if (IsA(expression, SubscriptingRef)) {
-            auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
-            Node* source = reinterpret_cast<Node*>(subscript->refexpr);
-            if (slice_project_node_opcode(source, *builder.oids).has_value()) {
-                (void)slice_project_build_ir_node(builder, source);
-            } else {
-                (void)slice_project_add_producer(builder, source);
-            }
-        }
-        return slice_project_add_producer(builder, expression);
-    }
-
     struct slice_project_discovery {
         slice_project_ir_builder* builder = nullptr;
         bool found = false;
@@ -353,6 +304,67 @@ export {
             return pg_walk_step::descend;
         }
     };
+
+    [[nodiscard]] std::uint32_t slice_project_build_ir_node(slice_project_ir_builder& builder,
+                                                            Node* expression) {
+        check_stack_depth();
+        if (expression == nullptr)
+            return 0u;
+        const auto operation = slice_project_node_opcode(expression, *builder.oids);
+        if (!operation.has_value()) {
+            if (slice_project_is_sequence_conversion(expression, *builder.oids)) {
+                /* Describe nested operations without treating a conversion as a
+                 * transparent dependency. PostgreSQL still evaluates the whole
+                 * cast, and its result keeps its own opaque producer identity. */
+                slice_project_discovery discovery{&builder};
+                slice_project_discovery_visitor visitor;
+                for (Node* argument : postgres_list<Node>(slice_project_call_arguments(expression))) {
+                    walk_pg_expression_including_root(argument, discovery, visitor);
+                }
+            }
+            return slice_project_add_producer(builder, expression);
+        }
+        builder.found = true;
+        const slice_project_opcode opcode = *operation;
+        if (opcode == slice_project_opcode::slice || opcode == slice_project_opcode::concat ||
+            opcode == slice_project_opcode::reverse ||
+            opcode == slice_project_opcode::reverse_complement) {
+            builder.piece_boundaries = bioseq::common::saturating_add(builder.piece_boundaries, 1u);
+        }
+        if (List* arguments = slice_project_call_arguments(expression); arguments != NIL) {
+            for (Node* argument : postgres_list<Node>(arguments)) {
+                if (slice_project_node_opcode(argument, *builder.oids).has_value() ||
+                    slice_project_is_sequence_conversion(argument, *builder.oids)) {
+                    (void)slice_project_build_ir_node(builder, argument);
+                } else if (exprType(argument) == builder.oids->bioseq_seq_type_oid) {
+                    (void)slice_project_add_producer(builder, argument);
+                }
+            }
+            FuncExpr* function = try_cast_pg_node<FuncExpr>(expression);
+            if (opcode == slice_project_opcode::materialize && function != nullptr) {
+                Node* source = reinterpret_cast<Node*>(linitial(arguments));
+                const std::uint32_t producer_id = slice_project_add_producer(builder, source);
+                const bool as_array = function->funcid == builder.oids->seq_to_array_oid;
+                slice_project_add_boundary(builder,
+                                           source,
+                                           producer_id,
+                                           as_array ? materialization_mechanism::letter_array
+                                                    : materialization_mechanism::text,
+                                           materialization_reason::sql_conversion,
+                                           true);
+            }
+        } else if (IsA(expression, SubscriptingRef)) {
+            auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
+            Node* source = reinterpret_cast<Node*>(subscript->refexpr);
+            if (slice_project_node_opcode(source, *builder.oids).has_value() ||
+                slice_project_is_sequence_conversion(source, *builder.oids)) {
+                (void)slice_project_build_ir_node(builder, source);
+            } else {
+                (void)slice_project_add_producer(builder, source);
+            }
+        }
+        return slice_project_add_producer(builder, expression);
+    }
 
     [[nodiscard]] bool slice_project_discover_target(PathTarget* target,
                                                      slice_project_ir_builder& builder) {

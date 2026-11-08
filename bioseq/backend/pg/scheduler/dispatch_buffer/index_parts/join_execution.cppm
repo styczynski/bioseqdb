@@ -39,7 +39,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipeline in a separate module.
 import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.scheduler.supervisor;

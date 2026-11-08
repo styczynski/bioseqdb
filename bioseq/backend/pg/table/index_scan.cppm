@@ -17,7 +17,7 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.table.types;
 import bioseq.postgres.table.scan_state;
-import :access_method;
+import :access_method_contract;
 import :utils;
 import bioseq.postgres.column.table_access;
 

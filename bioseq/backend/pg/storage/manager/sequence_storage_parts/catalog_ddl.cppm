@@ -34,6 +34,7 @@ extern "C" {
 #include "commands/extension.h"
 #include "commands/defrem.h"
 #include "commands/sequence.h"
+#include "commands/tablespace.h"
 #include "commands/vacuum.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -453,6 +454,22 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
     return rel;
 }
 
+/** Drop registry-derived private shard tables after parent authorization.
+ * The SPI owner closes on C++ unwind; only the generated DROP uses the extension
+ * identity. Parent DROP and public table ownership checks remain at the caller.
+ */
+void drop_sequence_storage_relations_checked(const char* ddl) {
+    bioseq::postgres::support::spi_session spi;
+    if (spi.connect() != SPI_OK_CONNECT)
+        storage_error_as_cpp(ERRCODE_INTERNAL_ERROR, "bioseq shard cleanup SPI_connect failed");
+    const int status = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+        "bioseq", [ddl] { return SPI_execute(ddl, false, 0); });
+    if (status != SPI_OK_UTILITY)
+        storage_error_as_cpp(ERRCODE_INTERNAL_ERROR, "bioseq shard cleanup returned an unexpected SPI status");
+    if (spi.finish() != SPI_OK_FINISH)
+        storage_error_as_cpp(ERRCODE_INTERNAL_ERROR, "bioseq shard cleanup SPI_finish failed");
+}
+
 /// Create a fragment table and sidecar together in a subtransaction.
 /// @param ddl SQL creating both tables.
 /// @param sub_name Fragment table name.
@@ -479,7 +496,7 @@ void create_shard_relations_checked(
                 connect_status));
     }
     const int execute_status =
-        bioseq::postgres::support::invoke_pg_as_cpp(
+        bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
             [ddl] {
                 return SPI_execute(
                     ddl->data, /*read_only=*/false, /*tcount=*/0);
@@ -577,17 +594,22 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     // through ALTER EXTENSION here requires nested SPI and SECURITY DEFINER
     // resorce owners, which can break tuple-descriptor cleanup.
     StringInfo ddl = bioseq::postgres::support::invoke_pg_as_cpp(
-        [persistence_kw, &sub_name, &tm, &sidecar_name] {
+        [persistence_kw, &sub_name, &tm, &sidecar_name, spc_oid] {
+        const char* tablespace = get_tablespace_name(spc_oid);
+        if (tablespace == nullptr)
+            ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT), errmsg("bioseq source tablespace is missing")));
+        const char* quoted_tablespace = quote_identifier(tablespace);
         StringInfo result = makeStringInfo();
         appendStringInfo(result,
             "CREATE %s TABLE IF NOT EXISTS bioseq_internal.%s "
-                "(seq bioseq.seq('%s', %d)) USING bioseq;\n"
+                "(seq bioseq.seq('%s', %d)) USING bioseq TABLESPACE %s;\n"
             "CREATE %s TABLE IF NOT EXISTS bioseq_internal.%s "
-                "(sub_rowno BIGINT PRIMARY KEY, blob BYTEA NOT NULL);",
+                "(sub_rowno pg_catalog.int8 PRIMARY KEY, blob pg_catalog.bytea NOT NULL) "
+                "USING heap TABLESPACE %s;",
             persistence_kw, quote_identifier(sub_name.c_str()),
             tm.alphabet_name.c_str(),
-            tm.storage_unit_bit_width,
-            persistence_kw, quote_identifier(sidecar_name.c_str()));
+            tm.storage_unit_bit_width, quoted_tablespace,
+            persistence_kw, quote_identifier(sidecar_name.c_str()), quoted_tablespace);
         return result;
     });
 
@@ -623,34 +645,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                 quote_identifier(sidecar_name.c_str()));
             return result;
         });
-        /// Save SPI status codes for checking after the cleanup call.
-        struct race_drop_spi_state {
-            int connect_status = 0;
-            int execute_status = 0;
-            int finish_status = 0;
-        } spi{};
-        const char* drop_sql = drop->data;
-        bioseq::postgres::support::invoke_pg_as_cpp([&spi, drop_sql] noexcept {
-            spi.connect_status = SPI_connect();
-            if (spi.connect_status != SPI_OK_CONNECT) return;
-            spi.execute_status = SPI_execute(
-                drop_sql, /*read_only=*/false, /*tcount=*/0);
-            spi.finish_status = SPI_finish();
-        });
-        if (spi.connect_status != SPI_OK_CONNECT
-            || spi.execute_status != SPI_OK_UTILITY
-            || spi.finish_status != SPI_OK_FINISH) {
-            bioseq::postgres::support::invoke_pg_as_cpp([&spi] {
-                ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("bioseq race-loser shard cleanup failed"),
-                     errdetail("SPI_connect_status=%d SPI_execute_status=%d "
-                               "SPI_finish_status=%d",
-                               spi.connect_status, spi.execute_status,
-                               spi.finish_status)));
-            });
-            pg_unreachable();
-        }
+        drop_sequence_storage_relations_checked(drop->data);
     }
 
     return open_relation_cached(row.sub_table_relid, lock_mode, cache,

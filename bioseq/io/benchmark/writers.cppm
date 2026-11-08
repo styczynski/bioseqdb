@@ -30,6 +30,7 @@ module bioseq.io.benchmark:writers;
 
 import :common;
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.io.reader;
@@ -182,20 +183,22 @@ template <bool p_is_fasta>
 /// Write prepared batches within the current shared-arena participant budget.
 template <bool p_is_fasta>
 [[nodiscard]] io_measurement
-run_bioseq_writer(const writer_input& input, std::size_t thread_count, bool use_mmap_sink = false) {
+run_bioseq_writer(const writer_input& input, std::size_t thread_count, bool bound_output = false) {
     constexpr auto file_type =
         p_is_fasta ? sequence_file_format::fasta : sequence_file_format::fastq;
     writer_options options{};
     options.overwrite = true;
     concurrency_options concurrency{};
     concurrency.worker_count = thread_count;
-    if (use_mmap_sink) {
-        // Leave room for record formatting when reserving the mapped output file.
-        // The capacity hint must be large enough for the complete result.
-        const std::size_t estimated_output_bytes =
-            input.source_bytes_on_disk + input.source_bytes_on_disk / 2;
-        options.output_capacity_hint =
-            estimated_output_bytes > 4096 ? estimated_output_bytes : 4096;
+    if (bound_output) {
+        // Preserve the existing oversized-output check without writable mappings.
+        const auto estimated_output_bytes = bioseq::common::checked_add(
+            input.source_bytes_on_disk, input.source_bytes_on_disk / 2u);
+        if (!estimated_output_bytes) {
+            bioseq_log<logging_level::error>("[bioseq.io.benchmark] output byte limit overflows");
+            return {};
+        }
+        options.maximum_output_bytes = std::max(std::size_t{4096u}, *estimated_output_bytes);
     }
     auto writer_or_err =
         sequence_writer<seq::dna4, file_type>::open(input.output_scratch_path, options, concurrency);
@@ -297,7 +300,7 @@ template <bool p_is_fasta>
     if (algorithm == "bioseq_writer_sync_fasta" || algorithm == "bioseq_writer_sync_fastq"
         || algorithm == "naive_ofstream_fasta" || algorithm == "naive_ofstream_fastq") return 1u;
     if (algorithm == "bioseq_writer_parallel4_fasta" || algorithm == "bioseq_writer_parallel4_fastq"
-        || algorithm == "bioseq_writer_mmap_fasta" || algorithm == "bioseq_writer_mmap_fastq") return 4u;
+        || algorithm == "bioseq_writer_bounded_pwrite_fasta" || algorithm == "bioseq_writer_bounded_pwrite_fastq") return 4u;
     if (algorithm == "bioseq_writer_parallel8_fasta" || algorithm == "bioseq_writer_parallel8_fastq") return 8u;
     return 0u;
 }
@@ -324,9 +327,9 @@ template <bool p_is_fasta>
     }
     if (algo == "naive_ofstream_fasta") return run_naive_ofstream<true>(input);
     if (algo == "naive_ofstream_fastq") return run_naive_ofstream<false>(input);
-    const bool use_mmap_sink = algo == "bioseq_writer_mmap_fasta" || algo == "bioseq_writer_mmap_fastq";
-    if (algo.ends_with("_fasta")) return run_bioseq_writer<true>(input, workers, use_mmap_sink);
-    return run_bioseq_writer<false>(input, workers, use_mmap_sink);
+    const bool bound_output = algo == "bioseq_writer_bounded_pwrite_fasta" || algo == "bioseq_writer_bounded_pwrite_fastq";
+    if (algo.ends_with("_fasta")) return run_bioseq_writer<true>(input, workers, bound_output);
+    return run_bioseq_writer<false>(input, workers, bound_output);
 }
 
 /// Run the selected writer after input batches and an output path are ready.

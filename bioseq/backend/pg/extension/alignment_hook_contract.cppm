@@ -12,14 +12,33 @@ extern "C" {
 }
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 module bioseq.postgres.extension:alignment_hook_contract;
 
 import :alignment_hook_core_stack;
+import bioseq.pipeline.stats;
 import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
+
+// Snapshot consumers are internal to the alignment implementation. Keep their
+// model dependencies out of the extension's public SQL and startup interface.
+/** @return Borrowed latest alignment snapshot, including partial queries, or an empty optional. */
+[[nodiscard]] const std::optional<
+    bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
+last_alignment_execution_snapshot_ref() noexcept;
+
+/** @return Borrowed latest fully consumed alignment snapshot, or an empty optional. */
+[[nodiscard]] const std::optional<
+    bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
+last_completed_alignment_snapshot_ref() noexcept;
+
+/** @brief Validate a snapshot's recorded execution environment and return its backend. */
+[[nodiscard]] bioseq::pipeline_stats::executed_backend
+validate_alignment_snapshot_environment(
+    const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot);
 
 struct alignment_executor_frame;
 

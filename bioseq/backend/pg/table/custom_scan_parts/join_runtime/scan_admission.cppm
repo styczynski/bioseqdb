@@ -45,7 +45,7 @@ import :utils;
 import :custom_scan_plan_abi_constants;
 import :custom_scan_scan_feature_contracts;
 import :custom_scan_scan_runtime_state_contracts;
-import :custom_scan_runtime_pipeline_contracts;
+import :custom_scan_execution_stats_contracts;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 import :custom_scan_oid_expression_support_expression_analysis_contracts;
 import :custom_scan_oid_expression_support_restriction_ownership_contracts;

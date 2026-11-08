@@ -58,10 +58,6 @@ concept positional_byte_source = requires(const Source& source,
         -> std::same_as<std::expected<std::size_t, std::string>>;
 };
 
-/** A private sibling file; only explicit publication exposes the completed output.
- * Writes may run concurrently at disjoint ranges; reservation ordering belongs
- * to the caller. Seal/publication/destruction require all tasks to have joined.
- */
 /** Bounded read-only mapping into a sealed private replay file; no copied payload. */
 class mapped_read_window {
     void* mapping_{};
@@ -119,12 +115,17 @@ public:
     }
 };
 
+/** A private sibling file; only explicit publication exposes the completed output.
+ * Writes may run concurrently at disjoint ranges; reservation ordering belongs
+ * to the caller. Seal/publication/destruction require all tasks to have joined.
+ */
 class posix_pwrite_sink {
     int descriptor_{-1};
     int directory_descriptor_{-1};
     std::string temporary_name_;
     std::string destination_name_;
     std::atomic<std::uint64_t> extent_{};
+    std::optional<std::uint64_t> maximum_output_bytes_;
     bool overwrite_{};
     bool sealed_{};
     bool published_{};
@@ -164,6 +165,7 @@ public:
           temporary_name_(std::move(other.temporary_name_)),
           destination_name_(std::move(other.destination_name_)),
           extent_(other.extent_.load(std::memory_order_relaxed)),
+          maximum_output_bytes_(other.maximum_output_bytes_),
           overwrite_(other.overwrite_), sealed_(other.sealed_), published_(other.published_) {}
 
     /** Abandon previous unpublished output and adopt a stopped source owner. */
@@ -175,6 +177,7 @@ public:
             temporary_name_ = std::move(other.temporary_name_);
             destination_name_ = std::move(other.destination_name_);
             extent_.store(other.extent_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            maximum_output_bytes_ = other.maximum_output_bytes_;
             overwrite_ = other.overwrite_;
             sealed_ = other.sealed_;
             published_ = other.published_;
@@ -187,9 +190,13 @@ public:
 
     /** Create a mode-0600 sibling with exclusive creation and a pinned parent directory.
      * The final path is untouched until publish(), even if it already exists.
+     * An optional byte limit bounds reservations; zero permits only empty output.
      */
     [[nodiscard]] static std::expected<posix_pwrite_sink, std::string>
-    try_open(std::string_view path, bool overwrite = false) {
+    try_open(std::string_view path, bool overwrite = false,
+            std::optional<std::uint64_t> maximum_output_bytes = std::nullopt) {
+        if (maximum_output_bytes && !representable_range(*maximum_output_bytes, 0u))
+            return std::unexpected("maximum_output_bytes exceeds the supported output offset range");
         if (path.empty() || path.find('\0') != std::string_view::npos)
             return std::unexpected("output path is empty or contains NUL");
         const auto slash = path.find_last_of('/');
@@ -205,6 +212,7 @@ public:
         sink.directory_descriptor_ = directory;
         sink.destination_name_ = basename;
         sink.overwrite_ = overwrite;
+        sink.maximum_output_bytes_ = maximum_output_bytes;
         static std::atomic<std::uint64_t> next_temporary{};
         const auto epoch = std::chrono::steady_clock::now().time_since_epoch().count();
         for (std::size_t attempt = 0; attempt < 128; ++attempt) {
@@ -221,7 +229,7 @@ public:
         return std::unexpected("could not allocate a unique private output name");
     }
 
-    /** Reserve a checked extent; the caller assigns these ranges in record order. */
+    /** Reserve a checked extent in caller order; rejected bounds never advance it. */
     [[nodiscard]] std::expected<std::uint64_t, std::string>
     reserve_offset(std::size_t byte_count) {
         if (descriptor_ < 0 || sealed_) return std::unexpected("output is closed or sealed");
@@ -229,6 +237,9 @@ public:
         for (;;) {
             if (!representable_range(offset, byte_count))
                 return std::unexpected("output file extent exceeds the supported offset range");
+            if (maximum_output_bytes_ && (offset > *maximum_output_bytes_
+                || byte_count > *maximum_output_bytes_ - offset))
+                return std::unexpected("output file extent exceeds maximum_output_bytes");
             if (extent_.compare_exchange_weak(offset, offset + byte_count,
                     std::memory_order_relaxed, std::memory_order_relaxed)) return offset;
         }
@@ -297,7 +308,6 @@ public:
         return consumed;
     }
 
-    /** Flush accepted bytes and freeze the file for independent replay readers. */
     /** Borrow one immutable replay payload; the mapping never owns the file. */
     [[nodiscard]] std::expected<mapped_read_window, std::string> map_read_at(
             std::uint64_t offset, std::size_t bytes) const {
@@ -306,6 +316,7 @@ public:
         return mapped_read_window::open(descriptor_, offset, bytes);
     }
 
+    /** Flush accepted bytes and freeze the file for independent replay readers. */
     [[nodiscard]] std::expected<void, std::string> seal() {
         if (sealed_) return {};
         if (descriptor_ < 0) return std::unexpected("cannot seal a closed output");
@@ -343,17 +354,6 @@ public:
         return {};
     }
 
-    /** Resize a stopped unsealed owner, for mapped allocation/final truncation. */
-    [[nodiscard]] std::expected<void, std::string> resize_file(std::uint64_t bytes) {
-        if (descriptor_ < 0 || sealed_ || !representable_range(bytes, 0))
-            return std::unexpected("invalid output resize");
-        if (::ftruncate(descriptor_, static_cast<off_t>(bytes)) != 0)
-            return std::unexpected(system_error("resize output", errno));
-        return {};
-    }
-
-    /** Return the owned descriptor for a checked shared mapping. */
-    [[nodiscard]] int fd() const noexcept { return descriptor_; }
     /** Return reserved logical bytes, retained even after publication. */
     [[nodiscard]] std::uint64_t size_bytes() const noexcept {
         return extent_.load(std::memory_order_relaxed);
@@ -361,79 +361,6 @@ public:
 };
 static_assert(io_sink<posix_pwrite_sink>);
 static_assert(positional_byte_source<posix_pwrite_sink>);
-
-/** Optional mapped output uses the same staging lifecycle and checked reservations. */
-class mmap_pwrite_sink {
-    posix_pwrite_sink file_;
-    std::byte* mapping_{};
-    std::size_t capacity_{};
-public:
-    mmap_pwrite_sink() = default;
-    mmap_pwrite_sink(const mmap_pwrite_sink&) = delete;
-    mmap_pwrite_sink& operator=(const mmap_pwrite_sink&) = delete;
-    /** Move only after all tasks using the source have joined. */
-    mmap_pwrite_sink(mmap_pwrite_sink&& other) noexcept
-        : file_(std::move(other.file_)), mapping_(std::exchange(other.mapping_, nullptr)),
-          capacity_(std::exchange(other.capacity_, 0)) {}
-    /** Unmap abandoned output; the underlying owner removes its private file. */
-    ~mmap_pwrite_sink() { if (mapping_ != nullptr) ::munmap(mapping_, capacity_); }
-
-    /** Create a private mapping; final output is exposed only by publish(). */
-    [[nodiscard]] static std::expected<mmap_pwrite_sink, std::string>
-    try_open(std::string_view path, std::size_t capacity, bool overwrite = false) {
-        if (capacity == 0) return std::unexpected("mapped output capacity must be positive");
-        auto opened = posix_pwrite_sink::try_open(path, overwrite);
-        if (!opened) return std::unexpected(opened.error());
-        const auto resized = opened->resize_file(capacity);
-        if (!resized) return std::unexpected(resized.error());
-        void* address = ::mmap(nullptr, capacity, PROT_READ | PROT_WRITE, MAP_SHARED, opened->fd(), 0);
-        if (address == MAP_FAILED)
-            return std::unexpected(fmt::format("map private output failed: {}", std::strerror(errno)));
-        mmap_pwrite_sink sink;
-        sink.file_ = std::move(*opened);
-        sink.mapping_ = static_cast<std::byte*>(address);
-        sink.capacity_ = capacity;
-        return sink;
-    }
-
-    /** Reserve the next caller-ordered range and reject inadequate mapping hints. */
-    [[nodiscard]] std::expected<std::uint64_t, std::string> reserve_offset(std::size_t bytes) {
-        const auto offset = file_.reserve_offset(bytes);
-        if (!offset) return std::unexpected(offset.error());
-        if (*offset > capacity_ || bytes > capacity_ - *offset)
-            return std::unexpected("mapped output capacity is smaller than the requested extent");
-        return *offset;
-    }
-
-    /** Copy a reserved nonoverlapping range, returning an immutable diagnostic. */
-    [[nodiscard]] std::expected<std::size_t, std::string>
-    write_at(std::span<const std::byte> bytes, std::uint64_t offset) {
-        if (mapping_ == nullptr || offset > capacity_ || bytes.size() > capacity_ - offset
-            || offset > file_.size_bytes() || bytes.size() > file_.size_bytes() - offset)
-            return std::unexpected("mapped write lies outside its reserved extent");
-        if (!bytes.empty()) std::memcpy(mapping_ + offset, bytes.data(), bytes.size());
-        return bytes.size();
-    }
-
-    /** Flush, unmap and trim the staged file before atomic publication. */
-    [[nodiscard]] std::expected<void, std::string> publish(io_caller_checkpoint checkpoint = {}) {
-        if (mapping_ != nullptr) {
-            if (::msync(mapping_, capacity_, MS_SYNC) != 0)
-                return std::unexpected(fmt::format("sync mapped output failed: {}", std::strerror(errno)));
-            if (::munmap(mapping_, capacity_) != 0)
-                return std::unexpected(fmt::format("unmap output failed: {}", std::strerror(errno)));
-            mapping_ = nullptr;
-            const auto resized = file_.resize_file(file_.size_bytes());
-            if (!resized) return resized;
-        }
-        return file_.publish(checkpoint);
-    }
-
-    /** Retain the logical byte count after final publication. */
-    [[nodiscard]] std::uint64_t size_bytes() const noexcept { return file_.size_bytes(); }
-};
-static_assert(io_sink<mmap_pwrite_sink>);
-
 
 /** Admitted immutable bytes, spilling only when resident growth cannot be reserved.
  * Files use the existing exclusive private staging owner and disappear without publication.

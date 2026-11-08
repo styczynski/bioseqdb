@@ -46,7 +46,8 @@ export import :active_policy_accounting;
 import bioseq.common.logging;
 import bioseq.postgres.support.datums;
 import bioseq.indexing.type;
-import bioseq.pipeline.pipe;
+// Statement ownership belongs to the small contract, not the full execution graph.
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.storage.indexing.active_read_policy_resolution_contract;
 import bioseq.postgres.storage.indexing.executor_read_context;
 import bioseq.postgres.storage.indexing.minimizer_read_stats;

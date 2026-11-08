@@ -43,6 +43,16 @@ struct column_origin {
     bool operator==(const column_origin&) const = default;
 };
 
+/** One expression's source row, independently of exact source-column identity.
+ * An invalid attribute denotes a row. A CTE consumer uses its lexical RTE and
+ * InvalidOid rather than merging different consumers of one stored definition.
+ * Unknown/multiple rows stay ineligible for implicit quality association. */
+struct export_expression_source {
+    std::optional<column_origin> row;
+    std::vector<column_origin> consumers;
+    bool known{true};
+};
+
 /** Private values transported through SQL slots for exact per-row export decisions. */
 enum class export_internal_field : std::uint8_t {
     none, alignment_status, alignment_ordinal, dp_score, chain_score, edit_distance,
@@ -56,6 +66,7 @@ struct export_column_binding {
     AttrNumber result_number{};
     std::optional<record_field_role> role;
     std::optional<column_origin> origin;
+    export_expression_source row_source;
     Oid source_relation{};
     AttrNumber source_attribute{};
     Oid helper_function{};
@@ -110,6 +121,8 @@ struct export_query_binding {
     std::vector<export_match_site> match_sites;
     std::vector<export_column_binding> columns;
     std::size_t visible_count{};
+    export_expression_source query_row_source;
+    std::size_t query_source_frame{};
 };
 
 /** Alignment formats consume native fields which text formats preserve as metadata. */
@@ -144,6 +157,12 @@ struct export_query_binding {
         name, std::span<char>{result.data(), result.size()});
     result.resize(normalized.size());
     return result;
+}
+
+/** Match only the established normalized aliases for an inferred header. */
+[[nodiscard]] inline bool is_export_header_name(std::string_view spelling) {
+    const auto name = normalized_export_name(spelling);
+    return name == "id" || name == "identifier" || name == "header" || name == "name";
 }
 
 /** Decode the single role vocabulary used by column_mapping.data_source. */
@@ -258,7 +277,8 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
 /** Resolve direct projection identity once for origins, helpers and transformed checks. */
 [[nodiscard]] inline std::pair<Node*, std::size_t> resolve_export_expression(
     const export_query_binding& binding, std::size_t frame, Node* expression,
-    std::size_t depth = 0) {
+    std::size_t depth = 0, bool preserve_materialized_output = false,
+    bool preserve_cte_output = false) {
     if (depth > 128) return {nullptr, frame};
     expression = export_identity_expression(expression);
     if (!expression || !IsA(expression, Var)) return {expression, frame};
@@ -270,15 +290,20 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
     auto* entry = static_cast<RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1));
     if (entry->rtekind == RTE_JOIN && variable->varattno <= list_length(entry->joinaliasvars))
         return resolve_export_expression(binding, *owner,
-            static_cast<Node*>(list_nth(entry->joinaliasvars, variable->varattno - 1)), depth + 1);
+            static_cast<Node*>(list_nth(entry->joinaliasvars, variable->varattno - 1)), depth + 1,
+            preserve_materialized_output, preserve_cte_output);
     auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
         : entry->rtekind == RTE_CTE ? export_cte_query(binding, *owner, *entry) : nullptr;
     if (!inner) return {expression, *owner};
     const auto inner_frame = export_frame_index(binding, inner);
     auto* target = export_target_entry(*inner, variable->varattno);
     if (!inner_frame || !target) return {nullptr, *owner};
+    const auto* cte = binding.frames[*inner_frame].defining_cte;
+    if (entry->rtekind == RTE_CTE && cte && (preserve_cte_output
+        || (preserve_materialized_output && cte->ctematerialized == CTEMaterializeAlways)))
+        return {expression, *owner};
     return resolve_export_expression(binding, *inner_frame,
-        reinterpret_cast<Node*>(target->expr), depth + 1);
+        reinterpret_cast<Node*>(target->expr), depth + 1, preserve_materialized_output, preserve_cte_output);
 }
 
 /** Proven direct base column; aliases retain the physical relation and lexical range. */
@@ -404,6 +429,185 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         || query.havingQual != nullptr || query.distinctClause != NIL
         || query.setOperations != nullptr || query.hasRecursive
         || export_nullable_join_scope(reinterpret_cast<const Node*>(query.jointree));
+}
+
+/** True only for a scope reached through declared subqueries or CTE references. */
+[[nodiscard]] inline bool export_query_contains_scope(const export_query_binding& binding,
+    std::size_t start, std::size_t wanted) {
+    std::vector<std::size_t> pending{start};
+    std::vector<bool> visited(binding.frames.size(), false);
+    while (!pending.empty()) {
+        const auto frame = pending.back();
+        pending.pop_back();
+        if (frame == wanted) return true;
+        if (visited[frame]) continue;
+        visited[frame] = true;
+        const auto* query = binding.frames[frame].query;
+        for (auto* cell = list_head(query->rtable); cell; cell = lnext(query->rtable, cell)) {
+            const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
+            auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
+                : entry->rtekind == RTE_CTE ? export_cte_query(binding, frame, *entry) : nullptr;
+            if (const auto child = inner ? export_frame_index(binding, inner) : std::nullopt)
+                pending.push_back(*child);
+        }
+    }
+    return false;
+}
+
+/** A consumer and its definition are both needed to retain nested source aliases. */
+struct export_cte_source {
+    column_origin consumer;
+    std::size_t definition_frame{};
+};
+
+/** Read-only walk state; local scalar-subquery levels do not become planner scopes. */
+struct export_row_source_walk {
+    const export_query_binding& binding;
+    std::size_t frame{};
+    std::size_t match_frame{};
+    std::size_t depth{};
+    Index local_levels{};
+    std::span<const export_cte_source> consumers;
+    export_expression_source& result;
+    std::size_t& dependencies;
+};
+
+/** Retain the consumer path around an underlying row, rejecting mixed ownership. */
+inline bool record_export_row_source(export_row_source_walk& context,
+    std::optional<column_origin> row, std::optional<std::size_t> source_frame) {
+    std::vector<column_origin> consumers;
+    for (const auto& step : context.consumers) {
+        // Outputs above an already selected match are lifted through the existing
+        // exactly-one-consumer completion path. A correlated outer dependency is
+        // not a row owned by the inner CTE that happened to read it.
+        if (!export_query_contains_scope(context.binding, step.definition_frame, context.match_frame)
+            && (!source_frame || export_query_contains_scope(context.binding, step.definition_frame, *source_frame)))
+            consumers.push_back(step.consumer);
+    }
+    if (!row && consumers.empty()) return false;
+    ++context.dependencies;
+    if ((context.result.row || !context.result.consumers.empty())
+        && (context.result.row != row || context.result.consumers != consumers)) {
+        context.result.known = false;
+        return true;
+    }
+    context.result.row = row;
+    context.result.consumers = std::move(consumers);
+    return false;
+}
+
+/** Inspect dependencies without evaluating expressions, including stored volatile values. */
+inline bool collect_export_row_source(Node* expression, void* opaque) {
+    if (!expression) return false;
+    auto& context = *static_cast<export_row_source_walk*>(opaque);
+    if (!context.result.known) return true;
+    if (context.depth >= 128) { context.result.known = false; return true; }
+    Node* normalized = export_identity_expression(expression);
+    std::optional<Var> adjusted;
+    if (normalized && IsA(normalized, Var)) {
+        adjusted = *reinterpret_cast<Var*>(normalized);
+        if (!bms_is_empty(adjusted->varnullingrels) || adjusted->varlevelsup < context.local_levels) {
+            context.result.known = false;
+            return true;
+        }
+        adjusted->varlevelsup -= context.local_levels;
+        if (!export_outer_frame(context.binding, context.frame, adjusted->varlevelsup)) {
+            context.result.known = false;
+            return true;
+        }
+        normalized = reinterpret_cast<Node*>(&*adjusted);
+    }
+    const auto [resolved, frame] = resolve_export_expression(context.binding,
+        context.frame, normalized, 0, false, true);
+    if (!resolved) { context.result.known = false; return true; }
+    const bool crossed_projection = frame != context.frame || (adjusted && resolved != normalized);
+    const auto local_levels = crossed_projection ? Index{0} : context.local_levels;
+    if (IsA(resolved, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(resolved);
+        if (!bms_is_empty(variable->varnullingrels)) {
+            context.result.known = false;
+            return true;
+        }
+        auto owner = std::optional<std::size_t>{frame};
+        if (variable->varattno <= 0)
+            owner = export_outer_frame(context.binding, frame, variable->varlevelsup);
+        auto* query = owner ? context.binding.frames[*owner].query : nullptr;
+        auto* entry = query && variable->varno > 0 && variable->varno <= list_length(query->rtable)
+            ? static_cast<RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1)) : nullptr;
+        if (entry && entry->rtekind == RTE_RELATION && OidIsValid(entry->relid))
+            return record_export_row_source(context,
+                column_origin{query, variable->varno, entry->relid, InvalidAttrNumber}, owner);
+        auto* definition = entry && entry->rtekind == RTE_CTE
+            ? export_cte_query(context.binding, *owner, *entry) : nullptr;
+        const auto definition_frame = definition ? export_frame_index(context.binding, definition) : std::nullopt;
+        auto* target = definition && variable->varattno > 0
+            ? export_target_entry(*definition, variable->varattno) : nullptr;
+        if (!definition_frame || !target || target->resjunk) {
+            context.result.known = false;
+            return true;
+        }
+        std::vector<export_cte_source> consumers(context.consumers.begin(), context.consumers.end());
+        consumers.push_back({{query, variable->varno, InvalidOid, InvalidAttrNumber}, *definition_frame});
+        export_row_source_walk child{context.binding, *definition_frame, context.match_frame,
+            context.depth + 1, 0, consumers, context.result, context.dependencies};
+        const auto before = context.dependencies;
+        if (collect_export_row_source(reinterpret_cast<Node*>(target->expr), &child)) return true;
+        // A stored constant/row-free expression still belongs to its CTE consumer;
+        // a second consumer cannot silently supply a different stored value.
+        if (context.dependencies == before)
+            return record_export_row_source(child, std::nullopt, std::nullopt);
+        return false;
+    }
+    if (IsA(resolved, Const) || IsA(resolved, Param)) return false;
+    if (IsA(resolved, SubLink)) {
+        const auto* link = reinterpret_cast<const SubLink*>(resolved);
+        const auto* query = link->subselect && IsA(link->subselect, Query)
+            ? reinterpret_cast<const Query*>(link->subselect) : nullptr;
+        if (link->subLinkType != EXPR_SUBLINK || link->testexpr || !query
+            || query->commandType != CMD_SELECT || query->cteList != NIL || query->rowMarks != NIL
+            || query->sortClause != NIL || query->limitCount || query->limitOffset
+            || !query->jointree || query->jointree->fromlist != NIL || query->jointree->quals
+            || export_completion_barrier(*query) || list_length(query->targetList) != 1) {
+            context.result.known = false;
+            return true;
+        }
+        const auto* target = static_cast<const TargetEntry*>(linitial(query->targetList));
+        if (target->resjunk) { context.result.known = false; return true; }
+        export_row_source_walk child{context.binding, frame, context.match_frame,
+            context.depth + 1, local_levels + 1, context.consumers, context.result, context.dependencies};
+        return collect_export_row_source(reinterpret_cast<Node*>(target->expr), &child);
+    }
+    if (IsA(resolved, Query) || IsA(resolved, Aggref) || IsA(resolved, WindowFunc)
+        || IsA(resolved, PlaceHolderVar)) {
+        context.result.known = false;
+        return true;
+    }
+    export_row_source_walk child{context.binding, frame, context.match_frame,
+        context.depth + 1, local_levels, context.consumers, context.result, context.dependencies};
+    return expression_tree_walker(resolved, collect_export_row_source, &child);
+}
+
+/** Prove one underlying row plus its consumer path; ordinary constants are row-free. */
+[[nodiscard]] inline export_expression_source resolve_export_row_source(
+    const export_query_binding& binding, std::size_t frame, Node* expression,
+    std::size_t match_frame) {
+    export_expression_source result;
+    std::size_t dependencies = 0;
+    export_row_source_walk context{binding, frame, match_frame, 0, 0, {}, result, dependencies};
+    static_cast<void>(collect_export_row_source(expression, &context));
+    return result;
+}
+
+/** Associate supplied companions with the selected query, never an unrelated row. */
+[[nodiscard]] inline bool export_query_companion_eligible(
+    const export_query_binding& binding, const export_column_binding& column) {
+    if (binding.match_sites.empty()) return true;
+    const auto& query = binding.query_row_source;
+    const auto& supplied = column.row_source;
+    if (!query.known || !supplied.known) return false;
+    if (!supplied.row)
+        return supplied.consumers.empty() || supplied.consumers == query.consumers;
+    return supplied.row == query.row && supplied.consumers == query.consumers;
 }
 
 /** Parse an exact visible selector, preserving duplicate names and #ordinal syntax. */
@@ -597,7 +801,12 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
         if (variable->varlevelsup == 0 && variable->varno > 0
             && variable->varno <= list_length(query.rtable)) {
             auto* entry = static_cast<RangeTblEntry*>(list_nth(query.rtable, variable->varno - 1));
-            if (entry->rtekind == RTE_RELATION && entry->perminfoindex > 0) {
+            // Rewriting a view preserves its relation permission entry on the
+            // RTE_SUBQUERY. Appended references need the same column ACL bits as
+            // directly analyzed Vars, including when the view runs as its owner.
+            const bool relation_permissions = entry->rtekind == RTE_RELATION
+                || (entry->rtekind == RTE_SUBQUERY && OidIsValid(entry->relid));
+            if (relation_permissions && entry->perminfoindex > 0) {
                 auto* permission = static_cast<RTEPermissionInfo*>(
                     list_nth(query.rteperminfos, entry->perminfoindex - 1));
                 if (OidIsValid(permission->checkAsUser)) export_binding_error(
@@ -655,8 +864,13 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
         }
         if (range_number == 0) export_binding_error("export companion has no transparent parent projection");
         auto* range = static_cast<RangeTblEntry*>(list_nth(parent->rtable, range_number - 1));
-        if (range->security_barrier) export_binding_error(
-            "export completion cannot expose a hidden column through a security-barrier view; project it in the view explicitly");
+        // Stored views retain relid after rewriting, including security_invoker
+        // views whose base permission entries have no checkAsUser. Their declared
+        // outputs may be reused, but completion must never extend that interface.
+        const bool declared_view = range->rtekind == RTE_SUBQUERY
+            && (OidIsValid(range->relid) || range->security_barrier);
+        if (declared_view && number > list_length(range->eref->colnames)) export_binding_error(
+            "export completion cannot expose a hidden column through a view; project it in the view explicitly");
         while (list_length(range->eref->colnames) < number)
             range->eref->colnames = lappend(range->eref->colnames, makeString(pstrdup(target->resname)));
         auto* variable = makeVar(range_number, number,
@@ -676,7 +890,10 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     const auto origin = resolve_export_origin(binding, frame, reinterpret_cast<Node*>(expression));
     if (origin) {
         for (std::size_t index = 0; index < binding.columns.size(); ++index) {
-            if (!binding.columns[index].role && binding.columns[index].origin == origin) {
+            const auto& column = binding.columns[index];
+            if (!column.role && column.origin == origin
+                && ((role != record_field_role::header && role != record_field_role::quality)
+                    || export_query_companion_eligible(binding, column))) {
                 bind_export_role(binding, index, role);
                 return;
             }
@@ -702,6 +919,8 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     column.column.nullable = true;
     column.role = role;
     column.origin = origin;
+    column.row_source = resolve_export_row_source(binding, 0,
+        reinterpret_cast<Node*>(target->expr), binding.query_source_frame);
     if (origin) { column.source_relation = origin->relation; column.source_attribute = origin->attribute; }
     column.private_companion = true;
     if (auto* helper = resolve_export_helper(binding, 0, reinterpret_cast<Node*>(target->expr))) {
@@ -714,9 +933,9 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     binding.columns.push_back(std::move(column));
 }
 
-/** Locate a unique header/quality companion in the proven operand's own relation. */
+/** Locate a source companion, optionally limiting discovery to its text primary key. */
 [[nodiscard]] inline std::optional<AttrNumber> source_companion_attribute(
-    const column_origin& origin, record_field_role role) {
+    const column_origin& origin, record_field_role role, bool primary_key_only = false) {
     auto* relation = bioseq::postgres::support::invoke_pg_as_cpp([oid = origin.relation] {
         return table_open(oid, AccessShareLock);
     });
@@ -746,8 +965,7 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
             if (kind == column_value_kind::alignment_record) candidates.push_back(attribute->attnum);
         } else if (kind == column_value_kind::text) {
             candidates.push_back(attribute->attnum);
-            const auto name = normalized_export_name(NameStr(attribute->attname));
-            if (name == "id" || name == "identifier" || name == "header" || name == "name")
+            if (is_export_header_name(NameStr(attribute->attname)))
                 named_candidates.push_back(attribute->attnum);
         }
     }
@@ -755,6 +973,7 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     if ((role == record_field_role::header || role == record_field_role::reference_name)
         && std::find(candidates.begin(), candidates.end(), primary_attribute) != candidates.end())
         return primary_attribute;
+    if (primary_key_only) return std::nullopt;
     if (named_candidates.size() == 1) return named_candidates.front();
     if (candidates.size() == 1) return candidates.front();
     if (candidates.size() > 1) export_binding_error(
@@ -762,20 +981,63 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     return std::nullopt;
 }
 
+/** Prefer a declared header without weakening the query operand's source identity.
+ * Direct columns must belong to the same source row. A unique computed alias is
+ * supplied display-header intent, not evidence used to choose an alignment owner.
+ * Match callers invoke this only after proving one coherent mmsearch owner. */
+inline void complete_export_visible_header(export_query_binding& binding,
+    const std::optional<column_origin>& sequence_origin) {
+    if (std::any_of(binding.columns.begin(), binding.columns.end(),
+            [](const auto& column) { return column.role == record_field_role::header; })) return;
+    std::vector<std::size_t> named_headers;
+    for (std::size_t index = 0; index < binding.visible_count; ++index) {
+        const auto& column = binding.columns[index];
+        if (column.role || column.column.kind != column_value_kind::text
+            || !is_export_header_name(column.column.name)) continue;
+        if (column.origin) {
+            if (!binding.match_sites.empty()) {
+                if (!export_query_companion_eligible(binding, column)) continue;
+            } else if (!sequence_origin || column.origin->query != sequence_origin->query
+                || column.origin->range_index != sequence_origin->range_index
+                || column.origin->relation != sequence_origin->relation) continue;
+        }
+        named_headers.push_back(index);
+    }
+    if (named_headers.empty()) return;
+    if (sequence_origin) {
+        const auto primary = source_companion_attribute(*sequence_origin,
+            record_field_role::header, true);
+        if (primary) {
+            auto primary_origin = *sequence_origin;
+            primary_origin.attribute = *primary;
+            for (std::size_t index = 0; index < binding.visible_count; ++index) {
+                const auto& column = binding.columns[index];
+                if (!column.role && column.origin == primary_origin
+                    && export_query_companion_eligible(binding, column)) {
+                    bind_export_role(binding, index, record_field_role::header);
+                    return;
+                }
+            }
+        }
+    }
+    if (named_headers.size() != 1) export_binding_error(
+        "multiple header candidates; provide column_mapping");
+    bind_export_role(binding, named_headers.front(), record_field_role::header);
+}
+
 /** Complete a source attribute at its lexical owning relation, retaining column ACLs. */
 inline void complete_source_companion(export_query_binding& binding,
     const column_origin& origin, record_field_role role) {
     for (const auto& column : binding.columns) if (column.role == role) return;
-    // An untyped candidate may still be another quality payload. Defer the
-    // unique-family decision until its first non-NULL value has been inspected.
+    // Supplied quality expressions own their values, including transformations.
+    // Let the unique-family pass resolve them before considering a hidden copy.
+    // An unknown typmod is deferred until the first non-NULL payload is inspected.
     if (role == record_field_role::quality)
         for (const auto& column : binding.columns)
-            if (!column.role && !column.column.alphabet_code
-                && column.column.kind == column_value_kind::biological_sequence
-                && (binding.match_sites.empty() || (column.origin
-                    && column.origin->query == origin.query
-                    && column.origin->range_index == origin.range_index
-                    && column.origin->relation == origin.relation))) return;
+            if (!column.role && export_query_companion_eligible(binding, column)
+                && (column.column.kind == column_value_kind::quality_sequence
+                    || (!column.column.alphabet_code
+                        && column.column.kind == column_value_kind::biological_sequence))) return;
     const auto attribute = source_companion_attribute(origin, role);
     if (!attribute) return;
     const auto frame = export_frame_index(binding, origin.query);
@@ -837,12 +1099,94 @@ struct export_operand_dependencies {
     std::vector<std::pair<std::size_t, Var*>>* scalar_inputs{};
 };
 
+/** Reject dependencies outside the original materialization's physical identity.
+ * PostgreSQL's level-aware walker includes nested expressions and CTE definitions.
+ * Following a referenced sibling CTE needs another check because its definition
+ * lies outside the original Query tree. Nested local LATERAL references remain
+ * valid when they refer to a scope inside the same materialization boundary. */
+inline void check_export_materialized_scope(const export_query_binding& binding,
+    std::size_t frame, std::size_t materialization_frame) {
+    int first_external_level = 1;
+    int ancestor_level = 1;
+    for (auto ancestor = binding.frames[frame].parent; ancestor;
+            ancestor = binding.frames[*ancestor].parent, ++ancestor_level) {
+        if (*ancestor == materialization_frame) {
+            first_external_level = ancestor_level + 1;
+            break;
+        }
+    }
+    auto* query = binding.frames[frame].query;
+    ancestor_level = 1;
+    for (auto ancestor = binding.frames[frame].parent; ancestor;
+            ancestor = binding.frames[*ancestor].parent, ++ancestor_level) {
+        if (ancestor_level < first_external_level) continue;
+        if (bioseq::postgres::support::invoke_pg_as_cpp([query, ancestor_level] {
+            return contain_vars_of_level(reinterpret_cast<Node*>(query), ancestor_level);
+        })) export_binding_error(
+            "automatic export cannot identify a correlated MATERIALIZED operand; materialize that value in a table before alignment");
+    }
+}
+
+/** Prove a materialized row's identity from all of its physical input rows.
+ * The stored output can contain volatile expressions: only tableoid/ctid are
+ * appended, so the expression is neither copied nor evaluated a second time.
+ * Inner joins retain all participating identities; cardinality-changing or
+ * nonphysical sources fail closed rather than merging distinct stored rows. */
+[[nodiscard]] inline std::vector<column_origin> export_materialized_row_sources(
+    const export_query_binding& binding, std::size_t frame, Node* from, std::size_t depth = 0,
+    std::optional<std::size_t> materialization_frame = std::nullopt) {
+    if (depth >= 128) export_binding_error("materialized export lineage is too deeply nested");
+    const auto boundary = materialization_frame.value_or(frame);
+    if (from == reinterpret_cast<Node*>(binding.frames[frame].query->jointree))
+        check_export_materialized_scope(binding, frame, boundary);
+    if (!from) return {};
+    std::vector<column_origin> sources;
+    const auto append = [&sources](std::vector<column_origin> additions) {
+        for (const auto& source : additions) {
+            if (std::none_of(sources.begin(), sources.end(), [&source](const auto& previous) {
+                return previous.query == source.query && previous.range_index == source.range_index;
+            })) sources.push_back(source);
+        }
+    };
+    if (IsA(from, FromExpr)) {
+        const auto* expression = reinterpret_cast<FromExpr*>(from);
+        for (auto* cell = list_head(expression->fromlist); cell; cell = lnext(expression->fromlist, cell))
+            append(export_materialized_row_sources(binding, frame,
+                static_cast<Node*>(lfirst(cell)), depth + 1, boundary));
+        return sources;
+    }
+    if (IsA(from, JoinExpr)) {
+        const auto* join = reinterpret_cast<JoinExpr*>(from);
+        if (join->jointype != JOIN_INNER) export_binding_error(
+            "materialized export identity cannot cross an outer or non-inner join; materialize the operand in a table");
+        append(export_materialized_row_sources(binding, frame, join->larg, depth + 1, boundary));
+        append(export_materialized_row_sources(binding, frame, join->rarg, depth + 1, boundary));
+        return sources;
+    }
+    if (!IsA(from, RangeTblRef)) export_binding_error("unsupported materialized export source shape");
+    const auto range_index = reinterpret_cast<RangeTblRef*>(from)->rtindex;
+    auto* query = binding.frames[frame].query;
+    if (range_index <= 0 || range_index > list_length(query->rtable))
+        export_binding_error("materialized export source has an invalid range identity");
+    auto* entry = static_cast<RangeTblEntry*>(list_nth(query->rtable, range_index - 1));
+    if (entry->rtekind == RTE_RELATION)
+        return {{query, static_cast<Index>(range_index), entry->relid, InvalidAttrNumber}};
+    auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
+        : entry->rtekind == RTE_CTE ? export_cte_query(binding, frame, *entry) : nullptr;
+    const auto inner_frame = inner ? export_frame_index(binding, inner) : std::nullopt;
+    if (!inner_frame || export_completion_barrier(*inner)) export_binding_error(
+        "materialized export operand lacks a transparent physical row identity; materialize it in a table before alignment");
+    return export_materialized_row_sources(binding, *inner_frame,
+        reinterpret_cast<Node*>(inner->jointree), depth + 1, boundary);
+}
+
 /** Resolve projection aliases, reusing SliceProject's exact operation classifier. */
 inline bool collect_export_operand_dependencies(Node* expression, void* opaque) {
     if (!expression) return false;
     auto& context = *static_cast<export_operand_dependencies*>(opaque);
     if (context.depth >= 128) export_binding_error("export operand lineage is too deeply nested");
-    const auto [resolved, frame] = resolve_export_expression(*context.binding, context.frame, expression);
+    const auto [resolved, frame] = resolve_export_expression(
+        *context.binding, context.frame, expression, 0, true);
     if (!resolved) export_binding_error("export operand has no stable projection lineage");
     export_operand_dependencies child{context.binding, frame, context.depth + 1,
         context.row_sources, context.scalar_inputs};
@@ -854,6 +1198,25 @@ inline bool collect_export_operand_dependencies(Node* expression, void* opaque) 
         auto* variable = reinterpret_cast<Var*>(resolved);
         if (!bms_is_empty(variable->varnullingrels)) export_binding_error(
             "automatic operand identity cannot cross a nullable outer-join projection");
+        auto* query = context.binding->frames[frame].query;
+        auto* entry = variable->varno > 0 && variable->varno <= list_length(query->rtable)
+            ? static_cast<RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1)) : nullptr;
+        if (entry && entry->rtekind == RTE_CTE) {
+            auto* materialized = export_cte_query(*context.binding, frame, *entry);
+            const auto owner = materialized ? export_frame_index(*context.binding, materialized) : std::nullopt;
+            if (owner && context.binding->frames[*owner].defining_cte->ctematerialized == CTEMaterializeAlways) {
+                if (export_completion_barrier(*materialized)) export_binding_error(
+                    "materialized export identity cannot cross grouping, DISTINCT, windows or set-returning projections");
+                for (const auto& source : export_materialized_row_sources(*context.binding, *owner,
+                        reinterpret_cast<Node*>(materialized->jointree))) {
+                    if (std::none_of(context.row_sources->begin(), context.row_sources->end(),
+                            [&source](const auto& previous) {
+                                return previous.query == source.query && previous.range_index == source.range_index;
+                            })) context.row_sources->push_back(source);
+                }
+                return false;
+            }
+        }
         if (const auto origin = resolve_export_origin(*context.binding, frame, resolved)) {
             const auto previous = std::find_if(context.row_sources->begin(), context.row_sources->end(),
                 [&origin](const auto& candidate) {
@@ -960,6 +1323,8 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
     value.private_companion = true;
     value.helper_function = helper_oid;
     value.origin = origin;
+    value.row_source = resolve_export_row_source(binding, site.frame,
+        reinterpret_cast<Node*>(operand), binding.query_source_frame);
     if (origin) { value.source_relation = origin->relation; value.source_attribute = origin->attribute; }
     if (selected) {
         auto& column = binding.columns[*selected];
@@ -969,6 +1334,7 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
         column.helper_function = helper_oid;
         if (!column.column.alphabet_code) column.column.alphabet_code = value.column.alphabet_code;
         column.origin = origin;
+        column.row_source = value.row_source;
         column.source_relation = origin ? origin->relation : InvalidOid;
         column.source_attribute = origin ? origin->attribute : 0;
         if (column.result_number == number) return;
@@ -1024,14 +1390,31 @@ inline void complete_export_matches(export_query_binding& binding) {
     if (contain_volatile_functions(reinterpret_cast<Node*>(target))
         || contain_volatile_functions(reinterpret_cast<Node*>(query))) export_binding_error(
             "export requires stable mmsearch operand aliases; volatile operands cannot be evaluated twice");
+    binding.query_source_frame = site.frame;
+    binding.query_row_source = resolve_export_row_source(binding, site.frame,
+        reinterpret_cast<Node*>(query), site.frame);
+    for (std::size_t index = 0; index < binding.visible_count; ++index) {
+        auto& column = binding.columns[index];
+        auto* projected = export_target_entry(*binding.query, column.result_number);
+        column.row_source = resolve_export_row_source(binding, 0,
+            reinterpret_cast<Node*>(projected->expr), site.frame);
+    }
     const auto& oids = get_cached_stub_oids();
     complete_export_operand_value(binding, site, query, record_field_role::sequence, oids.alignment_query_sequence_oid);
     const auto query_origin = resolve_export_origin(binding, site.frame, reinterpret_cast<Node*>(query));
+    auto header_origin = query_origin;
+    if (!header_origin && binding.query_row_source.known && binding.query_row_source.row
+        && OidIsValid(binding.query_row_source.row->relation))
+        header_origin = binding.query_row_source.row;
+    complete_export_visible_header(binding, header_origin);
     if (query_origin) {
         if (alignments) complete_export_row_identity(binding, *query_origin, true);
-        complete_source_companion(binding, *query_origin, record_field_role::header);
         if (export_uses_quality(binding.format)) complete_source_companion(binding, *query_origin, record_field_role::quality);
     } else if (alignments) complete_export_operand_identity(binding, site.frame, query, true);
+    // A display header can follow a proven source row. Quality still requires
+    // exact operand identity before hidden completion: never copy its old order
+    // or length for a transformed query merely because the same row owns it.
+    if (header_origin) complete_source_companion(binding, *header_origin, record_field_role::header);
     if (!alignments) return;
     complete_export_operand_value(binding, site, target, record_field_role::reference_sequence, oids.alignment_reference_sequence_oid);
     const auto target_origin = resolve_export_origin(binding, site.frame, reinterpret_cast<Node*>(target));
@@ -1111,21 +1494,15 @@ inline void finish_export_role_inference(export_query_binding& binding) {
                 || column.column.kind == column_value_kind::alignment_record)))
             column.role = record_field_role::omit;
     }
-    std::optional<column_origin> match_query_origin;
-    for (const auto& column : binding.columns)
-        if (column.role == record_field_role::sequence && column.origin) match_query_origin = column.origin;
     const bool has_match_owner = !binding.match_sites.empty();
-    const auto eligible_companion = [has_match_owner, &match_query_origin](
+    const auto eligible_companion = [has_match_owner, &binding](
         const export_column_binding& column, record_field_role role) {
         if (!has_match_owner) return true;
         // A new match owns its alignment. An old alignment composite is only
         // considered when the user explicitly mapped it before this pass.
         if (role == record_field_role::alignment) return false;
         if (role != record_field_role::quality && role != record_field_role::header) return true;
-        return match_query_origin && column.origin
-            && column.origin->query == match_query_origin->query
-            && column.origin->range_index == match_query_origin->range_index
-            && column.origin->relation == match_query_origin->relation;
+        return export_query_companion_eligible(binding, column);
     };
     for (std::size_t index = 0; index < binding.columns.size(); ++index) {
         auto& column = binding.columns[index];
@@ -1179,9 +1556,12 @@ inline void finish_export_role_inference(export_query_binding& binding) {
         if (candidate) bind_export_role(binding, *candidate, role);
     }
     std::optional<column_origin> sequence_origin;
-    for (const auto& column : binding.columns)
-        if (column.role == record_field_role::sequence && column.origin) sequence_origin = column.origin;
-    if (!sequence_origin) {
+    bool sequence_bound = false;
+    for (const auto& column : binding.columns) if (column.role == record_field_role::sequence) {
+        sequence_bound = true;
+        if (column.origin) sequence_origin = column.origin;
+    }
+    if (!sequence_origin && !sequence_bound) {
         // Payload family inference can be deferred without losing the common
         // physical relation's established identifier precedence.
         bool conflicting_origin = false;
@@ -1198,6 +1578,7 @@ inline void finish_export_role_inference(export_query_binding& binding) {
         }
         if (conflicting_origin) sequence_origin.reset();
     }
+    if (sequence_origin) complete_export_visible_header(binding, sequence_origin);
     if (sequence_origin) {
         complete_source_companion(binding, *sequence_origin, record_field_role::header);
         if (export_uses_quality(binding.format)) complete_source_companion(binding, *sequence_origin, record_field_role::quality);
@@ -1214,8 +1595,7 @@ inline void finish_export_role_inference(export_query_binding& binding) {
             if (column.role || column.column.kind != column_value_kind::text
                 || !eligible_companion(column, record_field_role::header)) continue;
             text.push_back(index);
-            const auto name = normalized_export_name(column.column.name);
-            if (name == "id" || name == "identifier" || name == "header" || name == "name") named.push_back(index);
+            if (is_export_header_name(column.column.name)) named.push_back(index);
         }
         if (named.size() == 1) bind_export_role(binding, named.front(), record_field_role::header);
         else if (text.size() == 1) bind_export_role(binding, text.front(), record_field_role::header);

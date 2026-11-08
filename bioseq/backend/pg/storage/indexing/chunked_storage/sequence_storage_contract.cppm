@@ -477,10 +477,15 @@ struct sequence_index_storage {
         std::string sql = fmt::format("DELETE FROM bioseq_internal.{} WHERE query_key = {}",
                                       quote_identifier(this_table_name().c_str()),
                                       (long long)query_key_);
-        if (SPI_connect() == SPI_OK_CONNECT) {
-            SPI_execute(sql.c_str(), false, 0);
-            SPI_finish();
-        }
+        bioseq::postgres::support::spi_session spi;
+        if (spi.connect() != SPI_OK_CONNECT)
+            minimizer_generation_storage_error("sequence index cleanup SPI_connect failed");
+        const int status = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp(
+            "bioseq", [&sql] { return SPI_execute(sql.c_str(), false, 0); });
+        if (status != SPI_OK_DELETE)
+            minimizer_generation_storage_error("sequence index cleanup returned an unexpected SPI status");
+        if (spi.finish() != SPI_OK_FINISH)
+            minimizer_generation_storage_error("sequence index cleanup SPI_finish failed");
         decoded_valid_ = false;
     }
     /// Drop the tables whose names identify shards of the named index.

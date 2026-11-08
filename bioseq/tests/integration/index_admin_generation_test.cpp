@@ -17,90 +17,98 @@ using namespace bioseq_int_tests::index_admin_test_support;
 
 TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer relations",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
-    auto ctx = fresh_context({"index_admin_no_index_absence"});
-    exec_sql(ctx,
-        "CREATE TABLE index_admin_no_index_absence "
-        "(id int, seq bioseq.seq('dna4', 64)) USING bioseq;");
-    exec_sql(ctx,
-        "SET bioseq.index.insert_maintenance.enabled=off; "
-        "INSERT INTO index_admin_no_index_absence VALUES "
-        "(1, repeat('ACGT', 4096)::bioseq.seq('dna4', 64));");
+    for (const bool grouped_generation : {false, true}) {
+        DYNAMIC_SECTION("grouped persistence=" << grouped_generation) {
+            auto ctx = fresh_context({"index_admin_no_index_absence"});
+            exec_sqlf(ctx,
+                "SET bioseq.aligner.grouped_soa_generation.enabled={};"
+                "SET bioseq.aligner.minimizer.algorithm='two_stack_nthash';",
+                grouped_generation ? "on" : "off");
+            exec_sql(ctx,
+                "CREATE TABLE index_admin_no_index_absence "
+                "(id int, seq bioseq.seq('dna4', 64)) USING bioseq;");
+            exec_sql(ctx,
+                "SET bioseq.index.insert_maintenance.enabled=off; "
+                "INSERT INTO index_admin_no_index_absence VALUES "
+                "(1, repeat('ACGT', 4096)::bioseq.seq('dna4', 64));");
 
-    const auto absent = query_one(ctx,
-        "SELECT target_rows::text, is_target_cardinality_metadata_only::int::text, "
-        "source_parent_rows_read::text, source_fragment_rows_read::text, "
-        "source_decoded_bp::text, physical_index_relations::text, "
-        "persisted_index_rows::text, generation_objects::text "
-        "FROM bioseq.inspect_cold_no_index_absence("
-        "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
-    REQUIRE(absent.size() == 8);
-    REQUIRE(absent[0].value() == "1");
-    REQUIRE(absent[1].value() == "1");
-    REQUIRE(absent[2].value() == "0");
-    REQUIRE(absent[3].value() == "0");
-    REQUIRE(absent[4].value() == "0");
-    REQUIRE(absent[5].value() == "0");
-    REQUIRE(absent[6].value() == "0");
-    REQUIRE(absent[7].value() == "0");
+            const auto absent = query_one(ctx,
+                "SELECT target_rows::text, is_target_cardinality_metadata_only::int::text, "
+                "source_parent_rows_read::text, source_fragment_rows_read::text, "
+                "source_decoded_bp::text, physical_index_relations::text, "
+                "persisted_index_rows::text, generation_objects::text "
+                "FROM bioseq.inspect_cold_no_index_absence("
+                "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
+            REQUIRE(absent.size() == 8);
+            REQUIRE(absent[0].value() == "1");
+            REQUIRE(absent[1].value() == "1");
+            REQUIRE(absent[2].value() == "0");
+            REQUIRE(absent[3].value() == "0");
+            REQUIRE(absent[4].value() == "0");
+            REQUIRE(absent[5].value() == "0");
+            REQUIRE(absent[6].value() == "0");
+            REQUIRE(absent[7].value() == "0");
 
-    const auto before_sidecars = query_rows(ctx,
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
-        "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
-        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
-        "ESCAPE '\\' ORDER BY c.relname;");
-    exec_sql(ctx,
-        "SELECT bioseq.update_index('index_admin_no_index_absence'::regclass, "
-        "'minimizers_per_fragment');");
-    const auto present = query_one(ctx,
-        "SELECT physical_index_relations::text, persisted_index_rows::text, "
-        "generation_objects::text "
-        "FROM bioseq.inspect_cold_no_index_absence("
-        "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
-    REQUIRE(present.size() == 3);
-    REQUIRE(std::stoll(present[0].value()) > 0);
-    REQUIRE(std::stoll(present[1].value()) > 0);
-    // This writer stores fragment rows without publishing a generation head.
-    // The audit must report those rows and a zero generation count.
-    REQUIRE(present[2].value() == "0");
+            const auto before_sidecars = query_rows(ctx,
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
+                "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
+                "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
+                "ESCAPE '\\' ORDER BY c.relname;");
+            exec_sql(ctx,
+                "SELECT bioseq.update_index('index_admin_no_index_absence'::regclass, "
+                "'minimizers_per_fragment');");
+            const auto present = query_one(ctx,
+                "SELECT physical_index_relations::text, persisted_index_rows::text, "
+                "generation_objects::text "
+                "FROM bioseq.inspect_cold_no_index_absence("
+                "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
+            REQUIRE(present.size() == 3);
+            REQUIRE(std::stoll(present[0].value()) > 0);
+            REQUIRE(std::stoll(present[1].value()) > 0);
+            // The native writer publishes one head for this target. Direct fragments
+            // have stored payload rows but no generation head.
+            REQUIRE(present[2].value() == (grouped_generation ? "1" : "0"));
 
-    const auto after_sidecars = query_rows(ctx,
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
-        "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
-        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
-        "ESCAPE '\\' ORDER BY c.relname;");
-    std::vector<std::string> prior_names;
-    for (const auto& row : before_sidecars) {
-        prior_names.push_back(row[0].value());
+            const auto after_sidecars = query_rows(ctx,
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
+                "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
+                "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
+                "ESCAPE '\\' ORDER BY c.relname;");
+            std::vector<std::string> prior_names;
+            for (const auto& row : before_sidecars) {
+                prior_names.push_back(row[0].value());
+            }
+            std::size_t truncated_relations = 0;
+            for (const auto& row : after_sidecars) {
+                const std::string& name = row[0].value();
+                if (std::ranges::find(prior_names, name) != prior_names.end()) continue;
+                REQUIRE(std::ranges::all_of(name, [](const char character) {
+                    return (character >= 'a' && character <= 'z')
+                        || (character >= '0' && character <= '9')
+                        || character == '_';
+                }));
+                exec_sqlf(ctx, "TRUNCATE bioseq_internal.{};", name);
+                ++truncated_relations;
+            }
+            REQUIRE(truncated_relations > 0);
+            const auto empty_but_present = query_one(ctx,
+                "SELECT physical_index_relations::text, persisted_index_rows::text, "
+                "generation_objects::text "
+                "FROM bioseq.inspect_cold_no_index_absence("
+                "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
+            REQUIRE(std::stoll(empty_but_present[0].value()) > 0);
+            REQUIRE(empty_but_present[1].value() == "0");
+            REQUIRE(empty_but_present[2].value() == "0");
+
+            const auto unsupported = sql_error(ctx,
+                "SELECT * FROM bioseq.inspect_cold_no_index_absence("
+                "'index_admin_no_index_absence'::regclass, 'symbol_counts');");
+            REQUIRE(unsupported.sqlstate == "55000");
+            REQUIRE(unsupported.contains(
+                "minimizer fragment or sequence policy"));
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        }
     }
-    std::size_t truncated_relations = 0;
-    for (const auto& row : after_sidecars) {
-        const std::string& name = row[0].value();
-        if (std::ranges::find(prior_names, name) != prior_names.end()) continue;
-        REQUIRE(std::ranges::all_of(name, [](const char character) {
-            return (character >= 'a' && character <= 'z')
-                || (character >= '0' && character <= '9')
-                || character == '_';
-        }));
-        exec_sqlf(ctx, "TRUNCATE bioseq_internal.{};", name);
-        ++truncated_relations;
-    }
-    REQUIRE(truncated_relations > 0);
-    const auto empty_but_present = query_one(ctx,
-        "SELECT physical_index_relations::text, persisted_index_rows::text, "
-        "generation_objects::text "
-        "FROM bioseq.inspect_cold_no_index_absence("
-        "'index_admin_no_index_absence'::regclass, 'minimizers_per_fragment');");
-    REQUIRE(std::stoll(empty_but_present[0].value()) > 0);
-    REQUIRE(empty_but_present[1].value() == "0");
-    REQUIRE(empty_but_present[2].value() == "0");
-
-    const auto unsupported = sql_error(ctx,
-        "SELECT * FROM bioseq.inspect_cold_no_index_absence("
-        "'index_admin_no_index_absence'::regclass, 'symbol_counts');");
-    REQUIRE(unsupported.sqlstate == "55000");
-    REQUIRE(unsupported.contains(
-        "minimizer fragment or sequence policy"));
-    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
 TEST_CASE("sequence-source invalidation is terminal across parent update and delete",
@@ -649,7 +657,8 @@ TEST_CASE("fragment-minimizer coordinator executes scalar and SIMD PostgreSQL sc
             REQUIRE(observed[38].value() == "f");
         } else {
             REQUIRE(observed[17].value() == "1");
-            REQUIRE(observed[18].value() == "1");
+            // Persisted bounded ntHash uses scheme revision 2.
+            REQUIRE(observed[18].value() == "2");
             REQUIRE(observed[29].value() == "0");
             REQUIRE(observed[30].value() == "0");
             REQUIRE(std::stoll(observed[31].value()) > 0);
@@ -809,7 +818,8 @@ TEST_CASE("sequence-minimizer coordinator publishes PostgreSQL spill generations
         REQUIRE(observed[16].value() == "10");
         if (backend == "bounded_nthash_simd") {
             REQUIRE(observed[17].value() == "1");
-            REQUIRE(observed[18].value() == "1");
+            // Persisted bounded ntHash uses scheme revision 2.
+            REQUIRE(observed[18].value() == "2");
         } else {
             REQUIRE(observed[17].value() == "0");
             REQUIRE(observed[18].value() == "0");

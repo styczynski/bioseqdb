@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Describes an existing alignment pln using its PostgreSQL sequence alphabet.
+ * @brief Owns pipeline descriptions for PostgreSQL sequence alphabets.
  */
 module;
 
@@ -18,8 +18,10 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.support;
 import bioseq.sequences;
 
+import :custom_scan_execution_stats_contracts;
+
 /** @brief Describes the existing execution plan for its alphabet and query-sketch route. */
-export [[nodiscard]] inline bioseq::simd::pipe::pipeline_description
+export [[nodiscard]] bioseq::simd::pipe::pipeline_description
 describe_pipeline_for_pg_alphabet(
     const bioseq::simd::pipe::statement_execution_plan_owner& execution_plan,
     const std::uint8_t alphabet_code,

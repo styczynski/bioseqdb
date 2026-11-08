@@ -550,6 +550,29 @@ fixture_bridge_evidence(bridge_kind bridge) {
     return ledger;
 }
 
+/** Preserve full ledger evidence for two same-arity SQL overloads with distinct wrappers. */
+[[nodiscard]] inline safety_ledger fixture_split_overload_ledger(
+    compilation_profile profile) {
+    auto ledger = fixture_ledger(profile);
+    ledger.parents.resize(2);
+    ledger.symbol_groups.clear();
+    std::size_t overload_index{};
+    for (const std::string_view source_type : {"regclass", "text"}) {
+        auto& parent = ledger.parents[overload_index];
+        parent.sql_identity = "bioseq.write(" + std::string{source_type} + ",text)";
+        parent.public_symbol = "write_overload_" + std::to_string(overload_index);
+        parent.generated_wrapper = "fixture::" + parent.public_symbol;
+        ledger.symbol_groups.push_back({
+            .public_symbol = parent.public_symbol,
+            .finfo_symbol = "pg_finfo_" + parent.public_symbol,
+            .generated_wrapper = parent.generated_wrapper,
+            .sql_identities = {parent.sql_identity},
+        });
+        ++overload_index;
+    }
+    return ledger;
+}
+
 [[nodiscard]] inline runtime_matrix fixture_runtime_matrix(
     const safety_ledger& production,
     const safety_ledger& test_indexes,
@@ -691,6 +714,7 @@ fixture_bridge_evidence(bridge_kind bridge) {
         const std::string identity = "public." + symbol + "(internal)";
         ledger.parents.push_back({
             .sql_identity = identity,
+            .generated_wrapper = "fixture::" + symbol,
             .public_symbol = symbol,
         });
         ledger.symbol_groups.push_back({
@@ -876,6 +900,32 @@ inline void run_safety_contract_self_tests() {
         provenance,
         std::string(64, 'c'),
         policy);
+    {
+        const auto split_production = detail::fixture_split_overload_ledger(
+            compilation_profile::production);
+        const auto split_test_indexes = detail::fixture_split_overload_ledger(
+            compilation_profile::test_indexes);
+        const ledger_policy split_policy{
+            .expected_parent_count = 2,
+            .expected_symbol_count = 2,
+            .shared_symbols = {},
+        };
+        validate_profile_pair(split_production, split_test_indexes, provenance,
+            std::string(64, 'c'), split_policy);
+        auto swapped = split_production;
+        swapped.symbol_groups[0].sql_identities.swap(swapped.symbol_groups[1].sql_identities);
+        detail::require_failure([&swapped, &provenance, &split_policy] {
+            validate_safety_ledger(swapped, provenance, std::string(64, 'c'), split_policy);
+        }, "parent and symbol-group ownership disagree");
+    }
+    {
+        auto cross_schema = production;
+        cross_schema.parents[1].sql_identity = "other.from_array(text)";
+        cross_schema.symbol_groups.front().sql_identities[1] = cross_schema.parents[1].sql_identity;
+        detail::require_failure([&cross_schema, &provenance, &policy] {
+            validate_safety_ledger(cross_schema, provenance, std::string(64, 'c'), policy);
+        }, "symbol sharing crosses SQL names");
+    }
     {
         safety_ledger bad = production;
         bad.analyzer_version = clang_cfg_lifetime_identity(
@@ -1474,6 +1524,44 @@ inline void run_safety_contract_self_tests() {
         dso_ledger, dso_policy.external_symbols);
     validate_dso_ownership(dso_ledger, inventory, dso_policy);
     {
+        const auto split_ledger = detail::fixture_split_overload_ledger(
+            compilation_profile::production);
+        auto split_policy = dso_policy;
+        split_policy.main_identity_count = 2;
+        split_policy.main_symbol_count = 2;
+        const auto split_inventory = detail::fixture_dso_inventory(
+            split_ledger, split_policy.external_symbols);
+        validate_dso_ownership(split_ledger, split_inventory, split_policy);
+        {
+            auto swapped = split_ledger;
+            swapped.symbol_groups[0].sql_identities.swap(swapped.symbol_groups[1].sql_identities);
+            detail::require_failure([&swapped, &split_inventory, &split_policy] {
+                validate_dso_ownership(swapped, split_inventory, split_policy);
+            }, "parent and symbol-group ownership disagree");
+        }
+        {
+            auto missing = split_ledger;
+            missing.parents.front().sql_identity = "bioseq.write(integer,text)";
+            detail::require_failure([&missing, &split_inventory, &split_policy] {
+                validate_dso_ownership(missing, split_inventory, split_policy);
+            }, "main symbol group has no parent identity");
+        }
+        {
+            auto duplicated = split_ledger;
+            duplicated.parents.back().sql_identity = duplicated.parents.front().sql_identity;
+            detail::require_failure([&duplicated, &split_inventory, &split_policy] {
+                validate_dso_ownership(duplicated, split_inventory, split_policy);
+            }, "main parent identity or ownership is empty or duplicated");
+        }
+        {
+            auto duplicated = split_ledger;
+            duplicated.symbol_groups.back().sql_identities = duplicated.symbol_groups.front().sql_identities;
+            detail::require_failure([&duplicated, &split_inventory, &split_policy] {
+                validate_dso_ownership(duplicated, split_inventory, split_policy);
+            }, "duplicates an identity");
+        }
+    }
+    {
         dso_inventory bad = inventory;
         bad.symbols.pop_back();
         detail::require_failure(
@@ -1491,7 +1579,7 @@ inline void run_safety_contract_self_tests() {
                 validate_dso_ownership(
                     bad, inventory, dso_policy);
             },
-            "generated wrappers do not exactly own");
+            "parent and symbol-group ownership disagree");
     }
     {
         dso_contract bad = dso_policy;

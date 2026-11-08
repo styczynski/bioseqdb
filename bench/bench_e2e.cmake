@@ -63,6 +63,7 @@ bioseq_add_postgresql_extension(
     PostgreSQL::PostgreSQL                     # libpq — the SQL client
     sqlgen::sqlgen                             # sqlgen PostgresV2Connection (find_package imported target)
     bioseq_integration_test_support
+    bioseq_highway_runtime                     # Generated dispatch for shared sequence IO codecs.
     Vulkan::Vulkan                             # Vulkan loader (bioseq_modules_nopg uses vulkan/shader_compiler)
     ${BIOSEQ_GLSLANG_STATIC_LIBS}               # GLSL→SPIR-V compiler (shader_compiler.cppm)
     spirv-cross-msl                            # SPIR-V → MSL cross-compiler (MoltenVK path)
@@ -113,6 +114,7 @@ bioseq_add_postgresql_extension(
     sqlgen::sqlgen
     Catch2::Catch2WithMain
     bioseq_integration_test_support
+    bioseq_highway_runtime
     Vulkan::Vulkan
     ${BIOSEQ_GLSLANG_STATIC_LIBS}
     spirv-cross-msl

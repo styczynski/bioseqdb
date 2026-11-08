@@ -1,9 +1,19 @@
 /** @file Checked native SAM/BAM record framing and streaming serialization. */
+module;
+
+// Pinned Boost.JSON already accompanies jinja2cpp in the existing dependency graph.
+// Its header-only fast_float implementation parses directly to binary32 without
+// allocation, locale state or double rounding. Keep this internal dependency at
+// the SAM numeric boundary; libc++ floating from_chars needs macOS 26 or later.
+#include <boost/assert.hpp>
+#include <boost/json/detail/charconv/detail/fast_float/fast_float.hpp>
+
 export module bioseq.io.alignment.record_codec;
 
 import std;
 import bioseq.io.record_schema;
 import bioseq.common.seqan_adapter;
+import bioseq.common.json_string;
 import bioseq.io.simd;
 import bioseq.io.alignment.sequence_codec;
 import bioseq.sequences.cigar;
@@ -216,6 +226,11 @@ parse_bam_auxiliary(std::span<const std::uint8_t> bytes) {
     return bam_auxiliary_view{field, prefix + payload_bytes};
 }
 
+/** Ignore reserved SAM FLAG bits for native semantics; originals retain all 16 bits. */
+[[nodiscard]] inline constexpr std::uint16_t defined_sam_flags(const std::uint16_t flags) {
+    return static_cast<std::uint16_t>(flags & 0x0fffu);
+}
+
 /** Checked fixed BAM fields, independent of record storage and sequence alphabets. */
 struct bam_core_fields {
     std::int32_t reference_id{-1};
@@ -247,6 +262,15 @@ struct native_cigar_metrics {
     std::uint64_t query_span{};
     std::uint64_t reference_span{};
     std::uint64_t query_before_hard_clipping{};
+    std::uint64_t leading_query_clip{};
+    std::uint64_t trailing_query_clip{};
+
+    /** Return half-open original-query bounds from validated native clip geometry. */
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> original_query_interval(const bool reversed) const {
+        return reversed
+            ? std::pair{trailing_query_clip, query_before_hard_clipping - leading_query_clip}
+            : std::pair{leading_query_clip, query_before_hard_clipping - trailing_query_clip};
+    }
 };
 
 /** Validate native runs and terminal clipping, without expanding run lengths. */
@@ -278,6 +302,10 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
             if (saw_trailing_soft || saw_trailing_hard)
                 return std::unexpected(std::string{"BAM CIGAR contains an internal clipping run"});
             saw_body = true;
+        }
+        if (role == bioseq::cigar_role::hard_clip || role == bioseq::cigar_role::soft_clip) {
+            if (saw_body) metrics.trailing_query_clip += decoded->length;
+            else metrics.leading_query_clip += decoded->length;
         }
         if (bioseq::visible_in_space(decoded->operation, bioseq::cigar_space::query))
             metrics.query_span += decoded->length;
@@ -320,11 +348,10 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
         || result.core.position < -1 || result.core.mate_position < -1
         || result.core.position == std::numeric_limits<std::int32_t>::max()
         || result.core.mate_position == std::numeric_limits<std::int32_t>::max()
-        || result.core.sequence_length < 0 || (result.core.flags & 0xf000u) != 0)
+        || result.core.sequence_length < 0)
         return std::unexpected(std::string{"BAM fixed core contains out-of-range fields"});
-    if ((result.core.reference_id == -1 && result.core.position != -1)
-        || (result.core.mate_reference_id == -1 && result.core.mate_position != -1))
-        return std::unexpected(std::string{"BAM position is present without a reference"});
+    // An unavailable reference makes its coordinate uninterpreted. Retain the
+    // raw field for preservation; native projection emits an absent position.
     if (name_bytes == 0 || name_bytes > record.size() - 32)
         return std::unexpected(std::string{"BAM read name length is invalid"});
     const auto name = record.subspan(32, name_bytes);
@@ -592,6 +619,10 @@ measure_wire_cigar(const cigar_wire_recipe& recipe) {
                 || run->length > std::numeric_limits<std::uint64_t>::max() - result.geometry.query_before_hard_clipping)
                 return std::unexpected(std::string{"CIGAR projected geometry overflows"});
             ++result.word_count;
+            if (role == bioseq::cigar_role::hard_clip || role == bioseq::cigar_role::soft_clip) {
+                if (saw_body) result.geometry.trailing_query_clip += run->length;
+                else result.geometry.leading_query_clip += run->length;
+            }
             if (bioseq::visible_in_space(run->operation, bioseq::cigar_space::query))
                 result.geometry.query_span += run->length;
             if (bioseq::visible_in_space(run->operation, bioseq::cigar_space::reference))
@@ -622,13 +653,15 @@ measure_wire_cigar(const cigar_wire_recipe& recipe) {
     return recipe;
 }
 
-/** BAM BAI-style bin; positions outside that indexable span use the root bin. */
+/** Compute the SAM/HTSlib wire bin, including coordinates beyond BAI's index range.
+ * Final narrowing matches BAM's uint16 core field; it does not imply that a BAI
+ * index can represent the interval. Unplaced reads use reg2bin(-1, 0).
+ */
 [[nodiscard]] inline std::uint16_t bam_region_bin(
     const std::int32_t position, const std::uint64_t reference_span) {
     if (position < 0) return 4680;
     const auto begin = static_cast<std::uint64_t>(position);
     const auto end = begin + std::max<std::uint64_t>(reference_span, 1) - 1;
-    if (end >= (std::uint64_t{1} << 29)) return 0;
     if ((begin >> 14) == (end >> 14)) return static_cast<std::uint16_t>(4681 + (begin >> 14));
     if ((begin >> 17) == (end >> 17)) return static_cast<std::uint16_t>(585 + (begin >> 17));
     if ((begin >> 20) == (end >> 20)) return static_cast<std::uint16_t>(73 + (begin >> 20));
@@ -685,7 +718,7 @@ template<alignment_byte_sink Sink>
         (static_cast<std::uint32_t>(core.bin) << 16)
             | (static_cast<std::uint32_t>(core.mapping_quality) << 8)
             | static_cast<std::uint32_t>(qname.size() + 1),
-        (static_cast<std::uint32_t>(core.flags) << 16) | measured.core_cigar_count,
+        (static_cast<std::uint32_t>(defined_sam_flags(core.flags)) << 16) | measured.core_cigar_count,
         std::bit_cast<std::uint32_t>(core.sequence_length),
         std::bit_cast<std::uint32_t>(core.mate_reference_id),
         std::bit_cast<std::uint32_t>(core.mate_position),
@@ -960,7 +993,7 @@ template<alignment_byte_sink Sink>
     };
     if (auto written = append_text(qname); !written) return written;
     if (auto written = sink.append(tab); !written) return written;
-    if (auto written = append_sam_integer(sink, core.flags); !written) return written;
+    if (auto written = append_sam_integer(sink, defined_sam_flags(core.flags)); !written) return written;
     if (auto written = sink.append(tab); !written) return written;
     if (auto written = append_text(reference_name); !written) return written;
     if (auto written = sink.append(tab); !written) return written;
@@ -985,6 +1018,7 @@ struct native_reference_binding {
     std::int32_t reference_id{-1};
     std::int32_t mate_reference_id{-1};
     std::optional<std::uint64_t> reference_length;
+    std::optional<std::uint64_t> mate_reference_length;
     bool reference_is_circular{};
     bool mate_same_projection_domain{};
 };
@@ -1006,8 +1040,6 @@ struct native_alignment_plan {
     const native_reference_binding& references, const bool protein_triplets) {
     constexpr auto coordinate_limit = static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
     const std::uint64_t scale = protein_triplets ? 3 : 1;
-    if ((resolved_flags & 0xf000u) != 0)
-        return std::unexpected(std::string{"Alignment FLAG uses reserved bits"});
     for (std::size_t bit = 0; bit < alignment.flag_constraints.size(); ++bit) {
         if (alignment.flag_constraints[bit]
             && *alignment.flag_constraints[bit] != ((resolved_flags & (std::uint16_t{1} << bit)) != 0))
@@ -1018,18 +1050,19 @@ struct native_alignment_plan {
     if (references.reference_length && alignment.reference_length
         && *references.reference_length != *alignment.reference_length)
         return std::unexpected(std::string{"Alignment reference length disagrees with dictionary"});
-    if (reference_length && (*reference_length == 0 || *reference_length > coordinate_limit / scale))
+    if (reference_length && (*reference_length == 0
+        || (references.reference_id >= 0 && *reference_length > coordinate_limit / scale)))
         return std::unexpected(std::string{"Projected reference length exceeds SAM signed32 limits"});
     if (source_sequence_length && *source_sequence_length > coordinate_limit / scale)
         return std::unexpected(std::string{"Projected sequence length exceeds native signed32 limits"});
-    if (alignment.target_start && *alignment.target_start > (coordinate_limit - 1) / scale)
+    if (alignment.target_start && references.reference_id >= 0
+        && *alignment.target_start > (coordinate_limit - 1) / scale)
         return std::unexpected(std::string{"Projected target position exceeds native signed32 limits"});
     const bool mapped = (resolved_flags & 4u) == 0;
     if (mapped && (references.reference_id < 0 || !alignment.target_start || !alignment.cigar))
         return std::unexpected(std::string{"Mapped alignment needs reference, position and real CIGAR"});
-    if (alignment.target_start && references.reference_id < 0)
-        return std::unexpected(std::string{"Alignment target position has no reference dictionary entry"});
-    if (alignment.target_start && reference_length && *alignment.target_start >= *reference_length)
+    if (references.reference_id >= 0 && alignment.target_start && reference_length
+        && *alignment.target_start >= *reference_length)
         return std::unexpected(std::string{"Alignment starts outside its reference"});
     const auto recipe = make_cigar_wire_recipe(alignment, protein_triplets, resolved_flags);
     if (!recipe) return std::unexpected(recipe.error());
@@ -1045,38 +1078,51 @@ struct native_alignment_plan {
     if (alignment.query_length && measured->word_count != 0
         && measured->geometry.query_before_hard_clipping != *alignment.query_length * scale)
         return std::unexpected(std::string{"Complete CIGAR differs from original query length"});
+    if ((alignment.query_start && alignment.query_end && *alignment.query_start > *alignment.query_end)
+        || (alignment.query_length && ((alignment.query_start && *alignment.query_start > *alignment.query_length)
+            || (alignment.query_end && *alignment.query_end > *alignment.query_length))))
+        return std::unexpected(std::string{"Original query coordinates are outside their declared interval"});
+    if (measured->word_count != 0) {
+        const auto [query_start, query_end] = measured->geometry.original_query_interval((resolved_flags & 16u) != 0u);
+        if ((alignment.query_start && *alignment.query_start != query_start / scale)
+            || (alignment.query_end && *alignment.query_end != query_end / scale))
+            return std::unexpected(std::string{"Original query coordinates disagree with complete CIGAR clipping"});
+    }
     if (alignment.target_start && alignment.target_end) {
         if (*alignment.target_end < *alignment.target_start
             || *alignment.target_end - *alignment.target_start != measured->geometry.reference_span / scale)
             return std::unexpected(std::string{"Alignment target span disagrees with CIGAR"});
     }
-    if (alignment.target_start && reference_length && !references.reference_is_circular
+    if (references.reference_id >= 0 && alignment.target_start && reference_length && !references.reference_is_circular
         && measured->geometry.reference_span > (*reference_length - *alignment.target_start) * scale)
         return std::unexpected(std::string{"Alignment extends beyond its linear reference"});
     native_alignment_plan plan;
     plan.cigar = *recipe;
     plan.cigar_size = *measured;
-    plan.core.flags = resolved_flags;
+    plan.core.flags = defined_sam_flags(resolved_flags);
     plan.core.mapping_quality = alignment.mapping_quality.value_or(255);
     plan.core.reference_id = references.reference_id;
-    plan.core.position = alignment.target_start
+    plan.core.position = alignment.target_start && references.reference_id >= 0
         ? static_cast<std::int32_t>(*alignment.target_start * scale) : -1;
     plan.core.sequence_length = source_sequence_length
         ? static_cast<std::int32_t>(*source_sequence_length * scale) : 0;
+    if (references.mate_reference_id >= 0 && alignment.mate_start && references.mate_reference_length
+        && *alignment.mate_start >= *references.mate_reference_length)
+        return std::unexpected(std::string{"Alignment mate starts outside its reference"});
     const bool paired = (resolved_flags & 1u) != 0;
     const bool native_mate_known = !protein_triplets || references.mate_same_projection_domain;
     if (protein_triplets && paired && !native_mate_known) {
         plan.core.flags = static_cast<std::uint16_t>((plan.core.flags | 8u) & ~std::uint16_t{2u | 32u});
     } else {
-        if (alignment.mate_start && (references.mate_reference_id < 0
-                || *alignment.mate_start > (coordinate_limit - 1) / scale))
-            return std::unexpected(std::string{"Projected mate position has no reference or exceeds signed32"});
+        if (alignment.mate_start && references.mate_reference_id >= 0
+            && *alignment.mate_start > (coordinate_limit - 1) / scale)
+            return std::unexpected(std::string{"Projected mate position exceeds signed32"});
         constexpr auto signed_limit = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max());
         if (alignment.template_length < -signed_limit / static_cast<std::int64_t>(scale)
             || alignment.template_length > signed_limit / static_cast<std::int64_t>(scale))
             return std::unexpected(std::string{"Projected template length exceeds signed32"});
         plan.core.mate_reference_id = references.mate_reference_id;
-        plan.core.mate_position = alignment.mate_start
+        plan.core.mate_position = alignment.mate_start && references.mate_reference_id >= 0
             ? static_cast<std::int32_t>(*alignment.mate_start * scale) : -1;
         plan.core.template_length = static_cast<std::int32_t>(
             alignment.template_length * static_cast<std::int64_t>(scale));
@@ -1084,7 +1130,8 @@ struct native_alignment_plan {
     if (protein_triplets && (plan.core.flags & 2u) != 0
         && (!paired || !native_mate_known || plan.core.position < 0 || plan.core.mate_position < 0))
         plan.core.flags = static_cast<std::uint16_t>(plan.core.flags & ~std::uint16_t{2});
-    plan.core.bin = bam_region_bin(plan.core.position, measured->geometry.reference_span);
+    plan.core.bin = bam_region_bin(plan.core.position,
+        mapped ? measured->geometry.reference_span : std::uint64_t{1});
     return plan;
 }
 
@@ -1162,13 +1209,11 @@ parse_sam_record(std::string_view line) {
     const auto template_length = parse_sam_integer<std::int32_t>(fields[8]);
     constexpr auto coordinate_limit = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
     if (!flags || !position || !mapq || !mate_position || !template_length
-        || (*flags & 0xf000u) != 0 || *mapq > 255 || *position > coordinate_limit
+        || *mapq > 255 || *position > coordinate_limit
         || *mate_position > coordinate_limit || *template_length == std::numeric_limits<std::int32_t>::min())
         return std::unexpected(std::string{"SAM fixed numeric field is invalid or out of range"});
     if ((fields[2] != "*" && !valid_reference_name(fields[2]))
         || (fields[6] != "*" && fields[6] != "=" && !valid_reference_name(fields[6]))
-        || (fields[2] == "*" && *position != 0)
-        || (fields[6] == "*" && *mate_position != 0)
         || (fields[6] == "=" && fields[2] == "*"))
         return std::unexpected(std::string{"SAM reference name or coordinate is inconsistent"});
     sam_record_view result;
@@ -1210,14 +1255,16 @@ inline void store_wire_integer(std::span<std::uint8_t> output, const Integer val
 /** Parse one numeric SAM element into its declared binary type with strict range checks. */
 [[nodiscard]] inline std::expected<void, std::string> parse_sam_auxiliary_number(
     const char type, std::string_view text, std::span<std::uint8_t> output) {
+    if (text.starts_with("+-"))
+        return std::unexpected(std::string{"SAM numeric auxiliary has multiple signs"});
     if (!text.empty() && text.front() == '+') text.remove_prefix(1);
     const auto width = auxiliary_element_bytes(type);
     if (width == 0 || type == 'A' || output.size() < width)
         return std::unexpected(std::string{"SAM numeric auxiliary destination is invalid"});
     if (type == 'f') {
         float value{};
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value,
-            std::chars_format::general);
+        const auto parsed = boost::json::detail::charconv::detail::fast_float::from_chars(
+            text.data(), text.data() + text.size(), value);
         if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(value))
             return std::unexpected(std::string{"SAM float auxiliary value is invalid"});
         store_wire_integer(output, std::bit_cast<std::uint32_t>(value));
@@ -1255,6 +1302,8 @@ inline void store_wire_integer(std::span<std::uint8_t> output, const Integer val
     }
     if (field.type == 'i') {
         auto integer_text = value;
+        if (integer_text.starts_with("+-"))
+            return std::unexpected(std::string{"SAM integer auxiliary has multiple signs"});
         if (!integer_text.empty() && integer_text.front() == '+') integer_text.remove_prefix(1);
         const auto integer = parse_sam_integer<std::int64_t>(integer_text);
         if (!integer || *integer < std::numeric_limits<std::int32_t>::min()
@@ -1390,12 +1439,12 @@ public:
     return validate_cigar_projection(recipe, source.borrow());
 }
 
-/** Compare projected native core values, excluding derived bin/padding representation. */
+/** Compare native semantics, ignoring reserved FLAG bits and derived bin/padding. */
 [[nodiscard]] inline std::expected<void, std::string> validate_bam_core_projection(
     const native_alignment_plan& projected, const bam_record_view& native) {
     const auto& expected = projected.core;
     const auto& actual = native.core;
-    if (expected.flags != actual.flags || expected.mapping_quality != actual.mapping_quality
+    if (expected.flags != defined_sam_flags(actual.flags) || expected.mapping_quality != actual.mapping_quality
         || expected.reference_id != actual.reference_id || expected.position != actual.position
         || expected.mate_reference_id != actual.mate_reference_id || expected.mate_position != actual.mate_position
         || expected.template_length != actual.template_length || expected.sequence_length != actual.sequence_length)
@@ -1418,6 +1467,71 @@ public:
         case 'I': return read_wire_unsigned<std::uint32_t>(bytes);
         default: return {};
     }
+}
+
+/** Check only the native structure of predefined NM/MD/AS summaries.
+ * Original payloads may retain malformed summaries; native projections may not.
+ * MD uses the SAMtags grammar without parsing counts or requiring reference data.
+ * Every other tag keeps the existing generic auxiliary validation policy.
+ */
+[[nodiscard]] inline bool valid_native_alignment_summary(const auxiliary_field_view& field) {
+    if (field.tag == std::array{'N', 'M'}) {
+        const auto differences = auxiliary_integer_value(field);
+        return differences && *differences >= 0;
+    }
+    if (field.tag == std::array{'A', 'S'}) return auxiliary_integer_value(field).has_value();
+    if (field.tag != std::array{'M', 'D'}) return true;
+    if (field.type != 'Z') return false;
+    const std::string_view text{reinterpret_cast<const char*>(field.payload.data()), field.payload.size()};
+    std::size_t position{};
+    while (position < text.size()) {
+        const auto count_begin = position;
+        while (position < text.size() && text[position] >= '0' && text[position] <= '9') ++position;
+        if (position == count_begin) return false;
+        if (position == text.size()) return true;
+        if (text[position] == '^') {
+            const auto deletion_begin = ++position;
+            while (position < text.size() && text[position] >= 'A' && text[position] <= 'Z') ++position;
+            if (position == deletion_begin) return false;
+        } else {
+            if (text[position] < 'A' || text[position] > 'Z') return false;
+            ++position;
+        }
+    }
+    return false;
+}
+
+/** Identify the only auxiliary summaries derived from the emitted query/reference. */
+[[nodiscard]] inline bool derived_alignment_auxiliary_tag(const std::array<char, 2> tag) {
+    return tag == std::array{'N', 'M'} || tag == std::array{'M', 'D'};
+}
+
+/** Retain only source tags whose meaning survives synthetic protein projection.
+ * Identity/barcode strings and inherited alignment scores have no coordinates in
+ * the projected read. Other source tags remain in the lossless original payload;
+ * separately derived nucleotide tags are appended through their own checked path.
+ */
+[[nodiscard]] inline bool protein_auxiliary_is_projection_invariant(
+    const auxiliary_field_view& field) {
+    if (field.tag == std::array{'A', 'S'}) return auxiliary_integer_value(field).has_value();
+    constexpr std::array string_tags{
+        std::array{'R', 'G'}, std::array{'P', 'G'}, std::array{'B', 'C'},
+        std::array{'Q', 'T'}, std::array{'R', 'X'}, std::array{'Q', 'X'},
+        std::array{'M', 'I'}};
+    return field.type == 'Z'
+        && std::find(string_tags.begin(), string_tags.end(), field.tag) != string_tags.end();
+}
+
+/** Decide which original fields may appear unchanged in the native projection.
+ * Transport/envelope tags are regenerated, malformed summaries remain payload-only,
+ * SAM cannot spell nonfinite floats, and protein projection keeps invariant metadata.
+ */
+[[nodiscard]] inline bool retain_original_native_auxiliary(
+    const auxiliary_field_view& field, const bool protein_triplets, const bool sam_text) {
+    return field.tag != std::array{'b', 'q'} && field.tag != std::array{'C', 'G'}
+        && valid_native_alignment_summary(field)
+        && (!sam_text || !auxiliary_has_nonfinite_float(field))
+        && (!protein_triplets || protein_auxiliary_is_projection_invariant(field));
 }
 
 /** Compare typed auxiliary values while ignoring legal scalar integer-width choices. */
@@ -1470,12 +1584,51 @@ public:
     return {};
 }
 
+/** Validate SAM header text with SIMD ASCII runs and the shared UTF-8 decoder.
+ * Only SQ/RG/PG DS, PG CL and CO permit non-ASCII. CO is free one-line text,
+ * including TAB, rather than a TAG:VALUE field; it still forbids NUL/CR/LF.
+ */
+[[nodiscard]] inline std::expected<void, std::string> validate_sam_header_value(
+    const std::string_view record, const std::array<char, 2> tag, const std::string_view value) {
+    const bool comment = record == "@CO";
+    if (value.empty() && !comment)
+        return std::unexpected(std::string{"SAM header attribute lacks a value"});
+    const bool unicode_allowed = comment
+        || ((record == "@SQ" || record == "@RG" || record == "@PG")
+            && tag == std::array<char, 2>{'D', 'S'})
+        || (record == "@PG" && tag == std::array<char, 2>{'C', 'L'});
+    std::size_t position{};
+    while (position < value.size()) {
+        position += io::simd::scan_sam_auxiliary_prefix(
+            reinterpret_cast<const std::uint8_t*>(value.data() + position), value.size() - position, false);
+        if (position == value.size()) break;
+        const auto character = static_cast<unsigned char>(value[position]);
+        if (comment && character < 0x80u && character != '\0' && character != '\r' && character != '\n') {
+            ++position;
+            continue;
+        }
+        if (!unicode_allowed || character < 0x80u)
+            return std::unexpected(std::string{"SAM header value contains an invalid character"});
+        common::json_utf8_state unicode;
+        do {
+            if (!common::consume_json_utf8_byte(unicode, static_cast<unsigned char>(value[position++])))
+                return std::unexpected(std::string{"SAM header value contains invalid UTF-8"});
+        } while (unicode.continuation_bytes != 0 && position < value.size());
+        if (unicode.continuation_bytes != 0)
+            return std::unexpected(std::string{"SAM header value contains truncated UTF-8"});
+    }
+    return {};
+}
+
 /** Visit checked SAM header attributes without copying their strings. */
 template<class Consumer>
 [[nodiscard]] std::expected<void, std::string> visit_sam_header_fields(
     std::string_view line, Consumer&& consumer) {
-    if (line.size() < 4 || line[0] != '@' || line[3] != '\t')
-        return std::unexpected(std::string{"SAM header field record lacks its prefix/TAB"});
+    if (line.size() < 5 || line[0] != '@' || line[3] != '\t')
+        return std::unexpected(std::string{"SAM header field record lacks its prefix/TAB or attributes"});
+    const auto record = line.substr(0, 3);
+    if (record != "@HD" && record != "@SQ" && record != "@RG" && record != "@PG")
+        return std::unexpected(std::string{"Unknown SAM header field record"});
     std::bitset<52 * 62> seen;
     std::size_t cursor = 4;
     while (cursor < line.size()) {
@@ -1491,8 +1644,7 @@ template<class Consumer>
             return std::unexpected(std::string{"SAM header attribute is invalid or duplicated"});
         seen.set(*index);
         const auto value = field.substr(3);
-        if (value.find_first_of("\r\n") != std::string_view::npos || value.find('\0') != std::string_view::npos)
-            return std::unexpected(std::string{"SAM header attribute contains a record separator"});
+        if (const auto valid = validate_sam_header_value(record, tag, value); !valid) return valid;
         if (const auto consumed = std::invoke(consumer, tag, value); !consumed) return consumed;
         cursor += length;
         if (cursor < line.size()) {
@@ -1646,6 +1798,8 @@ struct alignment_wire_source {
 
 /** Stream exact standard MD and return NM from real projected sequence/reference bases.
  * Only equal canonical A/C/G/T bases match; ambiguity counts as a difference.
+ * Explicit =/X runs must agree wherever both bases are canonical; ambiguous
+ * symbols retain the existing NM policy without imposing another match rule.
  * Insertions/deletions contribute to NM, while reference skips are absent from MD.
  */
 template<alignment_byte_sink Sink>
@@ -1709,9 +1863,14 @@ template<alignment_byte_sink Sink>
                     while (position < count) {
                         const auto equal = bioseq::simd::first_unequal_sequence_rank(query_tile.data() + position,
                             comparison.data() + position, count - position);
+                        if (operation == 8u && equal != 0u)
+                            return std::unexpected(std::string{"CIGAR X contradicts matching canonical sequence/reference bases"});
                         if (const auto added = advance(matched, equal); !added) return added;
                         position += equal;
                         if (position == count) break;
+                        // The existing comparison tables map ambiguity to disjoint sentinels.
+                        if (operation == 7u && query_tile[position] != 0u && comparison[position] != 255u)
+                            return std::unexpected(std::string{"CIGAR = contradicts mismatching canonical sequence/reference bases"});
                         if (auto written = append_sam_integer(sink, matched); !written) return written;
                         if (auto written = sink.append(std::span<const std::uint8_t>{reference_tile}.subspan(position, 1u)); !written) return written;
                         matched = 0u;

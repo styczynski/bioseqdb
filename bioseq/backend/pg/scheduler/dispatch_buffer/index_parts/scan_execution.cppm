@@ -44,7 +44,7 @@ import bioseq.postgres.scheduler.dispatch_processor; // Keep the  alignment pipe
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.alignment.contracts;
 import bioseq.sequences;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
 import bioseq.parallelism.memory_admission;

@@ -47,7 +47,6 @@ def _revision4_empty_ledger():
 
 class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
     _synthetic_observed_manifest_cache = None
-    _synthetic_q8_evidence_cache = None
     _synthetic_approved_authority_cache = None
     _legacy_approved_authority_cache = None
     _current_approved_authority_cache = None
@@ -119,129 +118,275 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
         aggregator._validate_approved_tuple_authority_document(legacy, fixture_raw)
         cls._legacy_approved_authority_cache = (legacy, fixture_raw)
 
+    @staticmethod
+    def _synthetic_q8_framework_bundle(report_number, records, config_path, config):
+        """Seal invented singleton samples through the real framework wire format."""
+        records = copy.deepcopy(records)
+        run_id = f"synthetic-q8-contract-report-{report_number}"
+        configured_seed = config["bench_e2e"]["iteration_order"]["seed"]
+        checksums = []
+        schedule_text = []
+        for repeat, record in enumerate(records):
+            record.update({
+                "schema": 1, "benchmark": "bench_e2e",
+                "raw_record_id": repeat, "repeat": repeat,
+                "tuple_index": 0, "group_index": 0, "group_count": 1,
+                "schedule": {
+                    "benchmark_index": 0, "test_case_index": 0,
+                    "tuple_index": 0, "group_index": 0, "repeat": repeat,
+                    "mode": "interleaved_seeded",
+                    "configured_seed": f"{configured_seed:016x}",
+                    "shuffle_seed": f"{aggregator._schedule_shuffle_seed(configured_seed, 'bench_e2e', record['test_case'], 0, repeat):016x}",
+                    "order_position": 0,
+                },
+            })
+            record.pop("record_checksum", None)
+            checksum = aggregator._fnv1a((aggregator._canonical_record(record),))
+            record["record_checksum"] = checksum
+            checksums.append(checksum)
+            schedule_text.extend((
+                ":".join(f"{value:020d}" for value in (0, 0, 0, 0, repeat)),
+                checksum,
+            ))
+        header = {"kind": "header", "schema": 1, "run_id": run_id}
+        prefix = b"".join(
+            (aggregator._canonical_record(value) + "\n").encode("utf-8")
+            for value in (header, *records))
+        outer = [record["outer_e2e_ns"] for record in records]
+        index_and_map = [
+            record["index_and_map_ns"] for record in records
+            if record["index_and_map_ns"] is not None]
+        first = records[0]
+        manifest = {
+            "schema": 1, "path": f"report_{report_number}.raw.jsonl",
+            "run_id": run_id, "complete": True, "record_count": len(records),
+            "prefix_bytes": len(prefix),
+            "append_order_checksum": aggregator._fnv1a(checksums),
+            "schedule_sorted_checksum": aggregator._fnv1a(schedule_text),
+            "outer_e2e_ns": aggregator._duration_summary(outer),
+            "index_and_map_ns": aggregator._duration_summary(index_and_map),
+            "cells": [{
+                "benchmark": "bench_e2e", "test_case": first["test_case"],
+                "algorithm": first["algorithm"], "tuple_index": 0,
+                "group_index": 0, "record_count": len(records),
+                "schedule_sorted_checksum": aggregator._fnv1a(sorted(checksums)),
+                "outer_e2e_ns": aggregator._duration_summary(outer),
+                "first_repeat_outer_e2e_ns": aggregator._duration_summary(outer[:1]),
+                "steady_state_outer_e2e_ns": aggregator._duration_summary(outer[1:]),
+                "index_and_map_ns": aggregator._duration_summary(index_and_map),
+            }],
+        }
+        footer = {"kind": "footer", "schema": 1, "manifest": manifest}
+        sidecar_raw = prefix + (
+            aggregator._canonical_record(footer) + "\n").encode("utf-8")
+        report = {
+            "meta": {
+                "commit": "synthetic-contract-test", "dirty": False,
+                "timestamp": 946684800, "created": "2000-01-01T00:00:00Z",
+                "fast": False, "history_eligible": True,
+            },
+            "raw_evidence": manifest, "paired_rule_evidence": [],
+            "rule_violations": [], "regressions": [], "sanity_warnings": [],
+            "benchmarks": {"bench_e2e": {
+                "title": "Synthetic Q8 contract fixture",
+                "description": "Invented samples; not benchmark measurements.",
+                "location": config_path.relative_to(aggregator.REPOSITORY_ROOT).as_posix(),
+                "test_case_descriptions": {},
+                "execution_tuples": [{
+                    "tuple": {first["algorithm"]: first["params"]},
+                    "test_cases": {first["test_case"]: {"all_regions": {
+                        "wall_clock_ns": {"samples_count": len(records)},
+                        "region_total_ns": {"samples_count": len(records)},
+                    }}},
+                }],
+                "raw_samples": records,
+            }},
+        }
+        return report, sidecar_raw
+
     @classmethod
     @contextlib.contextmanager
     def _load_q8_contract_with_synthetic_source_evidence(cls):
-        """Load q8 against one hermetic byte snapshot and synthetic worker logs."""
-        if cls._synthetic_q8_evidence_cache is None:
-            proof, _ = aggregator._read_json_file(
-                aggregator.Q8_QUERY_PREFIX_PROOF_PATH,
-                "q8 query-prefix proof test fixture")
-            manifest, _ = aggregator._read_json_file(
-                aggregator.Q8_RESCUE_MANIFEST_PATH,
-                "q8 rescue manifest test fixture")
-            ledger_path = REPOSITORY_ROOT / "Q8_RESULTS.yaml"
-            ledger, ledger_raw = aggregator._read_json_file(
-                ledger_path, "q8 results test fixture")
-            proof = copy.deepcopy(proof)
-            manifest = copy.deepcopy(manifest)
+        """Create a private, complete Q8 evidence tree; never read local results."""
+        repository_root = REPOSITORY_ROOT
+        campaign, _ = aggregator._read_json_file(
+            aggregator.Q8_CONTRACT_PATH, "q8 campaign fixture template")
+        proof, _ = aggregator._read_json_file(
+            aggregator.Q8_QUERY_PREFIX_PROOF_PATH, "q8 prefix fixture template")
+        manifest, _ = aggregator._read_json_file(
+            aggregator.Q8_RESCUE_MANIFEST_PATH, "q8 rescue fixture template")
+        baseline = next(
+            entry for entry in campaign["configs"]
+            if entry["shard_kind"] == "minimap2_baseline"
+            and entry["cells"][0]["identity"]["dataset"]
+                == "matrix_2gbp_dna4_k15_w10"
+            and entry["cells"][0]["identity"]["index_mode"] == "no_index")
+        # The numbers label five synthetic cases; no archived reports are read.
+        raw_records = {
+            number: [cls._raw_record(number, repeat) for repeat in range(5)]
+            for number in (5, 9, 10, 11, 12)
+        }
+        path_names = (
+            "CAMPAIGN_CONTRACT_PATH", "QUERY_PREFIX_PROOF_PATH",
+            "Q8_CONTRACT_PATH", "Q8_CONFIG_PATH", "Q8_QUERY_PREFIX_PROOF_PATH",
+            "Q8_RESCUE_MANIFEST_PATH", "Q1024_CONTRACT_PATH", "Q1024_CONFIG_PATH",
+        )
+        source_path = REVISION4_EMPTY_LEDGER_FIXTURE
+        dependency_paths = {
+            *(getattr(aggregator, name) for name in path_names), source_path,
+            *(repository_root / entry["path"] for entry in campaign["configs"]),
+            *(repository_root / child["path"] for child in manifest["children"]),
+        }
+        template_bytes = {
+            path.relative_to(repository_root): aggregator._read_regular(
+                path, f"tracked q8 fixture dependency {path.name}")
+            for path in dependency_paths
+        }
+        with tempfile.TemporaryDirectory(prefix="bioseq-q8-contract-") as directory:
+            fixture_root = Path(directory)
+            for relative, raw in template_bytes.items():
+                target = fixture_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+            with contextlib.ExitStack() as stack:
+                for name in path_names:
+                    relative = getattr(aggregator, name).relative_to(repository_root)
+                    stack.enter_context(mock.patch.object(
+                        aggregator, name, fixture_root / relative))
+                stack.enter_context(mock.patch.object(
+                    aggregator, "REPOSITORY_ROOT", fixture_root))
 
-            source_path = REVISION4_EMPTY_LEDGER_FIXTURE
-            source_raw = source_path.read_bytes()
-            source_lines = source_raw.decode("utf-8").splitlines()
-            synthetic_source_evidence = {
-                "path": source_path.relative_to(REPOSITORY_ROOT).as_posix(),
-                "sha256": hashlib.sha256(source_raw).hexdigest(),
-                "evidence": [{
-                    "line": 2,
-                    "statement": source_lines[1],
-                }],
-            }
-            query_contract = proof["query_generation_contract"]
-            query_contract["benchmark_loader"] = copy.deepcopy(
-                synthetic_source_evidence)
-            query_contract["sequence_generator"] = copy.deepcopy(
-                synthetic_source_evidence)
-            proof["matrix_and_repeat_contract"]["sealed_matrix_evidence"] = (
-                copy.deepcopy(synthetic_source_evidence))
+                def write_json(path, value):
+                    raw = (json.dumps(value, indent=2, ensure_ascii=True,
+                                      allow_nan=False) + "\n").encode("utf-8")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(raw)
+                    return raw
 
-            external_bytes = {}
-            manifest["purpose"] = (
-                "Synthetic in-memory q8 rescue authority for contract tests; "
-                "repository report and raw-sample bytes are unchanged.")
-            for ordinal, child in enumerate(manifest["children"]):
-                worker_log = child["worker_log"]
-                worker_log_path = Path(worker_log["path"])
-                worker_log_raw = (
-                    "synthetic q8 rescue worker-log fixture\n"
-                    f"ordinal={ordinal}\n"
-                ).encode("utf-8")
-                external_bytes[worker_log_path] = worker_log_raw
-                worker_log["sha256"] = hashlib.sha256(
-                    worker_log_raw).hexdigest()
-                worker_log["size"] = len(worker_log_raw)
+                source_relative = source_path.relative_to(repository_root)
+                source_raw = template_bytes[source_relative]
+                source_evidence = {
+                    "path": source_relative.as_posix(),
+                    "sha256": hashlib.sha256(source_raw).hexdigest(),
+                    "evidence": [{"line": 2, "statement":
+                                  source_raw.decode("utf-8").splitlines()[1]}],
+                }
+                proof["query_generation_contract"]["benchmark_loader"] = (
+                    copy.deepcopy(source_evidence))
+                proof["query_generation_contract"]["sequence_generator"] = (
+                    copy.deepcopy(source_evidence))
+                proof["matrix_and_repeat_contract"]["sealed_matrix_evidence"] = (
+                    copy.deepcopy(source_evidence))
+                manifest["created_at"] = "2000-01-01T00:00:00Z"
+                manifest["purpose"] = (
+                    "Synthetic contract-test authority with invented samples, "
+                    "logs and receipts; not benchmark execution evidence.")
+                manifest["interrupted_parent_evidence"] = {
+                    "reason": {"classification": "synthetic-test-fixture"},
+                    "partial_evidence": {"complete_sample_records": 0},
+                    "replacement_rule": "No historical partial records are used.",
+                }
+                children_by_number = {
+                    int(Path(child["report"]["path"]).stem.removeprefix("report_")): child
+                    for child in manifest["children"]
+                }
+                configs = {5: baseline["path"]}
+                configs.update({number: child["path"]
+                                for number, child in children_by_number.items()})
+                for number, relative_config in configs.items():
+                    config_path = fixture_root / relative_config
+                    config, config_raw = aggregator._read_json_file(
+                        config_path, "synthetic q8 config")
+                    report, sidecar_raw = cls._synthetic_q8_framework_bundle(
+                        number, raw_records[number], config_path, config)
+                    report_path = fixture_root / (
+                        f"reporting/bioseq_benchmark_e2e/report_{number}.json")
+                    report_raw = write_json(report_path, report)
+                    sidecar_path = report_path.with_suffix(".raw.jsonl")
+                    sidecar_path.write_bytes(sidecar_raw)
+                    if number == 5:
+                        continue
+                    child = children_by_number[number]
+                    ordinal = child["ordinal"]
+                    run, build = cls._synthetic_receipts(
+                        report_path, report_raw, config_path, config_raw,
+                        ordinal=ordinal)
+                    # The validator intentionally pins this build identity.
+                    # This synthetic snapshot does not attest to that actual build.
+                    build["build_receipt_id"] = "br_7d3103c3a6f867a41c4028e335e1403b"
+                    build.pop("content_sha256", None)
+                    build["content_sha256"] = aggregator._sha256(
+                        aggregator._canonical_bytes(build))
+                    run["build_receipt_id"] = f"rr_synthetic_q8_{ordinal}"
+                    run["reused_build_receipt"] = build["build_receipt_id"]
+                    run["reused_build_receipt_content_sha256"] = build["content_sha256"]
+                    run.pop("content_sha256", None)
+                    run["content_sha256"] = aggregator._sha256(
+                        aggregator._canonical_bytes(run))
+                    manifest["build_receipt"] = build
+                    child["report"] = {
+                        "path": report_path.relative_to(fixture_root).as_posix(),
+                        "sha256": aggregator._sha256(report_raw), "size": len(report_raw),
+                        "raw_sidecar": {
+                            "path": sidecar_path.relative_to(fixture_root).as_posix(),
+                            "sha256": aggregator._sha256(sidecar_raw), "size": len(sidecar_raw),
+                        },
+                        "run_id": report["raw_evidence"]["run_id"],
+                        "schedule_sorted_checksum": report["raw_evidence"]["schedule_sorted_checksum"],
+                    }
+                    log_path = fixture_root / f"worker_{ordinal}.log"
+                    log_raw = f"synthetic q8 contract case {ordinal}\n".encode("utf-8")
+                    log_path.write_bytes(log_raw)
+                    child["worker_log"] = {
+                        "path": str(log_path), "sha256": aggregator._sha256(log_raw),
+                        "size": len(log_raw),
+                    }
+                    child["run_receipt_id"] = run["build_receipt_id"]
+                    child["run_receipt_sha256"] = run["content_sha256"]
+                    child["run_receipt"] = run
+                manifest_raw = write_json(aggregator.Q8_RESCUE_MANIFEST_PATH, manifest)
+                proof["rescue_execution_authority"]["manifest_sha256"] = (
+                    aggregator._sha256(manifest_raw))
+                write_json(aggregator.Q8_QUERY_PREFIX_PROOF_PATH, proof)
+                contract = aggregator._load_campaign_contract()
+                records, source = aggregator._load_report(
+                    fixture_root / "reporting/bioseq_benchmark_e2e/report_5.json",
+                    fixture_root / baseline["path"], contract)
+                ledger = {
+                    "schema_version": 1,
+                    "contract": aggregator._legacy_all_results_contract(
+                        aggregator._expected_all_results_contract(contract)),
+                    "matrix_contract": aggregator._expected_matrix_contract(),
+                    "wiring": aggregator._expected_wiring(),
+                    "campaign": {
+                        "name": aggregator.EXPECTED_LEDGER_CAMPAIGN_NAME,
+                        "campaign_id": contract["campaign_id"],
+                        "campaign_digest": contract["campaign_digest"],
+                        "status": "aggregation_in_progress",
+                        "last_updated_at": "2000-01-01T00:00:00Z",
+                        "execution_scope": "local_campaign",
+                        "remote_execution_invoked": False,
+                        "measurements_collected": 5, "benchmark_runs_started": 1,
+                        "results_are_publishable": False,
+                        "no_results_reason": "Synthetic partial contract-test fixture.",
+                    },
+                    "aggregation_state": {
+                        "campaign_id": contract["campaign_id"],
+                        "campaign_digest": contract["campaign_digest"],
+                        "canonical_result_cell_count": 1296,
+                        "canonical_membership_complete": False,
+                        "canonical_statuses_valid": True,
+                        "missing_canonical_cell_count": 1295,
+                        "processed_reports": [source], "report_count": 1,
+                        "raw_record_count": 5, "result_cell_count": 1,
+                        "accepted_cell_count": 1, "rejected_cell_count": 0,
+                        "invalid_cell_count": 0, "pending_cell_count": 0,
+                    },
+                    "results": aggregator._aggregate(records),
+                }
+                write_json(fixture_root / "Q8_RESULTS.yaml", ledger)
+                yield contract, fixture_root
 
-            manifest_raw = (json.dumps(
-                manifest, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode(
-                    "utf-8")
-            proof["rescue_execution_authority"]["manifest_sha256"] = (
-                hashlib.sha256(manifest_raw).hexdigest())
-            proof_raw = (json.dumps(
-                proof, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode(
-                    "utf-8")
-
-            repository_paths = {
-                aggregator.CAMPAIGN_CONTRACT_PATH,
-                aggregator.Q8_CONFIG_PATH,
-                aggregator.Q1024_CONTRACT_PATH,
-                aggregator.Q1024_CONFIG_PATH,
-                aggregator.Q8_QUERY_PREFIX_PROOF_PATH,
-                aggregator.Q8_RESCUE_MANIFEST_PATH,
-                ledger_path,
-                source_path,
-                REPOSITORY_ROOT / manifest["parent"]["path"],
-            }
-            for child in manifest["children"]:
-                repository_paths.update({
-                    REPOSITORY_ROOT / child["path"],
-                    REPOSITORY_ROOT / child["report"]["path"],
-                    REPOSITORY_ROOT / child["report"]["raw_sidecar"]["path"],
-                })
-            for entry in ledger["aggregation_state"]["processed_reports"]:
-                repository_paths.update({
-                    REPOSITORY_ROOT / entry["campaign_contract"],
-                    REPOSITORY_ROOT / entry["config"],
-                    REPOSITORY_ROOT / entry["report"],
-                    REPOSITORY_ROOT / entry["raw_sidecar"],
-                })
-            repository_bytes = {
-                path: aggregator._read_regular(
-                    path, f"synthetic q8 dependency {path.name}")
-                for path in repository_paths
-            }
-            repository_bytes.update({
-                aggregator.Q8_QUERY_PREFIX_PROOF_PATH: proof_raw,
-                aggregator.Q8_RESCUE_MANIFEST_PATH: manifest_raw,
-                ledger_path: ledger_raw,
-                source_path: source_raw,
-            })
-            cls._synthetic_q8_evidence_cache = (
-                repository_bytes, external_bytes)
-
-        repository_bytes, external_bytes = cls._synthetic_q8_evidence_cache
-
-        def read_repository_evidence(path, label):
-            exact_path = Path(path)
-            if exact_path not in repository_bytes:
-                raise AssertionError(
-                    f"synthetic q8 fixture omitted repository dependency: "
-                    f"{label} {exact_path}")
-            return repository_bytes[exact_path]
-
-        def read_external_evidence(path, label):
-            exact_path = Path(path)
-            if exact_path not in external_bytes:
-                raise AssertionError(
-                    f"synthetic q8 fixture omitted external dependency: "
-                    f"{label} {exact_path}")
-            return external_bytes[exact_path]
-
-        with mock.patch.object(
-                aggregator, "_read_regular",
-                side_effect=read_repository_evidence), mock.patch.object(
-                    aggregator, "_read_external_regular",
-                    side_effect=read_external_evidence):
-            yield aggregator._load_campaign_contract(), repository_bytes
 
     @staticmethod
     def _approved_tuple_row(
@@ -1804,17 +1949,417 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
                     aggregator._validate_selected_vulkan_stage_receipts(rows, True, True)
 
     @staticmethod
-    def _raw_record(report_number: int, repeat: int = 0):
-        path = (
-            REPOSITORY_ROOT
-            / f"reporting/bioseq_benchmark_e2e/report_{report_number}.raw.jsonl"
+    def _synthetic_receipts(report_path, report_raw, config_path, config_raw, ordinal=0):
+        """Build test-only receipt evidence; no real build or benchmark is claimed."""
+        artifact_raw = b"synthetic contract fixture, not an executable\n"
+        artifact = {
+            "path": str(aggregator.REPOSITORY_ROOT
+                        / "synthetic_build/bioseq/bioseq_benchmark_e2e"),
+            "sha256": hashlib.sha256(artifact_raw).hexdigest(),
+            "size": len(artifact_raw), "executable": True,
+        }
+        host = {"system": "Darwin", "machine": "arm64",
+                "node": "synthetic-contract-fixture", "release": "synthetic"}
+        build = {
+            "kind": "bioseq-build-receipt", "schema_revision": 2,
+            "build_receipt_id": "br_" + "a" * 32,
+            "created_at": 1.0, "status": "completed", "exit_code": 0,
+            "mode": "benchmark-e2e", "debug": False, "fresh": False,
+            "preset": "bench-e2e-opt", "preset_family": "e2e",
+            "binary_subdir": "bioseq",
+            "build_dir": str(aggregator.REPOSITORY_ROOT / "synthetic_build"),
+            "source_repository_root": str(aggregator.REPOSITORY_ROOT),
+            "source_commit": "synthetic-contract-fixture",
+            "source_graph_fingerprint": hashlib.sha256(artifact_raw).hexdigest(),
+            "host": host, "runtime_artifacts": [artifact],
+            "authorized_artifacts": [{
+                "relative_path": "bioseq/bioseq_benchmark_e2e",
+                "sha256": artifact["sha256"], "size": len(artifact_raw), "mode": 0o755,
+            }],
+            "configuration": {}, "artifact_counts": {"runtime_artifacts": 1},
+            "targets": ["bioseq_benchmark_e2e"], "target_timings": [],
+            "configure_completed_at": 1.0, "configure_duration_sec": 0.0,
+            "build_phase_started_at": 1.0, "build_phase_completed_at": 1.0,
+            "build_phase_duration_sec": 0.0, "build_timeout_sec": None,
+            "termination_evidence": None,
+        }
+        build["content_sha256"] = aggregator._sha256(aggregator._canonical_bytes(build))
+        run = {
+            "kind": "bioseq-run-receipt", "schema_revision": 1,
+            "build_receipt_id": f"rr_{ordinal + 1:032x}",
+            "created_at": 2.0, "status": "completed", "exit_code": 0,
+            "mode": "benchmark-e2e",
+            "bench_flags": ["--filter", "benchmark=bench_e2e"], "test_flags": [],
+            "bench_e2e_config": {"path": str(config_path),
+                                 "sha256": hashlib.sha256(config_raw).hexdigest()},
+            "reports": [{"path": str(report_path), "size": len(report_raw),
+                         "sha256": hashlib.sha256(report_raw).hexdigest()}],
+            "reused_build_receipt": build["build_receipt_id"],
+            "reused_build_receipt_content_sha256": build["content_sha256"],
+            "source_commit": build["source_commit"],
+            "source_graph_fingerprint": build["source_graph_fingerprint"],
+            "host": copy.deepcopy(host), "runtime_artifacts": [copy.deepcopy(artifact)],
+            "authorized_artifacts_sha256": aggregator._sha256(
+                aggregator._canonical_bytes(build["authorized_artifacts"])),
+        }
+        run["content_sha256"] = aggregator._sha256(aggregator._canonical_bytes(run))
+        return run, build
+
+    @staticmethod
+    def _synthetic_alignment_snapshot(attestation, interval_receipt):
+        """Construct the retained revision-2 row schema with explicit synthetic work."""
+        # Frozen v11 column layout, not current producer output or measured data.
+        column_spec = (
+            ('execution_id', 'number'),
+            ('backend_pid', 'number'),
+            ('database_oid', 'number'),
+            ('effective_cpu_workers', 'number'),
+            ('gpu_device_uuid', 'null'),
+            ('gpu_driver', 'null'),
+            ('gpu_pipeline_cache_policy', 'null'),
+            ('gpu_pipeline_cache_seed_sha256', 'null'),
+            ('gpu_pipeline_cache_seed_size', 'null'),
+            ('gpu_pipeline_cache_manifest_checksum', 'null'),
+            ('gpu_pipeline_cache_hit', 'null'),
+            ('scan_node_count', 'number'),
+            ('nested_alignment_executor_count', 'number'),
+            ('is_completed', 'boolean'),
+            ('is_partial', 'boolean'),
+            ('is_fully_drained', 'boolean'),
+            ('requested_backend', 'string'),
+            ('actual_backend', 'string'),
+            ('requested_target_index_source', 'string'),
+            ('actual_target_index_source', 'string'),
+            ('persisted_generation_id', 'number'),
+            ('persisted_source_identity', 'string'),
+            ('has_mixed_persisted_identity', 'boolean'),
+            ('stage', 'string'),
+            ('eligible_jobs', 'number'),
+            ('executed_host_io_jobs', 'number'),
+            ('executed_scalar_cpu_jobs', 'number'),
+            ('executed_simd_cpu_jobs', 'number'),
+            ('executed_vulkan_gpu_jobs', 'number'),
+            ('fallback_jobs', 'number'),
+            ('stage_host_wall_ns', 'number'),
+            ('stage_gpu_device_ns', 'number'),
+            ('target_rows', 'number'),
+            ('attempted_alignment_jobs', 'number'),
+            ('fully_attested_alignment_jobs', 'number'),
+            ('unattested_alignment_jobs', 'number'),
+            ('first_unattested_target_row', 'null'),
+            ('first_unattested_query_ordinal', 'null'),
+            ('cpu_prepared_index_builds', 'number'),
+            ('cpu_prepared_index_reuses', 'number'),
+            ('cpu_prepared_unique_keys', 'number'),
+            ('cpu_prepared_duplicate_build_attempts', 'number'),
+            ('cpu_prepared_key_set_checksum', 'null'),
+            ('cpu_prepared_build_set_checksum', 'null'),
+            ('has_operational_identity_conflict', 'boolean'),
+            ('persisted_index_rows', 'number'),
+            ('missing_persisted_index_rows', 'number'),
+            ('recomputed_target_index_rows', 'number'),
+            ('persisted_generation_read_sessions', 'number'),
+            ('persisted_relation_opens', 'number'),
+            ('persisted_index_scans', 'number'),
+            ('persisted_head_scans', 'number'),
+            ('persisted_head_rows_read', 'number'),
+            ('persisted_head_bytes_read', 'number'),
+            ('persisted_manifest_directory_scans', 'number'),
+            ('persisted_manifest_rows_read', 'number'),
+            ('persisted_manifest_bytes_read', 'number'),
+            ('persisted_directory_chunks_read', 'number'),
+            ('persisted_directory_bytes_read', 'number'),
+            ('persisted_metadata_repeated_reads', 'number'),
+            ('persisted_metadata_heap_rows_read', 'number'),
+            ('persisted_metadata_bytes_read', 'number'),
+            ('persisted_payload_heap_rows_read', 'number'),
+            ('persisted_payload_bytes_read', 'number'),
+            ('persisted_heap_rows_read', 'number'),
+            ('persisted_toast_values_read', 'number'),
+            ('persisted_detoast_bytes', 'number'),
+            ('persisted_explicit_copy_bytes', 'number'),
+            ('persisted_wanted_subkeys', 'number'),
+            ('persisted_read_subkeys', 'number'),
+            ('persisted_wanted_extents', 'number'),
+            ('persisted_wanted_chunks', 'number'),
+            ('persisted_skipped_rows', 'number'),
+            ('persisted_repeated_chunk_reads', 'number'),
+            ('persisted_extents_read', 'number'),
+            ('persisted_chunks_read', 'number'),
+            ('persisted_bytes_read', 'number'),
+            ('persisted_bulk_read_calls', 'number'),
+            ('persisted_planned_request_groups', 'number'),
+            ('persisted_executed_request_groups', 'number'),
+            ('persisted_range_scan_calls', 'number'),
+            ('persisted_skip_budget_rows', 'number'),
+            ('persisted_hash_build_calls', 'number'),
+            ('persisted_assembly_ns', 'number'),
+            ('pair_sort_calls', 'number'),
+            ('host_pair_materialization_calls', 'number'),
+            ('host_biological_hash_filter_calls', 'number'),
+            ('host_query_hash_readbacks', 'number'),
+            ('host_query_symbol_packing_calls', 'number'),
+            ('host_target_symbol_packing_calls', 'number'),
+            ('host_alignment_job_classification_calls', 'number'),
+            ('host_anchor_concatenation_calls', 'number'),
+            ('host_cigar_construction_calls', 'number'),
+            ('full_segment_hydrations', 'number'),
+            ('nthash_vector_batches', 'number'),
+            ('nthash_scalar_backend_branches', 'number'),
+            ('nthash_scalar_tail_symbols', 'number'),
+            ('nthash_masked_tail_lanes', 'number'),
+            ('simd_chain_vector_batches', 'number'),
+            ('simd_chain_backtrack_vector_batches', 'number'),
+            ('simd_chain_scalar_backend_branches', 'number'),
+            ('simd_chain_backtrack_scalar_branches', 'number'),
+            ('cpu_seed_positions_rejected_outside_collection', 'number'),
+            ('gpu_partition_select_dispatches', 'number'),
+            ('gpu_partition_anchor_merge_dispatches', 'number'),
+            ('gpu_index_build_candidates', 'number'),
+            ('gpu_index_build_canonical_emitted', 'number'),
+            ('gpu_index_build_overlap_duplicates_rejected', 'number'),
+            ('gpu_index_build_noncanonical_extras_rejected', 'number'),
+            ('gpu_index_build_surviving_extras', 'number'),
+            ('gpu_persisted_resident_uploads', 'number'),
+            ('gpu_persisted_resident_cache_hits', 'number'),
+            ('gpu_overlap_anchor_duplicates', 'number'),
+            ('gpu_seed_dispatches', 'number'),
+            ('gpu_chain_dispatches', 'number'),
+            ('gpu_chain_backtrack_dispatches', 'number'),
+            ('gpu_extend_dispatches', 'number'),
+            ('gpu_target_window_request_dispatches', 'number'),
+            ('gpu_target_window_logical_units_requested', 'number'),
+            ('host_target_window_requests_consumed', 'number'),
+            ('host_target_window_physical_units_read', 'number'),
+            ('host_target_window_remap_units_filled', 'number'),
+            ('host_target_window_packed_bytes_read', 'number'),
+            ('gpu_runtime_init_ns', 'number'),
+            ('gpu_pipeline_cache_loads', 'number'),
+            ('gpu_pipeline_cache_seed_bytes', 'number'),
+            ('gpu_pipeline_cache_load_ns', 'number'),
+            ('gpu_pipeline_creation_ns', 'number'),
+            ('gpu_submit_cpu_ns', 'number'),
+            ('gpu_wait_cpu_ns', 'number'),
+            ('gpu_ordinal_readback_cpu_ns', 'number'),
+            ('gpu_result_readback_cpu_ns', 'number'),
+            ('gpu_device_critical_path_ns', 'number'),
+            ('gpu_timestamp_query_failures', 'number'),
+            ('gpu_queue_submits', 'number'),
+            ('gpu_host_waits', 'number'),
+            ('gpu_buffer_creates', 'number'),
+            ('gpu_memory_allocations', 'number'),
+            ('gpu_pipeline_creates', 'number'),
+            ('backend_declines', 'number'),
+            ('backend_fallbacks', 'number'),
+            ('are_stats_saturated', 'boolean'),
+            ('persisted_source_parent_rows_read', 'number'),
+            ('persisted_source_catalog_rows_read', 'number'),
+            ('persisted_source_catalog_index_scans', 'number'),
+            ('persisted_source_fragment_rows_read', 'number'),
+            ('persisted_source_decoded_bp', 'number'),
+            ('persisted_pair_index_conversion_calls', 'number'),
+            ('persisted_segment_rebase_calls', 'number'),
+            ('cold_index_preparation', 'null'),
+            ('simd_execution_stats', 'object'),
         )
-        envelopes = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-        ]
-        records = [value for value in envelopes if "kind" not in value]
-        return copy.deepcopy(records[repeat])
+        columns = [{"name": name, "ordinal": ordinal, "json_type": kind}
+                   for ordinal, (name, kind) in enumerate(column_spec)]
+        defaults = {name: False if kind == "boolean" else
+                    "" if kind == "string" else None if kind == "null" else 0
+                    for name, kind in column_spec}
+        defaults.update({
+            "execution_id": 1, "backend_pid": 100, "database_oid": 42,
+            "effective_cpu_workers": 1, "scan_node_count": 1,
+            "is_completed": True, "is_fully_drained": True,
+            "target_rows": 1, "attempted_alignment_jobs": 8,
+            "fully_attested_alignment_jobs": 8,
+            "requested_backend": attestation["requested_backend"],
+            "actual_backend": attestation["actual_backend"],
+            "requested_target_index_source": attestation["requested_target_index_source"],
+            "actual_target_index_source": attestation["actual_target_index_source"],
+        })
+        simd = {name: 0 for name in aggregator.SIMD_EXECUTION_STATS_FIELDS}
+        simd.update({
+            "schema": "bioseq.simd_execution_stats", "revision": 6,
+            "requested_policy": "none", "observed_policy": "none",
+            "requested_alignment_algorithm": attestation["requested_simd_alignment_algorithm"],
+            "observed_alignment_algorithm": attestation["observed_simd_alignment_algorithm"],
+            "downstream_active_wall_available": True,
+            "downstream_work_saturated": False,
+            "downstream_active_wall_ns": interval_receipt["union_ns"],
+            "downstream_work_ns": interval_receipt["union_ns"],
+            "downstream_active_wall_invocation_count": 1,
+            "mapq_execution_available": True, "mapq_executed": True,
+            "mapq_execution_conflict": False,
+            "benchmark_e2e_interval_union": copy.deepcopy(interval_receipt),
+            "are_simd_chaining_policy_stats_saturated": False,
+            "block_aligner_execution_stats": copy.deepcopy(attestation["block_aligner_execution_stats"]),
+            "prefilter_execution_stats": copy.deepcopy(attestation["prefilter_execution_stats"]),
+        })
+        for prefix in ("requested", "observed"):
+            for axis in ("minimizer_algorithm", "chaining_algorithm", "base_alignment_algorithm"):
+                simd[f"{prefix}_{axis}"] = attestation[f"{prefix}_{axis}"]
+        rows = []
+        for stage in aggregator.ALIGNMENT_SNAPSHOT_STAGES:
+            row = copy.deepcopy(defaults)
+            row["stage"] = stage
+            if stage in {"query_sketch", "seed_lookup", "chain_score", "chain_backtrack",
+                         "mapq", "left_extension", "gap_extension", "right_extension"}:
+                row["eligible_jobs"] = 8
+                extension = stage.endswith("_extension")
+                engine = ("simd_cpu" if extension and
+                          attestation["observed_base_alignment_algorithm"] == "block_aligner"
+                          else "scalar_cpu")
+                row[f"executed_{engine}_jobs"] = 8
+            row["simd_execution_stats"] = copy.deepcopy(simd)
+            rows.append([row[column["name"]] for column in columns])
+        return {
+            "schema": "bioseq.last_alignment_execution_stats/raw-rowset", "schema_revision": 2,
+            "expected_column_count": 151,
+            "expected_row_count": len(rows), "actual_row_count": len(rows),
+            "columns": columns, "rows": rows,
+        }
+
+    @classmethod
+    def _raw_record(cls, report_number: int, repeat: int = 0):
+        """Return synthetic v11 evidence, independent of mutable local report numbers.
+
+        The numbers identify five test cases only. All timings, session IDs and
+        receipts below are invented; these records never authorize publication.
+        """
+        if report_number not in (5, 9, 10, 11, 12) or repeat not in range(5):
+            raise ValueError("unknown synthetic algorithm-matrix fixture")
+        baseline = report_number == 5
+        if baseline:
+            config = json.loads((REPOSITORY_ROOT /
+                "bench/e2e_algorithm_matrix_q8_shards/"
+                "bench_e2e_algorithm_matrix_q8_campaign_shard_m2_d4_k15_w10_isolated_minimap2_no_index.json"
+                ).read_text(encoding="utf-8"))
+            algorithm = "minimap2_no_index"
+            params = {name: value["default"] for name, value in config["params"][algorithm].items()}
+            test_case = "M2_D4_K15_W10"
+        else:
+            manifest = json.loads(aggregator.Q8_RESCUE_MANIFEST_PATH.read_text(encoding="utf-8"))
+            cell = next(child["execution_cell"] for child in manifest["children"]
+                        if child["report"]["path"].endswith(f"/report_{report_number}.json"))
+            algorithm, params, test_case = cell["algorithm"], copy.deepcopy(cell["params"]), cell["test_case"]
+        outer, union = report_number * 1000 + repeat * 10, 100 + repeat * 3
+        block = not baseline and params["base_alignment_algorithm"] == "block_aligner"
+        backend = "mixed_cpu" if block else "scalar_cpu"
+        requested = {f"requested_{axis}": "" if baseline else params[axis]
+                     for axis in ("minimizer_algorithm", "chaining_algorithm", "base_alignment_algorithm")}
+        attestation = cls._unexecuted_attestation()
+        attestation["persisted_gpu_operation_stats_accepted"] = None
+        if not baseline:
+            prefilter = {name: 0 for name in aggregator.PREFILTER_EXECUTION_STATS_FIELDS}
+            prefilter.update(available=False, saturated=False)
+            block_stats = {name: 0 for name in aggregator.BLOCK_ALIGNER_EXECUTION_STATS_FIELDS}
+            if block:
+                block_stats.update(available=1, consistent=1, executed_calls=8,
+                    nonempty_calls=8, nonempty_calls_with_simd=8,
+                    simd_dp_vector_batches=8, simd_dp_cells=64)
+            attestation.update({
+                **requested,
+                **{name.replace("requested_", "observed_", 1): value for name, value in requested.items()},
+                "requested_backend": backend, "actual_backend": backend,
+                "requested_target_index_source": "recomputed", "actual_target_index_source": "recomputed",
+                "requested_simd_chaining_policy": "none", "observed_simd_chaining_policy": "none",
+                "requested_simd_alignment_algorithm": "block_aligner" if block else "none",
+                "observed_simd_alignment_algorithm": "block_aligner" if block else "none",
+                "backend_declines": 0, "backend_fallbacks": 0, "stats_saturated": 0,
+                "stage_engine_matrix_valid": 1, "validation_present": 1,
+                "validation_attached_to_measurement": 1, "validation_accepted": 1,
+                "mapq_execution_available": True, "mapq_executed": True, "mapq_execution_conflict": False,
+                "prefilter_execution_stats": prefilter, "block_aligner_execution_stats": block_stats,
+                "hash_major_index_reader_stats": {
+                    "backend_fallbacks": 0, "generic_source_fallback_calls": 0, "failures": 0},
+                "minimizer_fragment_reader_stats": {
+                    "fragment_native_compact_direct_fallbacks": 0,
+                    "fragment_native_compact_direct_rejected_posting_reads": 0,
+                    "fragment_native_rejected_control_validation_bytes": 0,
+                    "fragment_native_rejected_control_validation_ns": 0,
+                    "file_action_identity_mismatches": 0},
+            })
+        if baseline:
+            receipt = {
+                "source": "minimap2_phase_receipt_v2", "available": True, "union_ns": union,
+                "cigar_union_ns": union - 10, "mapq_union_ns": 10,
+                "cigar_interval_count": 8, "mapq_interval_count": 8, "child_pid": 200,
+                "checksum": "1" * 16, "raw_intervals_embedded": False,
+                "artifact": {"path": "synthetic/minimap2_receipt.json",
+                    "digest_algorithm": "fnv-1a-64_raw_receipt_bytes", "digest": "2" * 16},
+                "validated_summary": {
+                    "schema": "bioseq.minimap2.e2e-phase-receipt/validated-summary",
+                    "version": 2, "receipt_schema_version": 2,
+                    "child_lifetime_envelope_contained": True,
+                    "framework_repeat_association": "program_order",
+                    "framework_outer_timestamp_containment_claimed": False,
+                    "validity": {name: True for name in aggregator.REQUIRED_MINIMAP_VALIDITY},
+                },
+            }
+        else:
+            cigar_scope = ("block_dp" if block else "alignment_dp") + (
+                "_trace_storage_traceback_cigar_assembly_result_materialization_inclusive")
+            receipt = {
+                "source": "bioseq_postgresql_revision6", "stats_revision": 6,
+                "available": True, "union_ns": union, "interval_count": 16,
+                "cigar_interval_count": 8, "mapq_interval_count": 8,
+                "finalization_count": 1, "failure_code": "none",
+                "physical_interval_semantics": "half_open_monotonic_same_statement_union",
+                "origins": [{"logical_target_row": 1, "query_ordinal": ordinal,
+                    "kind": kind, "algorithm": params["base_alignment_algorithm"] if kind == "cigar" else "cpu_mapping_quality",
+                    "inclusive_work": cigar_scope if kind == "cigar" else "compute_mapping_quality_only",
+                    "interval_count": 1} for ordinal in range(8) for kind in ("cigar", "mapq")],
+            }
+        return {
+            "schema": 1, "benchmark": "bench_e2e",
+            "payload_schema": "bioseq.e2e.raw-sample", "payload_schema_version": 11,
+            "fixture_purpose": "Synthetic contract-test evidence; never a measured benchmark result.",
+            "test_case": test_case, "algorithm": algorithm, "params": params,
+            "group_index": 0, "group_count": 1, "tuple_index": 0, "repeat": repeat,
+            "record_checksum": "0" * 16,
+            "pairing": {"dataset_key": "matrix_2gbp_dna4_k15_w10", "alphabet": "dna4",
+                "target_size_bp": 2_000_000_000, "kmer_size": 15, "window_size": 10,
+                "mode": "no_index", "index_key": "none", "repeat_field": "framework_envelope.repeat"},
+            "tuple_status": {"accepted": 1, "disposition": "accepted", "phase": "completed",
+                "correctness_evaluated": 1, "rejection_reason": "", "behavior_difference_comment": "",
+                **requested, "sql_diagnostics": {"result_status": "", "sqlstate": "", "primary": "", "detail": ""}},
+            "correctness": {"evaluated": 1, "found": True, "match_count": 8, "expected_match_count": 8,
+                "correct_match_count": 8, "exact_primary_count_accepted": 1,
+                "strand_result_count": 8, "correct_strand_count": 8,
+                "cigar_result_count": 8, "correct_cigar_count": 8, "cigar_replay_count": 8,
+                "mapq_result_count": 8, "max_abs_offset_bp": 0},
+            "benchmark_shape": {"expected_target_rows": None if baseline else 1, "expected_query_rows": 8,
+                "expected_alignment_jobs": 8, "actual_target_rows": None if baseline else 1,
+                "actual_alignment_jobs": 8},
+            "postgres": None if baseline else {"restart_identity": {"after": {
+                "postmaster_start": "synthetic-postmaster", "backend_pid": 100, "database_oid": 42}}},
+            "outer_e2e_ns": outer, "index_and_map_ns": outer,
+            "cigar_or_mapq_interval_union_ns": union,
+            "outer_e2e_minus_cigar_or_mapq_union_ns": outer - union,
+            "downstream_active_wall_ns": None if baseline else union,
+            "downstream_work_ns": None if baseline else union,
+            "downstream_active_wall_available": None if baseline else True,
+            "downstream_active_wall_invocation_count": None if baseline else 1,
+            "downstream_active_wall_unavailable_invocation_count": None if baseline else 0,
+            "downstream_work_saturated": None if baseline else False,
+            "interval_receipt": receipt,
+            "attestation": attestation, "persisted_gpu_operation_stats": None,
+            "alignment_snapshot": None if baseline else cls._synthetic_alignment_snapshot(attestation, receipt),
+            "e2e_interval_metric_contract": {
+                "schema": "bioseq.e2e.interval-metrics", "version": 2,
+                "framework_finalize_adjusted_metric": True,
+                "validated_inner_envelope": {"name": "measured_region_ns_manual", "value_ns": outer,
+                                             "union_not_greater": True},
+                "duration_clock_domains": {
+                    "absolute_timestamp_domain_equality_claimed": False,
+                    "same_repeat_proof": "framework_program_order_and_raw_envelope",
+                    "framework_outer": {"clock": "bioseq.instrumentation.clock::now_ns", "unit": "ns", "value_kind": "duration"},
+                    "interval_union": {"clock": "helper-declared CLOCK_MONOTONIC" if baseline else "bioseq.instrumentation.clock::now_ns",
+                        "unit": "ns", "value_kind": "duration", "rate_compatibility": "same_kernel_monotonic_nanosecond_rate" if baseline else "same_clock_implementation"},
+                },
+            },
+        }
 
     @staticmethod
     def _validate_q8_record(record, source=None):
@@ -2239,44 +2784,41 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
         self.assertIsNone(args.approved_command)
         self.assertEqual(args.query_count, 32)
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _synthetic_manifest_config():
+        """Provide a real temporary manifest-authorized path without local outputs."""
+        with tempfile.TemporaryDirectory(prefix="bioseq-contract-config-") as temporary:
+            root = Path(temporary)
+            config_path = root / "bench/synthetic_observed_singleton.json"
+            config_path.parent.mkdir()
+            config_path.write_text('{"purpose":"synthetic path contract fixture"}\n', encoding="utf-8")
+            entry = {"path": "bench/synthetic_observed_singleton.json",
+                     "execution_authority": "observed_rung_singleton"}
+            with mock.patch.object(aggregator, "REPOSITORY_ROOT", root):
+                yield config_path, entry
+
     def test_observed_rung_accepts_exact_manifest_resolved_absolute_config(self):
-        config_entry = {
-            "path": (
-                "bench/e2e_algorithm_matrix_q2_observed_singletons/"
-                "bench_e2e_algorithm_matrix_q2_observed_singleton_"
-                "0725_925f4f05e3a6c239.json"),
-            "execution_authority": "observed_rung_singleton",
-        }
-        config_path = aggregator._canonical_repository_file(
-            config_entry["path"], "observed rung manifest config")
-        with mock.patch.object(
-                aggregator, "ACTIVE_CAMPAIGN_PROFILE", "observed_rung"):
-            self.assertEqual(
-                aggregator._sealed_report_config_location(
-                    str(config_path), config_path, config_entry,
-                    "observed rung report config location"),
-                config_path,
-            )
+        with self._synthetic_manifest_config() as (config_path, config_entry):
+            with mock.patch.object(aggregator, "ACTIVE_CAMPAIGN_PROFILE", "observed_rung"):
+                self.assertEqual(
+                    aggregator._sealed_report_config_location(
+                        str(config_path), config_path, config_entry,
+                        "observed rung report config location"),
+                    config_path,
+                )
 
     def test_observed_rung_rejects_wrong_absolute_config(self):
-        config_entry = {
-            "path": (
-                "bench/e2e_algorithm_matrix_q2_observed_singletons/"
-                "bench_e2e_algorithm_matrix_q2_observed_singleton_"
-                "0725_925f4f05e3a6c239.json"),
-            "execution_authority": "observed_rung_singleton",
-        }
-        config_path = aggregator._canonical_repository_file(
-            config_entry["path"], "observed rung manifest config")
-        wrong_path = aggregator.Q1024_CONFIG_PATH
-        with mock.patch.object(
-                aggregator, "ACTIVE_CAMPAIGN_PROFILE", "observed_rung"):
-            with self.assertRaisesRegex(
-                    aggregator.ContractError,
-                    "absolute spelling is not manifest authority"):
-                aggregator._sealed_report_config_location(
-                    str(wrong_path), config_path, config_entry,
-                    "observed rung report config location")
+        with self._synthetic_manifest_config() as (config_path, config_entry):
+            wrong_path = config_path.with_name("different_singleton.json")
+            wrong_path.write_text("{}\n", encoding="utf-8")
+            with mock.patch.object(aggregator, "ACTIVE_CAMPAIGN_PROFILE", "observed_rung"):
+                with self.assertRaisesRegex(
+                        aggregator.ContractError,
+                        "absolute spelling is not manifest authority"):
+                    aggregator._sealed_report_config_location(
+                        str(wrong_path), config_path, config_entry,
+                        "observed rung report config location")
 
     def test_observed_rung_permits_only_dna5_reference_scalar_exception(self):
         dna5_reference_scalar = [
@@ -2542,9 +3084,9 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
     def test_q8_rescue_union_reuses_core_raw_and_parity_validation(self):
         aggregator._activate_campaign_profile("Q8_RESULTS.yaml")
         with self._load_q8_contract_with_synthetic_source_evidence() as loaded:
-            contract, repository_bytes = loaded
+            contract, fixture_root = loaded
             document, _ = aggregator._read_json_file(
-                REPOSITORY_ROOT / "Q8_RESULTS.yaml", "Q8_RESULTS.yaml")
+                fixture_root / "Q8_RESULTS.yaml", "Q8_RESULTS.yaml")
             aggregator._refresh_q8_ledger_proof_binding(document, contract)
             aggregator._validate_all_results(document, contract)
             records, processed = aggregator._load_existing_reports(
@@ -2552,14 +3094,13 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
             processed_paths = {entry["report"] for entry in processed}
             for report_number in (9, 10, 11, 12):
                 report_path = (
-                    REPOSITORY_ROOT
+                    fixture_root
                     / f"reporting/bioseq_benchmark_e2e/report_{report_number}.json"
                 )
-                report = json.loads(
-                    repository_bytes[report_path].decode("utf-8"))
-                config_path = Path(
-                    report["benchmarks"]["bench_e2e"]["location"])
-                if report_path.relative_to(REPOSITORY_ROOT).as_posix() \
+                report, _ = aggregator._read_json_file(
+                    report_path, "synthetic q8 report")
+                config_path = fixture_root / report["benchmarks"]["bench_e2e"]["location"]
+                if report_path.relative_to(fixture_root).as_posix() \
                         in processed_paths:
                     continue
                 loaded_records, source = aggregator._load_report(
@@ -2583,16 +3124,15 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
             )
             for row in rows
         }
-        self.assertEqual(
-            sorted(p50_by_stable_key.values()),
-            sorted([
-                (41910820292, 41907189292),
-                (214237952792, 214214777003),
-                (217095317542, 217091647336),
-                (1786874695375, 1786715083583),
-                (1787744955708, 1787583535460),
-            ]),
-        )
+        # Invented timings: outer=case*1000+repeat*10, union=100+repeat*3.
+        # Check identity as well as the median; these are never measurements.
+        self.assertEqual(p50_by_stable_key, {
+            ("minimap2", None, None): (5020, 4914),
+            ("bioseq", "minimizers_per_fragment", "ksw2"): (9020, 8914),
+            ("bioseq", "minimizers_per_fragment", "block_aligner"): (10020, 9914),
+            ("bioseq", "minimizers_per_sequence", "ksw2"): (11020, 10914),
+            ("bioseq", "minimizers_per_sequence", "block_aligner"): (12020, 11914),
+        })
         self.assertEqual(1296 - len(rows), 1291)
         self.assertEqual(
             [entry["report"] for entry in processed],
@@ -2619,68 +3159,61 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
             for entry in rescue_entries
         }
         self.assertEqual(receipt_ids, {
-            "rr_f5c3b0b95787c1ac2783ef782b0d5e21",
-            "rr_3e7eab959234858337df1ebae6484516",
-            "rr_f5a7f58b35eeee20a7d4b3d18daf7ed9",
-            "rr_3d8c2f2baecf4642cd23585bb4250840",
+            "rr_synthetic_q8_0", "rr_synthetic_q8_1",
+            "rr_synthetic_q8_2", "rr_synthetic_q8_3",
         })
 
     def test_run_receipt_accepts_only_exact_optional_debug_instrumentation(self):
-        manifest = json.loads(
-            aggregator.Q8_RESCUE_MANIFEST_PATH.read_text(encoding="utf-8"))
-        child = manifest["children"][0]
-        build_receipt = manifest["build_receipt"]
-        report_path = REPOSITORY_ROOT / child["report"]["path"]
-        config_path = REPOSITORY_ROOT / child["path"]
+        with tempfile.TemporaryDirectory(prefix="bioseq-contract-receipts-") as temporary:
+            root = Path(temporary)
+            report_path, config_path = root / "report.json", root / "config.json"
+            report_raw = b'{"purpose":"synthetic run-receipt fixture"}\n'
+            config_raw = b'{"purpose":"synthetic config fixture"}\n'
+            report_path.write_bytes(report_raw)
+            config_path.write_bytes(config_raw)
+            with mock.patch.object(aggregator, "REPOSITORY_ROOT", root):
+                run_receipt, build_receipt = self._synthetic_receipts(
+                    report_path, report_raw, config_path, config_raw)
 
-        def receipt_with_flags(flags):
-            receipt = copy.deepcopy(child["run_receipt"])
-            receipt["bench_flags"] = flags
-            payload = copy.deepcopy(receipt)
-            del payload["content_sha256"]
-            receipt["content_sha256"] = aggregator._sha256(
-                aggregator._canonical_bytes(payload))
-            return receipt
+                def receipt_with_flags(flags):
+                    receipt = copy.deepcopy(run_receipt)
+                    receipt["bench_flags"] = flags
+                    del receipt["content_sha256"]
+                    receipt["content_sha256"] = aggregator._sha256(
+                        aggregator._canonical_bytes(receipt))
+                    return receipt
 
-        baseline, _ = aggregator._validate_run_receipt_snapshot(
-            child["run_receipt"],
-            build_receipt,
-            report_path,
-            config_path,
-            "baseline run receipt",
-        )
-        self.assertEqual(
-            baseline["bench_flags"],
-            ["--filter", "benchmark=bench_e2e"],
-        )
+                baseline, _ = aggregator._validate_run_receipt_snapshot(
+                    run_receipt, build_receipt, report_path, config_path,
+                    "synthetic baseline run receipt")
+                self.assertEqual(baseline["bench_flags"], ["--filter", "benchmark=bench_e2e"])
+                instrumented = receipt_with_flags(
+                    ["--filter", "benchmark=bench_e2e", "--debug"])
+                validated, _ = aggregator._validate_run_receipt_snapshot(
+                    instrumented, build_receipt, report_path, config_path,
+                    "synthetic instrumented run receipt")
+                self.assertEqual(validated["bench_flags"], instrumented["bench_flags"])
 
-        instrumented = receipt_with_flags(
-            ["--filter", "benchmark=bench_e2e", "--debug"])
-        validated, _ = aggregator._validate_run_receipt_snapshot(
-            instrumented,
-            build_receipt,
-            report_path,
-            config_path,
-            "instrumented run receipt",
-        )
-        self.assertEqual(validated["bench_flags"], instrumented["bench_flags"])
-
-        invalid_flags = (
-            ["--debug", "--filter", "benchmark=bench_e2e"],
-            ["--filter", "benchmark=bench_e2e", "--debug", "--extra"],
-            ["--filter", "benchmark=bench_e2e,bench_sort_scan", "--debug"],
-        )
-        for flags in invalid_flags:
-            with self.subTest(flags=flags), self.assertRaisesRegex(
-                    aggregator.ContractError,
-                    "does not bind the exact report/config/build execution"):
-                aggregator._validate_run_receipt_snapshot(
-                    receipt_with_flags(flags),
-                    build_receipt,
-                    report_path,
-                    config_path,
-                    "invalid instrumented run receipt",
+                invalid_flags = (
+                    ["--debug", "--filter", "benchmark=bench_e2e"],
+                    ["--filter", "benchmark=bench_e2e", "--debug", "--extra"],
+                    ["--filter", "benchmark=bench_e2e,bench_sort_scan", "--debug"],
                 )
+                for flags in invalid_flags:
+                    with self.subTest(flags=flags), self.assertRaisesRegex(
+                            aggregator.ContractError,
+                            "does not bind the exact report/config/build execution"):
+                        aggregator._validate_run_receipt_snapshot(
+                            receipt_with_flags(flags), build_receipt, report_path,
+                            config_path, "synthetic invalid instrumented run receipt")
+
+                # A self-consistent seal cannot authorize different report bytes.
+                report_path.write_bytes(report_raw + b" ")
+                with self.assertRaisesRegex(aggregator.ContractError,
+                        "does not bind the exact report/config/build execution"):
+                    aggregator._validate_run_receipt_snapshot(
+                        run_receipt, build_receipt, report_path, config_path,
+                        "synthetic changed report receipt")
 
     def test_closed_attestation_rejects_independent_report9_corruptions(self):
         mutations = {

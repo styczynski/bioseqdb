@@ -717,7 +717,8 @@ template<preservation_record_destination Destination>
             if (!preservation_integer<std::int64_t>(text)) return std::unexpected("invalid preserved template length");
         } else if (key != "reference_name" && key != "mate_reference") {
             const auto number = preservation_integer<std::uint64_t>(text);
-            if (!number || (key == "flag" && *number > 4095) || (key == "mapq" && *number > 255))
+            if (!number || (key == "flag" && *number > std::numeric_limits<std::uint16_t>::max())
+                || (key == "mapq" && *number > 255))
                 return std::unexpected("invalid preserved alignment coordinate/flag/MAPQ");
         }
     }
@@ -848,6 +849,18 @@ struct text_record_shape {
     std::array<std::uint64_t, 2> observed_ranks{};
     bool header_is_null{};
 
+private:
+    std::span<const canonical_field> scalar_fields_;
+    std::string_view visible_alphabet_;
+    std::size_t scalar_count_{};
+    bool header_is_empty_{};
+
+public:
+    /** Borrow the visible envelope only until finish_record validates and releases it. */
+    explicit text_record_shape(const canonical_header& header)
+        : scalar_fields_(header.fields), visible_alphabet_(header.alphabet),
+          header_is_empty_(header.header_is_empty) {}
+
     /** Accept text-only scalar events; schema validation remains in the shared decoder. */
     [[nodiscard]] std::expected<void, std::string> field(std::string_view name, std::optional<std::string_view> value) {
         if (name == "header_null") header_is_null = value == "true";
@@ -877,9 +890,15 @@ struct text_record_shape {
             return std::unexpected("text preservation rank payload is truncated");
         return {};
     }
-    /** Text metadata is type-checked by the shared grammar and not retained. */
-    [[nodiscard]] std::expected<void, std::string> metadata(std::string_view, std::string_view,
-            std::optional<std::string_view>, bool) { return {}; }
+    /** Match every declared scalar to its visible bracket in order, without copying values. */
+    [[nodiscard]] std::expected<void, std::string> metadata(std::string_view name, std::string_view,
+            std::optional<std::string_view>, bool types_only) {
+        if (!types_only || scalar_count_ == scalar_fields_.size()
+            || scalar_fields_[scalar_count_].name != name)
+            return std::unexpected("canonical scalar descriptors disagree with visible metadata fields");
+        ++scalar_count_;
+        return {};
+    }
     /** Text envelopes never contain native auxiliary payloads. */
     [[nodiscard]] std::expected<void, std::string> begin_auxiliary(bool, std::array<char, 2>, char, char) {
         return std::unexpected("text preservation cannot contain alignment auxiliary fields");
@@ -908,6 +927,17 @@ struct text_record_shape {
     [[nodiscard]] std::expected<void, std::string> finish_record() {
         if (sequences[0].storage != preservation_storage::native)
             return std::unexpected("text biological sequence must use native storage");
+        if (!sequences[0].alphabet_code
+            || supported_biological_alphabets::name_of_alphabet_code(*sequences[0].alphabet_code)
+                != visible_alphabet_)
+            return std::unexpected("canonical visible alphabet disagrees with sequence descriptor");
+        if (header_is_null && !header_is_empty_)
+            return std::unexpected("canonical NULL header has a nonempty identifier");
+        if (scalar_count_ != scalar_fields_.size())
+            return std::unexpected("canonical scalar descriptors omit visible metadata fields");
+        // Preflight returns this shape after its decoded envelope owner is destroyed.
+        scalar_fields_ = {};
+        visible_alphabet_ = {};
         return {};
     }
 };

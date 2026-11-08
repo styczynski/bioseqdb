@@ -816,6 +816,145 @@ TEST_CASE("exact SIMD pipe borrows whole native-width ranges for resident vector
             .kmer_15_window_10_byte_8_uint32_hash_kernel_calls > 0u));
 }
 
+TEST_CASE("Raw exact pairs preserve short minima and agree on one eligible selection route",
+          "[component:bioseq][layer:unit][feature:seeding][resource:highway]") {
+    using packed_sequence = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<packed_sequence>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<std::uint64_t, 2u>;
+    using minimizer_type = ::bioseq::simd::minimizer_representation<15u, 32u>;
+    using collector_type = ::bioseq::simd::basic_sketch_collector<minimizer_type>;
+    namespace entry = ::bioseq::simd::pipe_entry_detail;
+
+    ::bioseq::simd::minimap2_parameters params;
+    bind_fixed_highway(params);
+    params.minimizer_algorithm = ::bioseq::simd::minimizer_algorithm::two_stack_nthash;
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    constexpr std::array<std::array<std::size_t, 2u>, 4u> length_cases{{
+        {16u, 383u}, {383u, 18u}, {16u, 18u}, {383u, 383u},
+    }};
+    for (const auto lengths : length_cases) {
+        const std::size_t query_length = lengths[0];
+        const std::size_t target_length = lengths[1];
+        auto query_bases = vulkan_pipeline_test_support::make_dna4(query_length, 0x51A1D5EEDu);
+        auto target_bases = vulkan_pipeline_test_support::make_dna4(target_length, 0x51A1D5EEDu);
+        range_type query_range(query_bases);
+        range_type target_range(target_bases);
+        auto resident_query = bioseq::storage::make_resident_lazy_sequence(query_range);
+        auto resident_target = bioseq::storage::make_resident_lazy_sequence(target_range);
+        bioseq::storage::lazy_sequence<packed_sequence, scanner_type> fragmented_query{
+            scanner_type::from_range(query_range)};
+        bioseq::storage::lazy_sequence<packed_sequence, scanner_type> fragmented_target{
+            scanner_type::from_range(target_range)};
+        std::size_t payload_allocations = 0u;
+        const bioseq::storage::sequence_payload_allocation_observer observer{
+            .context = std::addressof(payload_allocations),
+            .publish = [](void* context,
+                          const bioseq::storage::sequence_payload_allocation_event&,
+                          std::uint64_t, std::uint64_t) noexcept {
+                ++*static_cast<std::size_t*>(context);
+            },
+        };
+        const auto resident_query_view = bioseq::storage::make_lazy_sequence_view(resident_query)
+            .with_payload_allocation_observer(std::addressof(observer));
+        const auto resident_target_view = bioseq::storage::make_lazy_sequence_view(resident_target)
+            .with_payload_allocation_observer(std::addressof(observer));
+        const auto fragmented_query_view = bioseq::storage::make_lazy_sequence_view(fragmented_query)
+            .with_payload_allocation_observer(std::addressof(observer));
+        const auto fragmented_target_view = bioseq::storage::make_lazy_sequence_view(fragmented_target)
+            .with_payload_allocation_observer(std::addressof(observer));
+        REQUIRE(try_minimizer_resident_packed(
+            resident_query_view, 0u, query_length).has_value());
+        REQUIRE(try_minimizer_resident_packed(
+            resident_target_view, 0u, target_length).has_value());
+        REQUIRE_FALSE(try_minimizer_resident_packed(
+            fragmented_query_view, 0u, query_length).has_value());
+        REQUIRE_FALSE(try_minimizer_resident_packed(
+            fragmented_target_view, 0u, target_length).has_value());
+
+        collector_type query_continuation;
+        collector_type target_continuation;
+        const auto baseline_reserved_before = admission.reserved_bytes();
+        CAPTURE(query_length, target_length);
+        try {
+            (void)minimizer_dispatch_range<minimizer_type>(
+                query_continuation, resident_query_view, 0u, query_length, 10u, 15u,
+                minimizer_sketch_backend::exact_simd,
+                exact_simd_range_route::require_continuation, params.highway_kernels);
+            (void)minimizer_dispatch_range<minimizer_type>(
+                target_continuation, resident_target_view, 0u, target_length, 10u, 15u,
+                minimizer_sketch_backend::exact_simd,
+                exact_simd_range_route::require_continuation, params.highway_kernels);
+        } catch (const ::bioseq::simd::exact_simd_runtime_error& error) {
+            REQUIRE(error.status() == ::bioseq::simd::
+                two_stack_continuation_status::unsupported_vector_shape);
+            REQUIRE(admission.reserved_bytes() == baseline_reserved_before);
+            SKIP("generated fixed target lacks the required continuation vector shape");
+        }
+        REQUIRE(admission.reserved_bytes() == baseline_reserved_before);
+        REQUIRE_FALSE(query_continuation.extract_sketches_data().empty());
+        REQUIRE_FALSE(target_continuation.extract_sketches_data().empty());
+        for (const bool use_fragmented_query : std::array{false, true}) {
+            for (const bool use_fragmented_target : std::array{false, true}) {
+                CAPTURE(query_length, target_length, use_fragmented_query, use_fragmented_target);
+                auto query_view = use_fragmented_query ? fragmented_query_view : resident_query_view;
+                auto target_view = use_fragmented_target ? fragmented_target_view : resident_target_view;
+                const auto route = entry::raw_exact_simd_pair_route<minimizer_type>(
+                    query_view, target_view, 10u, 15u);
+                const bool expect_resident = query_length >= 24u && target_length >= 24u &&
+                    !use_fragmented_query && !use_fragmented_target;
+                REQUIRE(route == (expect_resident
+                    ? exact_simd_range_route::require_resident_vector_stream
+                    : exact_simd_range_route::require_continuation));
+                const auto reserved_before = admission.reserved_bytes();
+                const std::size_t allocations_before = payload_allocations;
+                collector_type query_collector;
+                collector_type target_collector;
+                entry::minimizer_sketch_execution_stats query_stats{};
+                entry::minimizer_sketch_execution_stats target_stats{};
+                try {
+                    query_stats = entry::sketch_into_collector<minimizer_type>(
+                        query_collector, query_view, 10u, 15u, params, route);
+                    target_stats = entry::sketch_into_collector<minimizer_type>(
+                        target_collector, target_view, 10u, 15u, params, route);
+                } catch (const ::bioseq::simd::exact_simd_runtime_error& error) {
+                    REQUIRE(error.status() == ::bioseq::simd::
+                        two_stack_continuation_status::unsupported_vector_shape);
+                    REQUIRE(admission.reserved_bytes() == reserved_before);
+                    SKIP("generated fixed target lacks the required vector shape");
+                }
+                REQUIRE(admission.reserved_bytes() == reserved_before);
+                REQUIRE(payload_allocations - allocations_before ==
+                    static_cast<std::size_t>(use_fragmented_query) +
+                    static_cast<std::size_t>(use_fragmented_target));
+                REQUIRE(query_stats.exact_simd_available);
+                REQUIRE(target_stats.exact_simd_available);
+                REQUIRE(exact_simd_stats_share_selection_route(
+                    query_stats.exact_simd, target_stats.exact_simd));
+                REQUIRE(query_stats.exact_simd.resident_vector_stream_kernel_calls ==
+                    static_cast<std::uint64_t>(expect_resident));
+                REQUIRE(target_stats.exact_simd.resident_vector_stream_kernel_calls ==
+                    static_cast<std::uint64_t>(expect_resident));
+                REQUIRE_FALSE(query_collector.extract_sketches_data().empty());
+                REQUIRE_FALSE(target_collector.extract_sketches_data().empty());
+                if (!expect_resident) {
+                    const auto require_equal_records = [](
+                            const collector_type& actual, const collector_type& expected) {
+                        const auto& actual_records = actual.extract_sketches_data();
+                        const auto& expected_records = expected.extract_sketches_data();
+                        REQUIRE(actual_records.size() == expected_records.size());
+                        for (std::size_t index = 0u; index < actual_records.size(); ++index) {
+                            CAPTURE(index);
+                            REQUIRE(actual_records[index].raw_value() == expected_records[index].raw_value());
+                        }
+                    };
+                    require_equal_records(query_collector, query_continuation);
+                    require_equal_records(target_collector, target_continuation);
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with scalar-identical records",
           "[component:bioseq][layer:unit][feature:seeding][resource:highway]") {
     using namespace ::bioseq::simd;
@@ -997,6 +1136,10 @@ TEST_CASE("bounded ntHash preserves native widths across resident and materializ
     check_bounded_nthash_native_coordinates<seq::dna5, std::uint16_t>();
     check_bounded_nthash_native_coordinates<seq::dna5, std::uint32_t>();
     check_bounded_nthash_native_coordinates<seq::dna5, std::uint64_t>();
+    check_bounded_nthash_native_coordinates<seq::dna15, std::uint8_t>();
+    check_bounded_nthash_native_coordinates<seq::dna15, std::uint16_t>();
+    check_bounded_nthash_native_coordinates<seq::dna15, std::uint32_t>();
+    check_bounded_nthash_native_coordinates<seq::dna15, std::uint64_t>();
     check_bounded_nthash_native_coordinates<seq::aa10li, std::uint32_t>();
     check_bounded_nthash_native_coordinates<seq::aa10li, std::uint64_t>();
     check_bounded_nthash_native_coordinates<seq::aa10murphy, std::uint32_t>();

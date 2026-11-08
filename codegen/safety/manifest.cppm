@@ -181,18 +181,10 @@ inline void require_current_manifest_root(
     return result;
 }
 
-[[nodiscard]] inline std::string routine_leaf(
+/** Retain the schema when comparing SQL names independently of C export spelling. */
+[[nodiscard]] inline std::string_view routine_name(
     std::string_view identity) {
-    const std::size_t arguments = identity.find('(');
-    const std::string_view qualified =
-        arguments == std::string_view::npos
-        ? identity
-        : identity.substr(0, arguments);
-    const std::size_t separator = qualified.rfind('.');
-    return std::string{
-        separator == std::string_view::npos
-            ? qualified
-            : qualified.substr(separator + 1)};
+    return identity.substr(0, identity.find('('));
 }
 
 inline void validate_runtime_sql_identity(
@@ -566,11 +558,12 @@ inline void validate_runtime_sql_identity(
                 context
                 + " wrapper overloads differ from owner identities");
         }
+        const auto sql_name = manifest_detail::routine_name(
+            parsed.sql_identities.front());
         for (const std::string& identity :
              parsed.sql_identities) {
             if (!owner_identities.insert(identity).second
-                || manifest_detail::routine_leaf(identity)
-                    != parsed.public_symbol) {
+                || manifest_detail::routine_name(identity) != sql_name) {
                 throw std::runtime_error(
                     context
                     + " shares a C symbol across different SQL names "

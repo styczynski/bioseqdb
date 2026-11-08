@@ -251,6 +251,72 @@ inline void require_failure(
     };
 }
 
+/** Exercise type-distinct SQL overloads with the same C++ name and SQL arity. */
+inline void check_same_arity_write_overloads() {
+    collected_program program;
+    program.entities.push_back(fixture_schema("fixture_types"));
+    for (const bool relation : {true, false}) {
+        auto function = fixture_function("write", "fixture_types", {
+            {.name = relation ? "source_table" : "query",
+             .cpp_type = relation ? "std::optional<Oid>" : "std::optional<std::string>",
+             .sql_type = relation ? "regclass" : "text", .nullable = true},
+            {.name = "file_path", .cpp_type = "std::optional<std::string>",
+             .sql_type = "text", .nullable = true}}, "bigint");
+        function.cpp_return_type = "std::int64_t";
+        program.entities.push_back(std::move(function));
+    }
+    std::vector<std::pair<std::string, std::string>> original_symbols;
+    for (const bool reverse_discovery : {false, true}) {
+        if (reverse_discovery) std::ranges::reverse(program.entities);
+        const auto graph = build_sql_graph(program);
+        const auto sql = render_sql_graph(graph);
+        const auto modules = render_fmgr_entrypoint_modules(graph,
+            {{"fixture_owner", "bioseq.postgres.fixture"}});
+        require(modules.size() == 1 && modules.front().wrappers.size() == 2,
+            "same-arity write overloads must have two independently linked wrappers");
+        const auto& module = modules.front();
+        const auto manifest = render_graph_manifest(graph, sql, modules, {}, {});
+        std::vector<std::pair<std::string, std::string>> symbols;
+        for (const auto& wrapper : module.wrappers) {
+            require(wrapper.overloads.size() == 1 && wrapper.overloads.front().sql_arity == 2,
+                "type-distinct overloads must not become an arity dispatcher");
+            const auto& identity = wrapper.overloads.front().sql_identity;
+            const auto& symbol = wrapper.public_symbol;
+            require(!symbol.empty() && !(symbol.front() >= '0' && symbol.front() <= '9')
+                && std::ranges::all_of(symbol, [](char value) {
+                    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z')
+                        || (value >= '0' && value <= '9') || value == '_';
+                }), "generated write entrypoints must be legal C identifiers");
+            require(identity == "fixture_types.write(regclass,text)"
+                    || identity == "fixture_types.write(text,text)",
+                "write overload lost its distinct SQL argument identity");
+            const auto statement = std::ranges::find(sql.statements,
+                "sql:function:" + identity, &rendered_statement::entity_identity);
+            require(statement != sql.statements.end()
+                    && statement->text.contains("AS 'MODULE_PATHNAME', '" + symbol + "'")
+                    && module.content.contains("PG_FUNCTION_INFO_V1(" + symbol + ");")
+                    && wrapper.finfo_symbol == "pg_finfo_" + symbol,
+                "DDL, entrypoint definition and finfo disagree for a write overload");
+            require(manifest.contains("{\"symbol\": \"" + symbol
+                    + "\", \"finfo_symbol\": \"" + wrapper.finfo_symbol
+                    + "\", \"overloads\": [\n        {\"sql_identity\": \"" + identity + "\""),
+                "manifest must bind each write SQL identity to its actual linked wrapper");
+            symbols.emplace_back(identity, symbol);
+        }
+        std::ranges::sort(symbols);
+        require(symbols[0].first != symbols[1].first && symbols[0].second != symbols[1].second,
+            "same-arity write overloads must not share an SQL identity or C symbol");
+        if (reverse_discovery) require(symbols == original_symbols,
+            "write overload symbol ownership must not depend on discovery order");
+        else original_symbols = std::move(symbols);
+    }
+    auto collision = fixture_function(original_symbols.front().second, "fixture_types", {}, "bigint");
+    collision.cpp_return_type = "std::int64_t";
+    program.entities.push_back(std::move(collision));
+    require_failure([&program] { static_cast<void>(render_sql_graph(build_sql_graph(program))); },
+        "derived fmgr symbol", "an authored routine may not collide with a generated write entrypoint");
+}
+
 /** Collect a literal enum authority and an intentionally earlier SQL consumer. */
 [[nodiscard]] inline collected_program enum_type_program(
     std::string_view initializer = R"({"plain", "uniprot", "quote'd"})",
@@ -715,6 +781,7 @@ inline void run_generator_contract_self_tests() {
     run_guc_generator_contract_self_tests();
     run_fmgr_renderer_contract_tests();
     run_compact_fmgr_contract_tests();
+    contract_test_detail::check_same_arity_write_overloads();
 
     sql_graph graph;
     contract_test_detail::require(

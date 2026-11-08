@@ -258,6 +258,9 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 	// buffers cannot return locators or values from the relation's old storage.
 	const uint64_t cache_storage_id = bioseq::settings::column_cache::enabled
 		? column_storage_id(state->relation, false) : 0;
+	// Pruning compacts chunk indices; the original stripe row offset remains stable
+	// when overlapping readers select different subsets of this stripe.
+	const uint32_t cache_chunk_id = buffers->selected_chunk_group_row_offsets[chunk_index];
 	bool *column_mask = build_projected_column_mask(tuple_descriptor->natts, projected_columns);
 
 	chunk_data *pending_chunk = allocate_chunk_data(tuple_descriptor->natts, column_mask,
@@ -283,7 +286,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 
 			if (should_cache)
 			{
-				mark_chunk_group_in_use(state->relation->rd_id, cache_storage_id, stripe_id, chunk_index);
+				mark_chunk_group_in_use(state->stripe_read_context, cache_storage_id, stripe_id, cache_chunk_id);
 			}
 
 			/* Reuse cached values or decode the stored chunk  below. */
@@ -293,7 +296,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 			if (should_cache)
 			{
 				value_buffer = static_cast<StringInfo>(retrieve_column_cache_entry(
-					cache_storage_id, stripe_id, chunk_index, column_index));
+					cache_storage_id, stripe_id, cache_chunk_id, column_index));
 			}
 
 			if (value_buffer == NULL)
@@ -306,26 +309,30 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 				}
 				else
 				{
-					MemoryContext old_memory_context;
-					if (should_cache)
+					// Keep an incomplete fill with the reader so PostgreSQL error and
+					// subtransaction cleanup cannot strand bytes in the shared cache.
+					MemoryContext value_context = should_cache
+						? AllocSetContextCreate(state->stripe_read_context,
+							"Bioseq Cached Column Buffer", ALLOCSET_SMALL_SIZES)
+						: CurrentMemoryContext;
 					{
-						old_memory_context = MemoryContextSwitchTo(get_column_cache_memory_context());
+						bioseq::postgres::support::memory_context_scope value_scope{value_context};
+						value_buffer = bioseq::postgres::support::invoke_pg_as_cpp([chunk_buffers] {
+							StringInfo decompressed = decompress_column_buffer(chunk_buffers->value_buffer,
+								chunk_buffers->value_compression_algorithm,
+								chunk_buffers->value_decompressed_length);
+							return static_cast<StringInfo>(repalloc(decompressed, sizeof(cached_string_info)));
+						});
+						reinterpret_cast<cached_string_info *>(value_buffer)->cached = should_cache;
 					}
 
-					value_buffer = decompress_column_buffer(chunk_buffers->value_buffer,
-									 chunk_buffers->value_compression_algorithm,
-									 chunk_buffers->value_decompressed_length);
-
-					value_buffer = static_cast<StringInfo>(repalloc(value_buffer, sizeof(cached_string_info)));
-					reinterpret_cast<cached_string_info *>(value_buffer)->cached = false;
-
 					if (should_cache)
 					{
-						reinterpret_cast<cached_string_info *>(value_buffer)->cached = true;
-
-						add_column_cache_entry(cache_storage_id, stripe_id, chunk_index,
-												  column_index, value_buffer);
-						MemoryContextSwitchTo(old_memory_context);
+						// Publication may discard a duplicate context, so the fill scope
+						// must restore the reader context before this ownership transfer.
+						value_buffer = static_cast<StringInfo>(add_column_cache_entry(
+							cache_storage_id, stripe_id, cache_chunk_id, column_index,
+							value_buffer, value_context));
 					}
 				}
 			}

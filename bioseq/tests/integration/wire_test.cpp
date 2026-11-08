@@ -23,19 +23,19 @@ constexpr std::string_view k_destination_table = "wire_destination";
 constexpr std::string_view k_binary_path = "/tmp/bioseq_seq_wire.bin";
 
 /** @brief Seeds the source relation used by the binary COPY round trip. */
-void seed_pair(connection_test_context& ctx) {
+void seed_pair(connection_test_context& ctx, std::string_view alphabet) {
     create_seq_table(
         ctx,
         seq_table_spec{
             .name = std::string(k_source_table),
-            .typmod = {.alphabet = "dna4", .width = 64},
+            .typmod = {.alphabet = alphabet, .width = 64},
             .seq_columns = 1,
         },
         {
             seq_row{.pk = 23, .sequences = {"ACTAGGCACAT"}},
             seq_row{.pk = 101, .sequences = {"GGGGTTTTACTAGGCACATACTAGGCACATACT"}},
             seq_row{.pk = 69, .sequences = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"}},
-            seq_row{.pk = 42, .sequences = {"TTTTTT"}},
+            seq_row{.pk = 42, .sequences = {alphabet == "dna15" ? "ACGTRYSWKMBDHVN" : "TTTTTT"}},
         });
 }
 
@@ -43,8 +43,14 @@ void seed_pair(connection_test_context& ctx) {
 
 TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
           "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
+    std::string_view alphabet = "dna4";
+    SECTION("DNA4") {}
+    SECTION("DNA15 preserves all IUPAC ranks") { alphabet = "dna15"; }
     auto ctx = fresh_context({k_source_table, k_destination_table});
-    seed_pair(ctx);
+    seed_pair(ctx, alphabet);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT get_byte(bioseq.seq_send(seq0),0) FROM wire_source ORDER BY pk LIMIT 1")
+        == (alphabet == "dna15" ? 6 : 0));
 
     // Try to remove a file left by an earlier COPY test.
     std::error_code cleanup_error;
@@ -127,9 +133,10 @@ TEST_CASE("quality binary parameters preserve scores and reject malformed rank p
     };
     struct alphabet_case { const char* name; unsigned code, bits, cardinality; char low, high; int minimum; };
     for (const auto alphabet : {
-            alphabet_case{"phred42", 7, 6, 42, '!', 'J', 0},
-            alphabet_case{"phred63", 8, 6, 63, '!', '_', 0},
-            alphabet_case{"phred68-legacy", 9, 7, 68, ';', '~', -5}}) {
+            alphabet_case{"phred42", 8, 6, 42, '!', 'J', 0},
+            alphabet_case{"phred63", 9, 6, 63, '!', '_', 0},
+            alphabet_case{"phred68-legacy", 10, 7, 68, ';', '~', -5},
+            alphabet_case{"phred94", 11, 7, 94, '!', '~', 0}}) {
         INFO(alphabet.name);
         for (const std::string text : {std::string{}, std::string{alphabet.low},
                 std::string{alphabet.high}, std::string(20003, alphabet.low)}) {

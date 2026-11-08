@@ -225,7 +225,7 @@ template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width> struct 
             constexpr std::size_t scalar_capacity = 4096u;
             auto scalar_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
             if (!scalar_permit) raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit canonical descriptor scratch");
-            preserved_shape.emplace();
+            preserved_shape.emplace(*canonical_header);
             const auto parsed = idp::decode_preservation_record(canonical_header->payload,
                 *preserved_shape, true, scalar_capacity);
             if (!parsed) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, parsed.error());

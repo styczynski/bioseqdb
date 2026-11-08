@@ -392,6 +392,20 @@ export {
                              base_lineage ? "true" : "false")));
             }
         }
+        // A final Result can request a foreign exact helper absent from this
+        // join's PathTarget. Its value already exists in the checked child;
+        // expose it as a hidden output so upper setrefs can bind the whole call.
+        // The inherited-site path below copies its slot without a new owner or
+        // re-evaluating the helper against the current match.
+        for (Node* identity : postgres_list<Node>(plan_owner_support.helper_identities)) {
+            if (!batch_join_identity_list_contains(inherited_helper_identities, identity)
+                || find_plan_tlist_expression_resno(requested_tlist, identity) > 0)
+                continue;
+            requested_tlist = lappend(requested_tlist,
+                makeTargetEntry(reinterpret_cast<Expr*>(copyObject(identity)),
+                    static_cast<AttrNumber>(list_length(requested_tlist) + 1),
+                    nullptr, /*resjunk=*/true));
+        }
         for (Node* support : postgres_list<Node>(plan_owner_support.passthrough_vars)) {
             if (find_plan_tlist_expression_resno(requested_tlist, support) > 0)
                 continue;

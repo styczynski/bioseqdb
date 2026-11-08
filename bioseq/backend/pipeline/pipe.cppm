@@ -981,6 +981,35 @@ export {
             template run<>(params, collector, range, window_len, kmer_len);
     }
 
+    /** Select one exact scheme for both raw operands before either is sketched.
+     * Keep the resident fast path only when both views can borrow its native
+     * whole-range storage and have at least one complete minimizer window.
+     * Continuation preserves terminal partial-window minima for short inputs
+     * and the established semantics of materialized operands.
+     */
+    template <class p_minimizer, sequence_alphabet p_alphabet>
+    [[nodiscard]] inline pipe::exact_simd_range_route raw_exact_simd_pair_route(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const std::size_t window_len,
+        const std::size_t kmer_len) {
+        if (window_len == 0u || kmer_len == 0u ||
+            query_seq.bp_size() < kmer_len || target_seq.bp_size() < kmer_len ||
+            query_seq.bp_size() - kmer_len < window_len - 1u ||
+            target_seq.bp_size() - kmer_len < window_len - 1u) {
+            return pipe::exact_simd_range_route::require_continuation;
+        }
+        if constexpr (exact_simd_minimizer_representation<p_minimizer>) {
+            if (pipe::try_minimizer_resident_packed(
+                    query_seq, 0u, query_seq.bp_size()).has_value() &&
+                pipe::try_minimizer_resident_packed(
+                    target_seq, 0u, target_seq.bp_size()).has_value()) {
+                return pipe::exact_simd_range_route::require_resident_vector_stream;
+            }
+        }
+        return pipe::exact_simd_range_route::require_continuation;
+    }
+
     /// Reserve an initial, sketch buffer and measure the selected sketch call.
     template <class p_minimizer, class p_range>
     BIOSEQ_PIPELINE_INLINE_ATTR minimizer_sketch_execution_stats
@@ -988,10 +1017,24 @@ export {
                           p_range& range,
                           const std::size_t& window_len,
                           const std::size_t& kmer_len,
-                          const ::bioseq::simd::minimap2_parameters& params) {
+                          const ::bioseq::simd::minimap2_parameters& params,
+                          const pipe::exact_simd_range_route exact_route) {
         static const auto* _desc = bioseq::instrumentation::register_static_region("mm_sketch");
         auto _scope = bioseq::instrumentation::region(_desc);
         collector.reserve(range.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
+        if (params.minimizer_algorithm == minimizer_algorithm::two_stack_nthash) {
+            const auto stats = pipe::minimizer_dispatch_range<p_minimizer>(
+                collector, range, 0u, range.bp_size(), window_len, kmer_len,
+                minimizer_sketch_backend::exact_simd, exact_route, params.highway_kernels);
+            return {
+                .exact_simd = stats.exact_simd,
+                .exact_simd_available = stats.exact_simd_available,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                .observed_algorithm = minimizer_algorithm::two_stack_nthash,
+                .observed_algorithm_available = true,
+#endif
+            };
+        }
         return sketch_one<p_minimizer>(collector, range, window_len, kmer_len, params);
     }
 
@@ -1023,6 +1066,11 @@ export {
 
         const std::size_t window_len = static_cast<std::size_t>(params.window_size);
         const std::size_t kmer_len = static_cast<std::size_t>(params.kmer_size);
+        const auto exact_route =
+            params.minimizer_algorithm == minimizer_algorithm::two_stack_nthash
+                ? raw_exact_simd_pair_route<p_minimizer>(
+                    query_seq, target_seq, window_len, kmer_len)
+                : pipe::exact_simd_range_route::require_continuation;
 
         // A GPU target-index build sketches the target itself. Other routes
         // prepare the  target sketch here. The adopted Vulkan host buffer stays
@@ -1049,7 +1097,7 @@ export {
             } else {
                 basic_sketch_collector<p_minimizer> target_collector;
                 target_sketch_stats = sketch_into_collector<p_minimizer>(
-                    target_collector, target_seq, window_len, kmer_len, params);
+                    target_collector, target_seq, window_len, kmer_len, params, exact_route);
                 target_minimizers = std::move(target_collector).extract_sketches_data();
             }
         }
@@ -1061,7 +1109,7 @@ export {
         basic_sketch_collector<p_minimizer> query_collector;
         const minimizer_sketch_execution_stats query_sketch_stats =
             sketch_into_collector<p_minimizer>(
-                query_collector, query_seq, window_len, kmer_len, params);
+                query_collector, query_seq, window_len, kmer_len, params, exact_route);
         auto query_owner = std::make_shared<const std::vector<p_minimizer>>(
             std::move(query_collector).extract_sketches_data());
         const auto query_minimizers = pipe::minimizer_batch_view<p_minimizer>::from_shared_host(

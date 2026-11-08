@@ -12,6 +12,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
 import bioseq.io.options;
 import bioseq.io.record_schema;
+import bioseq.io.simd;
 import bioseq.parallelism.memory_admission;
 import bioseq.io.identifier_parser.preservation;
 export import bioseq.io.alignment.bgzf;
@@ -212,10 +213,9 @@ class alignment_export_context {
         std::set<std::array<char, 2>> attributes;
         for (const auto& field : reference.attributes) {
             if (field.tag == std::array<char, 2>{'S', 'N'} || field.tag == std::array<char, 2>{'L', 'N'}
-                || !auxiliary_tag_index(field.tag) || !attributes.insert(field.tag).second
-                || field.value.find_first_of("\t\r\n") != std::string::npos
-                || field.value.find('\0') != std::string::npos)
+                || !auxiliary_tag_index(field.tag) || !attributes.insert(field.tag).second)
                 return std::unexpected(std::string{"Reference attributes have duplicate or invalid fields"});
+            if (const auto valid = validate_sam_header_value("@SQ", field.tag, field.value); !valid) return valid;
             if (field.tag == std::array<char, 2>{'T', 'P'}
                 && field.value != (reference.circular ? "circular" : "linear"))
                 return std::unexpected(std::string{"Reference topology conflicts with TP attribute"});
@@ -298,43 +298,56 @@ class alignment_export_context {
                 && *alignment.flag_constraints[bit] != ((flags & (std::uint16_t{1} << bit)) != 0))
                 return std::unexpected(std::string{"Numeric FLAG contradicts an explicit boolean mapping"});
         }
-        if ((flags & 0xf000u) != 0)
-            return std::unexpected(std::string{"FLAG uses reserved SAM bits"});
         return flags;
     }
 
     /** Parse a native header's fields once and retain compatible RG/PG/CO records. */
     [[nodiscard]] std::expected<void, std::string> add_header_lines(
         std::span<const std::string> lines) {
-        for (const auto& line : lines) {
+        for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
+            const auto& line = lines[line_index];
             if (line.size() < 3 || line[0] != '@' || line.find_first_of("\r\n") != std::string::npos)
                 return std::unexpected(std::string{"SAM header line is malformed"});
             const auto kind = std::string_view{line}.substr(0, 3);
-            if (kind == "@HD" || kind == "@SQ") continue;
+            if (kind == "@HD" && line_index != 0)
+                return std::unexpected(std::string{"SAM @HD must occur once at the start of its source header"});
+            if (kind == "@SQ") {
+                if (const auto parsed = parse_sam_reference_header(line); !parsed)
+                    return std::unexpected(parsed.error());
+                continue;
+            }
             if (kind == "@CO") {
-                if (std::string_view{line}.starts_with("@CO\tbioseq.io:")) continue;
-                if (line.size() != 3 && line[3] != '\t')
+                if (line.size() < 4 || line[3] != '\t')
                     return std::unexpected(std::string{"SAM comment header is malformed"});
+                if (const auto valid = validate_sam_header_value(kind, {}, std::string_view{line}.substr(4)); !valid)
+                    return valid;
+                if (std::string_view{line}.starts_with("@CO\tbioseq.io:")) continue;
                 retained_header_lines_.push_back(line);
                 continue;
             }
-            if ((kind != "@RG" && kind != "@PG") || line.size() < 4 || line[3] != '\t')
-                return std::unexpected(std::string{"Unknown or malformed SAM header record"});
             std::string identifier;
             std::optional<std::string> parent;
-            std::set<std::array<char, 2>> tags;
-            std::size_t cursor = 4;
-            while (cursor < line.size()) {
-                const auto ending = line.find('\t', cursor);
-                const auto field = std::string_view{line}.substr(cursor,
-                    ending == std::string::npos ? line.size() - cursor : ending - cursor);
-                if (field.size() < 4 || field[2] != ':'
-                    || !tags.insert({field[0], field[1]}).second)
-                    return std::unexpected(std::string{"SAM header has invalid or duplicate fields"});
-                if (field.starts_with("ID:")) identifier = field.substr(3);
-                if (field.starts_with("PP:") || (kind == "@RG" && field.starts_with("PG:")))
-                    parent = field.substr(3);
-                cursor = ending == std::string::npos ? line.size() : ending + 1;
+            bool version_present{};
+            const auto parsed = visit_sam_header_fields(line,
+                [kind, &identifier, &parent, &version_present](const std::array<char, 2> tag, const std::string_view value)
+                    -> std::expected<void, std::string> {
+                    if (kind == "@HD" && tag == std::array<char, 2>{'V', 'N'}) {
+                        const auto dot = value.find('.');
+                        if (dot == std::string_view::npos || dot == 0 || dot + 1 == value.size()
+                            || value.substr(0, dot).find_first_not_of("0123456789") != std::string_view::npos
+                            || value.substr(dot + 1).find_first_not_of("0123456789") != std::string_view::npos)
+                            return std::unexpected(std::string{"SAM @HD VN must contain a numeric major.minor version"});
+                        version_present = true;
+                    }
+                    if (tag == std::array<char, 2>{'I', 'D'}) identifier = value;
+                    if (tag == std::array<char, 2>{'P', 'P'}
+                        || (kind == "@RG" && tag == std::array<char, 2>{'P', 'G'})) parent = value;
+                    return {};
+                });
+            if (!parsed) return parsed;
+            if (kind == "@HD") {
+                if (!version_present) return std::unexpected(std::string{"SAM @HD requires VN"});
+                continue;
             }
             if (identifier.empty())
                 return std::unexpected(std::string{"SAM RG/PG header has no ID"});
@@ -501,7 +514,8 @@ public:
             && row.identity.segment_id && (*flags & (4u | 0x100u | 0x800u)) == 0
             && !explicit_primaries_.contains(*row.identity.segment_id);
         const bool new_reference = row.alignment
-            && (!row.alignment->reference_name.empty() || row.identity.reference_id)
+            && ((!row.alignment->reference_name.empty() && row.alignment->reference_name != "*")
+                || row.identity.reference_id)
             && !find_reference(row.identity.reference_id, row.alignment->reference_name, row.alignment->header_context_id);
         const auto fixed_growth = (new_name ? 256u : 0u) + (new_group ? 1024u : 0u)
             + (new_primary ? 256u : 0u) + (new_reference ? 4096u : 0u);
@@ -540,7 +554,8 @@ public:
         }
         if (!row.alignment) return {};
         const auto& alignment = *row.alignment;
-        if (alignment.reference_name.empty() && !row.identity.reference_id) return {};
+        if ((alignment.reference_name.empty() || alignment.reference_name == "*")
+            && !row.identity.reference_id) return {};
         if (find_reference(row.identity.reference_id, alignment.reference_name, alignment.header_context_id)) return {};
         if (finalized_)
             return std::unexpected(std::string{"New reference needs retained source replay before header emission"});
@@ -580,13 +595,15 @@ public:
             for (const auto& field : reference.source->attributes) {
                 if (field.tag != std::array<char, 2>{'A', 'N'}) continue;
                 std::size_t cursor{};
-                while (cursor < field.value.size()) {
-                    const auto end = field.value.find(',', cursor);
-                    const auto alias = field.value.substr(cursor, end == std::string::npos
-                        ? field.value.size() - cursor : end - cursor);
-                    if (!valid_reference_name(alias) || !reserved_reference_names_.insert(alias).second)
-                        return std::unexpected(std::string{"Reference AN aliases conflict in the native namespace"});
-                    cursor = end == std::string::npos ? field.value.size() : end + 1;
+                for (;;) {
+                    const auto tail = std::string_view{field.value}.substr(cursor);
+                    const auto length = io::simd::scan_first_byte(',',
+                        reinterpret_cast<const std::uint8_t*>(tail.data()), tail.size());
+                    const auto alias = tail.substr(0, length);
+                    if (!valid_reference_name(alias) || !reserved_reference_names_.emplace(alias).second)
+                        return std::unexpected(std::string{"Reference AN aliases are invalid or conflict in the native namespace"});
+                    if (length == tail.size()) break;
+                    cursor += length + 1;
                 }
             }
         }
@@ -737,6 +754,7 @@ public:
                 if (const auto valid = validate_reference(*entry.source, mate_name); !valid)
                     return std::unexpected(valid.error());
                 binding.mate_reference_id = static_cast<std::int32_t>(*mate);
+                binding.mate_reference_length = entry.source->length;
                 binding.mate_same_projection_domain = entry.protein == result.protein_triplets
                     && (!entry.protein || !alphabet || !entry.source->alphabet_code || *alphabet == *entry.source->alphabet_code);
                 result.mate_reference_name = entry.wire_name;
@@ -992,10 +1010,9 @@ public:
     /** Retain original @SQ attributes once; emitted geometry remains independently checked. */
     [[nodiscard]] std::expected<void, std::string> reference_attribute(const sam_header_field& field) {
         if (!reference_open_ || !auxiliary_tag_index(field.tag)
-            || field.tag == std::array<char, 2>{'S', 'N'} || field.tag == std::array<char, 2>{'L', 'N'}
-            || field.value.find_first_of("\t\r\n") != std::string::npos
-            || field.value.find('\0') != std::string::npos)
+            || field.tag == std::array<char, 2>{'S', 'N'} || field.tag == std::array<char, 2>{'L', 'N'})
             return std::unexpected(std::string{"Manifest reference attribute is invalid"});
+        if (const auto valid = validate_sam_header_value("@SQ", field.tag, field.value); !valid) return valid;
         auto& reference = source_metadata.references.back();
         if (std::any_of(reference.attributes.begin(), reference.attributes.end(),
                 [tag = field.tag](const sam_header_field& previous) { return previous.tag == tag; }))

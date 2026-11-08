@@ -9,6 +9,10 @@ extern "C" {
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/table.h"
+#include "catalog/pg_class.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "nodes/pg_list.h"
@@ -1375,6 +1379,16 @@ update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name
     bool cpp_error = false;
     bool unknown_cpp_error = false;
     try {
+        // Public rebuilds need their own authorization now that trusted private
+        // catalog operations do not rely on the caller owning extension tables.
+        // Automatic INSERT/LOAD maintenance calls the implementation only after
+        // its parent write checks, without changing the writer's identity.
+        bioseq::postgres::support::invoke_pg_as_cpp([rel_oid] {
+            Relation relation = table_open(rel_oid, AccessShareLock);
+            if (!object_ownercheck(RelationRelationId, rel_oid, GetUserId()))
+                aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, RelationGetRelationName(relation));
+            table_close(relation, NoLock);
+        });
         const std::string name{name_data, name_size};
         return update_index_impl<p_supported_indexes>(rel_oid, name);
     } catch (bioseq::postgres::support::postgres_error& error) {

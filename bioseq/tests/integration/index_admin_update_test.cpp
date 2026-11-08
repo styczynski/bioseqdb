@@ -217,7 +217,11 @@ TEST_CASE("UPDATE_ON_INSERT can build minimizers_per_sequence without per-fragme
     exec_sql(ctx, "SELECT bioseq.set_index_policy("
                   "'index_admin_sequence_minimizer_policy'::regclass, "
                   "'minimizers_per_sequence', 'UPDATE_ON_INSERT');");
-    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    // INSERT maintenance uses the direct exact-scheme storage contract.
+    exec_sql(ctx,
+             "SET bioseq.aligner.grouped_soa_generation.enabled = off;"
+             "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+             "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx, "INSERT INTO index_admin_sequence_minimizer_policy VALUES "
                   "('minimizers_per_sequence', "
                   "repeat('ACGT', 2000)::bioseq.seq('dna4', 64));");

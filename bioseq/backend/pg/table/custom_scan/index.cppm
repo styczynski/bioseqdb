@@ -147,7 +147,7 @@ bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_gua
     const batch_join_projection_guard_fixture system_var = make_batch_join_projection_guard_fixture(
         target_relid,
         list_make1(
-            makeVar(target_relid, SelfItemPointerAttributeNumber, TIDOID, -1, InvalidOid, 0)),
+            makeVar(target_relid, MinTransactionIdAttributeNumber, XIDOID, -1, InvalidOid, 0)),
         13.0,
         37.0,
         5.0);
@@ -164,16 +164,49 @@ bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_gua
         find_unparameterized_bioseq_custom_path(nulling_var.rel, /*target_seq_attno=*/3).scan ==
         nullptr;
 
+    // Row markers use ordinary child attributes after projection. Exercise
+    // both the new admitted case and every exact-identity rejection gate.
+    const auto accepts_row_marker = [target_relid](Var* marker) {
+        const auto fixture = make_batch_join_projection_guard_fixture(
+            target_relid, list_make1(marker), 13.0, 37.0, 5.0);
+        const auto candidate = find_unparameterized_bioseq_custom_path(
+            fixture.rel, /*target_seq_attno=*/3);
+        return candidate.scan == fixture.scan &&
+               candidate.cost_owner == &fixture.projection->path &&
+               candidate.locator_target == fixture.projection->path.pathtarget;
+    };
+    bool accepts_exact_row_markers = true;
+    bool rejects_malformed_row_markers = true;
+    for (Var* marker : std::array{
+             makeVar(target_relid, SelfItemPointerAttributeNumber, TIDOID, -1, InvalidOid, 0),
+             makeVar(target_relid, TableOidAttributeNumber, OIDOID, -1, InvalidOid, 0)}) {
+        accepts_exact_row_markers = accepts_row_marker(marker) && accepts_exact_row_markers;
+        Var* null_extended = static_cast<Var*>(copyObject(marker));
+        null_extended->varnullingrels = bms_make_singleton(static_cast<int>(target_relid));
+        for (Var* malformed : std::array{
+                 makeVar(target_relid, marker->varattno, INT4OID, -1, InvalidOid, 0),
+                 makeVar(target_relid, marker->varattno, marker->vartype, 0, InvalidOid, 0),
+                 makeVar(target_relid, marker->varattno, marker->vartype, -1,
+                         static_cast<Oid>(1), 0),
+                 makeVar(target_relid, marker->varattno, marker->vartype, -1, InvalidOid, 1),
+                 makeVar(target_relid + 1, marker->varattno, marker->vartype, -1, InvalidOid, 0),
+                 makeVar(OUTER_VAR, marker->varattno, marker->vartype, -1, InvalidOid, 0),
+                 null_extended}) {
+            rejects_malformed_row_markers =
+                !accepts_row_marker(malformed) && rejects_malformed_row_markers;
+        }
+    }
+
     return bioseq::postgres::support::named_output{
         bioseq::table::batch_join_projection_guard_probe_row{
             .accepts_exact_helper = accepts_exact_helper,
             .rejects_unrelated_phv = rejects_unrelated_phv,
             .rejects_volatile_mixed_expression = rejects_volatile_mixed_expression,
             .preserves_wrapper_cost_owner = preserves_wrapper_cost_owner,
-            .accepts_plain_target_var = accepts_plain_target_var,
+            .accepts_plain_target_var = accepts_plain_target_var && accepts_exact_row_markers,
             .rejects_plain_target_sequence_var = rejects_plain_target_sequence_var,
             .rejects_whole_row_var = rejects_whole_row_var,
-            .rejects_system_var = rejects_system_var,
+            .rejects_system_var = rejects_system_var && rejects_malformed_row_markers,
             .rejects_nulling_var = rejects_nulling_var,
         }};
 }

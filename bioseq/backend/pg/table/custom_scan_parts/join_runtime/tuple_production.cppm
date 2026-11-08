@@ -98,11 +98,12 @@ export {
      * @brief Finds the writable Const for a match helper.
      *
      * bioseq.score and bioseq.dp_score share the score placeholder. Return null for
-     * a function that has no match placeholder.
+     * a function that has no match placeholder. Operand helpers also record which
+     * alignment sequences the executor must materialize.
      */
     Const* lookup_bioseq_placeholder_const(Oid funcid, const var_injector_context* ctx) {
         const bioseq_stub_oids* o = ctx->oids;
-        const placeholder_constants* c = ctx->consts;
+        placeholder_constants* const c = ctx->consts;
         if (funcid == o->score_oid || funcid == o->dp_score_oid)
             return c->dp_score_node;
         if (funcid == o->query_len_oid)

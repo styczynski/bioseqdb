@@ -118,10 +118,10 @@ struct writer_options {
     /// Flush a producer's pending bytes before the next record once this size is reached.
     std::size_t flush_threshold_bytes = 64 * 1024 * 1024 - 64 * 1024;
 
-    /// Maximum file size to map for output. Zero selects the pwrite sink.
-    /// A mapped write fails if it exceeds this capacity. Closing the mapped
-    /// sink resizes the file to the total number of reserved bytes.
-    std::size_t output_capacity_hint = 0;
+    /// Maximum complete output file bytes, including compression framing.
+    /// Absent leaves output unlimited; present zero permits only an empty file.
+    /// Exceeding the limit fails before reserving that range or publishing output.
+    std::optional<std::uint64_t> maximum_output_bytes;
 };
 
 inline constexpr writer_options default_writer_options{};

@@ -36,7 +36,6 @@ import bioseq.postgres.column;
 import bioseq.postgres.storage.indexing.quality_summary_reader;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
-import bioseq.pipeline.stats;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
@@ -44,7 +43,6 @@ import bioseq.postgres.sql.generated.test_indexes.guc_registry;
 #else
 import bioseq.postgres.sql.generated.production.guc_registry;
 #endif
-import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.sequences.random;
 

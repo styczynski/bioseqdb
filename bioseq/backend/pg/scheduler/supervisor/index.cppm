@@ -484,8 +484,11 @@ void process_minimizer_sequence_build_claim(const persist_claim& claim,
                                             Size mapped,
                                             Snapshot registered_snapshot);
 
-/** Prepare the supervisor's Apple shader cache, returning any build or validation error. */
-[[nodiscard]] std::expected<void, std::string> load_bioseq_runtime();
+/** Prepare the supervisor's Apple shader cache, returning any build or validation error.
+ * Poll stop_requested only on the caller, between completed compilation waves.
+ */
+[[nodiscard]] std::expected<void, std::string>
+load_bioseq_runtime(bool (*stop_requested)() noexcept);
 /** Publish shader initialization success or, failure and wake waiting backends. */
 void publish_runtime_init_result(std::expected<void, std::string> initialization_result) noexcept;
 /** Compile up to four ready shader requests and wake their  waiting backends. */

@@ -51,7 +51,7 @@ struct output_block {
  * blocks own admission permits; a full wave drains before any block is reused.
  */
 class ordered_output_sink {
-    std::variant<posix_pwrite_sink, mmap_pwrite_sink> file_;
+    posix_pwrite_sink file_;
     std::vector<std::unique_ptr<output_block>> blocks_;
     sequence_compression compression_{};
     std::size_t filled_{};
@@ -63,13 +63,11 @@ class ordered_output_sink {
 
     /** Append framing only after all ordered block tasks have joined. */
     [[nodiscard]] std::expected<void, std::string> append_final_bytes(std::span<const std::uint8_t> bytes) {
-        return std::visit([bytes](auto& file) -> std::expected<void, std::string> {
-            const auto offset = file.reserve_offset(bytes.size());
-            if (!offset) return std::unexpected(offset.error());
-            const auto written = file.write_at(std::as_bytes(bytes), *offset);
-            if (!written) return std::unexpected(written.error());
-            return {};
-        }, file_);
+        const auto offset = file_.reserve_offset(bytes.size());
+        if (!offset) return std::unexpected(offset.error());
+        const auto written = file_.write_at(std::as_bytes(bytes), *offset);
+        if (!written) return std::unexpected(written.error());
+        return {};
     }
 
     /** Join encoders, reserve offsets in source order, then issue disjoint writes. */
@@ -79,21 +77,24 @@ class ordered_output_sink {
         for (std::size_t index = 0u; index < filled_; ++index) {
             auto& block = *blocks_[index];
             if (!block.error.empty()) return std::unexpected(block.error);
-            const auto offset = std::visit([&block](auto& file) { return file.reserve_offset(block.output_size); }, file_);
+            const auto offset = file_.reserve_offset(block.output_size);
             if (!offset) return std::unexpected(offset.error());
             block.file_offset = *offset;
         }
         auto& pool = parallelism::global_pool::instance();
-        pool.parallel_for(0u, filled_, 1u, [this](std::size_t begin, std::size_t end) {
+        const auto write_blocks = [this](std::size_t begin, std::size_t end) {
             for (auto index = begin; index < end; ++index) {
                 auto& block = *blocks_[index];
                 const auto bytes = compression_ == sequence_compression::none
                     ? std::span<const std::uint8_t>{block.input}.first(block.output_size)
                     : std::span<const std::uint8_t>{block.compressed}.first(block.output_size);
-                const auto written = std::visit([bytes, &block](auto& file) { return file.write_at(std::as_bytes(bytes), block.file_offset); }, file_);
+                const auto written = file_.write_at(std::as_bytes(bytes), block.file_offset);
                 if (!written) block.error = written.error();
             }
-        });
+        };
+        if (parallelism::has_parallel_dispatch(pool.get_mode()))
+            pool.parallel_for(0u, filled_, 1u, write_blocks);
+        else write_blocks(0u, filled_);
         checkpoint_();
         for (std::size_t index = 0u; index < filled_; ++index) {
             auto& block = *blocks_[index];
@@ -101,7 +102,8 @@ class ordered_output_sink {
             block.input_size = block.output_size = 0u;
         }
         filled_ = 0u;
-        jobs_ = pool.make_task_group();
+        if (blocks_.size() > 1u && parallelism::has_parallel_dispatch(pool.get_mode()))
+            jobs_ = pool.make_task_group();
         return {};
     }
 
@@ -112,14 +114,18 @@ class ordered_output_sink {
         if (compression_ == sequence_compression::none) block->output_size = block->input_size;
         else {
             const auto framing = compression_;
-            jobs_.run([block, framing] {
+            auto encode_block = [block, framing] {
                 const auto input = std::span<const std::uint8_t>{block->input}.first(block->input_size);
                 const auto encoded = framing == sequence_compression::gzip
                     ? block->encoder.template encode<alignment::gzip_member_framing::ordinary>(input, block->compressed)
                     : block->encoder.encode(input, block->compressed);
                 if (!encoded) block->error = encoded.error();
                 else block->output_size = *encoded;
-            });
+            };
+            if (blocks_.size() > 1u && parallelism::has_parallel_dispatch(
+                    parallelism::global_pool::instance().get_mode()))
+                jobs_.run(std::move(encode_block));
+            else encode_block();
         }
         ++filled_;
         if (filled_ == blocks_.size()) return drain();
@@ -140,17 +146,13 @@ public:
             sequence_compression compression, const concurrency_options& concurrency,
             io_caller_checkpoint checkpoint = {}) {
         checkpoint();
+        if (options.chunk_capacity_bytes == 0u)
+            return std::unexpected(std::string{"writer chunk capacity must be positive"});
         auto result = std::make_unique<ordered_output_sink>();
         result->checkpoint_ = checkpoint;
-        if (options.output_capacity_hint == 0u) {
-            auto opened = posix_pwrite_sink::try_open(path, options.overwrite);
-            if (!opened) return std::unexpected(opened.error());
-            result->file_.template emplace<posix_pwrite_sink>(std::move(*opened));
-        } else {
-            auto opened = mmap_pwrite_sink::try_open(path, options.output_capacity_hint, options.overwrite);
-            if (!opened) return std::unexpected(opened.error());
-            result->file_.template emplace<mmap_pwrite_sink>(std::move(*opened));
-        }
+        auto opened = posix_pwrite_sink::try_open(path, options.overwrite, options.maximum_output_bytes);
+        if (!opened) return std::unexpected(opened.error());
+        result->file_ = std::move(*opened);
         result->compression_ = compression;
         auto& pool = parallelism::global_pool::instance();
         auto workers = concurrency.worker_count;
@@ -163,6 +165,7 @@ public:
             .mode = parallelism::pipeline_concurrency_mode::dispatch_parallel});
         workers = std::max<std::size_t>(1u,
             std::min<std::size_t>(workers, pool.maximum_concurrency()));
+        if (!parallelism::has_parallel_dispatch(pool.get_mode())) workers = 1u;
         const auto maximum_slots = std::max(std::size_t{1u}, std::min(workers,
             std::max(std::size_t{1u}, concurrency.io_buffer_pool_size)));
         const auto input_capacity = compression == sequence_compression::none
@@ -181,13 +184,19 @@ public:
             block->compressed.resize(output_capacity);
             if (compression != sequence_compression::none) {
                 const auto initialized = block->encoder.open(options.compression_level);
-                if (!initialized) return std::unexpected(initialized.error());
+                if (!initialized) {
+                    if (result->blocks_.empty()) return std::unexpected(initialized.error());
+                    // Identical earlier slots validated the level and codec bound.
+                    // Retire this incomplete slot and keep the admitted worker prefix.
+                    break;
+                }
             }
             result->blocks_.push_back(std::move(block));
         }
         if (result->blocks_.empty())
             return std::unexpected(std::string{"memory admission cannot reserve one output block"});
-        result->jobs_ = pool.make_task_group();
+        if (result->blocks_.size() > 1u && parallelism::has_parallel_dispatch(pool.get_mode()))
+            result->jobs_ = pool.make_task_group();
         return result;
     }
 
@@ -244,7 +253,7 @@ public:
             if (!written) { failure_ = written.error(); return std::unexpected(failure_); }
         }
         checkpoint_();
-        const auto published = std::visit([this](auto& file) { return file.publish(checkpoint_); }, file_);
+        const auto published = file_.publish(checkpoint_);
         if (!published) { failure_ = published.error(); return std::unexpected(failure_); }
         finished_ = true;
         return {};
@@ -254,13 +263,15 @@ public:
     void wait_for_compression() {
         jobs_.wait();
         // scoped_task_group::wait releases its arena owner; later block submissions need a fresh group.
-        jobs_ = parallelism::global_pool::instance().make_task_group();
+        auto& pool = parallelism::global_pool::instance();
+        if (blocks_.size() > 1u && parallelism::has_parallel_dispatch(pool.get_mode()))
+            jobs_ = pool.make_task_group();
         checkpoint_();
     }
 
     /** Stable reserved byte count remains observable after successful publication. */
     [[nodiscard]] std::uint64_t bytes_written() const noexcept {
-        return std::visit([](const auto& file) { return file.size_bytes(); }, file_);
+        return file_.size_bytes();
     }
 };
 
@@ -556,16 +567,13 @@ template<class Sink, class Resolved>
         const auto tag = *auxiliary_tag_index(field.tag);
         if (occupied_tags[tag]) return std::unexpected(std::string{"alignment contains duplicate auxiliary tags"});
         occupied_tags.set(tag);
-        if (field.tag == std::array{'b', 'q'} || field.tag == std::array{'C', 'G'}) continue;
-        if (!binary && auxiliary_has_nonfinite_float(field)) continue;
-        if (derived.active() && (field.tag == std::array{'N', 'M'} || field.tag == std::array{'M', 'D'})) {
+        if (!retain_original_native_auxiliary(field, resolved.protein_triplets, !binary)) continue;
+        if (derived.active() && derived_alignment_auxiliary_tag(field.tag)) {
             const auto& generated = derived_fields[field.tag[0] == 'N' ? 0u : 1u];
             if (!resolved.protein_triplets && !auxiliary_logically_equal(field, generated))
                 return std::unexpected(std::string{"supplied NM/MD contradicts the actual sequence/reference alignment"});
             continue;
         }
-        if (resolved.protein_triplets && (field.tag == std::array{'N', 'M'}
-            || field.tag == std::array{'M', 'D'} || field.tag == std::array{'S', 'A'})) continue;
         const auto measured = measure_bam_auxiliary(field);
         if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
             return std::unexpected(measured ? std::string{"auxiliary size overflows"} : measured.error());
@@ -819,6 +827,7 @@ class record_format_wave {
 
     /** Partition a frozen wave into at most the requested number of existing-pool tasks. */
     void run_pending() {
+        if (!parallelism::has_parallel_dispatch(parallelism::global_pool::instance().get_mode())) return;
         const auto workers = std::min(worker_limit_, jobs_.size());
         started_ = workers;
         for (std::size_t worker{}; worker < workers; ++worker) {
@@ -844,8 +853,9 @@ public:
         const auto workers = concurrency.worker_count == 0u ? static_cast<std::size_t>(pool.maximum_concurrency())
             : concurrency.worker_count;
         worker_limit_ = std::min(workers, static_cast<std::size_t>(pool.maximum_concurrency()));
+        if (!parallelism::has_parallel_dispatch(pool.get_mode())) worker_limit_ = 1u;
         maximum_jobs_ = worker_limit_ < 2u ? 0u : std::min(std::size_t{16u}, worker_limit_) * 4u;
-        tasks_ = pool.make_task_group();
+        if (maximum_jobs_ != 0u) tasks_ = pool.make_task_group();
     }
     /** Wait before any caller-owned backing can be released on an error path. */
     ~record_format_wave() { tasks_.wait(); }
@@ -957,7 +967,9 @@ public:
         }
         jobs_.clear();
         started_ = 0u;
-        tasks_ = parallelism::global_pool::instance().make_task_group();
+        if (maximum_jobs_ != 0u && parallelism::has_parallel_dispatch(
+                parallelism::global_pool::instance().get_mode()))
+            tasks_ = parallelism::global_pool::instance().make_task_group();
         return {};
     }
 };
@@ -1047,6 +1059,7 @@ public:
         save_optional(5u, 10u, original.identity.chain_score);
         header[11] = static_cast<std::uint64_t>(original.identity.classification);
         header[12] = original.identity.completes_match_group;
+        header[15] = original.alignment && original.alignment->source_bound_interpretation;
         if (original.alignment)
             for (std::size_t bit = 0u; bit < original.alignment->flag_constraints.size(); ++bit)
                 if (original.alignment->flag_constraints[bit]) {
@@ -1159,10 +1172,14 @@ public:
         if (const auto score = optional_value(5u, 10u)) row.identity.chain_score = std::bit_cast<std::int64_t>(*score);
         row.identity.classification = static_cast<alignment_classification_source>(header[11]);
         row.identity.completes_match_group = header[12] != 0u;
-        if (row.alignment)
+        if (header[15] > 1u || (header[15] != 0u && !row.alignment))
+            return std::unexpected(std::string{"compact replay alignment interpretation is invalid"});
+        if (row.alignment) {
+            row.alignment->source_bound_interpretation = header[15] != 0u;
             for (std::size_t bit = 0u; bit < row.alignment->flag_constraints.size(); ++bit)
                 if ((header[13] & (std::uint64_t{1u} << bit)) != 0u)
                     row.alignment->flag_constraints[bit] = (header[14] & (std::uint64_t{1u} << bit)) != 0u;
+        }
         constexpr std::array roles{record_field_role::sequence, record_field_role::quality, record_field_role::reference_sequence};
         for (std::size_t index = 0u; index < roles.size(); ++index) {
             const auto first = 16u + 5u * index;
@@ -1333,9 +1350,27 @@ template<export_record_source Source>
         formatting_replay_rows.clear();
         return {};
     };
-    const auto schedule_row = [&formatting, &drain_formatting, &write_row, &alignment_context, text, checkpoint](const export_record_view& row)
+    const auto schedule_row = [&formatting, &drain_formatting, &write_row, &alignment_context, &options, text, checkpoint](export_record_view row)
         -> std::expected<bool, record_error> {
         checkpoint();
+        // Interpret a shallow row copy once for serial, worker and preservation paths.
+        // Source-bound facts survive private spill and cannot be redefined by options.
+        if (!text && row.alignment) {
+            auto& alignment = *row.alignment;
+            if (options.sequence_orientation) {
+                if (alignment.source_bound_interpretation
+                    && *options.sequence_orientation != alignment.sequence_orientation)
+                    return std::unexpected(record_error{row.ordinal, std::nullopt,
+                        "Explicit sequence_orientation disagrees with the source alignment"});
+                alignment.sequence_orientation = *options.sequence_orientation;
+            }
+            if (options.alignment_cigar_form) {
+                if (alignment.source_bound_interpretation && *options.alignment_cigar_form != alignment.form)
+                    return std::unexpected(record_error{row.ordinal, std::nullopt,
+                        "Explicit cigar_form disagrees with the source alignment"});
+                alignment.form = *options.alignment_cigar_form;
+            }
+        }
         if (formatting.full()) {
             if (const auto drained = drain_formatting(); !drained) return std::unexpected(drained.error());
         }

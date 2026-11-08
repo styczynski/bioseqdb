@@ -14,7 +14,6 @@ export module bioseq.postgres.table:custom_scan_scan_runtime_state_contracts;
 
 import bioseq.indexing.type;
 import bioseq.pipeline.minimap_parameters_contract;
-import bioseq.pipeline.pipe;
 import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 import bioseq.postgres.storage.scanner.source_provider_contract;

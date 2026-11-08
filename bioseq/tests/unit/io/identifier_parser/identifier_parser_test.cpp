@@ -13,6 +13,8 @@ import bioseq.io.options;
 import bioseq.io.reader;
 import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser;
+import bioseq.io.identifier_parser.canonical;
+import bioseq.io.identifier_parser.preservation;
 
 using namespace bioseq::io::identifier_parser;
 
@@ -322,6 +324,37 @@ TEST_CASE("identifier_parser: ambiguous unmapped text columns return an error",
     REQUIRE(map.error().find("disambiguate") != std::string::npos);
 }
 
+TEST_CASE("identifier_parser: explicit header selection keeps literal metadata keys separate",
+          "[component:bioseq][layer:unit][feature:io]") {
+    const std::array columns{text_col("left_header"), text_col("right_header"), text_col("numeric_key")};
+    const std::array mappings{
+        user_column_mapping{"left_header", "HEADER"},
+        user_column_mapping{"right_header", "key:header"},
+        user_column_mapping{"numeric_key", "key:1"}};
+    const auto parsed = run_parse(header_format::automatic, header_format::automatic,
+        columns, "read label [header=metadata] [1=one]", mappings);
+    REQUIRE(value_for_column(parsed.map, parsed.writer, 0) == std::optional<std::string>{"read label"});
+    REQUIRE(value_for_column(parsed.map, parsed.writer, 1) == std::optional<std::string>{"metadata"});
+    REQUIRE(value_for_column(parsed.map, parsed.writer, 2) == std::optional<std::string>{"one"});
+
+    const std::array plain_columns{text_col("left_header"), text_col("right_header")};
+    const std::array plain_mapping{user_column_mapping{"left_header", "header"}};
+    const auto plain = run_parse(header_format::plain, header_format::plain,
+        plain_columns, "complete header [unchanged=value]", plain_mapping);
+    REQUIRE(value_for_column(plain.map, plain.writer, 0)
+        == std::optional<std::string>{"complete header [unchanged=value]"});
+    REQUIRE_FALSE(value_for_column(plain.map, plain.writer, 1).has_value());
+
+    const std::array duplicate{user_column_mapping{"left_header", "header"},
+        user_column_mapping{"right_header", "HEADER"}};
+    REQUIRE_FALSE(resolve_identifier_mapping(header_format::automatic,
+        header_format::automatic, plain_columns, duplicate).has_value());
+    const std::array scalar_columns{scalar_col("value")};
+    const std::array invalid{user_column_mapping{"value", "header"}};
+    REQUIRE_FALSE(resolve_identifier_mapping(header_format::automatic,
+        header_format::automatic, scalar_columns, invalid).has_value());
+}
+
 TEST_CASE("identifier_parser: detect_header_format majority vote",
           "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<std::string_view> uniprot{
@@ -397,4 +430,77 @@ TEST_CASE("identifier_parser: sample_sequence_headers FASTA prefix",
     REQUIRE((*headers)[0] == "chr1 human chromosome 1");
     REQUIRE((*headers)[1] == "chr2");
     std::filesystem::remove(path);
+}
+
+
+TEST_CASE("identifier_parser: canonical envelope rejects contradictory visible fields",
+          "[component:bioseq][layer:unit][feature:io]") {
+    struct text_sink {
+        std::string text;
+        /** Collect one fixture header; production owns its own admitted sink. */
+        [[nodiscard]] std::expected<void, std::string> append(std::string_view bytes) {
+            text.append(bytes);
+            return {};
+        }
+    };
+    const auto make_wire = [](std::string_view descriptors,
+            std::span<const canonical_field_view> fields, std::string_view alphabet,
+            bool null_header, std::string_view original_header) {
+        const std::string payload = std::string{
+            R"({"magic":"bioseq.io","version":1,"representation":"text","header_null":)"}
+            + (null_header ? "true" : "false")
+            + R"(,"sequence":{"alphabet":"dna4","present":true,"length":"4","storage":"native","ranks":null},)"
+              R"("quality":{"alphabet":null,"present":false,"length":"0","storage":"native","ranks":null},"scalar_types":)"
+            + std::string{descriptors} + "}";
+        text_sink sink;
+        REQUIRE(append_canonical_header(sink, original_header, alphabet,
+            std::string_view{payload}, fields).has_value());
+        return sink.text;
+    };
+    const std::array<canonical_field_view, 2> fields{{
+        {"count", std::string_view{"42"}, 'i'}, {"label", std::nullopt, 's'}}};
+    constexpr std::string_view descriptors =
+        R"([{"name":"count","type":"pg_catalog.int8"},{"name":"label","type":"pg_catalog.text"}])";
+    const auto valid = make_wire(descriptors, fields, "dna4", false, " read µ🙂 ");
+    const auto missing_bracket = make_wire(descriptors,
+        std::span{fields}.first(1), "dna4", false, "read");
+    const auto missing_descriptor = make_wire(
+        R"([{"name":"count","type":"pg_catalog.int8"}])", fields, "dna4", false, "read");
+    const auto duplicated_descriptor = make_wire(
+        R"([{"name":"count","type":"pg_catalog.int8"},{"name":"count","type":"pg_catalog.text"}])",
+        fields, "dna4", false, "read");
+    const auto reordered_descriptors = make_wire(
+        R"([{"name":"label","type":"pg_catalog.text"},{"name":"count","type":"pg_catalog.int8"}])",
+        fields, "dna4", false, "read");
+    const auto wrong_alphabet = make_wire(descriptors, fields, "dna5", false, "read");
+    const auto contradictory_null = make_wire(descriptors, fields, "dna4", true, "read");
+    const auto null_header = make_wire("[]", {}, "dna4", true, "");
+    const auto empty_header = make_wire("[]", {}, "dna4", false, "");
+    for (const auto mode : {canonical_parse_mode::complete, canonical_parse_mode::shape}) {
+        const auto accepts = [mode](std::string_view wire) {
+            const auto parsed = parse_canonical_header(wire, mode);
+            if (!parsed || !*parsed) return false;
+            text_record_shape shape{**parsed};
+            return decode_preservation_record((**parsed).payload, shape, true, 4096).has_value();
+        };
+        REQUIRE(accepts(valid));
+        REQUIRE(accepts(null_header));
+        REQUIRE(accepts(empty_header));
+        REQUIRE_FALSE(accepts(missing_bracket));
+        REQUIRE_FALSE(accepts(missing_descriptor));
+        REQUIRE_FALSE(accepts(duplicated_descriptor));
+        REQUIRE_FALSE(accepts(reordered_descriptors));
+        REQUIRE_FALSE(accepts(wrong_alphabet));
+        REQUIRE_FALSE(accepts(contradictory_null));
+        const auto suffix = valid.substr(valid.find(' '));
+        REQUIRE_FALSE(accepts("%FF" + suffix));
+        REQUIRE_FALSE(accepts("%E2%82" + suffix));
+        REQUIRE_FALSE(accepts("%ED%A0%80" + suffix));
+        REQUIRE_FALSE(accepts("%C2A" + suffix));
+    }
+    const std::array columns{text_col("header")};
+    auto restored_null = run_parse(header_format::automatic, header_format::plain, columns, null_header);
+    REQUIRE_FALSE(value_for_column(restored_null.map, restored_null.writer, 0).has_value());
+    auto restored_empty = run_parse(header_format::automatic, header_format::plain, columns, empty_header);
+    REQUIRE(value_for_column(restored_empty.map, restored_empty.writer, 0) == std::optional<std::string>{""});
 }

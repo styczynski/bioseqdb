@@ -64,6 +64,111 @@ TEST_CASE("Vector aggregates hydrate residual sequence predicates",
     }
 }
 
+TEST_CASE("Overlapping pruned cursors retain independent cached chunks through rollback",
+          "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
+    constexpr std::string_view table = "column_cache_cursor_rows";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.index.insert_maintenance.enabled=off; "
+        "SET bioseq.index.sequence_read.enabled=off; "
+        "SET max_parallel_workers_per_gather=0; "
+        "SET bioseq.column_cache.capacity_mb=20; "
+        "SET bioseq.storage.stripe.row_limit=3000; "
+        "SET bioseq.storage.chunk_group.row_limit=1000; "
+        "SET enable_indexscan=off; SET enable_indexonlyscan=off; SET enable_bitmapscan=off; "
+        "CREATE TABLE column_cache_cursor_rows "
+        " (id integer PRIMARY KEY,label text,seq bioseq.seq('dna4',64)) USING bioseq; "
+        "INSERT INTO column_cache_cursor_rows "
+        " SELECT id,'row-'||lpad(id::text,4,'0')||':'||repeat('x',256+id%7), "
+        " repeat('ACGT',16+id%5)::bioseq.seq('dna4',64) "
+        " FROM generate_series(1,3000) id;");
+
+    // Compute exact row contents independently of the SQL fixture expressions.
+    const auto expected_row = [](const int id) -> row_t {
+        std::string sequence;
+        for (int repetition = 0; repetition < 16 + id % 5; ++repetition) {
+            sequence += "ACGT";
+        }
+        return row_t{
+            std::to_string(id),
+            fmt::format("row-{:04d}:{}", id, std::string(256 + id % 7, 'x')),
+            std::move(sequence),
+        };
+    };
+    // Cursor order is unspecified; exact contents and multiplicity are required.
+    const auto require_complete_chunk = [&expected_row](rowset_t rows, const int first_id) {
+        rowset_t expected;
+        expected.reserve(1000);
+        for (int id = first_id; id < first_id + 1000; ++id) {
+            expected.push_back(expected_row(id));
+        }
+        std::ranges::sort(rows);
+        std::ranges::sort(expected);
+        REQUIRE(rows == expected);
+    };
+
+    constexpr std::array settings{"off", "on"};
+    for (const char* vectorization : settings) {
+        for (const char* column_cache : settings) {
+            exec_sqlf(ctx,
+                "SET bioseq.vectorization.enabled={}; SET bioseq.column_cache.enabled={};",
+                vectorization, column_cache);
+            CAPTURE(vectorization, column_cache);
+            for (const int first_id : {1, 2001}) {
+                const auto plan = explain_text<true>(ctx, fmt::format(
+                    "SELECT id,label,seq::text FROM column_cache_cursor_rows "
+                    "WHERE id BETWEEN {} AND {};", first_id, first_id + 999));
+                REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+                REQUIRE(find_explain_property(plan, "Bioseq Chunk Groups Removed by Filter") == "2");
+            }
+            for (const bool abort_inner : {false, true}) {
+                CAPTURE(abort_inner);
+                exec_sql(ctx,
+                    "BEGIN; "
+                    "DECLARE cache_outer_reader NO SCROLL CURSOR FOR "
+                    " SELECT id,label,seq::text FROM column_cache_cursor_rows "
+                    " WHERE id BETWEEN 1 AND 1000;");
+                auto outer_rows = query_rows(ctx, "FETCH FORWARD 1 FROM cache_outer_reader;");
+                REQUIRE(outer_rows.size() == 1);
+                if (abort_inner) {
+                    exec_sql(ctx, "SAVEPOINT cache_reader_subtransaction;");
+                }
+                exec_sql(ctx,
+                    "DECLARE cache_inner_reader NO SCROLL CURSOR FOR "
+                    " SELECT id,label,seq::text FROM column_cache_cursor_rows "
+                    " WHERE id BETWEEN 2001 AND 3000;");
+                auto inner_rows = query_rows(ctx, "FETCH FORWARD 1 FROM cache_inner_reader;");
+                REQUIRE(inner_rows.size() == 1);
+                REQUIRE(inner_rows.front().size() == 3);
+                REQUIRE(inner_rows.front()[0].has_value());
+                const int inner_id = std::stoi(*inner_rows.front()[0]);
+                REQUIRE(inner_id >= 2001);
+                REQUIRE(inner_id <= 3000);
+                REQUIRE(inner_rows.front() == expected_row(inner_id));
+                if (abort_inner) {
+                    const auto error = sql_error(ctx, "SELECT 1/0;");
+                    REQUIRE(error.sqlstate == "22012");
+                    exec_sql(ctx, "ROLLBACK TO SAVEPOINT cache_reader_subtransaction;");
+                    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+                } else {
+                    auto remaining_inner = query_rows(ctx, "FETCH FORWARD ALL FROM cache_inner_reader;");
+                    inner_rows.insert(inner_rows.end(),
+                        std::make_move_iterator(remaining_inner.begin()),
+                        std::make_move_iterator(remaining_inner.end()));
+                    require_complete_chunk(std::move(inner_rows), 2001);
+                    exec_sql(ctx, "CLOSE cache_inner_reader;");
+                }
+                auto remaining_outer = query_rows(ctx, "FETCH FORWARD ALL FROM cache_outer_reader;");
+                outer_rows.insert(outer_rows.end(),
+                    std::make_move_iterator(remaining_outer.begin()),
+                    std::make_move_iterator(remaining_outer.end()));
+                require_complete_chunk(std::move(outer_rows), 1);
+                exec_sql(ctx, "ROLLBACK;");
+            }
+        }
+    }
+}
+
 TEST_CASE("Projection-only EPQ evaluates volatile final once",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
     constexpr std::string_view table = "projection_epq";
@@ -423,14 +528,14 @@ TEST_CASE("Multiple Const mmsearch quals fail closed",
     REQUIRE(error.contains("stacked mmsearch"));
 }
 
-TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
+TEST_CASE("Aggregate over bioseq.cigar projection (seq_max) returns the "
           "greatest CIGAR by reported matches",
           "[component:bioseq][layer:integration][feature:pipeline][resource:postgres]") {
-    // MAX must receive the CIGAR sequences produced by mmsearch.
+    // seq_max must receive the CIGAR sequences produced by mmsearch.
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
-    const std::string sql = fmt::format("SELECT MAX(bioseq.cigar(pk)) FROM {} "
+    const std::string sql = fmt::format("SELECT seq_max(bioseq.cigar(pk)) FROM {} "
                                         " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 64));",
                                         k_hoe_join,
                                         k_hoe_probe_sequence);
@@ -476,7 +581,7 @@ TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
     auto ctx = fresh_context({k_hoe_join});
     seed_hoe_fixture(ctx, k_hoe_join);
 
-    const std::string sql = fmt::format("SELECT pk, MAX(bioseq.cigar(pk)) AS best_cigar "
+    const std::string sql = fmt::format("SELECT pk, seq_max(bioseq.cigar(pk)) AS best_cigar "
                                         "  FROM {} "
                                         " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 64)) "
                                         " GROUP BY pk ORDER BY pk;",

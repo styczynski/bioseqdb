@@ -41,7 +41,7 @@ import bioseq.postgres.scheduler.dispatch_processor; // Keep the alignment pipel
 import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
 

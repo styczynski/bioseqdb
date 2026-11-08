@@ -38,7 +38,7 @@ export module bioseq.postgres.table:custom_scan_per_row_join_execution;
 
 import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.scheduler.dispatch_buffer.api;
 import bioseq.postgres.support;
 import bioseq.postgres.table.alignment_execution;
@@ -59,7 +59,6 @@ import :custom_scan_planner_aligner_contracts;
 import :custom_scan_per_row_join_runtime_contracts;
 import :custom_scan_runtime_buffer_contracts;
 import :custom_scan_runtime_match_contracts;
-import :custom_scan_runtime_pipeline_contracts;
 import :custom_scan_execution_stats_contracts;
 import :custom_scan_semantic_payload_query_sketch_route_contracts;
 

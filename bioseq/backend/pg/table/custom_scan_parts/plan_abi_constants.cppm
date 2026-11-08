@@ -4,6 +4,8 @@
  */
 export module bioseq.postgres.table:custom_scan_plan_abi_constants;
 
+/** @brief Private CustomScan marker for vectorized aggregate execution. */
+export inline constexpr int k_vectorized_aggregate_private_marker = 1;
 /** @brief Format version shared by two-child batch-join paths and plans. */
 export inline constexpr int k_bioseq_batch_join_plan_version = 3;
 /** @brief Magic tag for locator passthrough metadata. */

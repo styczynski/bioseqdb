@@ -7,17 +7,90 @@ module;
 extern "C" {
 #include "postgres.h"
 
+#include "access/htup_details.h"
+#include "catalog/pg_extension.h"
+#include "commands/extension.h"
 #include "executor/spi.h"
+#include "miscadmin.h"
+#include "utils/guc.h"
+#include "utils/syscache.h"
 #include "utils/errcodes.h"
 }
 
+#include <functional>
 #include <type_traits>
+#include <utility>
 
 export module bioseq.postgres.support:spi;
 
 import :error_boundary;
 
 export namespace bioseq::postgres::support {
+
+/** Execute trusted internal SQL with its installed extension owner's privileges.
+ * This C++ boundary accepts only repository-generated private catalog/storage
+ * operations, never caller SQL, user-table scans, defaults or constraints.
+ * Callers own SPI and their transaction. The supplied PG leaf runs behind the
+ * existing error bridge so both PostgreSQL ERROR and C++ failure restore the
+ * original role before escaping. Roll back every scoped GUC change, including
+ * changes made by DDL callbacks; no session setting survives this operation.
+ * Fixed heap/database defaults also prevent caller GUCs from redirecting private
+ * storage creation. Explicit access methods/tablespaces in generated DDL win.
+ */
+template<class Function>
+auto invoke_extension_internal_sql_as_cpp(const char* extension_name, Function&& function)
+    -> std::invoke_result_t<std::remove_reference_t<Function>&> {
+    using result_type = std::invoke_result_t<std::remove_reference_t<Function>&>;
+    static_assert(!std::is_reference_v<result_type>);
+    Oid saved_user = InvalidOid;
+    int saved_security_context = 0;
+    GetUserIdAndSecContext(&saved_user, &saved_security_context);
+    int settings_level = 0;
+    const auto restore = [saved_user, saved_security_context, &settings_level] {
+        // PostgreSQL explicitly guarantees this setter cannot throw an error.
+        SetUserIdAndSecContext(saved_user, saved_security_context);
+        if (settings_level != 0) {
+            invoke_pg_as_cpp([level = settings_level] { AtEOXact_GUC(false, level); });
+            settings_level = 0;
+        }
+    };
+    try {
+        const auto operation = [extension_name, &function, &settings_level,
+                                saved_security_context]() -> result_type {
+            const Oid extension_oid = get_extension_oid(extension_name, false);
+            const HeapTuple tuple = SearchSysCache1(EXTENSIONOID, ObjectIdGetDatum(extension_oid));
+            if (!HeapTupleIsValid(tuple))
+                elog(ERROR, "cache lookup failed for extension %u", extension_oid);
+            const Oid owner = reinterpret_cast<Form_pg_extension>(GETSTRUCT(tuple))->extowner;
+            ReleaseSysCache(tuple);
+            settings_level = NewGUCNestLevel();
+            SetUserIdAndSecContext(owner,
+                saved_security_context | SECURITY_LOCAL_USERID_CHANGE | SECURITY_RESTRICTED_OPERATION);
+            RestrictSearchPath();
+            static_cast<void>(set_config_option("default_table_access_method", "heap",
+                PGC_USERSET, PGC_S_SESSION, GUC_ACTION_SAVE, true, ERROR, false));
+            static_cast<void>(set_config_option("default_tablespace", "",
+                PGC_USERSET, PGC_S_SESSION, GUC_ACTION_SAVE, true, ERROR, false));
+            return std::invoke(function);
+        };
+        if constexpr (std::is_void_v<result_type>) {
+            invoke_pg_as_cpp(operation);
+            restore();
+        } else {
+            auto result = invoke_pg_as_cpp(operation);
+            restore();
+            return result;
+        }
+    } catch (...) {
+        try {
+            restore();
+        } catch (...) {
+            // Identity was restored first. Preserve the operation error; the
+            // enclosing PG transaction abort owns any remaining GUC rollback.
+        }
+        throw;
+    }
+}
 
 /**
  * Own one nested SPI connection.

@@ -58,7 +58,7 @@ struct user_column_mapping {
 /// One non-sequence destination column described without database types.
 struct column_descriptor {
     std::string_view name; // raw column name
-    bool is_text;          // TEXT, VARCHAR, or BPCHAR column eligible to, hold the header
+    bool is_text;          // Text-like destination eligible to hold the header.
     bool is_primary_key;
     bool not_null;
     bool has_default;
@@ -1050,11 +1050,13 @@ export namespace bioseq::io::identifier_parser {
 /** Route one already decoded canonical owner without rescanning or copying its payload. */
 [[nodiscard]] std::expected<void, std::string> route_canonical_header(
         const canonical_header& decoded, const identifier_routing& routing,
-        identifier_writer_reference writer) {
+        identifier_writer_reference writer, const bool header_is_null) {
     if (decoded.header.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
         return std::unexpected("canonical sequence identifier exceeds destination size limit");
-    for (const auto slot : routing.identifier_slots)
-        writer.set_field(slot, decoded.header.data(), static_cast<std::int32_t>(decoded.header.size()));
+    for (const auto slot : routing.identifier_slots) {
+        if (header_is_null) writer.set_null(slot);
+        else writer.set_field(slot, decoded.header.data(), static_cast<std::int32_t>(decoded.header.size()));
+    }
     for (const auto& field : decoded.fields) {
         const auto value = field.value ? std::optional<std::string_view>{*field.value} : std::nullopt;
         if (const auto routed = route_canonical_field(field.name, value, routing, writer); !routed) return routed;
@@ -1077,10 +1079,10 @@ parse_and_route_header(header_format format,
         constexpr std::size_t scalar_capacity = 4096u;
         auto scratch = parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
         if (!scratch) return std::unexpected("cannot admit canonical descriptor validation scratch");
-        text_record_shape shape;
+        text_record_shape shape{**canonical};
         if (const auto validated = decode_preservation_record((**canonical).payload, shape, true, scalar_capacity); !validated)
             return std::unexpected(validated.error());
-        return route_canonical_header(**canonical, routing, writer);
+        return route_canonical_header(**canonical, routing, writer, shape.header_is_null);
     }
     state.lexer.lex(header);
     detail::route_emitter emit{routing, writer, {}};
@@ -1175,6 +1177,8 @@ resolve_identifier_mapping(header_format requested_format,
     std::vector<char> is_metadata_claimed(column_count, 0);
     std::vector<destination_slot> column_to_slot(column_count, -1);
     bool has_key_or_position_route = false;
+    std::size_t explicit_identifier_column = column_count;
+    std::vector<std::string_view> explicit_metadata_keys(column_count);
 
     // Assign one writer slot to each destination column when first needed.
     auto slot_of = [&column_to_slot, &destination_columns](std::size_t i) -> destination_slot {
@@ -1260,6 +1264,25 @@ resolve_identifier_mapping(header_format requested_format,
         const destination_slot slot = slot_of(i);
 
         const std::string_view ds = detail::trim_spaces(user_mapping.data_source);
+        if (ds.empty()) return std::unexpected("mapping data_source must not be empty");
+        if (detail::names_match_normalised(ds, "header")) {
+            if (!columns[i].is_text) return std::unexpected(
+                fmt::format("header destination \"{}\" must be text-like", columns[i].name));
+            if (explicit_identifier_column != column_count) return std::unexpected(
+                "header is mapped more than once; choose one destination");
+            explicit_identifier_column = i;
+            continue;
+        }
+        // Literal metadata keys are distinct from the header role and positional
+        // numbers. Existing formats still decide which external keys they parse.
+        if (ds.starts_with("key:")) {
+            const auto key = ds.substr(4);
+            if (key.empty()) return std::unexpected("key: requires a nonempty metadata key");
+            explicit_metadata_keys[i] = key;
+            add_key_route(detail::normalise_to_string(key), slot);
+            continue;
+        }
+        explicit_metadata_keys[i] = ds;
         std::uint32_t index = 0;
         const auto [ptr, ec] = std::from_chars(ds.data(), ds.data() + ds.size(), index);
         const bool is_index = !ds.empty() && ec == std::errc{} && ptr == ds.data() + ds.size();
@@ -1314,18 +1337,20 @@ resolve_identifier_mapping(header_format requested_format,
             detail::names_match_normalised(columns[i].name, "name"))
             name_candidates.push_back(i);
     }
-    std::size_t identifier_column = column_count; // no identifier column selected
-    if (primary_key_candidates.size() == 1)
-        identifier_column = primary_key_candidates[0];
-    else if (name_candidates.size() == 1)
-        identifier_column = name_candidates[0];
-    else if (text_candidates.size() == 1)
-        identifier_column = text_candidates[0];
-    else if (text_candidates.size() > 1)
-        return std::unexpected(
-            fmt::format("{} unmapped text columns and no single PRIMARY KEY / identifier-name "
-                        "alias; pass columns => ARRAY[(...)] to disambiguate",
-                        text_candidates.size()));
+    std::size_t identifier_column = explicit_identifier_column;
+    if (identifier_column == column_count) {
+        if (primary_key_candidates.size() == 1)
+            identifier_column = primary_key_candidates[0];
+        else if (name_candidates.size() == 1)
+            identifier_column = name_candidates[0];
+        else if (text_candidates.size() == 1)
+            identifier_column = text_candidates[0];
+        else if (text_candidates.size() > 1)
+            return std::unexpected(
+                fmt::format("{} unmapped text columns and no single PRIMARY KEY / identifier-name "
+                            "alias; pass an explicit header mapping to disambiguate",
+                            text_candidates.size()));
+    }
     if (identifier_column != column_count)
         routing.identifier_slots.push_back(slot_of(identifier_column));
 
@@ -1347,10 +1372,7 @@ resolve_identifier_mapping(header_format requested_format,
     for (std::size_t i = 0; i < column_count; ++i) {
         if (i == identifier_column || columns[i].is_identity_or_generated) continue;
         std::string_view key = columns[i].name;
-        if (is_user_mapped[i]) {
-            for (const auto& mapping : user_mappings)
-                if (find_column(mapping.column_name) == i) { key = mapping.data_source; break; }
-        }
+        if (is_user_mapped[i]) key = explicit_metadata_keys[i];
         const auto slot = slot_of(i);
         bool joined = false;
         for (auto& route : routing.exact_key_routes) {

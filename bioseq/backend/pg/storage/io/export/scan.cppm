@@ -22,6 +22,7 @@ import bioseq.postgres.storage.io.exporting.query_binding;
 import bioseq.postgres.storage.io.exporting.options;
 import bioseq.postgres.storage.io.exporting.plan_contract;
 import bioseq.postgres.storage.io.exporting.row_source;
+import bioseq.postgres.storage.io.scalar_codec;
 
 export namespace bioseq::postgres::storage::io::exporting {
 /** Publication is performed at most once for the lifetime of this executor node. */
@@ -110,6 +111,7 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
                 ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                     errmsg("bioseq.write requires privileges of pg_write_server_files")));
         });
+        bioseq::postgres::storage::io::require_utf8_io_encoding();
         auto* cleanup = invoke_pg_as_cpp([estate] {
             return static_cast<export_runtime_cleanup*>(MemoryContextAllocZero(
                 estate->es_query_cxt, sizeof(export_runtime_cleanup)));

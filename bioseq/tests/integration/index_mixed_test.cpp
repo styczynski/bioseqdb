@@ -53,7 +53,12 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
              "CREATE TABLE mixed_index_rows (pk int, target bioseq.seq('dna4',64), "
              "query bioseq.seq('dna4',64)) USING bioseq;");
 
-    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    // INSERT maintenance writes direct fragments; choose their exact scheme
+    // explicitly so the first two rows exercise the optional stored reader.
+    exec_sql(ctx,
+             "SET bioseq.aligner.grouped_soa_generation.enabled = off;"
+             "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+             "SET bioseq.index.insert_maintenance.enabled = on;");
     insert_pair(ctx, "mixed_index_rows", 1, 11); // indexed on insert
     insert_pair(ctx, "mixed_index_rows", 2, 22); // indexed on insert
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
@@ -94,9 +99,5 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
     const auto with_index_reads = find_primary_keys("on");
     const auto without_index_reads = find_primary_keys("off");
     REQUIRE(with_index_reads.size() == 4); // both indexed and unindexed rows matched
-    REQUIRE(
-        std::includes(with_index_reads.begin(),
-                      with_index_reads.end(),
-                      without_index_reads.begin(),
-                      without_index_reads.end())); // Enabled reads include disabled-read results.
+    REQUIRE(with_index_reads == without_index_reads);
 }

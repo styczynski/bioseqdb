@@ -659,6 +659,34 @@ HWY_INLINE void decode_words_to_ascii(
     }
 }
 
+/** Decode admitted uint64 packed ranks without exporting Highway instantiations.
+ * Validate the registry code and bounded word capacity, then reuse the existing
+ * alphabet decoder inside its owning module. Callers supply validated ranks;
+ * output length excludes padding. False reports an unsupported code or shape.
+ */
+[[nodiscard]] bool decode_words_to_ascii(
+    std::uint8_t alphabet_code,
+    std::span<const std::uint64_t> words,
+    std::span<std::uint8_t> output) {
+    if (alphabet_code >= supported_storage_alphabets::alphabet_count
+        || alphabet_code == supported_storage_alphabets::index_of<bioseq::cigar_symbol>())
+        return false;
+    bool decoded{};
+    supported_rank_packed_alphabets::dispatch_alphabet_by_code(alphabet_code,
+        [words, output, &decoded]<sequence_alphabet Alphabet>() {
+            using configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+            using traits = typename compact_sequence_range<configuration>::traits;
+            const auto required_words = output.size() / traits::letters_per_unit
+                + static_cast<std::size_t>(output.size() % traits::letters_per_unit != 0u);
+            if (words.size() < required_words) return;
+            decode_words_to_ascii<Alphabet, std::uint64_t,
+                traits::bits_per_char, traits::letters_per_unit>(
+                    words.data(), output.data(), output.size());
+            decoded = true;
+        });
+    return decoded;
+}
+
 /**
  * Decodes packed ranks into wrapped ASCII lines.
  *

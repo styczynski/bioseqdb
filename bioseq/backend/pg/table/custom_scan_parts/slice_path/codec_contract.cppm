@@ -7,6 +7,7 @@ extern "C" {
 #include "postgres.h"
 
 #include "catalog/pg_type_d.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodes.h"
 #include "nodes/parsenodes.h"
@@ -226,9 +227,13 @@ export {
     /** @brief Estimates output symbol count for planner costing and returns 4096 when unknown. */
     [[nodiscard]] std::uint64_t slice_project_estimated_symbols(Node* node,
                                                                 const bioseq_stub_oids& oids) {
+        check_stack_depth();
         if (node == nullptr)
             return 0u;
         if (Node* source = slice_project_typmod_cast_source(node, oids)) {
+            return slice_project_estimated_symbols(source, oids);
+        }
+        if (Node* source = slice_project_symbol_count_cast_source(node, oids)) {
             return slice_project_estimated_symbols(source, oids);
         }
         if (IsA(node, SubscriptingRef)) {

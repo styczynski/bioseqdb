@@ -159,6 +159,9 @@ template<sequence_alphabet Alphabet, bool Reverse, bool Packed, class Sink>
         bioseq::simd::sequence_rank_transform_kernel transform = sequence_codec_kernel()) {
     constexpr auto table = native_wire_table<Alphabet, Reverse && seqan3::nucleotide_alphabet<Alphabet>, Packed>();
     constexpr auto capacity = bioseq::simd::sequence_rank_io_chunk_capacity;
+    if (source.symbol_count > std::numeric_limits<std::size_t>::max())
+        return std::unexpected(std::string{"sequence length exceeds addressable streaming range"});
+    const auto source_length = static_cast<std::size_t>(source.symbol_count);
     if (transform == nullptr || source.alphabet_code != supported_storage_alphabets::template index_of<Alphabet>())
         return std::unexpected(std::string{"sequence source alphabet or SIMD kernel is unavailable"});
     std::array<std::uint8_t, capacity> scratch{};
@@ -167,38 +170,41 @@ template<sequence_alphabet Alphabet, bool Reverse, bool Packed, class Sink>
     if constexpr (!Reverse && !Packed) {
         using configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
         using traits = typename compact_sequence_range<configuration>::traits;
-        const auto units = source.symbol_count / traits::letters_per_unit
-            + static_cast<std::size_t>(source.symbol_count % traits::letters_per_unit != 0u);
-        const auto padding = source.symbol_count % traits::letters_per_unit == 0u ? 0u
-            : traits::letters_per_unit - source.symbol_count % traits::letters_per_unit;
+        const auto units = source_length / traits::letters_per_unit
+            + static_cast<std::size_t>(source_length % traits::letters_per_unit != 0u);
+        const auto padding = source_length % traits::letters_per_unit == 0u ? 0u
+            : traits::letters_per_unit - source_length % traits::letters_per_unit;
         if (source.resident && source.resident->storage_unit_width == sizeof(std::uint64_t)
             && source.resident->bits_per_symbol == traits::bits_per_char
             && source.resident->leading_symbol_offset == 0u
             && source.resident->trailing_padding == padding && source.resident->unit_count == units
-            && source.resident->logical_length == source.symbol_count
+            && source.resident->logical_length == source_length
             && source.resident->bit_order == storage::packed_symbol_order::least_significant_symbol_first
-            && (source.symbol_count == 0u || source.resident->units != nullptr)
+            && (source_length == 0u || source.resident->units != nullptr)
             && reinterpret_cast<std::uintptr_t>(source.resident->units) % alignof(std::uint64_t) == 0u) {
             const auto* words = static_cast<const std::uint64_t*>(source.resident->units);
-            constexpr auto tile_symbols = capacity / traits::letters_per_unit * traits::letters_per_unit;
-            for (std::size_t position{}; position < source.symbol_count;) {
-                const auto count = std::min(tile_symbols, source.symbol_count - position);
-                bioseq::simd::active_target::decode_words_to_ascii<Alphabet, std::uint64_t,
-                    traits::bits_per_char, traits::letters_per_unit>(
-                        words + position / traits::letters_per_unit, encoded.data(), count);
+            constexpr std::size_t tile_symbols = capacity / traits::letters_per_unit * traits::letters_per_unit;
+            for (std::size_t position{}; position < source_length;) {
+                const auto count = std::min(tile_symbols, source_length - position);
+                const auto tile_words = count / traits::letters_per_unit
+                    + static_cast<std::size_t>(count % traits::letters_per_unit != 0u);
+                if (!bioseq::simd::active_target::decode_words_to_ascii(source.alphabet_code,
+                        std::span<const std::uint64_t>{words + position / traits::letters_per_unit, tile_words},
+                        std::span{encoded}.first(count)))
+                    return std::unexpected(std::string{"resident sequence codec rejected a checked window"});
                 if (const auto written = sink.append(std::span<const std::uint8_t>{encoded}.first(count)); !written)
                     return std::unexpected(written.error());
                 position += count;
             }
-            return static_cast<std::size_t>(source.symbol_count);
+            return source_length;
         }
     }
     bam_pair_state state;
     std::size_t consumed{}, emitted{};
-    while (consumed < source.symbol_count) {
-        const auto count = std::min(capacity, source.symbol_count - consumed);
+    while (consumed < source_length) {
+        const auto count = std::min(capacity, source_length - consumed);
         std::size_t position = consumed;
-        if constexpr (Reverse) position = source.symbol_count - consumed - count;
+        if constexpr (Reverse) position = source_length - consumed - count;
         const auto read = source.read_checked(position, count, scratch);
         if (!read) return std::unexpected(std::string{"sequence source window read failed"});
         auto ranks = *read;
@@ -211,7 +217,7 @@ template<sequence_alphabet Alphabet, bool Reverse, bool Packed, class Sink>
         std::size_t bytes{};
         if constexpr (Packed) {
             const auto result = pack_bam_rank_tile(ranks, seqan3::alphabet_size<Alphabet>, table,
-                state, count == source.symbol_count - consumed, encoded, transform);
+                state, count == source_length - consumed, encoded, transform);
             if (!result) return std::unexpected(result.error());
             state = result->next;
             bytes = result->bytes_written;
@@ -261,8 +267,11 @@ template<sequences::quality_alphabet Alphabet, bool Reverse, bool Text, class Si
         bioseq::simd::sequence_rank_transform_kernel transform = sequence_codec_kernel()) {
     constexpr auto table = quality_wire_table<Alphabet, Text>();
     constexpr auto capacity = bioseq::simd::sequence_rank_io_chunk_capacity;
+    if (source.symbol_count > std::numeric_limits<std::size_t>::max())
+        return std::unexpected(std::string{"quality length exceeds addressable streaming range"});
+    const auto source_length = static_cast<std::size_t>(source.symbol_count);
     if (transform == nullptr || source.alphabet_code != supported_storage_alphabets::template index_of<Alphabet>()
-        || (protein_triplets && source.symbol_count > std::numeric_limits<std::size_t>::max() / 3u))
+        || (protein_triplets && source_length > std::numeric_limits<std::size_t>::max() / 3u))
         return std::unexpected(std::string{"quality source geometry or SIMD kernel is unavailable"});
     std::array<std::uint8_t, capacity> scratch{}, reversed{}, encoded{};
     std::array<std::uint8_t, 3u * capacity> expanded{};
@@ -272,10 +281,10 @@ template<sequences::quality_alphabet Alphabet, bool Reverse, bool Text, class Si
             repeated[value] = static_cast<std::uint32_t>(value | (value << 8u) | (value << 16u));
     }
     std::size_t consumed{}, emitted{};
-    while (consumed < source.symbol_count) {
-        const auto count = std::min(capacity, source.symbol_count - consumed);
+    while (consumed < source_length) {
+        const auto count = std::min(capacity, source_length - consumed);
         std::size_t position = consumed;
-        if constexpr (Reverse) position = source.symbol_count - consumed - count;
+        if constexpr (Reverse) position = source_length - consumed - count;
         const auto read = source.read_checked(position, count, scratch);
         if (!read) return std::unexpected(std::string{"quality source window read failed"});
         auto ranks = *read;
@@ -289,7 +298,7 @@ template<sequences::quality_alphabet Alphabet, bool Reverse, bool Text, class Si
         if (!transform(bioseq::simd::sequence_rank_transform::map_bytes, ranks, table.size(), table, values))
             return std::unexpected(std::string{"quality rank is outside standard Phred bounds"});
         if constexpr (Text) {
-            if (escape_sam_single_star && !protein_triplets && source.symbol_count == 1u && values[0] == '*')
+            if (escape_sam_single_star && !protein_triplets && source_length == 1u && values[0] == '*')
                 values[0] = '+';
         }
         std::span<const std::uint8_t> bytes = values;
@@ -444,7 +453,10 @@ template<seqan3::aminoacid_alphabet Alphabet, bool Reverse, bool Packed, class S
     return output.size();
 }
 
-/** Decode text through the existing alphabet character-validity table and selected gather. */
+/** Decode SAM letters through the existing SIMD gather and checked native alphabet table.
+ * Nucleotide SEQ accepts ASCII letters/dot, mapping non-IUPAC symbols to N only
+ * when representable. Reference-dependent '=' is resolved by the reader first;
+ * quality callers retain their original exact character-range validation. */
 template<sequence_alphabet Alphabet>
 [[nodiscard]] inline std::expected<std::size_t, std::string> decode_sam_rank_tile(
         std::span<const std::uint8_t> input, std::span<std::uint8_t> output,
@@ -455,6 +467,17 @@ template<sequence_alphabet Alphabet>
         std::array<std::uint32_t, native.size()> mapped{};
         for (std::size_t index = 0u; index < mapped.size(); ++index)
             mapped[index] = native[index] == 255u ? 256u : native[index];
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
+            const auto unknown_rank = mapped[static_cast<std::size_t>('N')];
+            for (std::size_t index = 0u; index < mapped.size(); ++index) {
+                const bool letter = (index >= 'A' && index <= 'Z') || (index >= 'a' && index <= 'z');
+                const auto upper = static_cast<char>(index >= 'a' && index <= 'z' ? index - ('a' - 'A') : index);
+                if ((letter || index == '.')
+                    && bam_nucleotide_symbols.find(bam_nucleotide_character(upper)) == std::string_view::npos)
+                    mapped[index] = unknown_rank;
+                else if (!letter) mapped[index] = 256u;
+            }
+        }
         return mapped;
     }();
     if (transform == nullptr || !transform(bioseq::simd::sequence_rank_transform::map_bytes,

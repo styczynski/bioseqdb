@@ -127,7 +127,7 @@ read_locked_generation_head_for_descriptor_publication_pg(const std::string_view
         bool is_null = true;
         bool exact_size = false;
     } state{};
-    bioseq::postgres::support::invoke_pg_as_cpp(
+    bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
         [&state, &sql, &types, &arguments, &bytes] noexcept {
             state.connect = SPI_connect();
             if (state.connect != SPI_OK_CONNECT)
@@ -235,7 +235,7 @@ read_locked_live_descriptor_for_publication_pg(
         std::uint64_t rows = 0u;
         bool table = false;
     } state{};
-    bioseq::postgres::support::invoke_pg_as_cpp([&state, &row, &types, &arguments] noexcept {
+    bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", [&state, &row, &types, &arguments] noexcept {
         state.connect = SPI_connect();
         if (state.connect != SPI_OK_CONNECT)
             return;
@@ -490,7 +490,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
         std::uint64_t updated = 0u;
         std::uint64_t inserted = 0u;
     } state{};
-    bioseq::postgres::support::invoke_pg_as_cpp([&state,
+    bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", [&state,
                                                  &update_types,
                                                  &update_arguments,
                                                  &insert_types,
@@ -787,7 +787,7 @@ publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& to
             bool returned_size_valid = false;
         } spi{};
         const char* publication_sql = publication->sql.c_str();
-        bioseq::postgres::support::invoke_pg_as_cpp(
+        bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
             [&spi, publication_sql, &argument_types, &arguments, &returned_head_bytes] noexcept {
                 spi.connect_status = SPI_connect();
                 if (spi.connect_status != SPI_OK_CONNECT)

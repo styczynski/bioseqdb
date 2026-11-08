@@ -564,7 +564,7 @@ TEST_CASE("mmsearch ownership respects RLS barriers and effectful siblings",
     const std::string alternate_target = format_literal(
         canonical_rows[1].sequences.front(), dna4);
     exec_sql(ctx, fmt::format(
-        "SET bioseq.index.insert_maintenance.enabled=on;"
+        "SET bioseq.index.insert_maintenance.enabled=off;"
         "SET bioseq.index.sequence_read.enabled=off;"
         "SET bioseq.index.async_persistence.enabled=off;"
         "SET bioseq.index.recompute_async_persistence.enabled=off;"

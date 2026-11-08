@@ -28,6 +28,7 @@ import bioseq.postgres.support;
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
 import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_target_contracts;
 export import :custom_scan_join_ownership_helper_contracts;
 export import :custom_scan_join_ownership_carrier_lineage_contracts;
 
@@ -295,14 +296,16 @@ export {
     /**
      * @brief Check for an ordinary target column that can pass through the locator scan.
      *
-     * Accept a direct column such as t.pk. Exclude the column being aligned,
-     * whole-row references, system attributes, and columns made  nullable by
-     * an outer join
+     * Accept a direct column such as t.pk or an exact ctid/tableoid row marker.
+     * The scan projects row markers into ordinary child attributes before
+     * buffering. Exclude the aligned sequence, whole rows, other system
+     * attributes, and columns made nullable by an outer join.
      */
     [[nodiscard]] bool batch_join_is_safe_plain_target_var(
         Node* expression, const Index target_relid, const AttrNumber target_seq_attno) noexcept {
         Var* var = try_cast_pg_node<Var>(expression);
-        return var != nullptr && var->varno == target_relid && var->varattno > 0 &&
+        return var != nullptr && var->varno == target_relid &&
+               (var->varattno > 0 || per_row_is_exact_row_identity_var(var)) &&
                var->varattno != target_seq_attno && var->varlevelsup == 0 &&
                bms_is_empty(var->varnullingrels);
     }

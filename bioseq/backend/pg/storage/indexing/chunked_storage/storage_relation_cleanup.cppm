@@ -260,13 +260,13 @@ void drop_index_relations(drop_index_relation_selector selector) {
                                                true,
                                                0);
               })
-            : bioseq::postgres::support::invoke_pg_as_cpp(
+            : bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
                   [internal_namespace, prefix_data = owned_prefix.c_str()] noexcept {
-                      Oid argument_types[2] = {OIDOID, TEXTOID};
-                      Datum argument_values[2] = {ObjectIdGetDatum(internal_namespace),
-                                                  CStringGetTextDatum(prefix_data)};
+                      std::array<Oid, 2> argument_types{OIDOID, TEXTOID};
+                      std::array<Datum, 2> argument_values{
+                          ObjectIdGetDatum(internal_namespace), CStringGetTextDatum(prefix_data)};
                       const int status = SPI_execute_with_args(
-                          k_prefix_query, 2, argument_types, argument_values, nullptr, true, 0);
+                          k_prefix_query, 2, argument_types.data(), argument_values.data(), nullptr, true, 0);
                       pfree(DatumGetPointer(argument_values[1]));
                       return status;
                   });
@@ -314,10 +314,14 @@ void drop_index_relations(drop_index_relation_selector selector) {
         const std::string qualified_name = quote_index_relation_name(relation_name);
         const std::string drop_statement =
             fmt::format("DROP TABLE IF EXISTS {} CASCADE", qualified_name);
-        const int drop_status = bioseq::postgres::support::invoke_pg_as_cpp(
-            [statement = drop_statement.c_str()] noexcept {
-                return SPI_execute(statement, false, 0);
-            });
+        const auto execute_drop = [statement = drop_statement.c_str()] noexcept {
+            return SPI_execute(statement, false, 0);
+        };
+        // Automatic maintenance owns only its validated prefix. The public
+        // database-wide administrative cleanup keeps the invoker's privileges.
+        const int drop_status = selector.selected_kind == drop_index_selector_kind::prefix_strict
+            ? bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", execute_drop)
+            : bioseq::postgres::support::invoke_pg_as_cpp(execute_drop);
         if (!spi_session.handle_returned_status(
                 selector, drop_index_spi_stage::drop, drop_status)) {
             return;

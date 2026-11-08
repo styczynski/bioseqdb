@@ -85,3 +85,47 @@ TEST_CASE("EXPLAIN ANALYZE on mmsearch query reports the BioseqScan rows",
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
     REQUIRE(plan_contains(plan, "actual time"));
 }
+
+TEST_CASE("EXPLAIN accepts empty scan projections in both vectorization modes",
+          "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
+    auto ctx = fresh_context({k_table});
+    seed_small_bioseq_column(ctx, k_table);
+
+    for (const std::string_view vectorization : {"on", "off"}) {
+        guc_scope setting(ctx, "bioseq.vectorization.enabled", vectorization);
+        for (const std::string_view projection : {"1", "(ARRAY[1,2,3])[1]", "count(*)"}) {
+            const auto sql = fmt::format("SELECT {} FROM {};", projection, k_table);
+            CAPTURE(vectorization, sql);
+            for (const std::string_view options : {"VERBOSE, COSTS OFF",
+                                                   "ANALYZE, VERBOSE, COSTS OFF, TIMING OFF"}) {
+                const auto plan = explain_with_options(ctx, options, sql);
+                REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+                REQUIRE_FALSE(find_explain_property(plan, "Bioseq Retained Alignment Operands").has_value());
+            }
+        }
+    }
+}
+
+TEST_CASE("EXPLAIN finds retained alignment operands inside projection expressions",
+          "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
+    auto ctx = fresh_context({k_table});
+    seed_small_bioseq_column(ctx, k_table);
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 3> projections{{
+        {"bioseq.len(bioseq_internal.alignment_query_sequence(seq0))", "query"},
+        {"bioseq.len(bioseq_internal.alignment_reference_sequence(seq0))", "reference"},
+        {"bioseq.len(bioseq_internal.alignment_query_sequence(seq0)) + "
+         "bioseq.len(bioseq_internal.alignment_reference_sequence(seq0))", "query, reference"},
+    }};
+    for (const std::string_view vectorization : {"on", "off"}) {
+        guc_scope setting(ctx, "bioseq.vectorization.enabled", vectorization);
+        for (const auto& [projection, expected] : projections) {
+            const auto sql = fmt::format(
+                "SELECT {} FROM {} WHERE mmsearch(seq0, "
+                "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4',64));", projection, k_table);
+            CAPTURE(vectorization, sql);
+            const auto plan = explain_text<false>(ctx, sql);
+            REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+            REQUIRE(find_explain_property(plan, "Bioseq Retained Alignment Operands") == expected);
+        }
+    }
+}

@@ -30,10 +30,8 @@ export module bioseq.postgres.extension;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
-import bioseq.pipeline.stats;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.table.alignment_execution;
 
 export namespace bioseq::pg::sql_routines {
 
@@ -3109,20 +3107,6 @@ namespace bioseq::pg::detail {
 /** @brief Install executor hooks that save alignment statistics for this backend. */
 void install_alignment_execution_hooks();
 
-/** @return Borrowed latest alignment snapshot, including partial queries, or an empty optional. */
-[[nodiscard]] const std::optional<
-	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
-last_alignment_execution_snapshot_ref() noexcept;
-
-/** @return Borrowed latest  fully consumed alignment snapshot, or an empty optional. */
-[[nodiscard]] const std::optional<
-	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
-last_completed_alignment_snapshot_ref() noexcept;
-
-/** @brief Validate a snapshot's recorded execution environment and return its backend. */
-[[nodiscard]] bioseq::pipeline_stats::executed_backend
-validate_alignment_snapshot_environment(
-	const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot);
 /** @return A 16-digit lowercase hexadecimal string, including leading zeros. */
 [[nodiscard]] std::string fixed_hex_u64(std::uint64_t value);
 

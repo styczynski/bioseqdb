@@ -245,30 +245,40 @@ template<class Alphabet, std::size_t Width>
     return std::move(*result);
 }
 
-/** Preserve full CIGAR runs directly into the existing flat ABI with two bounded passes. */
+/** Canonicalize imported CIGAR runs into the flat ABI using two bounded passes. */
 [[nodiscard]] Datum load_cigar_datum(const bioseq::borrowed_cigar_run_source& source) {
+    // Reuse canonical append with one pending run, including across source-tile boundaries.
+    const auto visit_canonical = [&source](auto&& consume) -> std::expected<void, bioseq::cigar_error> {
+        std::array<bioseq::cigar_run, 1> pending_storage{};
+        bioseq::cigar_run_span_sink<bioseq::cigar_symbol> pending{pending_storage};
+        bioseq::borrowed_cigar_cursor cursor{source};
+        for (;;) {
+            const auto run = cursor.next();
+            if (!run) return std::unexpected(run.error());
+            if (!*run) break;
+            if (!pending.empty() && pending.back().operation != (**run).operation) {
+                if (const auto consumed = consume(pending.back()); !consumed) return consumed;
+                pending.used = 0;
+            }
+            if (const auto appended = bioseq::append_canonical_run(pending, **run); !appended) return appended;
+        }
+        return pending.empty() ? std::expected<void, bioseq::cigar_error>{} : consume(pending.back());
+    };
     std::uint64_t count{};
-    bioseq::borrowed_cigar_cursor measure{source};
-    for (;;) {
-        const auto run = measure.next();
-        if (!run) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "cannot read imported CIGAR");
-        if (!*run) break;
+    const auto measured = visit_canonical([&count](bioseq::cigar_run) -> std::expected<void, bioseq::cigar_error> {
         if (++count > std::numeric_limits<std::uint32_t>::max())
             raise_load_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED, "imported CIGAR has too many runs");
-    }
+        return {};
+    });
+    if (!measured) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "cannot normalize imported CIGAR");
     auto* result = bioseq::postgres::support::invoke_pg_as_cpp([count] {
         return allocate_pg_cigar_payload(static_cast<std::uint32_t>(count), bioseq::cigar_space::compatibility);
     });
     bioseq::cigar_payload_writer<bioseq::cigar_symbol> writer{
         {reinterpret_cast<std::byte*>(result->data), static_cast<std::size_t>(VARSIZE(result)) - bioseq::pg_types::seq::header_bytes()},
         static_cast<std::uint32_t>(count), bioseq::cigar_space::compatibility};
-    bioseq::borrowed_cigar_cursor replay{source};
-    for (;;) {
-        const auto run = replay.next();
-        if (!run) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "cannot replay imported CIGAR");
-        if (!*run) break;
-        if (!writer.append(**run)) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "invalid imported CIGAR");
-    }
+    const auto written = visit_canonical([&writer](bioseq::cigar_run run) { return writer.append(run); });
+    if (!written) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "invalid imported CIGAR");
     const auto finished = writer.finish();
     if (!finished) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, "invalid imported CIGAR termination");
     result->bp_size = *finished;
@@ -374,13 +384,13 @@ void insert_loaded_record(load_context& ctx, const bioseq::io::export_record_vie
     if (ctx.cols.quality_attno) ctx.assigned_columns[ctx.cols.quality_attno - 1] = true;
     if (quality) bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
         ctx.cols.quality_attno, bioseq::postgres::support::pg_datum::from_pointer(quality->stub));
+    tuple_writer.canonical_fields = true;
     if (row.header && (row.header->size() > MaxAllocSize - VARHDRSZ || row.header->find('\0') != std::string_view::npos))
         raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION, "imported header exceeds PostgreSQL text limits");
     for (const auto destination : ctx.routing.identifier_slots) {
         if (row.header) tuple_writer.set_field(destination, row.header->data(), static_cast<std::int32_t>(row.header->size()));
         else tuple_writer.set_null(destination);
     }
-    tuple_writer.canonical_fields = true;
     for (const auto& field : row.metadata) {
         const auto value = field.is_null ? std::nullopt : std::optional<std::string_view>{field.bytes};
         if (const auto routed = idp::route_canonical_field(field.name, value, ctx.routing, ctx.writer_ref); !routed)
@@ -406,6 +416,44 @@ class load_reference_lookup {
     pg_sequence_read_session* session_{};
     bioseq::parallelism::memory_permit permit_;
     std::string query_;
+
+    /** Resolve a readable reference identifier with the loader's shared header policy.
+     * A single text primary key wins, then a unique header alias, then the sole
+     * text column. All names borrow the open relation until resolution finishes.
+     */
+    [[nodiscard]] static AttrNumber identifier_attribute(Relation relation) {
+        const auto primary_attribute = bioseq::postgres::support::invoke_pg_as_cpp([relation]() -> AttrNumber {
+            const auto primary_oid = bioseq::postgres::support::find_primary_key_oid(relation);
+            if (!OidIsValid(primary_oid)) return InvalidAttrNumber;
+            const auto primary = index_open(primary_oid, AccessShareLock);
+            const AttrNumber attribute = primary->rd_index && primary->rd_index->indnkeyatts == 1
+                ? primary->rd_index->indkey.values[0] : InvalidAttrNumber;
+            index_close(primary, AccessShareLock);
+            return attribute;
+        });
+        const auto descriptor = RelationGetDescr(relation);
+        std::vector<idp::column_descriptor> columns;
+        std::vector<AttrNumber> attributes;
+        for (int index = 0; index < descriptor->natts; ++index) {
+            const auto* attribute = TupleDescAttr(descriptor, index);
+            if (attribute->attisdropped || attribute->attnum <= 0) continue;
+            if (!load_type_accepts_header(attribute->atttypid)) continue;
+            columns.push_back({.name = NameStr(attribute->attname), .is_text = true,
+                .is_primary_key = attribute->attnum == primary_attribute,
+                .not_null = attribute->attnotnull, .has_default = attribute->atthasdef,
+                .is_identity_or_generated = attribute->attidentity != '\0' || attribute->attgenerated != '\0'});
+            attributes.push_back(attribute->attnum);
+        }
+        const auto mapping = idp::resolve_identifier_mapping(idp::header_format::automatic,
+            idp::header_format::plain, columns, {});
+        if (!mapping) raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION,
+            "reference_table identifier: " + mapping.error());
+        if (mapping->routing.identifier_slots.size() != 1u)
+            raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION,
+                "reference_table requires one unambiguous text identifier");
+        return attributes[mapping->slot_to_column[mapping->routing.identifier_slots.front()]];
+    }
+
 public:
     /** Delay all reference-table work until an '=' symbol requires it. */
     explicit load_reference_lookup(std::optional<Oid> relation) : relation_(relation) {}
@@ -425,12 +473,11 @@ public:
             });
             try {
                 const auto columns = resolve_load_columns(relation);
-                if (!columns.header_attno) raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION,
-                    "reference_table requires one text identifier and one biological sequence column");
-                query_ = bioseq::postgres::support::invoke_pg_as_cpp([relation, columns] {
+                const auto header_attribute = identifier_attribute(relation);
+                query_ = bioseq::postgres::support::invoke_pg_as_cpp([relation, columns, header_attribute] {
                     const auto descriptor = RelationGetDescr(relation);
                     const auto* sequence = quote_identifier(NameStr(TupleDescAttr(descriptor, columns.seq_attno - 1)->attname));
-                    const auto* header = quote_identifier(NameStr(TupleDescAttr(descriptor, columns.header_attno - 1)->attname));
+                    const auto* header = quote_identifier(NameStr(TupleDescAttr(descriptor, header_attribute - 1)->attname));
                     const auto* table = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(relation)),
                         RelationGetRelationName(relation));
                     return std::string{"SELECT "} + sequence + " FROM " + table + " WHERE " + header + " = $1 LIMIT 2";

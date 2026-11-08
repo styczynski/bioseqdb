@@ -229,17 +229,23 @@ public:
     /** Release the reusable admitted inflater after its worker has joined. */
     ~bgzf_decoder() { if (decompressor_ != nullptr) libdeflate_free_decompressor(decompressor_); }
 
+    /** Admit the persistent workspace before scheduling; repeated initialization is harmless. */
+    [[nodiscard]] std::expected<void, std::string> initialize() {
+        if (decompressor_ != nullptr) return {};
+        const libdeflate_options options{sizeof(libdeflate_options), &compression_allocation::allocate, &compression_allocation::release};
+        decompressor_ = libdeflate_alloc_decompressor_ex(&options);
+        if (decompressor_ == nullptr)
+            return std::unexpected(std::string{"Cannot admit/allocate libdeflate decompression workspace"});
+        return {};
+    }
+
     /** Inflate exactly one independent member; reject short/extra input or output before delivery. */
     [[nodiscard]] std::expected<std::size_t, std::string> decode(
         const bgzf_member_view& member, std::span<std::uint8_t> output) {
         if (output.size() < member.uncompressed_bytes)
             return std::unexpected(std::string{"BGZF decoder output is not large enough"});
-        if (decompressor_ == nullptr) {
-            const libdeflate_options options{sizeof(libdeflate_options), &compression_allocation::allocate, &compression_allocation::release};
-            decompressor_ = libdeflate_alloc_decompressor_ex(&options);
-            if (decompressor_ == nullptr)
-                return std::unexpected(std::string{"Cannot admit/allocate libdeflate decompression workspace"});
-        }
+        if (const auto initialized = initialize(); !initialized)
+            return std::unexpected(initialized.error());
         std::size_t consumed{}, produced{};
         // Output-pointer parameters are required solely by the dependency C ABI;
         // the public codec returns its validated count by value.
@@ -349,7 +355,8 @@ class bgzf_source {
             }
             if (ready_slots == 0) return true;
             auto& pool = parallelism::global_pool::instance();
-            auto group = pool.make_task_group();
+            const bool parallel = ready_slots > 1u && parallelism::has_parallel_dispatch(pool.get_mode());
+            auto group = parallel ? pool.make_task_group() : parallelism::scoped_task_group{};
             for (std::size_t index = 0; index < ready_slots; ++index) {
                 auto& slot = *slots[index];
                 group.run(parallelism::task_body{[&slot]() {
@@ -383,22 +390,37 @@ public:
             .maximum_concurrency = static_cast<unsigned>(std::min<std::size_t>(workers, 64)),
             .mode = parallelism::pipeline_concurrency_mode::dispatch_parallel});
         workers = std::max<std::size_t>(1, std::min<std::size_t>(workers, pool.maximum_concurrency()));
+        if (!parallelism::has_parallel_dispatch(pool.get_mode())) workers = 1u;
         const auto slot_bytes = sizeof(decode_slot) + 2 * sizeof(std::unique_ptr<decode_slot>);
         if (workers > (std::numeric_limits<std::size_t>::max() - sizeof(state)) / slot_bytes)
             return std::unexpected(std::string{"BGZF decoder admission size overflows"});
+        constexpr auto slot_pointer_bytes = 2u * sizeof(std::unique_ptr<decode_slot>);
         auto permit = parallelism::memory_admission_controller::instance().try_reserve(
-            workers * slot_bytes + sizeof(state));
+            workers * slot_pointer_bytes + sizeof(state));
         while (!permit && workers > 1u) {
             workers = std::max<std::size_t>(1u, workers / 2u);
-            permit = parallelism::memory_admission_controller::instance().try_reserve(workers * slot_bytes + sizeof(state));
+            permit = parallelism::memory_admission_controller::instance().try_reserve(workers * slot_pointer_bytes + sizeof(state));
         }
         if (!permit) return std::unexpected(std::string{"Cannot admit BGZF decoder workers"});
         bgzf_source result;
         result.state_ = std::make_unique<state>();
         result.state_->permit = std::move(*permit);
         result.state_->slots.reserve(workers);
-        for (std::size_t index = 0; index < workers; ++index)
-            result.state_->slots.push_back(std::make_unique<decode_slot>());
+        for (std::size_t index = 0; index < workers; ++index) {
+            const auto previous_bytes = result.state_->permit.bytes();
+            if (!result.state_->permit.grow_to(previous_bytes + sizeof(decode_slot))) break;
+            auto slot = std::make_unique<decode_slot>();
+            const auto initialized = slot->decoder.initialize();
+            if (!initialized) {
+                slot.reset();
+                result.state_->permit.shrink_to(previous_bytes);
+                if (result.state_->slots.empty()) return std::unexpected(initialized.error());
+                break;
+            }
+            result.state_->slots.push_back(std::move(slot));
+        }
+        if (result.state_->slots.empty())
+            return std::unexpected(std::string{"Cannot admit one BGZF decoder slot"});
         return result;
     }
 

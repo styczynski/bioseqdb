@@ -10,6 +10,8 @@ module;
 export module bioseq.postgres.table:api;
 
 export import :table_access_method_contracts;
+// Planner metadata must not import the executor's scan-state graph.
+export import :custom_scan_plan_abi_constants;
 // Export binding reuses the registered OIDs and exact lazy-expression classifier;
 // their definitions remain owned by the existing table planner modules.
 export import :custom_scan_oid_expression_support_oid_catalog_core_contracts;

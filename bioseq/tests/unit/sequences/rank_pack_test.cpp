@@ -571,5 +571,42 @@ TEST_CASE("quality character codecs reject every out-of-domain byte and preserve
             }
         }
     };
-    check.template operator()<seq::phred42>(); check.template operator()<seq::phred63>(); check.template operator()<seq::phred68solexa>();
+    check.template operator()<seq::phred42>(); check.template operator()<seq::phred63>();
+    check.template operator()<seq::phred68solexa>(); check.template operator()<seq::phred94>();
+}
+
+TEST_CASE("packed ASCII module boundary preserves every rank and rejects short storage",
+          "[component:bioseq][layer:unit][feature:sequence][feature:io][resource:highway]") {
+    []<class... Entries>(std::tuple<Entries...>) {
+        const auto check = []<class Entry>() {
+            if constexpr (Entry::is_rank_packed) {
+                using alphabet = typename Entry::alphabet_type;
+                constexpr auto code = supported_storage_alphabets::index_of<alphabet>();
+                // All registered ranks, several vector batches, and a partial word.
+                std::vector<std::uint8_t> ranks(131u);
+                for (std::size_t index = 0u; index < ranks.size(); ++index)
+                    ranks[index] = static_cast<std::uint8_t>(index % seqan3::alphabet_size<alphabet>);
+                const auto words = manual_pack<alphabet, std::uint64_t>(ranks);
+                const auto expected = text_from_ranks<alphabet>(ranks);
+                std::vector<std::uint8_t> output(ranks.size() + 2u, 0xCCu);
+                auto destination = std::span{output}.subspan(1u, ranks.size());
+                CAPTURE(Entry::alphabet_name_sv);
+                REQUIRE(bioseq::simd::active_target::decode_words_to_ascii(code, words, destination));
+                REQUIRE(std::string(destination.begin(), destination.end()) == expected);
+                REQUIRE(output.front() == 0xCCu);
+                REQUIRE(output.back() == 0xCCu);
+                std::fill(output.begin(), output.end(), 0xCCu);
+                REQUIRE_FALSE(bioseq::simd::active_target::decode_words_to_ascii(code,
+                    std::span{words}.first(words.size() - 1u), destination));
+                REQUIRE(std::all_of(output.begin(), output.end(),
+                    [](std::uint8_t value) { return value == 0xCCu; }));
+                REQUIRE(bioseq::simd::active_target::decode_words_to_ascii(code, {}, {}));
+            }
+        };
+        (check.template operator()<Entries>(), ...);
+    }(supported_storage_alphabets::alphabet_entries_tuple{});
+    REQUIRE_FALSE(bioseq::simd::active_target::decode_words_to_ascii(
+        supported_storage_alphabets::index_of<bioseq::cigar_symbol>(), {}, {}));
+    REQUIRE_FALSE(bioseq::simd::active_target::decode_words_to_ascii(
+        std::numeric_limits<std::uint8_t>::max(), {}, {}));
 }

@@ -58,7 +58,12 @@ TEST_CASE(
             exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
             exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = off;");
             exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
-            /* Enabling Vulkan availability must still allow the selected CPU rorte */
+            /* This case checks the mapped control-directory route. The direct
+             * compact route has a separate directory-free test below. */
+            exec_sql(ctx,
+                "SET bioseq.aligner.fragment_minimizer.lookup_route="
+                "'control_block_scan';");
+            /* Enabling Vulkan availability must still allow the selected CPU route. */
             exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
             const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
                 ctx,
@@ -106,11 +111,11 @@ TEST_CASE(
                     ? "minimizer_fragment" : "minimizer_sequence",
                 k_batch_join_target, index_name, rowno));
             REQUIRE(publication.size() > 25u);
-            /* Check the published format and batch versions. The fragment route
+            /* Check the published format and grouped GPU ABI versions. The fragment route
              * reads a mapped image after metadata lookup. The sequence route
              * reads its full payload from PostgreSQL. */
             REQUIRE(publication[7].value_or("") == "5");
-            REQUIRE(publication[19].value_or("") == "3");
+            REQUIRE(publication[19].value_or("") == "4");
             REQUIRE(publication[8].value_or("") == "t");
             REQUIRE(publication[9].value_or("") == "t");
             REQUIRE(std::stoull(publication[14].value()) == target.size());

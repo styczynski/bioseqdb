@@ -23,8 +23,8 @@
     "bioseq_writer_parallel4_fastq": {"_": {"type": "integer", "default": 0}},
     "bioseq_writer_parallel8_fasta": {"_": {"type": "integer", "default": 0}},
     "bioseq_writer_parallel8_fastq": {"_": {"type": "integer", "default": 0}},
-    "bioseq_writer_mmap_fasta":      {"_": {"type": "integer", "default": 0}},
-    "bioseq_writer_mmap_fastq":      {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_bounded_pwrite_fasta":      {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_bounded_pwrite_fastq":      {"_": {"type": "integer", "default": 0}},
     "naive_ofstream_fasta":          {"_": {"type": "integer", "default": 0}},
     "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}},
 
@@ -1242,7 +1242,7 @@
 
   "bench_io_writers_fasta": {
     "tags": ["io", "writer", "fasta"],
-    "description": "FASTA writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash.",
+    "description": "FASTA writer paths. sync vs parallel4 vs parallel8 vs bounded-pwrite bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
@@ -1253,7 +1253,7 @@
         "bioseq_writer_sync_fasta":      {},
         "bioseq_writer_parallel4_fasta": {},
         "bioseq_writer_parallel8_fasta": {},
-        "bioseq_writer_mmap_fasta":      {},
+        "bioseq_writer_bounded_pwrite_fasta":      {},
         "naive_ofstream_fasta":          {}
       },
       "by_regions": false,
@@ -1275,8 +1275,8 @@
               { "compare": "<", "threshold%": 0, "tolerance%": 30, "aggregate": "p50" },
               { "key": "bioseq_writer_parallel4_fasta" } ],
 
-            [ "writer_mmap_within_50pct_of_naive_fasta",
-              { "key": "bioseq_writer_mmap_fasta" },
+            [ "writer_bounded_pwrite_within_50pct_of_naive_fasta",
+              { "key": "bioseq_writer_bounded_pwrite_fasta" },
               { "compare": "<", "threshold%": 0, "tolerance%": 50, "aggregate": "p50" },
               { "key": "naive_ofstream_fasta" } ]
           ]
@@ -1292,8 +1292,8 @@
               { "key": "bioseq_writer_parallel8_fasta" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "bioseq_writer_sync_fasta" } ],
-            [ "writer_mmap_fasta_roundtrip_matches_sync",
-              { "key": "bioseq_writer_mmap_fasta" },
+            [ "writer_bounded_pwrite_fasta_roundtrip_matches_sync",
+              { "key": "bioseq_writer_bounded_pwrite_fasta" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "bioseq_writer_sync_fasta" } ],
             [ "writer_naive_fasta_roundtrip_matches_sync",
@@ -1311,7 +1311,7 @@
 
   "bench_io_writers_fastq": {
     "tags": ["io", "writer", "fastq"],
-    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The writer matrix uses only DNA4 corpora. The separate real-data reader matrix explicitly selects DNA5 to preserve N and exercise mmap-parallel and parallel-gzip throughput.",
+    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs bounded-pwrite bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The writer matrix uses only DNA4 corpora. The separate real-data reader matrix explicitly selects DNA5 to preserve N and exercise mmap-parallel and parallel-gzip throughput.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
@@ -1322,7 +1322,7 @@
         "bioseq_writer_sync_fastq":      {},
         "bioseq_writer_parallel4_fastq": {},
         "bioseq_writer_parallel8_fastq": {},
-        "bioseq_writer_mmap_fastq":      {},
+        "bioseq_writer_bounded_pwrite_fastq":      {},
         "naive_ofstream_fastq":          {}
       },
       "by_regions": false,
@@ -1344,8 +1344,8 @@
               { "compare": "<", "threshold%": 0, "tolerance%": 30, "aggregate": "p50" },
               { "key": "bioseq_writer_parallel4_fastq" } ],
 
-            [ "writer_mmap_within_50pct_of_naive_fastq",
-              { "key": "bioseq_writer_mmap_fastq" },
+            [ "writer_bounded_pwrite_within_50pct_of_naive_fastq",
+              { "key": "bioseq_writer_bounded_pwrite_fastq" },
               { "compare": "<", "threshold%": 0, "tolerance%": 50, "aggregate": "p50" },
               { "key": "naive_ofstream_fastq" } ]
           ]
@@ -1361,8 +1361,8 @@
               { "key": "bioseq_writer_parallel8_fastq" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "bioseq_writer_sync_fastq" } ],
-            [ "writer_mmap_fastq_roundtrip_matches_sync",
-              { "key": "bioseq_writer_mmap_fastq" },
+            [ "writer_bounded_pwrite_fastq_roundtrip_matches_sync",
+              { "key": "bioseq_writer_bounded_pwrite_fastq" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "bioseq_writer_sync_fastq" } ],
             [ "writer_naive_fastq_roundtrip_matches_sync",

@@ -15,6 +15,11 @@ using namespace bioseq_int_tests;
 namespace {
 /** @brief Creates repeatable query/target pairs with long DNA4 targets. */
 void seed_sample(const connection_test_context& ctx, std::string_view table_name, int row_count) {
+    // These chunk and completeness-manifest fixtures exercise the direct
+    // five-column storage format, including its reserved temporary sub-keys.
+    exec_sql(ctx,
+             "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+             "SET bioseq.aligner.grouped_soa_generation.enabled = off;");
     exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table_name);
     exec_sqlf(ctx,
               "SELECT bioseq.create_query_target_sample_table('{}', {}, 5000, 100.0, 200000, "

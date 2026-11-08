@@ -155,6 +155,43 @@ export {
         return NIL;
     }
 
+    /**
+     * @brief Returns a cast input only for symbol-count estimation, never cast elision.
+     *
+     * A successful non-explicit cast to an ordinary alphabet binds or repacks
+     * symbols without changing their count. Keep CIGAR parsing, biological
+     * conversion, dynamic arguments and malformed typmods at the unknown estimate.
+     */
+    [[nodiscard]] inline Node*
+    slice_project_symbol_count_cast_source(Node* node, const bioseq_stub_oids& oids) {
+        FuncExpr* function = try_cast_pg_node<FuncExpr>(node);
+        if (function == nullptr || function->funcid != oids.seq_cast_oid ||
+            !slice_project_is_sequence_conversion(node, oids) ||
+            list_length(function->args) != 3)
+            return nullptr;
+        Const* target_typmod =
+            try_cast_pg_node<Const>(reinterpret_cast<Node*>(lsecond(function->args)));
+        Const* explicit_cast =
+            try_cast_pg_node<Const>(reinterpret_cast<Node*>(lthird(function->args)));
+        if (target_typmod == nullptr || target_typmod->constisnull ||
+            target_typmod->consttype != INT4OID || explicit_cast == nullptr ||
+            explicit_cast->constisnull || explicit_cast->consttype != BOOLOID)
+            return nullptr;
+        const int32 target_value = DatumGetInt32(target_typmod->constvalue);
+        Node* source = reinterpret_cast<Node*>(linitial(function->args));
+        if (target_value < 0)
+            return source;
+        if (DatumGetBool(explicit_cast->constvalue) || (target_value & 0xff) > 3 ||
+            (static_cast<std::uint32_t>(target_value) & 0xffff0000u) != 0u)
+            return nullptr;
+        const auto target = compact_sequence_stdc_type_params::decode(target_value);
+        return is_supported_alphabet_code(target.alphabet_code) &&
+                       !pgseq_is_cigar_alphabet(target.alphabet_code) &&
+                       pgseq_supported_storage_unit_byte_widths::contains_runtime(
+                           target.storage_unit_byte_width)
+                   ? source : nullptr;
+    }
+
     /* INSERT can wrap a sequence in an implicit typmod cast. With constant cast
      * arguments, trace the source expression through that wrapper  so the plan
      * records the lazy sequence work before the value is packed for storage.

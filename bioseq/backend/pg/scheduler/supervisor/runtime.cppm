@@ -29,6 +29,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 module bioseq.postgres.scheduler.supervisor;
 import :persist_queue_publish;
@@ -90,7 +91,11 @@ void scheduler_shmem_startup() {
     g_shared = static_cast<scheduler_shared_state*>(ShmemInitStruct(
         "bioseq scheduler shared state", sizeof(scheduler_shared_state), &shared_state_found));
     if (!shared_state_found) {
-        pg_atomic_init_u32(&g_shared->cfg_max_concurrency, 0);
+        // GUC registration precedes this hook. Publish the configured limit
+        // before backends can attach, independently of supervisor shader startup.
+        pg_atomic_init_u32(&g_shared->cfg_max_concurrency,
+                           static_cast<std::uint32_t>(std::max(
+                               0, bioseq::scheduler::settings::backend::max_concurrency)));
         pg_atomic_init_u32(&g_shared->cfg_generation, 1);
         pg_atomic_init_u32(&g_shared->state, 1);
 
@@ -449,8 +454,9 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     pg_atomic_write_u32(&g_shared->runtime_init_state,
                         static_cast<std::uint32_t>(runtime_initialization_state::pending));
     pg_atomic_fetch_add_u32(&g_shared->runtime_init_generation, 1);
-    publish_runtime_init_result(load_bioseq_runtime());
 
+    // CPU scheduling does not depend on shader readiness. Publish settings and
+    // reset the startup counters before potentially slow or failed AOT work.
     pg_atomic_write_u32(&g_shared->cfg_max_concurrency,
                         static_cast<std::uint32_t>(
                             std::max(0, bioseq::scheduler::settings::backend::max_concurrency)));
@@ -458,12 +464,23 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
     reset_shared_stats(g_shared->stats,
                        static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns()));
+    {
+        auto initialization_result = load_bioseq_runtime([]() noexcept {
+            return got_sigterm != 0;
+        });
+        if (!got_sigterm) {
+            publish_runtime_init_result(std::move(initialization_result));
+        }
+    }
 
     while (!got_sigterm) {
         const int latch_events = WaitLatch(
             MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1000L, PG_WAIT_EXTENSION);
         if ((latch_events & WL_LATCH_SET) != 0) {
             ResetLatch(MyLatch);
+        }
+        if (got_sigterm) {
+            break;
         }
         CHECK_FOR_INTERRUPTS();
         if (got_sighup) {

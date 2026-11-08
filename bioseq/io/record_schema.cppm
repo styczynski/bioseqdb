@@ -126,6 +126,8 @@ struct alignment_record_view {
     std::span<const auxiliary_field_view> auxiliary;
     record_orientation sequence_orientation{record_orientation::original_query};
     cigar_form form{cigar_form::sam_complete};
+    /// Imported/scan adapters bind orientation and CIGAR form; explicit options must agree.
+    bool source_bound_interpretation{};
     std::optional<std::uint64_t> header_context_id;
 };
 

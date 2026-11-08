@@ -101,16 +101,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
           "[component:bioseq][layer:integration][feature:planner][resource:postgres]") {
     // A GIN index on sequence labels must leave sequence alignment results unchanged.
     auto ctx = fresh_context({k_index_label_table});
-    // Build this fixture with room to add a labels column
-    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
-    create_seq_table(ctx,
-                     seq_table_spec{
-                         .name = std::string(k_index_label_table),
-                         .typmod = {.alphabet = "dna4", .width = 64},
-                         .seq_columns = 2,
-                         .using_bioseq = true,
-                     },
-                     hoe_seed_rows());
+    seed_hoe_fixture(ctx, k_index_label_table);
 
     // Fill  the labels column so the GIN index has data.
     exec_sqlf(ctx, "ALTER TABLE {} ADD COLUMN labels TEXT[];", k_index_label_table);
@@ -118,6 +109,7 @@ TEST_CASE("Result rows are independent of GIN index on array-of-text labels",
 
     // Pre-index baseline.
     const auto baseline = run_invariance_queries(ctx, k_index_label_table);
+    REQUIRE_FALSE(baseline.row_results.empty());
 
     // Add the GIN index.
     exec_sqlf(ctx, "CREATE INDEX {0}_labels_gin ON {0} USING gin(labels);", k_index_label_table);
@@ -193,5 +185,60 @@ TEST_CASE("Result rows are invariant under bioseq.planner.index_scan.enabled tog
         REQUIRE(row[1].has_value());
         REQUIRE(row[2].has_value());
         REQUIRE_FALSE(row[2].value().empty());
+    }
+}
+
+TEST_CASE("indexed scalar UPDATE keeps mixed sequence values across reader lifetimes",
+          "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
+    constexpr std::string_view table = "indexed_update_sequence_ownership";
+    auto ctx = fresh_context({table});
+    guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+    guc_scope compression(ctx, "bioseq.storage.compression.algorithm", "'pglz'");
+    constexpr std::array settings{"on", "off"};
+    for (const char* column_cache : settings) {
+        guc_scope cached(ctx, "bioseq.column_cache.enabled", column_cache);
+        for (const char* vectorization : settings) {
+            guc_scope vectorized(ctx, "bioseq.vectorization.enabled", vectorization);
+            CAPTURE(column_cache, vectorization);
+            exec_sqlf(ctx, "DROP TABLE IF EXISTS {0}; CREATE TABLE {0}("
+                "id integer PRIMARY KEY,dna bioseq.seq('dna4',64),"
+                "quality bioseq.seq('phred94',64),cigar bioseq.seq('cigar'),labels text[],"
+                "revision integer NOT NULL DEFAULT 0 CHECK(revision>=0)) USING bioseq;"
+                "INSERT INTO {0}(id,dna,quality,cigar) VALUES"
+                "(1,NULL,NULL,NULL),(2,'','',''),(3,'ACG','!I~','3M1I2D'),"
+                "(4,repeat('ACGT',8193)::bioseq.seq('dna4',64),"
+                "repeat('!~',8193)::bioseq.seq('phred94',64),"
+                "repeat('1M1I',4097)::bioseq.seq('cigar')),"
+                "(5,(repeat('TGCA',257)||'A')::bioseq.seq('dna4',64),"
+                "repeat('I',257)::bioseq.seq('phred94',64),'200M3I17M2D');", table);
+            const auto sequence_query = fmt::format(
+                "SELECT id,dna::text,quality::text,cigar::text FROM {} ORDER BY id", table);
+            const auto original_sequences = query_rows(ctx, sequence_query);
+            REQUIRE(original_sequences.size() == 5);
+            for (int revision : {1, 2}) {
+                if (revision == 2) {
+                    exec_sqlf(ctx, "CREATE INDEX ON {} USING gin(labels)", table);
+                }
+                // The primary-key uniqueness fetch ends while the row-version
+                // reader still borrows the remaining rows of this compressed chunk.
+                exec_sqlf(ctx, "UPDATE {} SET labels=ARRAY['lab','sample',id::text],"
+                    "revision=revision+1", table);
+                REQUIRE(query_rows(ctx, sequence_query) == original_sequences);
+                REQUIRE(query_scalar_int(ctx, fmt::format(
+                    "SELECT count(*) FROM {} WHERE revision={} "
+                    "AND labels=ARRAY['lab','sample',id::text]", table, revision)) == 5);
+            }
+            exec_sql(ctx, "BEGIN;SAVEPOINT rejected_update");
+            const auto failure = sql_error(ctx, fmt::format(
+                "UPDATE {} SET revision=-1", table));
+            exec_sql(ctx, "ROLLBACK TO SAVEPOINT rejected_update");
+            REQUIRE(failure.sqlstate == "23514");
+            REQUIRE(query_rows(ctx, sequence_query) == original_sequences);
+            exec_sqlf(ctx, "UPDATE {} SET revision=revision+1", table);
+            exec_sql(ctx, "COMMIT");
+            REQUIRE(query_rows(ctx, sequence_query) == original_sequences);
+            REQUIRE(query_scalar_int(ctx, fmt::format(
+                "SELECT count(*) FROM {} WHERE revision=3", table)) == 5);
+        }
     }
 }

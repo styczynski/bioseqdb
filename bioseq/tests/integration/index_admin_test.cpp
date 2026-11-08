@@ -315,9 +315,9 @@ TEST_CASE("fragment-minimizer lookup-route GUC has canonical spellings",
         "array_to_string(enumvals, ',') FROM pg_settings "
         "WHERE name='bioseq.aligner.fragment_minimizer.lookup_route';");
     REQUIRE(setting.size() == 6);
-    REQUIRE(setting[0].value() == "control_block_scan");
-    REQUIRE(setting[1].value() == "control_block_scan");
-    REQUIRE(setting[2].value() == "control_block_scan");
+    REQUIRE(setting[0].value() == "direct_compact_hash_lookup");
+    REQUIRE(setting[1].value() == "direct_compact_hash_lookup");
+    REQUIRE(setting[2].value() == "direct_compact_hash_lookup");
     REQUIRE(setting[3].value() == "user");
     REQUIRE(setting[4].value() == "enum");
     REQUIRE(setting[5].value()
@@ -325,14 +325,14 @@ TEST_CASE("fragment-minimizer lookup-route GUC has canonical spellings",
 
     exec_sql(ctx,
         "SET bioseq.aligner.fragment_minimizer.lookup_route="
-        "direct_compact_hash_lookup;");
-    REQUIRE(query_scalar(ctx,
-        "SHOW bioseq.aligner.fragment_minimizer.lookup_route;")
-        == "direct_compact_hash_lookup");
-    exec_sql(ctx, "RESET bioseq.aligner.fragment_minimizer.lookup_route;");
+        "control_block_scan;");
     REQUIRE(query_scalar(ctx,
         "SHOW bioseq.aligner.fragment_minimizer.lookup_route;")
         == "control_block_scan");
+    exec_sql(ctx, "RESET bioseq.aligner.fragment_minimizer.lookup_route;");
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.aligner.fragment_minimizer.lookup_route;")
+        == "direct_compact_hash_lookup");
 }
 
 TEST_CASE("generation descriptor and reaper catalogs have exact protected shape",

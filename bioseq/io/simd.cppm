@@ -532,8 +532,10 @@ export {
         if (size < 128) {
             return crc32_z_scalar(running, data, size);
         }
-        HWY_ALIGN std::array<std::uint64_t, 2> state_lanes{static_cast<std::uint64_t>(running),
-                                                           std::uint64_t{0}};
+        // Public running values are finalized, like zlib's. SIMD folds raw state.
+        HWY_ALIGN std::array<std::uint64_t, 2> state_lanes{
+            static_cast<std::uint64_t>(running ^ std::numeric_limits<std::uint32_t>::max()),
+            std::uint64_t{0}};
         auto running_state = hn::Load(simd_tag, state_lanes.data());
 
         const std::size_t aligned_chunks = size / 128;
@@ -544,7 +546,9 @@ export {
                                             aligned_chunks > 0 ? aligned_chunks - 1 : 0,
                                             keys);
 
-        std::uint32_t crc = crc32_final_reduction_reflected(simd_tag, running_state, keys);
+        // Finalize before passing a completed prefix to zlib's continuation API.
+        std::uint32_t crc = crc32_final_reduction_reflected(simd_tag, running_state, keys)
+            ^ std::numeric_limits<std::uint32_t>::max();
 
         const std::size_t tail_offset = aligned_chunks * 128;
         if (tail_offset < size) {
@@ -660,26 +664,26 @@ export {
     /** Decode uppercase hexadecimal pairs into ranks with fused alphabet bounds.
      * Input/output are exact-sized and nonoverlapping; a false result exposes no record.
      */
-    [[nodiscard]] inline bool decode_upper_hex_pairs(std::span<const std::uint8_t> input,
+    [[nodiscard]] bool decode_upper_hex_pairs(std::span<const std::uint8_t> input,
             std::span<std::uint8_t> output, std::size_t alphabet_size = 256) noexcept {
         return HWY_NAMESPACE::decode_upper_hex_pairs_for(hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t>{}, input, output, alphabet_size);
     }
 
     /** Encode ranks as uppercase hexadecimal with exact output size and no overlap. */
-    [[nodiscard]] inline bool encode_upper_hex_bytes(std::span<const std::uint8_t> input,
+    [[nodiscard]] bool encode_upper_hex_bytes(std::span<const std::uint8_t> input,
             std::span<std::uint8_t> output, std::size_t alphabet_size = 256) noexcept {
         return HWY_NAMESPACE::encode_upper_hex_bytes_for(hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t>{}, input, output, alphabet_size);
     }
 
     /** Return true only for complete finite little-endian IEEE binary32 values. */
-    [[nodiscard]] inline bool all_finite_f32_le(std::span<const std::uint8_t> bytes) noexcept {
+    [[nodiscard]] bool all_finite_f32_le(std::span<const std::uint8_t> bytes) noexcept {
         return HWY_NAMESPACE::finite_float_bytes_for(hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t>{}, bytes);
     }
 
     /** Return the safe printable-ASCII prefix for a canonical JSON string.
      * Scalar ABI keeps Highway tags/vectors inside this existing scan owner.
      */
-    [[nodiscard]] inline std::size_t scan_json_ascii_prefix(
+    [[nodiscard]] std::size_t scan_json_ascii_prefix(
             const char* data, std::size_t size) noexcept {
         namespace hn = hwy::HWY_NAMESPACE;
         const hn::ScalableTag<std::uint8_t> tag;
@@ -690,7 +694,7 @@ export {
     }
 
     /** Return the valid prefix of a SAM Z or H value using the existing Highway scan engine. */
-    [[nodiscard]] inline std::size_t scan_sam_auxiliary_prefix(
+    [[nodiscard]] std::size_t scan_sam_auxiliary_prefix(
             const std::uint8_t* data, std::size_t size, bool hexadecimal) noexcept {
         namespace hn = hwy::HWY_NAMESPACE;
         const hn::ScalableTag<std::uint8_t> tag;
@@ -703,7 +707,7 @@ export {
     }
 
     /** Return the canonical header's literal URI-unreserved prefix before decoding escapes. */
-    [[nodiscard]] inline std::size_t scan_header_unreserved_prefix(
+    [[nodiscard]] std::size_t scan_header_unreserved_prefix(
             const char* data, std::size_t size) noexcept {
         namespace hn = hwy::HWY_NAMESPACE;
         const hn::ScalableTag<std::uint8_t> tag;

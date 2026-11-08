@@ -61,7 +61,8 @@ TEST_CASE("Metadata row codecs match the live catalog and write rows",
                                        "2:chunk_group_row_limit:integer:true,"
                                        "3:stripe_row_limit:integer:true,"
                                        "4:compression_level:integer:true,"
-                                       "5:compression:name:true");
+                                       "5:compression:name:true,"
+                                       "6:io_provenance:jsonb:false");
   REQUIRE(descriptors[3][0].value() == "row_mask");
   REQUIRE(descriptors[3][1].value() == "1:id:bigint:true,"
                                        "2:storage_id:bigint:true,"

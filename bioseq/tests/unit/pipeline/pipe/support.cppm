@@ -847,6 +847,48 @@ void check_bounded_nthash_native_coordinates() {
         REQUIRE(normalized_raw_minimizers(scalar_collector)
                 == normalized_raw_minimizers(resident_collector));
     }
+    if constexpr (std::same_as<p_alphabet, seq::dna15>) {
+        // The ordinary scalar dispatch uses nt4 semantics for nucleotides.
+        // Select its independent native rolling implementation explicitly;
+        // it still computes reverse seeds as forward_seeds[complement_rank].
+        const auto require_native_scalar_parity = [](range_type& source,
+                const collector_type& actual) {
+            collector_type expected;
+            ::bioseq::simd::collect_minimizers_view<
+                ::bioseq::simd::minimap_int_hasher, minimizer_type,
+                range_type, decltype(source.begin()), std::uint64_t, collector_type,
+                ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash>(
+                    expected, source, source.begin(), source.end(), 10u, 15u);
+            REQUIRE(expected.extract_sketches_data().size()
+                    == actual.extract_sketches_data().size());
+            REQUIRE(normalized_raw_minimizers(expected) == normalized_raw_minimizers(actual));
+        };
+        require_native_scalar_parity(range, resident_collector);
+        std::vector<p_alphabet> reversed;
+        reversed.reserve(data.size());
+        for (auto position = data.rbegin(); position != data.rend(); ++position)
+            reversed.push_back(seqan3::complement(*position));
+        range_type reverse_range(reversed);
+        const auto reverse_view = bioseq::storage::make_lazy_sequence_view(reverse_range);
+        collector_type reverse_collector;
+        const auto reverse_stats = minimizer_dispatch_range<minimizer_type>(
+            reverse_collector, reverse_view, 0u, reverse_view.bp_size(), 10u, 15u,
+            minimizer_sketch_backend::bounded_nthash_simd,
+            exact_simd_range_route::require_continuation, fixed_highway_kernels());
+        REQUIRE(minimizer_range_stats_matches_backend(
+            minimizer_sketch_backend::bounded_nthash_simd, reverse_stats, true));
+        require_native_scalar_parity(reverse_range, reverse_collector);
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> forward_positions, reverse_positions;
+        for (const auto& record : resident_collector.extract_sketches_data())
+            forward_positions.emplace_back(record.kmer(), record.last_pos());
+        for (const auto& record : reverse_collector.extract_sketches_data())
+            reverse_positions.emplace_back(record.kmer(), data.size() + 15u - 2u - record.last_pos());
+        std::ranges::sort(forward_positions);
+        std::ranges::sort(reverse_positions);
+        // Self-complementary IUPAC kmers can tie strand states; hashes and
+        // mirrored coordinates must still agree, including multiplicities.
+        REQUIRE(forward_positions == reverse_positions);
+    }
     constexpr auto resident_width = static_cast<std::uint8_t>(
         std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
     constexpr auto resident_letters = bioseq::storage::packed_letters_per_unit(

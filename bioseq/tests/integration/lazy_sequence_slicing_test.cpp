@@ -368,7 +368,7 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     auto ctx = fresh_context({
         "sequence_slicing_slice_src", "sequence_slicing_slice_dst",
-        "sequence_slicing_slice_plan_dst"});
+        "sequence_slicing_slice_plan_dst", "sequence_slicing_slice_other_alphabet"});
     exec_sql(ctx,
         "CREATE TABLE sequence_slicing_slice_src "
         " (id int, s bioseq.seq('dna4',64)) USING bioseq;");
@@ -454,7 +454,11 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
         concat_insert_plan, "value_3 [slice] =") == 1u);
     REQUIRE(plan_line_count(
         concat_insert_plan, "value_4 [concat] =") == 1u);
-    REQUIRE(plan_line_count(concat_insert_plan, "value_5 [") == 0u);
+    /* The concatenation erases its typmod, so assignment must retain the
+     * runtime alphabet check as a separate opaque result producer. */
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "value_5 [source] =") == 1u);
+    REQUIRE(plan_line_count(concat_insert_plan, "value_6 [") == 0u);
     const auto first_slice = plan_line_index(
         concat_insert_plan, "value_2 [slice] =");
     const auto tail_slice = plan_line_index(
@@ -485,9 +489,16 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
         std::span<const std::string>{concat_insert_plan}.subspan(
             *concat_node + 1u, 1u), "Depends On")
         == "value_2, value_3");
+    const auto assignment_cast = plan_line_index(
+        concat_insert_plan, "value_5 [source] =");
+    REQUIRE(assignment_cast.has_value());
+    REQUIRE(*assignment_cast + 1u < concat_insert_plan.size());
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *assignment_cast + 1u, 1u), "Depends On") == "none");
     REQUIRE(boundary_explain_property(
         concat_insert_plan, "packed full", "heap tuple", "Producer Value")
-        == "4");
+        == "5");
     REQUIRE(boundary_explain_property(
         concat_insert_plan, "packed full", "heap tuple", "Estimated Symbols")
         == "128");
@@ -525,6 +536,25 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
     REQUIRE(durable_plan_rows.front()[2]
         == std::optional<std::string>{expected_concat});
 
+    /* Revealing the nested recipe must preserve the assignment check. */
+    exec_sql(ctx,
+        "CREATE TABLE sequence_slicing_slice_other_alphabet "
+        " (id int, s bioseq.seq('dna5',64)) USING bioseq;");
+    const auto implicit_alphabet_error = sql_error(ctx,
+        "INSERT INTO sequence_slicing_slice_other_alphabet "
+        "SELECT id, s[500000:500064] OPERATOR(bioseq.||) s[-64:] "
+        "FROM sequence_slicing_slice_src;");
+    REQUIRE(implicit_alphabet_error.sqlstate == "42804");
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) FROM sequence_slicing_slice_other_alphabet;") == 0);
+    exec_sql(ctx,
+        "INSERT INTO sequence_slicing_slice_other_alphabet "
+        "SELECT id, (s[500000:500064] OPERATOR(bioseq.||) s[-64:])"
+        " ::bioseq.seq('dna5',64) FROM sequence_slicing_slice_src;");
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq.len(s) = 128 AND s::text = repeat('ACGT',32) "
+        "FROM sequence_slicing_slice_other_alphabet;") == "t");
+
     /* A function with the same arguments as the cast is still an ordinary
      * function call. The plan must keep its result as a separate source. */
     const auto unrelated_cast_plan = explain_text<false>(
@@ -551,38 +581,42 @@ TEST_CASE("sliced source concatenations survive INSERT boundaries",
             "Producer Value") == "3");
     }
 
-    /* Direct SQL calls to seq_cast rmain separate sources. Only the cast
-     * expression PostgreSQL inserts for assignment can be folded into a slice. */
-    const std::array<std::string_view, 3> explicit_cast_sql{
-        "SELECT bioseq.seq_cast(s[500000:500064], 3, false) "
-        "FROM sequence_slicing_slice_src;",
-        "SELECT bioseq.seq_cast(s[500000:500064], 3, true) "
-        "FROM sequence_slicing_slice_src;",
-        "SELECT bioseq.seq_cast(s[500000:500064], -1, false) "
-        "FROM sequence_slicing_slice_src;",
-    };
-    for (const std::string_view sql : explicit_cast_sql) {
-        CAPTURE(sql);
+    /* Planner support removes exact-typmod identity casts. A call without
+     * a usable destination typmod remains a separate opaque SQL result. */
+    const std::array<std::pair<std::string_view, bool>, 3> explicit_cast_sql{{
+        {"SELECT bioseq.seq_cast(s[500000:500064], 3, false) "
+         "FROM sequence_slicing_slice_src;", false},
+        {"SELECT bioseq.seq_cast(s[500000:500064], 3, true) "
+         "FROM sequence_slicing_slice_src;", false},
+        {"SELECT bioseq.seq_cast(s[500000:500064], -1, false) "
+         "FROM sequence_slicing_slice_src;", true},
+    }};
+    for (const auto& [sql, retained_cast] : explicit_cast_sql) {
+        CAPTURE(sql, retained_cast);
         const auto explicit_cast_plan = explain_text<false>(ctx, sql);
         REQUIRE(plan_line_count(
             explicit_cast_plan, "value_1 [source] =") == 1u);
         REQUIRE(plan_line_count(
             explicit_cast_plan, "value_2 [slice] =") == 1u);
-        REQUIRE(plan_line_count(
-            explicit_cast_plan, "value_3 [source] =") == 1u);
         REQUIRE(plan_line_count(explicit_cast_plan, "value_4 [") == 0u);
-        const auto opaque_exact_cast = plan_line_index(
-            explicit_cast_plan, "value_3 [source] =");
-        REQUIRE(opaque_exact_cast.has_value());
-        REQUIRE(*opaque_exact_cast + 1u < explicit_cast_plan.size());
-        REQUIRE(find_explain_property(
-            std::span<const std::string>{explicit_cast_plan}.subspan(
-                *opaque_exact_cast + 1u, 1u), "Depends On") == "none");
+        if (retained_cast) {
+            REQUIRE(plan_line_count(
+                explicit_cast_plan, "value_3 [source] =") == 1u);
+            const auto opaque_exact_cast = plan_line_index(
+                explicit_cast_plan, "value_3 [source] =");
+            REQUIRE(opaque_exact_cast.has_value());
+            REQUIRE(*opaque_exact_cast + 1u < explicit_cast_plan.size());
+            REQUIRE(find_explain_property(
+                std::span<const std::string>{explicit_cast_plan}.subspan(
+                    *opaque_exact_cast + 1u, 1u), "Depends On") == "none");
+        } else {
+            REQUIRE(plan_line_count(explicit_cast_plan, "value_3 [") == 0u);
+        }
         for (const std::string_view mechanism : {"text", "binary"}) {
             CAPTURE(mechanism);
             REQUIRE(boundary_explain_property(
                 explicit_cast_plan, mechanism, "client output",
-                "Producer Value") == "3");
+                "Producer Value") == (retained_cast ? "3" : "2"));
         }
     }
 

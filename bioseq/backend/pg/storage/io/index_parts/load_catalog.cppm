@@ -23,11 +23,13 @@ module;
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 extern "C" {
 #include "postgres.h"
 
 #include "access/relation.h"     // index_open / index_close
+#include "access/sysattr.h"      // Bitmap offsets for index-expression attributes.
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
 #include "catalog/namespace.h"
@@ -46,6 +48,7 @@ extern "C" {
 #include "utils/lsyscache.h"     // getTypeInputInfo, get_typtype, getBaseType
 #include "utils/rel.h"           // RelationGetDescr
 #include "utils/resowner.h"      // CurrentResourceOwner, TopTransactionResourceOwner
+#include "utils/rls.h"           // Direct loads must not bypass row security.
 #include "utils/snapmgr.h" // Snapshot stack operations.
 #include "utils/typcache.h" // lookup_rowtype_tupdesc
 
@@ -75,6 +78,7 @@ import bioseq.postgres.storage.manager; // Sequence locators, fragment writers a
 
 
 import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
+import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.io.index_maintenance;
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
@@ -94,6 +98,65 @@ import bioseq.parallelism.pool;
 import bioseq.postgres.scheduler.supervisor;
 import :typed_row_writer;
 import :stream_dispatch;
+
+/** Reject targets whose INSERT semantics the streamed row writer cannot honor.
+ * Keep the relation lock through the transaction, before any schema preparation
+ * or source writes. PostgreSQL COPY likewise rejects active row security.
+ * Return the locked physical identity for the direct-write cache notification. */
+[[nodiscard]] RelFileLocator validate_load_target(Oid relation_id) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([relation_id] {
+        const auto relation = table_open(relation_id, RowExclusiveLock);
+        const auto acl = pg_class_aclcheck(relation_id, GetUserId(), ACL_INSERT);
+        if (acl != ACLCHECK_OK)
+            aclcheck_error(acl, OBJECT_TABLE, RelationGetRelationName(relation));
+        if (relation->rd_rel->relkind != RELKIND_RELATION
+            || !relation_uses_column_table_access_method(relation))
+            ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+                errmsg("bioseq.load target must be a table using the bioseq access method")));
+        if (check_enable_rls(relation_id, InvalidOid, false) == RLS_ENABLED)
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("bioseq.load does not support targets with active row-level security"),
+                errhint("Use INSERT to apply the table's row-security policies.")));
+        const auto* triggers = relation->trigdesc;
+        if (triggers && (triggers->trig_insert_before_row || triggers->trig_insert_instead_row
+            || triggers->trig_insert_after_row || triggers->trig_insert_before_statement
+            || triggers->trig_insert_after_statement || triggers->trig_insert_new_table))
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("bioseq.load does not support target INSERT triggers"),
+                errhint("Use INSERT for supported BEFORE or statement triggers. AFTER ROW and constraint triggers are unsupported by the bioseq access method.")));
+        const auto locator = relation->rd_locator;
+        table_close(relation, NoLock);
+        return locator;
+    });
+}
+
+/** Determine whether an opened ordinary index reads a sequence-valued column.
+ * Scalar keys avoid flushing streamed fragments just to populate their index;
+ * expressions, predicates, INCLUDE columns and whole-row references are covered. */
+[[nodiscard]] bool load_indexes_read_sequences(const load_context& ctx) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
+        Bitmapset* attributes = nullptr;
+        for (int index = 0; index < ctx.result_rel_info->ri_NumIndices; ++index) {
+            const auto* info = ctx.result_rel_info->ri_IndexRelationInfo[index];
+            for (int column = 0; column < info->ii_NumIndexAttrs; ++column)
+                if (info->ii_IndexAttrNumbers[column] != 0)
+                    attributes = bms_add_member(attributes,
+                        info->ii_IndexAttrNumbers[column] - FirstLowInvalidHeapAttributeNumber);
+            pull_varattnos(reinterpret_cast<Node*>(info->ii_Expressions), 1, &attributes);
+            pull_varattnos(reinterpret_cast<Node*>(info->ii_Predicate), 1, &attributes);
+        }
+        const bool whole_row = bms_is_member(-FirstLowInvalidHeapAttributeNumber, attributes);
+        const auto sequence_type = load_seq_type_oid();
+        bool reads_sequences = false;
+        for (int column = 0; column < ctx.parent_td->natts && !reads_sequences; ++column) {
+            const auto* attribute = TupleDescAttr(ctx.parent_td, column);
+            reads_sequences = !attribute->attisdropped && getBaseType(attribute->atttypid) == sequence_type
+                && (whole_row || bms_is_member(attribute->attnum - FirstLowInvalidHeapAttributeNumber, attributes));
+        }
+        bms_free(attributes);
+        return reads_sequences;
+    });
+}
 
 // Build indexes after the streamed insert.
 
@@ -284,7 +347,7 @@ void prepare_load_destination(Oid relid, const std::string& name, const std::str
     constexpr std::size_t scalar_capacity = 4096u;
     auto scalar_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
     if (!scalar_permit) raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit canonical descriptor scratch");
-    idp::text_record_shape shape;
+    idp::text_record_shape shape{**canonical};
     const auto decoded = idp::decode_preservation_record((**canonical).payload, shape, true, scalar_capacity);
     if (!decoded) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, decoded.error());
     return shape;
@@ -388,12 +451,29 @@ void setup_typed_column_mapping(load_context& ctx,
         if (OidIsValid(pk_oid)) {
             Relation pk_idx = bioseq::postgres::support::invoke_pg_as_cpp(
                 [pk_oid] { return index_open(pk_oid, AccessShareLock); });
-            if (pk_idx->rd_index != nullptr && pk_idx->rd_index->indnatts == 1) {
+            if (pk_idx->rd_index != nullptr && pk_idx->rd_index->indnkeyatts == 1) {
                 pk_attno = static_cast<std::int16_t>(pk_idx->rd_index->indkey.values[0]);
             }
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [pk_idx] { index_close(pk_idx, AccessShareLock); });
         }
+    }
+
+    // Resolve both column and type defaults once, before telling the mapper
+    // which destinations have defaults. Planning remains after mapping validation.
+    std::vector<Expr*> default_expressions(static_cast<std::size_t>(td->natts), nullptr);
+    ctx.domain_columns.clear();
+    for (int index = 0; index < td->natts; ++index) {
+        const auto* attribute = TupleDescAttr(td, index);
+        if (attribute->attisdropped || attribute->attidentity || attribute->attgenerated
+            || attribute->attnum == seq_attno || attribute->attnum == ctx.cols.quality_attno) continue;
+        const auto descriptor = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, attribute] {
+            return std::pair{build_column_default(ctx.parent_rel, attribute->attnum),
+                get_typtype(attribute->atttypid) == TYPTYPE_DOMAIN};
+        });
+        default_expressions[index] = reinterpret_cast<Expr*>(descriptor.first);
+        if (descriptor.second) ctx.domain_columns.push_back(
+            {attribute->attnum, attribute->atttypid, descriptor.first != nullptr});
     }
 
     // Give the header mapper plain column descriptions. Identity and generated
@@ -422,14 +502,13 @@ void setup_typed_column_mapping(load_context& ctx,
                 raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION, "unmapped FASTA quality column requires NULL or a default");
             continue;
         }
-        const bool is_text = (attr->atttypid == TEXTOID || attr->atttypid == VARCHAROID ||
-                              attr->atttypid == BPCHAROID);
+        const bool is_text = load_type_accepts_header(attr->atttypid);
         columns.push_back(idp::column_descriptor{
             .name = std::string_view{NameStr(attr->attname)},
             .is_text = is_text,
             .is_primary_key = (pk_attno != 0 && attno == pk_attno),
             .not_null = attr->attnotnull,
-            .has_default = (attr->atthasdef != false),
+            .has_default = default_expressions[i] != nullptr,
             .is_identity_or_generated = false,
         });
         col_attrs.push_back(column_attr{attno, attr->atttypid, attr->atttypmod});
@@ -506,8 +585,10 @@ void setup_typed_column_mapping(load_context& ctx,
             typtype = get_typtype(getBaseType(ca.atttypid));
         });
         dest_kind kind;
-        if (columns[ci].is_text)
-            kind = ca.atttypmod < 0 ? dest_kind::text : dest_kind::text_with_typmod;
+        if (ca.atttypid == TEXTOID)
+            kind = dest_kind::text;
+        else if (columns[ci].is_text)
+            kind = dest_kind::text_input;
         else if (typtype == TYPTYPE_RANGE)
             kind = dest_kind::range;
         else if (typtype == TYPTYPE_MULTIRANGE)
@@ -528,23 +609,20 @@ void setup_typed_column_mapping(load_context& ctx,
     ctx.defaults.clear();
     for (int index = 0; index < td->natts; ++index) {
         const auto* attr = TupleDescAttr(td, index);
-        if (attr->attisdropped || !attr->atthasdef || attr->attnum == seq_attno
-            || attr->attnum == ctx.cols.quality_attno) continue;
-        Node* raw = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, attr] {
-            return build_column_default(ctx.parent_rel, attr->attnum);
-        });
-        if (!raw) continue;
-        auto* planned = bioseq::postgres::support::invoke_pg_as_cpp([raw] {
-            return expression_planner(reinterpret_cast<Expr*>(raw));
+        auto* expression = default_expressions[index];
+        if (!expression) continue;
+        auto* planned = bioseq::postgres::support::invoke_pg_as_cpp([expression] {
+            return expression_planner(expression);
         });
         auto* state = bioseq::postgres::support::invoke_pg_as_cpp([planned] { return ExecInitExpr(planned, nullptr); });
         ctx.defaults.push_back(default_col{attr->attnum, state});
     }
 
-    // Create an executor only for defaults and table constraints. Loads that only
-    // parse and convert header fields can skip this setup and its trigger frame.
+    // Reuse the relation executor for defaults, constraints and ordinary indexes.
+    // It owns an AFTER-trigger query frame, including deferred index rechecks.
     const bool needs_private_executor =
-        !ctx.defaults.empty() || ctx.parent_rel->rd_att->constr != nullptr;
+        !ctx.defaults.empty() || !ctx.domain_columns.empty() || ctx.parent_rel->rd_att->constr != nullptr
+        || ctx.parent_rel->rd_rel->relhasindex || ctx.parent_rel->trigdesc != nullptr;
     if (!needs_private_executor) {
         return;
     }
@@ -557,6 +635,7 @@ void setup_typed_column_mapping(load_context& ctx,
         bioseq::postgres::support::invoke_pg_as_cpp([] { return makeNode(ResultRelInfo); });
     bioseq::postgres::support::invoke_pg_as_cpp(
         [&ctx] { InitResultRelInfo(ctx.result_rel_info, ctx.parent_rel, 1, nullptr, 0); });
-    // This executor checks NOT NULL and CHECK constraints around direct row writes.
-    // Bioseq index maintenance runs after, the load. PostgreSQL indexes are not opened here.
+    bioseq::postgres::support::invoke_pg_as_cpp(
+        [&ctx] { ExecOpenIndices(ctx.result_rel_info, false); });
+    ctx.indexes_read_sequences = load_indexes_read_sequences(ctx);
 }

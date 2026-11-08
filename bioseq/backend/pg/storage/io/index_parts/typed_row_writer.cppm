@@ -12,6 +12,7 @@ module;
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
 #include <condition_variable>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -37,8 +38,10 @@ extern "C" {
 #include "catalog/namespace.h"
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
+#include "commands/trigger.h"    // Index constraint and AFTER INSERT trigger events.
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
 #include "executor/tuptable.h"   // TupleTableSlot, MakeTupleTableSlot, TTSOpsVirtual, Exec*Tuple
+#include "mb/pg_wchar.h"         // Imported bytes must match the database encoding.
 #include "nodes/makefuncs.h"     // makeNode (ResultRelInfo)
 #include "optimizer/optimizer.h" // expression_planner
 #include "utils/array.h"         // deconstruct_array, ARR_ELEMTYPE
@@ -75,6 +78,7 @@ import bioseq.postgres.storage.manager; // Sequence locators, fragment writers a
 
 
 import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
+import bioseq.postgres.column.table_access; // Logical row number to PostgreSQL TID.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
 import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
@@ -146,6 +150,14 @@ void inject_load_failure(int stage) {
     });
 }
 
+/** Classify header destinations by their base type while retaining declared IO.
+ * Domains and PostgreSQL name values participate in the same header inference
+ * as text; their original input functions still enforce constraints and layout. */
+[[nodiscard]] bool load_type_accepts_header(Oid type) {
+    const auto base = bioseq::postgres::support::invoke_pg_as_cpp([type] { return getBaseType(type); });
+    return base == TEXTOID || base == VARCHAROID || base == BPCHAROID || base == NAMEOID;
+}
+
 /** @brief Sequence and header columns, with the sequence alphabet and packing width. */
 struct load_columns {
     /// Header column nmber, starting at one, or zero to discard the header.
@@ -205,9 +217,7 @@ struct load_columns {
             }
             ++seq_count;
             seq_attno = static_cast<std::int16_t>(i + 1);
-        } else if ((attr->atttypid == TEXTOID || attr->atttypid == VARCHAROID ||
-                    attr->atttypid == BPCHAROID) &&
-                   header_attno == 0) {
+        } else if (load_type_accepts_header(attr->atttypid) && header_attno == 0) {
             header_attno = static_cast<std::int16_t>(i + 1); // first text column
         }
     }
@@ -252,8 +262,8 @@ namespace idp = bioseq::io::identifier_parser;
 enum class dest_kind : std::uint8_t {
     /// Text with no length limit, copied directly into a PostgreSQL text value.
     text,
-    /// Text whose input function checks the declared length limit.
-    text_with_typmod,
+    /// Text-like values requiring declared input for typmods, domains or name layout.
+    text_input,
     /// Scalar value parsed by its PostgreSQL input function.
     scalar,
     /// Range iput that also accepts inclusive `lo..hi` notation.
@@ -284,6 +294,16 @@ struct default_col {
     std::int16_t attno;
     /// Default expression evaluated by the PostgreSQL executor.
     ExprState* state;
+};
+
+/** Domain NULL checks cached per column for the lifetime of the load executor.
+ * Non-NULL inputs and evaluated defaults already pass through declared type
+ * coercion. This state covers explicit NULLs and absent values without defaults. */
+struct load_domain_column {
+    AttrNumber attribute;
+    Oid type;
+    bool has_default;
+    void* constraint_cache = nullptr;
 };
 
 /// Find a substring in a byte range that need not end with a NUL byte.
@@ -420,9 +440,11 @@ struct load_context {
     std::map<std::pair<std::uint8_t, std::uint8_t>, std::array<std::uint32_t, 256>> rank_mappings;
     std::vector<bool> assigned_columns; // Explicit NULL values must not invoke column defaults.
     std::vector<default_col> defaults;
+    std::vector<load_domain_column> domain_columns;
     EState* estate = nullptr;
     ExprContext* econtext = nullptr;
     ResultRelInfo* result_rel_info = nullptr;
+    bool indexes_read_sequences = false;
 
     // Details included when PostgreSQL reports an error for the current record
     std::uint64_t record_no = 0;
@@ -477,17 +499,16 @@ struct load_error_context_scope {
     }
 };
 
-/** Evaluate CHECKs over bounded source views while keeping both publication
- * tokens pending. A separate executor context releases all temporary views
- * before its provider and snapshot close; DEFAULT values keep their own context. */
-void check_load_constraints(load_context& ctx,
+/** Run executor checks over bounded staged sources without publishing them.
+ * Temporary views are released before their provider and snapshot; DEFAULT
+ * values keep their original context. Scalar-only indexes avoid source reads. */
+template<std::invocable Action>
+void with_load_pending_sequences(load_context& ctx,
         const bioseq::storage::pending_sequence_source* primary,
-        const bioseq::storage::pending_sequence_source* quality) {
-    if (!ctx.result_rel_info || !ctx.parent_rel->rd_att->constr) return;
-    if ((primary == nullptr && quality == nullptr) || ctx.parent_rel->rd_att->constr->num_check == 0) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
-            ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
-        });
+        const bioseq::storage::pending_sequence_source* quality,
+        bool needs_sequences, Action action) {
+    if (!needs_sequences || (primary == nullptr && quality == nullptr)) {
+        action();
         return;
     }
     Snapshot snapshot = nullptr;
@@ -516,9 +537,7 @@ void check_load_constraints(load_context& ctx,
             ctx.slot->tts_values[attributes[i] - 1] = bioseq::storage::promote_pending_pg_sequence_source(
                 provider, attributes[i], locators[i], *sources[i], check_context->ecxt_per_tuple_memory);
         }
-        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
-            ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
-        });
+        action();
     } catch (...) { failure = std::current_exception(); }
     ctx.estate->es_per_tuple_exprcontext = saved_context;
     MemoryContextSwitchTo(saved_memory);
@@ -539,6 +558,78 @@ void check_load_constraints(load_context& ctx,
         bioseq::postgres::support::invoke_pg_as_cpp([snapshot] { UnregisterSnapshot(snapshot); });
     });
     if (failure) std::rethrow_exception(failure);
+}
+
+/** Check NULL domain values which bypassed type input or a default coercion.
+ * Skip evaluated defaults: checking them twice could repeat a domain CHECK
+ * expression. PostgreSQL owns the cached constraint state in es_query_cxt. */
+void check_load_domain_nulls(load_context& ctx) {
+    for (auto& column : ctx.domain_columns) {
+        const auto index = static_cast<std::size_t>(column.attribute - 1);
+        if (!ctx.slot->tts_isnull[index]
+            || (!ctx.assigned_columns[index] && column.has_default)) continue;
+        ctx.current_column_name = NameStr(TupleDescAttr(ctx.parent_td, index)->attname);
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx, &column] {
+            // The output-pointer cache is the PostgreSQL domain_check API;
+            // ownership remains with the load executor's query context.
+            domain_check(Datum{0}, true, column.type, &column.constraint_cache, ctx.estate->es_query_cxt);
+        });
+        ctx.current_column_name = nullptr;
+    }
+}
+
+/** Check NOT NULL and CHECK constraints against original values before writing. */
+void check_load_constraints(load_context& ctx,
+        const bioseq::storage::pending_sequence_source* primary,
+        const bioseq::storage::pending_sequence_source* quality) {
+    if (!ctx.result_rel_info || !ctx.parent_rel->rd_att->constr) return;
+    const auto descriptor = ctx.parent_rel->rd_att;
+    bool needs_sequences = descriptor->constr->num_check != 0;
+    if (!needs_sequences && descriptor->constr->has_not_null) {
+        // A NOT NULL failure formats the complete row before raising 23502.
+        // Promote staged locators for that diagnostic, but leave successful
+        // NOT NULL-only rows on the existing path without source reads.
+        for (std::size_t index = 0; index < static_cast<std::size_t>(descriptor->natts); ++index) {
+            if (TupleDescAttr(descriptor, index)->attnotnull && ctx.slot->tts_isnull[index]) {
+                needs_sequences = true;
+                break;
+            }
+        }
+    }
+    with_load_pending_sequences(ctx, primary, quality, needs_sequences,
+        [&ctx] {
+            bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
+                ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
+            });
+        });
+}
+
+/** Insert ordinary index entries and queue AFTER/constraint-trigger rechecks.
+ * The slot already carries the parent row's real TID. PostgreSQL evaluates
+ * expression/partial indexes and handles immediate or deferred uniqueness. */
+void index_load_row(load_context& ctx,
+        const bioseq::storage::pending_sequence_source* primary,
+        const bioseq::storage::pending_sequence_source* quality) {
+    if (!ctx.result_rel_info) return;
+    // AFTER-trigger WHEN expressions are evaluated while events are queued.
+    const bool needs_sequences = ctx.indexes_read_sequences
+        || (ctx.parent_rel->trigdesc && ctx.parent_rel->trigdesc->trig_insert_after_row);
+    with_load_pending_sequences(ctx, primary, quality, needs_sequences, [&ctx] {
+        bioseq::postgres::support::invoke_pg_as_cpp([&ctx] {
+            List* recheck_indexes = NIL;
+            if (ctx.result_rel_info->ri_NumIndices != 0) {
+#if PG_VERSION_NUM >= 190000
+                recheck_indexes = ExecInsertIndexTuples(
+                    ctx.result_rel_info, ctx.estate, 0, ctx.slot, NIL, nullptr);
+#else
+                recheck_indexes = ExecInsertIndexTuples(
+                    ctx.result_rel_info, ctx.slot, ctx.estate, false, false, nullptr, NIL, false);
+#endif
+            }
+            ExecARInsertTriggers(ctx.estate, ctx.result_rel_info, ctx.slot, recheck_indexes, nullptr);
+            list_free(recheck_indexes);
+        });
+    });
 }
 
 /// Convert parsed header fields into PostgreSQL values and write completed rows.
@@ -586,6 +677,9 @@ struct pg_identifier_writer {
         if (len < 0 || (len != 0 && (data == nullptr || std::memchr(data, '\0', static_cast<std::size_t>(len)) != nullptr)))
             raise_load_error_as_cpp(ERRCODE_INVALID_TEXT_REPRESENTATION,
                 "header/metadata field contains NUL or an invalid byte length");
+        if (len != 0) bioseq::postgres::support::invoke_pg_as_cpp([data, len] {
+            static_cast<void>(pg_verify_mbstr(GetDatabaseEncoding(), data, len, false));
+        });
         const dest_coercion& dc = dest[slot];
         check_canonical_assignment(slot);
         ctx.assigned_columns[dc.attno - 1] = true;
@@ -599,8 +693,9 @@ struct pg_identifier_writer {
                 MemoryContextSwitchTo(old);
                 return result;
             });
-        } else if (canonical_fields && std::find(ctx.routing.identifier_slots.begin(),
-                ctx.routing.identifier_slots.end(), slot) == ctx.routing.identifier_slots.end()) {
+        } else if (canonical_fields || dc.kind == dest_kind::text_input) {
+            // Headers retain their exact whitespace through domain/name/varchar
+            // input; only the existing non-text external-field adapter trims.
             const bioseq::postgres::support::memory_context_scope scope{per_tuple};
             const auto type = TupleDescAttr(ctx.parent_td, dc.attno - 1)->atttypid;
             v = bioseq::postgres::storage::io::parse_io_scalar(
@@ -644,11 +739,13 @@ struct pg_identifier_writer {
         }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [this] { bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.store_virtual(); });
+        check_load_domain_nulls(ctx);
         check_load_constraints(ctx, primary, quality);
         // FASTA can supply a declared quality DEFAULT. Persist that ordinary
         // SQL value through the same fragment manager as INSERT, so it has a
         // source epoch and participates in normal symbol_counts maintenance.
         std::vector<bioseq::storage::pending_sequence_source> default_sources;
+        std::vector<std::pair<AttrNumber, Datum>> default_sequence_values;
         for (const default_col& d : defaults) {
             const auto* attribute = TupleDescAttr(ctx.parent_td, d.attno - 1);
             if (ctx.slot->tts_isnull[d.attno - 1] || attribute->atttypid != load_seq_type_oid()
@@ -675,8 +772,18 @@ struct pg_identifier_writer {
             });
             ctx.slot->tts_values[d.attno - 1] = PointerGetDatum(stub);
             default_sources.push_back(std::move(pending));
+            default_sequence_values.emplace_back(d.attno, PointerGetDatum(flat));
         }
-        (void)write_column_row(ctx.write_state, ctx.slot->tts_values, ctx.slot->tts_isnull);
+        const auto row_number = write_column_row(ctx.write_state, ctx.slot->tts_values, ctx.slot->tts_isnull);
+        bioseq::postgres::support::invoke_pg_as_cpp([this, row_number] {
+            ctx.slot->tts_tableOid = ctx.main_relid;
+            ctx.slot->tts_tid = row_number_to_tid(row_number);
+        });
+        // Parent storage keeps locators; index expressions see complete DEFAULT
+        // values and bounded staged views for the streamed input columns.
+        for (const auto& [attribute, value] : default_sequence_values)
+            ctx.slot->tts_values[attribute - 1] = value;
+        index_load_row(ctx, primary, quality);
         for (auto& pending : default_sources) pending.publish_after_parent_row();
         // The row  writer has copied referenced values, so temporary memory can now be reused.
         if (ctx.econtext) {
@@ -756,17 +863,21 @@ void write_parent_row(load_context& ctx,
     tuple_writer.canonical_fields = canonical;
     if (ctx.parser_active) {
         auto routed = parsed_canonical
-            ? idp::route_canonical_header(*parsed_canonical, ctx.routing, ctx.writer_ref)
+            ? idp::route_canonical_header(*parsed_canonical, ctx.routing, ctx.writer_ref, header_is_null)
             : idp::parse_and_route_header(ctx.effective_fmt, header, ctx.routing, ctx.parse_state, ctx.writer_ref);
         if (!routed) {
             raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, routed.error());
         }
+    } else if (ctx.cols.header_attno != 0 && header_is_null) {
+        ctx.assigned_columns[ctx.cols.header_attno - 1] = true;
     } else if (ctx.cols.header_attno != 0) {
         if (header.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             raise_load_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
                                     "FASTA/FASTQ header exceeds INT_MAX");
         }
         text* htext = bioseq::postgres::support::invoke_pg_as_cpp([&ctx, header] {
+            static_cast<void>(pg_verify_mbstr(GetDatabaseEncoding(), header.data(),
+                static_cast<int>(header.size()), false));
             const MemoryContext old =
                 MemoryContextSwitchTo(get_column_write_per_tuple_context(ctx.write_state));
             text* result = cstring_to_text_with_len(header.data(), static_cast<int>(header.size()));
@@ -775,9 +886,6 @@ void write_parent_row(load_context& ctx,
         });
         bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_raw(
             ctx.cols.header_attno, bioseq::postgres::support::pg_datum::from_pointer(htext));
-    }
-    if (header_is_null) {
-        for (const auto destination : ctx.routing.identifier_slots) tuple_writer.set_null(destination);
     }
     tuple_writer.end_tuple(pending_source, quality_source); // Check both staged values before publication.
     if (quality_source) inject_load_failure(2);

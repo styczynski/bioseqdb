@@ -533,7 +533,7 @@ class pg_export_source {
 
     /** Classify only the compact descriptor; never decode or flatten the sequence. */
     [[nodiscard]] static std::pair<column_value_kind, std::uint8_t> payload_family(Datum value) {
-        const auto descriptor = invoke_pg_as_cpp([value] { return classify_and_describe_sequence(value); });
+        const auto descriptor = invoke_pg_as_cpp([value] { return classify_and_describe_sequence_header(value); });
         if (!descriptor.alphabet_bound) export_binding_error(
             "export sequence payload has no alphabet; cast to an explicit bioseq.seq alphabet");
         const auto kind = pgseq_is_cigar_alphabet(descriptor.alphabet_code)
@@ -649,7 +649,8 @@ class pg_export_source {
             return static_cast<std::uint64_t>(*input);
         };
         if (decoded.flag) {
-            if (*decoded.flag < 0 || *decoded.flag > 4095) export_binding_error("alignment flag is outside 0..4095");
+            if (*decoded.flag < 0 || *decoded.flag > std::numeric_limits<std::uint16_t>::max())
+                export_binding_error("alignment flag is outside 0..65535");
             alignment.flags = static_cast<std::uint16_t>(*decoded.flag);
             owner.record.identity.classification = bioseq::io::alignment_classification_source::explicit_flags;
         }
@@ -736,6 +737,7 @@ class pg_export_source {
             if (!supplied_header_) export_binding_error(
                 "reference_id requires original table IO provenance or explicit options.sam_header");
         }
+        alignment.source_bound_interpretation = true;
         const auto orientation = text_view(decoded.source_orientation);
         if (orientation == "reference_forward") alignment.sequence_orientation = bioseq::io::record_orientation::reference_forward;
         else if (!orientation.empty() && orientation != "original_query") export_binding_error("invalid imported source_orientation");
@@ -965,7 +967,8 @@ public:
                 }
                 case record_field_role::flags: {
                     const auto flags = export_signed_integer(datum, type);
-                    if (flags < 0 || flags > 4095) export_binding_error("alignment flags exceed 0..4095");
+                    if (flags < 0 || flags > std::numeric_limits<std::uint16_t>::max())
+                        export_binding_error("alignment flags exceed 0..65535");
                     alignment.flags = merge_export_value(alignment.flags,
                         std::optional<std::uint16_t>{static_cast<std::uint16_t>(flags)}, "flags");
                     owner->record.identity.classification = bioseq::io::alignment_classification_source::explicit_flags;
@@ -1023,6 +1026,7 @@ public:
                 owner->record.identity.classification = bioseq::io::alignment_classification_source::unavailable;
             alignment.form = bioseq::io::cigar_form::alignment_core;
             alignment.sequence_orientation = bioseq::io::record_orientation::original_query;
+            alignment.source_bound_interpretation = true;
         }
         if (!query_row.empty()) {
             const auto identity = identities_.intern("q:" + query_relation + ":" + query_row);

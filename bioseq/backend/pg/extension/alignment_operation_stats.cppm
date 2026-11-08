@@ -14,6 +14,7 @@ module;
 
 module bioseq.postgres.extension;
 
+import :alignment_hook_contract;
 import bioseq.pipeline.stats;
 import bioseq.postgres.support;
 import bioseq.postgres.table.alignment_execution;

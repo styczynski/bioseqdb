@@ -699,6 +699,10 @@ export {
         ExplainPropertyText("Bioseq Projected Columns", projected_columns_str, es);
 
         CustomScan* cscan = expect_pg_node<CustomScan>(to_pg_node(node->ss.ps.plan));
+        List* explain_owned_mmsearch =
+            list_length(cscan->custom_exprs) >= 4
+                ? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
+                : NIL;
         List* match_result_quals = list_length(cscan->custom_exprs) >= 5
                                        ? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 4))
                                        : NIL;
@@ -773,17 +777,25 @@ export {
             initStringInfo(&meta_buf);
             bool first = true;
             const bioseq_stub_oids& oids_snapshot = get_cached_stub_oids();
-            // Inspect the plan for plain EXPLAIN as well as an executed scan.
+            // The target list may be NIL for constant/count projections. Walk
+            // its expressions so nested retained-operand helpers are included.
             std::pair<const bioseq_stub_oids*, unsigned> retained_operands{&oids_snapshot, 0u};
-            const auto inspect_operand = [](Oid function, void* opaque) -> bool {
-                auto& state = *static_cast<std::pair<const bioseq_stub_oids*, unsigned>*>(opaque);
-                if (function == state.first->alignment_query_sequence_oid) state.second |= 1u;
-                if (function == state.first->alignment_reference_sequence_oid) state.second |= 2u;
-                return false;
+            const auto inspect_operand = [](
+                pg_expression_walk_cursor,
+                pg_node_view expression,
+                std::pair<const bioseq_stub_oids*, unsigned>& state) -> pg_walk_step {
+                if (const auto* function = expression.try_cast<FuncExpr>()) {
+                    if (function->funcid == state.first->alignment_query_sequence_oid)
+                        state.second |= 1u;
+                    if (function->funcid == state.first->alignment_reference_sequence_oid)
+                        state.second |= 2u;
+                }
+                return pg_walk_step::descend;
             };
-            static_cast<void>(check_functions_in_node(
-                reinterpret_cast<Node*>(node->ss.ps.plan->targetlist), inspect_operand, &retained_operands));
-            if (retained_operands.second != 0u)
+            static_cast<void>(walk_pg_expression_including_root(
+                to_pg_node(node->ss.ps.plan->targetlist), retained_operands, inspect_operand));
+            // Merely requesting a helper does not make this scan its owner.
+            if (explain_owned_mmsearch != NIL && retained_operands.second != 0u)
                 ExplainPropertyText("Bioseq Retained Alignment Operands",
                     retained_operands.second == 3u ? "query, reference"
                     : retained_operands.second == 1u ? "query" : "reference", es);
@@ -873,10 +885,6 @@ export {
             /* Use saved feature flags when available. Otherwise inspect the plan,
              * including mmsearch calls kept separately from ordinary scan filters. */
             const bioseq_stub_oids& explain_oids = get_cached_stub_oids();
-            List* explain_owned_mmsearch =
-                cscan != nullptr && list_length(cscan->custom_exprs) >= 4
-                    ? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
-                    : NIL;
             scan_feature_flags features =
                 (aligner_snapshot != nullptr && aligner_snapshot->execution_plan)
                     ? aligner_snapshot->features

@@ -18,7 +18,6 @@ export module bioseq.postgres.table:custom_scan_batch_join_execution_runtime_sta
 import bioseq.indexing.type;
 import bioseq.parallelism.memory_admission;
 import bioseq.pipeline.minimap_parameters_contract;
-import bioseq.pipeline.pipe;
 import bioseq.pipeline.runtime_contract;
 import bioseq.pipeline.stats;
 import bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;

@@ -265,9 +265,11 @@ TEST_CASE("ordinary update_index publishes fragment-minimizer metadata and a reo
             "SELECT bioseq.update_index('{}'::regclass, '{}');",
             table, index_name)) == 1);
 
-        // Open a new connection so these checks cannot reuse the writer's memory.
-        // Check fragment metadata or  reopen the complete sequence inex, as appropriate.
+        // Reopen without the writer's memory but with its requested producer.
+        // READY inspection validates the active session's algorithm identity.
         connection_test_context reopened;
+        exec_sql(reopened,
+            "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
         if (index_name == "minimizers_per_fragment") {
             REQUIRE(require_ready_fragment_minimizer_metadata(
                 reopened, table, index_name, rowno, 65'565,
@@ -503,8 +505,10 @@ TEST_CASE("ordinary hash-major replacement preserves its active generation when 
     constexpr std::string_view table = "index_admin_update_source_rollback";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
+    // The manifest assertions below pin the scalar producer's exact scheme.
     exec_sql(ctx,
-        "SET bioseq.aligner.grouped_soa_generation.enabled = on;");
+        "SET bioseq.aligner.grouped_soa_generation.enabled = on;"
+        "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
     exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
     exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = off;");
     exec_sqlf(ctx,
@@ -614,7 +618,10 @@ TEST_CASE("PG index streaming poisons contiguous access and resident "
   constexpr std::string_view source_table = "index_admin_index_poison_source";
   constexpr std::string_view target_table = "index_admin_index_poison_target";
   auto ctx = fresh_context({source_table, target_table});
+  // This case exercises the direct scalar resident-build route. Native READY
+  // generation coordinators stream their source and have separate coverage.
   exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled=off;"
+                "SET bioseq.aligner.grouped_soa_generation.enabled=off;"
                 "SET bioseq.index.recompute_async_persistence.enabled=off;"
                 "SET bioseq.aligner.minimizer.algorithm='scalar';"
                 "CREATE TABLE index_admin_index_poison_source ("

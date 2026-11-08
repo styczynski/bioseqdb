@@ -275,16 +275,19 @@ validate_relation_shape(Relation relation,
     }
 }
 
-/// Parse  a required CHECK expression in the catalog's tablz context.
-/// @param relation_name Catalog table name.
-/// @param expression SQL expression to parse.
+/// Parse a frozen CHECK expectation in the private catalog's table context.
+/// Parsing resolves the private schema even though this SELECT is never executed.
+/// Limit the extension identity to the parser leaf; table scans and caller
+/// expressions are not evaluated here. Both arguments come from frozen contracts.
+/// @param relation_name Private catalog table name from the frozen contract.
+/// @param expression Required CHECK expression from the frozen contract.
 /// @return Expression node allocated in the current memory context.
 /// @throws A PostgreSQL error if parsing fails.
 [[nodiscard]] inline Node* analyze_expected_check_expression(const std::string_view relation_name,
                                                              const std::string_view expression) {
     const std::string sql =
         fmt::format("SELECT ({}) FROM ONLY bioseq_internal.{};", expression, relation_name);
-    return bioseq::postgres::support::invoke_pg_as_cpp([&sql] {
+    return bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq", [&sql] {
         List* raw_statements = raw_parser(sql.c_str(), RAW_PARSE_DEFAULT);
         if (list_length(raw_statements) != 1) {
             ereport(

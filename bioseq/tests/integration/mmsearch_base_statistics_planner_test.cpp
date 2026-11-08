@@ -526,6 +526,11 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     seed_hoe_fixture(ctx, k_hoe);
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
+    exec_sql(ctx,
+        "SET bioseq.aligner.minimizer.algorithm='two_stack_nthash';"
+        "SET bioseq.aligner.chaining.algorithm='simd_minimap2';"
+        "SET bioseq.aligner.base_alignment.algorithm='block_aligner';"
+        "SET bioseq.aligner.vulkan.enabled=off;");
     REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(k_hoe, 1)).empty());
     const long long completed_id = stats_i64(
         last_alignment_stats(ctx).front(), 0);
@@ -544,7 +549,9 @@ TEST_CASE("alignment LIMIT publishes a partial statement snapshot",
     REQUIRE_FALSE(stats_bool(rows.front(), 13));
     REQUIRE(stats_bool(rows.front(), 14));
     REQUIRE_FALSE(stats_bool(rows.front(), 15));
-    REQUIRE(rows.front()[16].value_or("") == "mixed_invalid");
+    /* Partial completion does not erase the selected backend. The fixture's
+     * incomplete per-job evidence still reports actual mixed_invalid. */
+    REQUIRE(rows.front()[16].value_or("") == "simd_cpu");
     REQUIRE(rows.front()[17].value_or("") == "mixed_invalid");
     REQUIRE(stats_i64(rows.front(), 33) > 0);
     REQUIRE(stats_i64(rows.front(), 34) == 0);
@@ -655,8 +662,11 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
             1,
             "bioseq.edit(COALESCE(t.seq0, t.seq0)) AS edit_distance"));
     REQUIRE(wrapped_sequence_helper.sqlstate == "0A000");
+    // A wrapped expression names neither the complete target nor a bare source
+    // column. It remains unowned and must fail through the ordinary helper.
     REQUIRE(wrapped_sequence_helper.contains(
-        "bioseq.edit projection must reference the mmsearch target column"));
+        "bioseq.edit requires a bioseq alignment custom scan"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
 TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
@@ -743,8 +753,10 @@ TEST_CASE("Ordinary BatchJoin retains an upper-tagged lazy query child",
     const std::string target = high_entropy_sequence(320u);
     const std::string logical_query = target.substr(80u, 96u);
     seed_batch_join_target(ctx, target);
-    /* Build the target index for the scalar and exact SIMD cases. Leave
-     * automatic index creation off for the query tables. */
+    /* The allow-policy cases exercise the ordinary stored-index reader,
+     * whose fragment directory differs from the READY generation format.
+     * Leave automatic index creation off for the query tables. */
+    exec_sql(ctx, "SET bioseq.aligner.grouped_soa_generation.enabled=off;");
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass,"
         "'minimizers_per_fragment');", k_batch_join_target)) == 1);

@@ -19,9 +19,6 @@ import bioseq.postgres.storage.metadata;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
 
-/// @brief Private CustomScan marker for vectorized aggregate execution.
-export inline constexpr int k_vectorized_aggregate_private_marker = 1;
-
 /**
  * @brief State returned when PostgreSQL starts a table scan.
  * The column reader is created on the first row request. The descriptor keeps

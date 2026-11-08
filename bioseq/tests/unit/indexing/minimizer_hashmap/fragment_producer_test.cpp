@@ -1181,11 +1181,25 @@ TEST_CASE("ordinary fragment Vulkan build preserves native pairs and GPU executi
         std::uint64_t state = 0x4D504656554C4B4EULL;
         for (auto& symbol : symbols) {
             state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-            symbol.assign_rank(static_cast<decltype(symbol.to_rank())>(
-                (state >> 33u) % seqan3::alphabet_size<Alphabet>));
+            if constexpr (std::same_as<Alphabet, seq::dna15>) {
+                // Exact nt4 minimizers need complete A/C/G/T stretches; uniform
+                // DNA15 ranks overwhelmingly form unseedable ambiguity runs.
+                seqan3::assign_char_to(std::string_view{"ACGT"}[(state >> 33u) % 4u], symbol);
+            } else {
+                symbol.assign_rank(static_cast<decltype(symbol.to_rank())>(
+                    (state >> 33u) % seqan3::alphabet_size<Alphabet>));
+            }
         }
         symbols[100u].assign_rank(static_cast<decltype(symbols[100u].to_rank())>(
             seqan3::alphabet_size<Alphabet> - 1u));
+        if constexpr (std::same_as<Alphabet, seq::dna15>) {
+            // Exercise every ambiguity rank, including a run crossing the
+            // fragment boundary, while preserving seedable runs in both cores.
+            constexpr std::string_view ambiguities = "BDHKMNRSVWY";
+            for (const auto start : {std::size_t{100u}, fragment_bp - 5u, fragment_bp + 64u})
+                for (std::size_t index = 0u; index < ambiguities.size(); ++index)
+                    seqan3::assign_char_to(ambiguities[index], symbols[start + index]);
+        }
         source_range range(symbols);
         lazy_sequence<config, scanner> fragmented{scanner::from_range(range)};
         const auto view = bioseq::storage::make_lazy_sequence_view(fragmented);
@@ -1223,11 +1237,11 @@ TEST_CASE("ordinary fragment Vulkan build preserves native pairs and GPU executi
         for (index_sub_key_t fragment = 0; fragment < 2; ++fragment) {
             const auto expected = read_pairs(scalar_storage, fragment);
             const auto actual = read_pairs(gpu_storage, fragment);
-            if constexpr (std::same_as<Alphabet, seq::dna5>) {
-                // The baseline exact nucleotide tile selector retains extra
-                // seeds after ambiguity resets. On this corpus origin/main
-                // and the native build both emit the same six extra records.
-                // Require complete scalar coverage and the baseline tile bound.
+            if constexpr (seqan3::nucleotide_alphabet<Alphabet>
+                          && seqan3::alphabet_size<Alphabet> > 4u) {
+                // DNA5 and DNA15 share the exact nt4 ambiguity rule. The tile
+                // selector can retain extra seeds after ambiguity resets;
+                // require complete scalar coverage and the existing tile bound.
                 REQUIRE(std::ranges::includes(actual, expected));
                 constexpr auto k = ordinary_minimizer_index_kmer_size(
                     bioseq::minimizers::minimizer_exact_rank_bits<Alphabet>);
@@ -1238,6 +1252,25 @@ TEST_CASE("ordinary fragment Vulkan build preserves native pairs and GPU executi
                         <= std::uint64_t{tiles.tile_count} * 2u * (k + w + 1u));
             } else {
                 REQUIRE(actual == expected);
+            }
+            if constexpr (std::same_as<Alphabet, seq::dna15>) {
+                REQUIRE_FALSE(expected.empty());
+                REQUIRE_FALSE(actual.empty());
+                constexpr auto k = ordinary_minimizer_index_kmer_size(
+                    bioseq::minimizers::minimizer_exact_rank_bits<Alphabet>);
+                for (const auto& [hash, encoded_position] : actual) {
+                    const auto last = static_cast<std::size_t>(fragment) * fragment_bp
+                        + (encoded_position >> 1u);
+                    CAPTURE(fragment, last);
+                    REQUIRE(last < symbols.size());
+                    REQUIRE(last + 1u >= k);
+                    REQUIRE(std::ranges::all_of(
+                        std::span<const Alphabet>{symbols}.subspan(last + 1u - k, k),
+                        [](const Alphabet symbol) {
+                            return std::string_view{"ACGT"}.find(seqan3::to_char(symbol))
+                                != std::string_view::npos;
+                        }));
+                }
             }
             stored_pairs += actual.size();
             wide_hash_present = wide_hash_present || std::ranges::any_of(actual,

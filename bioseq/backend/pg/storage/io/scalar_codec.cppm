@@ -3,6 +3,7 @@ module;
 #include <bioseq/pg_compat.h>
 extern "C" {
 #include "catalog/pg_type_d.h"
+#include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -14,6 +15,16 @@ import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 
 export namespace bioseq::postgres::storage::io {
+
+/** Require the encoding used by canonical headers, JSON payloads and IO names.
+ * PostgreSQL catalog identifiers and typed metadata share the same boundary;
+ * partial value-only conversion would still produce inconsistent records.
+ */
+inline void require_utf8_io_encoding() {
+    if (GetDatabaseEncoding() != PG_UTF8)
+        bioseq::postgres::support::raise_sql_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+            {.message = "Bioseq canonical and SAM/BAM IO requires a UTF8 database encoding"});
+}
 
 /** Scope canonical settings around type IO only, restoring even after PG errors.
  * No source query executes inside this scope; GUC_ACTION_SAVE restores the caller
@@ -28,7 +39,9 @@ template<class Function>
             constexpr std::array settings{
                 std::pair{"DateStyle", "ISO, YMD"}, std::pair{"IntervalStyle", "iso_8601"},
                 std::pair{"TimeZone", "UTC"}, std::pair{"extra_float_digits", "3"},
-                std::pair{"bytea_output", "hex"}};
+                std::pair{"bytea_output", "hex"}, std::pair{"search_path", "pg_catalog"},
+                std::pair{"array_nulls", "on"}, std::pair{"lc_monetary", "C"},
+                std::pair{"xmloption", "content"}};
             for (const auto& [name, value] : settings)
                 static_cast<void>(set_config_option(name, value, PGC_USERSET, PGC_S_SESSION,
                     GUC_ACTION_SAVE, true, ERROR, false));
@@ -70,6 +83,8 @@ template<std::floating_point Value, scalar_output_admitter Admit>
 /** Encode primitives and stable PG type output, admitting variable C++ backing
  * before copying it. PG type-output functions necessarily allocate their transient
  * CString first; that caller-thread allocation is freed on success, denial or error.
+ * Custom type IO must itself round trip under the scoped settings; arbitrary
+ * user-defined functions can depend on other ambient state that IO cannot infer.
  * NULL optional means retryable admission pressure, never SQL NULL metadata.
  */
 template<scalar_output_admitter Admit>

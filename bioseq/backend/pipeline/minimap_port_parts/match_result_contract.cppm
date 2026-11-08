@@ -81,22 +81,30 @@ struct match_result {
     }
 };
 
+/** Reconcile classification after filtering or merging completed result sets.
+ *  Preserve producer validity; coordinate-only results remain unclassified. */
+inline void finalize_match_result_classification(std::span<match_result> results) noexcept {
+    bool primary_selected = false;
+    std::uint64_t ordinal = 0;
+    for (auto& result : results) {
+        result.alignment_ordinal = ordinal++;
+        result.is_sam_primary = result.has_sam_classification && result.is_primary && !primary_selected;
+        result.is_supplementary = result.has_sam_classification && result.is_primary && primary_selected;
+        primary_selected = primary_selected || result.is_sam_primary;
+    }
+}
+
 /** Finalize validity and SAM classification after every region filter has run.
  *  This does not change the existing chain-root is_primary meaning. Exporters
  *  reconcile primary election across reference result sets using query identity. */
 inline void finalize_match_result_classification(std::span<match_result> results,
-    bool mapq_computed, bool edit_distance_computed, bool classification_available = true) {
-    bool primary_selected = false;
-    std::uint64_t ordinal = 0;
+    bool mapq_computed, bool edit_distance_computed, bool classification_available = true) noexcept {
     for (auto& result : results) {
         result.has_mapq = mapq_computed;
         result.has_edit_distance = edit_distance_computed && result.has_dp_score;
         result.has_sam_classification = classification_available;
-        result.alignment_ordinal = ordinal++;
-        result.is_sam_primary = classification_available && result.is_primary && !primary_selected;
-        result.is_supplementary = classification_available && result.is_primary && primary_selected;
-        primary_selected = primary_selected || result.is_sam_primary;
     }
+    finalize_match_result_classification(results);
 }
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)

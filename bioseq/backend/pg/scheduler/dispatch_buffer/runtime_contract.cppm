@@ -18,7 +18,6 @@ export module bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 export import bioseq.postgres.scheduler.dispatch_buffer.output_contract;
 
 import bioseq.pipeline.minimap_parameters_contract;
-import bioseq.pipeline.pipe;
 import bioseq.pipeline.stats;
 import bioseq.indexing.type;
 import bioseq.postgres.types.compact_sequence;

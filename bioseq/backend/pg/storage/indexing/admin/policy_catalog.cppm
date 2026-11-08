@@ -94,7 +94,7 @@ load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
         table_policy_spi_error_as_cpp("SPI_connect", connect_status);
     }
 
-    const int execute_status = bioseq::postgres::support::invoke_pg_as_cpp(
+    const int execute_status = bioseq::postgres::support::invoke_extension_internal_sql_as_cpp("bioseq",
         [&sql] { return SPI_execute(sql.c_str(), /*read_only=*/true, /*tcount=*/0); });
     if (execute_status != SPI_OK_SELECT || SPI_tuptable == nullptr) {
         table_policy_spi_error_as_cpp("SPI_execute", execute_status);

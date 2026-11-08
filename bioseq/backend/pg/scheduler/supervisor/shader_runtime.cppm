@@ -241,7 +241,11 @@ process_shader_seed_snapshot() {
  * when none exists. Reject an invalid existing cache. Other platforms return
  * success without this preparation.
  */
-[[nodiscard]] std::expected<void, std::string> run_shader_cache_aot_phase() {
+[[nodiscard]] std::expected<void, std::string> run_shader_cache_aot_phase(
+    bool (*stop_requested)() noexcept) {
+    if (stop_requested()) {
+        return std::unexpected("supervisor shutdown interrupted shader startup");
+    }
 #if !defined(__APPLE__)
     return {};
 #else
@@ -279,6 +283,9 @@ process_shader_seed_snapshot() {
                 fmt::format("existing sealed shader cache is invalid and will not be repaired: {}",
                             sealed.error()));
         }
+        if (stop_requested()) {
+            return std::unexpected("supervisor shutdown interrupted shader startup");
+        }
         if (g_shared != nullptr) {
             std::snprintf(g_shared->cache_digest_hex,
                           sizeof(g_shared->cache_digest_hex),
@@ -288,7 +295,8 @@ process_shader_seed_snapshot() {
         return {};
     }
 
-    bioseq::parallelism::global_pool::instance().configure(bioseq::parallelism::pool_config{
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    pool.configure(bioseq::parallelism::pool_config{
         .maximum_concurrency = effective_max_concurrency(static_cast<unsigned>(
             std::max(0, bioseq::scheduler::settings::backend::max_concurrency))),
         .mode = bioseq::parallelism::pipeline_concurrency_mode_from_int(
@@ -298,8 +306,13 @@ process_shader_seed_snapshot() {
     constexpr std::uint64_t k_peak_compile_bytes = 256ull << 20;
     std::size_t compile_cursor = 0;
     while (compile_cursor < keys->size()) {
-        const unsigned requested =
-            static_cast<unsigned>(std::min<std::size_t>(4, keys->size() - compile_cursor));
+        if (stop_requested()) {
+            return std::unexpected("supervisor shutdown interrupted shader startup");
+        }
+        // A single-thread pool must return to the caller after one variant,
+        // rather than compiling a serial four-key wave before polling shutdown.
+        const unsigned requested = static_cast<unsigned>(std::min<std::size_t>(
+            {4u, pool.maximum_concurrency(), keys->size() - compile_cursor}));
         auto wave = bioseq::parallelism::try_reserve_budgeted_wave(requested, k_peak_compile_bytes);
         if (!wave.is_admitted) {
             return std::unexpected("shader cache AOT memory admission failed");
@@ -309,7 +322,7 @@ process_shader_seed_snapshot() {
             std::min<std::size_t>(keys->size(), compile_cursor + wave.fanout);
         std::mutex error_mu;
         std::string first_error;
-        bioseq::parallelism::global_pool::instance().parallel_for(
+        pool.parallel_for(
             wave_begin,
             wave_end,
             1,
@@ -329,16 +342,27 @@ process_shader_seed_snapshot() {
                     }
                 }
             });
+        // parallel_for has joined the wave; no task retains these local owners.
+        if (stop_requested()) {
+            return std::unexpected("supervisor shutdown interrupted shader startup");
+        }
         if (!first_error.empty()) {
             return std::unexpected(first_error);
         }
         compile_cursor = wave_end;
+    }
+    if (stop_requested()) {
+        return std::unexpected("supervisor shutdown interrupted shader startup");
     }
     if (auto command_library =
             bioseq::gpu::vulkan::ensure_moltenvk_command_library_for_sealed_seed(cache_dir);
         !command_library) {
         return std::unexpected(
             fmt::format("seal exact MoltenVK command library: {}", command_library.error()));
+    }
+    // An interrupted partial warmup never publishes the accepted manifest.
+    if (stop_requested()) {
+        return std::unexpected("supervisor shutdown interrupted shader startup");
     }
     auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(cache_dir, digest, *keys);
     if (!sealed) {
@@ -352,9 +376,10 @@ process_shader_seed_snapshot() {
 #endif
 }
 
-/** Prepare shader assets during supervisor startup and return any error. */
-[[nodiscard]] std::expected<void, std::string> load_bioseq_runtime() {
-    return run_shader_cache_aot_phase();
+/** Prepare shader assets, polling caller-owned shutdown between joined waves. */
+[[nodiscard]] std::expected<void, std::string>
+load_bioseq_runtime(bool (*stop_requested)() noexcept) {
+    return run_shader_cache_aot_phase(stop_requested);
 }
 
 /** Publish sdader initialization success or failure and wake all waiting backends. */

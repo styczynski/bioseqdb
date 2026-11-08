@@ -322,7 +322,7 @@ constexpr std::string_view k_minimap2_framework_duration_rate_contract =
 constexpr std::string_view k_minimap2_framework_duration_rate_contract =
     "not_proven";
 #endif
-constexpr std::size_t   k_fasta_stream_chunk_bp = std::size_t{1} << 24;      // bounded writer body slice
+constexpr std::size_t   k_fasta_checksum_chunk_bp = std::size_t{1} << 24;   // bounded decoded checksum slice
 // Bounded FASTA lines keep every reader alphabet/storage path within its input
 // slab; some fallback encoders must buffer one complete body line.
 constexpr std::size_t   k_fasta_line_width     = std::size_t{1} << 16;
@@ -1293,6 +1293,8 @@ inline void write_fasta(
                         std::string_view base_name, std::size_t record_bp) {
     bioseq::io::writer_options wo = bioseq::io::default_writer_options;
     wo.fasta_line_width = k_fasta_line_width;
+    // These generated fixture paths are refreshed when their cached identity changes.
+    wo.overwrite = true;
     auto writer_or = bench_writer<p_alphabet>::open(path, wo);
     if (!writer_or) {
         bioseq_log<logging_level::error>("[bench_e2e] cannot open '{}': {}", path, writer_or.error()); std::abort();
@@ -1303,11 +1305,9 @@ inline void write_fasta(
                           std::size_t off,
                           std::size_t cnt,
                           std::size_t pad) {
-        if (!writer.write_record_streamed(fmt::format("{}{}", base_name, idx),
-                                          view_slice<p_alphabet>(
-                                              seq, off, cnt, pad),
-                                          k_fasta_stream_chunk_bp)) {
-            bioseq_log<logging_level::error>("[bench_e2e] write_record_streamed failed for '{}'", path); std::abort();
+        if (!writer.write_record(fmt::format("{}{}", base_name, idx),
+                                 view_slice<p_alphabet>(seq, off, cnt, pad))) {
+            bioseq_log<logging_level::error>("[bench_e2e] write_record failed for '{}'", path); std::abort();
         }
     };
     if (record_bp == 0) {
@@ -1344,9 +1344,9 @@ template <sequence_alphabet p_alphabet>
     constexpr std::size_t k_letters_per_unit = traits::letters_per_unit;
     constexpr std::size_t k_bits_per_character = traits::bits_per_char;
     const std::size_t units_per_slice = std::max<std::size_t>(
-        std::size_t{1}, k_fasta_stream_chunk_bp / k_letters_per_unit);
+        std::size_t{1}, k_fasta_checksum_chunk_bp / k_letters_per_unit);
     std::vector<std::uint8_t> decoded;
-    decoded.reserve(k_fasta_stream_chunk_bp);
+    decoded.reserve(k_fasta_checksum_chunk_bp);
     bioseq::indexing::crc64_ecma182_accumulator checksum;
     for (std::size_t unit_offset = 0; unit_offset < sequence.size();
          unit_offset += units_per_slice) {

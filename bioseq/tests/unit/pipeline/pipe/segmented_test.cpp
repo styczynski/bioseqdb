@@ -23,8 +23,8 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     using ::bioseq::simd::base_alignment_algorithm;
 
     // Limit the memory budget so target segments use the 32-million-base
-    // minimum. Put the matching sequence inside the second segment to check
-    // that its local coordinates are converted back to target coordinates.
+    // minimum. Put matching roots inside both cores to check global coordinates
+    // and classification after the independently completed segments are merged.
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     struct restore_cap {
@@ -35,10 +35,13 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     admission.set_index_memory_cap_bytes(192'000'000u);
 
     constexpr std::size_t target_length = 33'000'000;
+    constexpr std::size_t first_truth_start = 250'000;
     constexpr std::size_t truth_start = 32'250'000;
     constexpr std::size_t query_length = 40'000;
     auto target = vulkan_pipeline_test_support::make_dna4(
         target_length, 0x5E6A3E17u);
+    std::copy_n(target.begin() + truth_start, query_length,
+                target.begin() + first_truth_start);
     std::vector<seq::dna4> query;
     query.reserve(query_length);
     for (auto iterator = target.begin() + truth_start + query_length;
@@ -79,14 +82,85 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     REQUIRE_FALSE(result.exact_simd_target_execution_stats_available);
     REQUIRE_FALSE(result.partial_vulkan_stats.has_any_dispatch());
 
-    const auto primary = std::ranges::find_if(
-        result.results,
+    for (const auto start : {first_truth_start, truth_start}) {
+        const auto root = std::ranges::find_if(result.results, [start](const auto& match) {
+            return match.is_primary && std::abs(static_cast<std::int64_t>(match.target_start)
+                - static_cast<std::int64_t>(start)) < 15;
+        });
+        REQUIRE(root != result.results.end());
+        REQUIRE(root->is_reverse);
+    }
+    const auto roots = std::ranges::count_if(result.results,
         [](const auto& match) { return match.is_primary; });
-    REQUIRE(primary != result.results.end());
-    REQUIRE(primary->is_reverse);
-    REQUIRE(std::abs(
-        static_cast<std::int64_t>(primary->target_start)
-        - static_cast<std::int64_t>(truth_start)) < 15);
+    REQUIRE(roots >= 2);
+    REQUIRE(std::ranges::count_if(result.results,
+        [](const auto& match) { return match.is_sam_primary; }) == 1);
+    REQUIRE(std::ranges::count_if(result.results,
+        [](const auto& match) { return match.is_supplementary; }) == roots - 1);
+    for (std::size_t index = 0; index < result.results.size(); ++index) {
+        const auto& match = result.results[index];
+        REQUIRE(match.has_sam_classification);
+        REQUIRE(match.alignment_ordinal == index);
+        REQUIRE(match.has_mapq);
+        REQUIRE_FALSE(match.has_dp_score);
+        REQUIRE_FALSE(match.has_edit_distance);
+    }
+}
+
+TEST_CASE("merged classification preserves producer validity after core filtering",
+          "[component:bioseq][layer:unit][feature:alignment]") {
+    std::array<match_result, 3> first_segment{};
+    first_segment[1].has_dp_score = true;
+    first_segment[2].is_primary = false;
+    finalize_match_result_classification(first_segment, true, true);
+    REQUIRE(first_segment[0].is_sam_primary);
+    REQUIRE(first_segment[1].is_supplementary);
+
+    std::array<match_result, 2> second_segment{};
+    second_segment[1].is_primary = false;
+    finalize_match_result_classification(second_segment, false, false);
+    REQUIRE(second_segment[0].is_sam_primary);
+
+    std::vector<match_result> merged;
+    merged.emplace_back(); // Coarse-only producer: validity must remain unavailable.
+    // The first segment's original primary was outside its accepted core.
+    merged.push_back(std::move(first_segment[1]));
+    merged.push_back(std::move(first_segment[2]));
+    merged.push_back(std::move(second_segment[0]));
+    merged.push_back(std::move(second_segment[1]));
+    const std::array<std::uint64_t, 5> sam_flags{0u, 0u, 0x100u, 0x800u, 0x100u};
+    for (unsigned pass = 0; pass != 2; ++pass) {
+        finalize_match_result_classification(merged);
+        REQUIRE_FALSE(merged[0].has_sam_classification);
+        REQUIRE_FALSE(merged[0].has_mapq);
+        REQUIRE_FALSE(merged[0].has_dp_score);
+        REQUIRE_FALSE(merged[0].has_edit_distance);
+        REQUIRE_FALSE(merged[0].is_sam_primary);
+        REQUIRE_FALSE(merged[0].is_supplementary);
+        REQUIRE(merged[0].export_status() == 0u);
+        REQUIRE(merged[1].is_sam_primary);
+        REQUIRE(merged[1].has_mapq); // A computed zero is still available.
+        REQUIRE(merged[1].mapq == 0);
+        REQUIRE(merged[1].has_dp_score);
+        REQUIRE(merged[1].has_edit_distance);
+        REQUIRE(merged[2].has_mapq);
+        REQUIRE_FALSE(merged[2].has_dp_score);
+        REQUIRE_FALSE(merged[2].has_edit_distance);
+        REQUIRE(merged[3].is_supplementary);
+        REQUIRE_FALSE(merged[3].has_mapq);
+        REQUIRE_FALSE(merged[3].has_edit_distance);
+        REQUIRE_FALSE(merged[4].has_mapq);
+        REQUIRE_FALSE(merged[4].has_edit_distance);
+        for (std::size_t index = 0; index < merged.size(); ++index) {
+            REQUIRE(merged[index].has_sam_classification == (index != 0));
+            REQUIRE(merged[index].alignment_ordinal == index);
+            REQUIRE((merged[index].export_status() & 0x900u) == sam_flags[index]);
+        }
+        REQUIRE(std::ranges::count_if(merged,
+            [](const auto& match) { return match.is_sam_primary; }) == 1);
+        REQUIRE(std::ranges::count_if(merged,
+            [](const auto& match) { return match.is_supplementary; }) == 1);
+    }
 }
 
 }  // namespace bioseq::simd::pipe

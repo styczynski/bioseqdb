@@ -1011,7 +1011,12 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     REQUIRE(producer[0].value_or("") == "0");
     REQUIRE(producer[1].value_or("") == "0");
 
-    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    // The absence query above retains the default native profile. This new
+    // INSERT selects the direct exact-scheme profile required by maintenance.
+    exec_sql(ctx,
+             "SET bioseq.aligner.grouped_soa_generation.enabled = off;"
+             "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+             "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx, fmt::format(
         "INSERT INTO {} VALUES "
         "(2, repeat('TGCA', 2000)::bioseq.seq('dna4', 64));",
@@ -1019,4 +1024,109 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "on");
     REQUIRE(index_table_row_count(
         ctx, "minimizers_per_fragment", k_missing_index) > 0);
+}
+
+TEST_CASE(
+    "ordinary CPU allow recomputes valid grouped indexes without reading direct chunks",
+    "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
+    constexpr std::string_view table = "mmsearch_grouped_optional_cpu_int";
+    constexpr std::size_t query_start = 1500u;
+    constexpr std::size_t query_length = 320u;
+    for (const std::string_view alphabet : {
+            std::string_view{"dna4"},
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+            std::string_view{"dna5"},
+#endif
+        }) {
+        for (const std::string_view index_name : {
+                std::string_view{"minimizers_per_fragment"},
+                std::string_view{"minimizers_per_sequence"}}) {
+            DYNAMIC_SECTION(alphabet << "/" << index_name) {
+                auto ctx = fresh_context({table});
+                REQUIRE(query_scalar(ctx,
+                    "SHOW bioseq.aligner.grouped_soa_generation.enabled;") == "on");
+                exec_sql(ctx,
+                    "SET bioseq.index.insert_maintenance.enabled = off;"
+                    "SET bioseq.index.async_persistence.enabled = off;"
+                    "SET bioseq.index.recompute_async_persistence.enabled = off;"
+                    "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';"
+                    "SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';"
+                    "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
+                std::string target = high_entropy_sequence(4096u);
+                if (alphabet == "dna5") {
+                    target[17u] = 'N';
+                }
+                const seq_typmod typmod{.alphabet = alphabet, .width = 64};
+                const std::string query = format_literal(
+                    target.substr(query_start, query_length), typmod);
+                create_seq_table(
+                    ctx,
+                    seq_table_spec{.name = std::string{table},
+                                   .typmod = typmod,
+                                   .seq_columns = 1,
+                                   .using_bioseq = true},
+                    {seq_row{.pk = 1, .sequences = {target}}});
+                REQUIRE(query_scalar_int(ctx, fmt::format(
+                    "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                    table, index_name)) > 0);
+                exec_sqlf(ctx,
+                    "SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+                    table, index_name);
+                // Resolve through the existing source-bound storage handle, not
+                // a private-schema prefix that could select another fixture.
+                const std::string relation_name = query_scalar(ctx, fmt::format(
+                    "SELECT before_oid::regclass::text "
+                    "FROM bioseq_internal.inspect_generation_storage_transition("
+                    "'{}'::regclass, '{}', "
+                    "(SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+                    " FROM {} WHERE pk=1), 'probe_residency');",
+                    table, index_name, table, table));
+                REQUIRE(query_scalar_int(ctx, fmt::format(
+                    "SELECT count(*) FROM pg_attribute "
+                    "WHERE attrelid='{}'::regclass AND attnum>0 AND NOT attisdropped;",
+                    relation_name)) == 8);
+                // Request base alignment before checking exact endpoints; the
+                // coordinate-only projection intentionally reports chain bounds.
+                const auto search_sql = [table, &query](const std::string_view options) {
+                    return fmt::format(
+                        "SELECT pk,bioseq.target_start(pk),bioseq.target_end(pk),bioseq.cigar(pk) "
+                        "FROM {} WHERE mmsearch(seq0, {}{}) ORDER BY pk;",
+                        table, query, options);
+                };
+                const std::string ordinary = search_sql("");
+                const rowset_t expected{{"1", std::to_string(query_start),
+                                         std::to_string(query_start + query_length),
+                                         fmt::format("{}M", query_length)}};
+                for (const std::string_view vectorization : {"on", "off"}) {
+                    for (const std::string_view cache : {"on", "off"}) {
+                        INFO(fmt::format("vectorization={} cache={}", vectorization, cache));
+                        exec_sqlf(ctx, "SET bioseq.vectorization.enabled = {};", vectorization);
+                        exec_sqlf(ctx, "SET bioseq.column_cache.enabled = {};", cache);
+                        exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
+                        REQUIRE(query_rows(ctx, ordinary) == expected);
+                        const auto plan = explain_text<true>(ctx, ordinary);
+                        REQUIRE(plan_contains(plan, "| align_stage: Block Aligner"));
+                        REQUIRE(plan_contains(plan, "Index outcomes [targets=1 persisted=0"));
+                        REQUIRE(plan_contains(plan, "recomputed=1]"));
+                        REQUIRE(query_rows(ctx, search_sql(
+                            ", aligner_options(index_read_requirement => 1)")) == expected);
+                        require_no_current_compatible_persisted_index(ctx, search_sql(
+                            ", aligner_options(index_read_requirement => 2)"));
+                        exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
+                        REQUIRE(query_rows(ctx, ordinary) == expected);
+                    }
+                }
+
+                // A malformed native schema is not a recognized unsupported layout.
+                // Reads-off still ignores it; allow must retain the strict error.
+                exec_sql(ctx, "BEGIN;");
+                exec_sqlf(ctx, "ALTER TABLE {} RENAME COLUMN blob TO broken_blob;", relation_name);
+                REQUIRE(query_rows(ctx, ordinary) == expected);
+                exec_sql(ctx, "SET LOCAL bioseq.index.sequence_read.enabled = on;");
+                const auto malformed = sql_error(ctx, ordinary);
+                REQUIRE(malformed.contains("fragment API refuses an incompatible schema"));
+                exec_sql(ctx, "ROLLBACK;");
+            }
+        }
+    }
 }

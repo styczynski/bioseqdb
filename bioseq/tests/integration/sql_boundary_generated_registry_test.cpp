@@ -330,6 +330,8 @@ WITH expected(
       ON ext.oid = dep.refobjid
      AND ext.extname = 'bioseq'
    WHERE p.prokind = 'a'
+     -- Match vector_aggregate_association_for; seq_min/seq_max are ordinary aggregates.
+     AND p.proname IN ('vcount', 'vsum', 'vavg', 'vmax', 'vmin')
 ), expected_with_scalar AS (
   SELECT e.*, count(s.oid) AS scalar_matches
     FROM expected AS e
