@@ -90,7 +90,42 @@ struct bench_identifier_writer {
 static_assert(
     bioseq::io::identifier_parser::identifier_destination_writer<bench_identifier_writer>);
 
-// Reader workloads report rpcord counts and decoded sequence lengths.
+/** Resolve an exact reader algorithm to its total shared-arena participant budget. */
+[[nodiscard]] std::int64_t reader_participant_budget(std::string_view algorithm) {
+    if (algorithm == "bioseq_io_async4_fasta" || algorithm == "bioseq_io_async4_fastq")
+        return 4;
+    if (algorithm == "bioseq_io_mmap_fasta" || algorithm == "bioseq_io_mmap_fastq"
+        || algorithm == "bioseq_io_pgzip_fastq") {
+        const auto limit = std::min<std::size_t>(
+            parallelism::default_concurrency_limit(),
+            oneapi::tbb::global_control::active_value(
+                oneapi::tbb::global_control::max_allowed_parallelism));
+        return static_cast<std::int64_t>(limit);
+    }
+    if (algorithm == "bioseq_io_sync_fasta" || algorithm == "bioseq_io_sync_fastq"
+        || algorithm == "bioseq_io_zlib_fastq" || algorithm == "kseqpp_fasta"
+        || algorithm == "kseqpp_fastq" || algorithm == "naive_ifstream_fasta"
+        || algorithm == "naive_ifstream_fastq")
+        return 1;
+    return 0;
+}
+
+/** Configure and log reader participants outside timing; reject invalid budgets before measurement. */
+[[nodiscard]] io_pool_scope prepare_reader_iteration(std::string_view algorithm, std::size_t repeat) {
+    const auto requested = reader_participant_budget(algorithm);
+    io_pool_scope preparation{requested};
+    if (!preparation.error.empty())
+        throw std::invalid_argument("reader budget preparation failed for '"
+            + std::string{algorithm} + "': " + preparation.error);
+    const auto& pool = parallelism::global_pool::instance();
+    bioseq_log<logging_level::info>(
+        "reader budget: algorithm={} repeat={} requested_participants={} pool_limit={} "
+        "framework_limit={} active_workers=unobserved",
+        algorithm, repeat, requested, pool.maximum_concurrency(), preparation.framework_limit);
+    return preparation;
+}
+
+// Reader workloads report record counts and decoded sequence lengths.
 
 /// Run the Bioseq reader with the exact backend and concurrency options supplied.
 template <sequence_alphabet p_alphabet, bool p_is_fasta>

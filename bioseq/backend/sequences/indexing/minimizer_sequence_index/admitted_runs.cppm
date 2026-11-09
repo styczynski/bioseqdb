@@ -329,6 +329,18 @@ inline void restore_pair_run_sort_override(
                        : static_cast<std::uint32_t>(max_occ);
 }
 
+/**
+ * Bound MPS query postings by clip length and the full-target occurrence limit.
+ * The query hash count is distinct; the reader rejects malformed repeated buckets
+ * before appending past this bound. Negative max_occ keeps its existing u32 limit.
+ */
+[[nodiscard]] constexpr std::uint64_t minimizer_sequence_query_pair_bound(
+    const std::uint64_t clip_bp, const std::uint64_t query_hash_count,
+    const std::int32_t max_occ) noexcept {
+    return std::min(clip_bp, bioseq::common::saturating_mul(
+        query_hash_count, static_cast<std::uint64_t>(effective_max_occ_threshold(max_occ))));
+}
+
 /** Pack the hash above the position so unsigned 128-bit sorting orders both fields. */
 [[nodiscard]] inline hwy::uint128_t pack_pair(sorted_pair_t pair) noexcept {
     return hwy::uint128_t{.lo = pair.second, .hi = pair.first};

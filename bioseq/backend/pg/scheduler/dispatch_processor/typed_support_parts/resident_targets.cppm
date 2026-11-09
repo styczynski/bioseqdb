@@ -386,8 +386,9 @@ inline void record_transient_query_execution(
 /**
  * Plan the simultaneous ordinary-reader allocations with existing heap/table planners.
  * Pairs and bucket scratch allow vector growth plus the retiring allocation. The
- * metadata predicate bounds copied MPS buckets by max_occ before any position copy.
- * Query minimizer owners and their retained sorted keys keep a separate permit.
+ * MPS bounds retained pairs by distinct query hashes and the full-target occurrence
+ * limit; the reader enforces that bound before every append. Copied MPS buckets are
+ * bounded before position scratch grows. Query minimizer owners keep a separate permit.
  */
 [[nodiscard]] inline std::uint64_t ordinary_minimizer_assembly_peak_bytes(
     const std::uint64_t target_bp, const std::uint64_t clip_bp,
@@ -405,19 +406,25 @@ inline void record_transient_query_execution(
     };
     constexpr std::uint64_t growing_vector_peak_factor =
         2u * bioseq::parallelism::k_vector_preallocation_headroom_factor;
-    const auto table = bioseq::indexing::plan_minimizer_hashmap_table_allocation(clip_bp);
-    if (!table.valid || clip_bp > (std::numeric_limits<std::uint32_t>::max)()) {
+    const auto pair_count = fragment_layout ? clip_bp
+        : bioseq::indexing::detail::minimizer_sequence_query_pair_bound(
+              clip_bp, query_hash_count, max_occ);
+    // build_from_pairs reserves from pair count before it knows distinct hashes.
+    const auto table = bioseq::indexing::plan_minimizer_hashmap_table_allocation(pair_count);
+    if (!table.valid || pair_count > (std::numeric_limits<std::uint32_t>::max)()) {
         raise_typed_dispatch_pg_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
             "ordinary minimizer assembly exceeds lookup geometry");
     }
+    const auto table_allocation = fragment_layout ? table.allocation_bytes
+        : allocation(table.allocation_bytes);
     std::uint64_t peak = saturating_add(
         // A rehash can retain both old and new table allocations.
-        saturating_mul(2u, table.allocation_bytes),
+        saturating_mul(2u, table_allocation),
         bioseq::indexing::minimizer_hashmap_fragment_index::table_owner_allocation_requirement_bytes());
     peak = saturating_add(peak, allocation(saturating_mul(
-        saturating_mul(growing_vector_peak_factor, clip_bp),
+        saturating_mul(growing_vector_peak_factor, pair_count),
         sizeof(std::pair<std::uint64_t, std::uint64_t>))));
-    peak = saturating_add(peak, allocation(saturating_mul(clip_bp, sizeof(std::uint64_t))));
+    peak = saturating_add(peak, allocation(saturating_mul(pair_count, sizeof(std::uint64_t))));
     peak = saturating_add(peak, allocation(saturating_mul(query_hash_count, sizeof(std::uint64_t))));
     if (!fragment_layout) {
         peak = saturating_add(peak, allocation(saturating_mul(
@@ -528,6 +535,15 @@ template <sequence_alphabet p_alphabet>
                     collection.results.push_back(std::move(match));
             }
         }
+        if (const auto classified = reconcile_match_result_classification(
+                std::span<match_result>{collection.results.data(), collection.results.size()},
+                params.mask_level, params.mask_len); !classified) {
+            collection.record_failure(classified.error());
+        }
+        collection = run_aligner_pg_checked("segmented index classification",
+            [&collection]() -> match_result_collection {
+                return std::move(collection);
+            });
     }
     record_transient_query_execution(collection, query);
     return collection;

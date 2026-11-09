@@ -193,9 +193,9 @@ export {
             };
         /// Finish the merged classification and add validated query sketch counts once.
         auto finalize_segmented_stats = [&query_sketch,
+                                         &params,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                          execution_plan,
-                                     &params,
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                                      benchmark_e2e_operation,
 #endif
@@ -270,8 +270,11 @@ export {
             collection.record_completed_minimizer_algorithm_identity(
                 scalar_segmented_route ? minimizer_algorithm::scalar : params.minimizer_algorithm);
 #endif
-            finalize_match_result_classification(
-                std::span<match_result>{collection.results.data(), collection.results.size()});
+            if (const auto classified = reconcile_match_result_classification(
+                    std::span<match_result>{collection.results.data(), collection.results.size()},
+                    params.mask_level, params.mask_len); !classified) {
+                collection.record_failure(classified.error());
+            }
             return collection;
         };
         boost::unordered_flat_set<std::uint64_t> query_kmer_filter;

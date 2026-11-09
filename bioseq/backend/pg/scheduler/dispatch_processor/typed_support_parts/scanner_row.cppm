@@ -994,9 +994,10 @@ template <class p_sequence,
                         ensure_q();
                         const sequence_size_t total_bp = loc_opt->logical_length;
                         const std::size_t a_lpu = target_letters_per_unit;
-                        constexpr sequence_size_t frag_bp = static_cast<sequence_size_t>(
-                            bioseq::storage::postgres_lazy_sequence_binding<
-                                p_sequence>::fragment_bp_capacity());
+                        // Ordinary index fragments have a fixed logical base span,
+                        // independent of the sequence's packed storage-fragment geometry.
+                        constexpr sequence_size_t frag_bp =
+                            bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp;
                         static_assert(frag_bp != 0u);
                         const std::size_t size_u =
                             static_cast<std::size_t>((total_bp + a_lpu - 1) / a_lpu);
@@ -1149,7 +1150,15 @@ template <class p_sequence,
                                     }
                                 }
                             }
-                            collection = std::move(merged_collection);
+                            if (const auto classified = reconcile_match_result_classification(
+                                    std::span<match_result>{merged.data(), merged.size()},
+                                    idx_params.mask_level, idx_params.mask_len); !classified) {
+                                merged_collection.record_failure(classified.error());
+                            }
+                            collection = run_aligner_pg_checked("segmented index classification",
+                                [&merged_collection]() -> match_result_collection {
+                                    return std::move(merged_collection);
+                                });
                         }
                         assembled = true;
                     };
@@ -1364,7 +1373,15 @@ template <class p_sequence,
                                                         }
                                                     }
                                                 }
-                                                collection = std::move(merged_collection);
+                                                if (const auto classified = reconcile_match_result_classification(
+                                                        std::span<match_result>{merged.data(), merged.size()},
+                                                        idx_params.mask_level, idx_params.mask_len); !classified) {
+                                                    merged_collection.record_failure(classified.error());
+                                                }
+                                                collection = run_aligner_pg_checked("segmented index classification",
+                                                    [&merged_collection]() -> match_result_collection {
+                                                        return std::move(merged_collection);
+                                                    });
                                             }
                                             assembled = true;
                                         }

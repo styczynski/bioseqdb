@@ -11,6 +11,7 @@ import itertools
 import json
 from pathlib import Path
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -18,7 +19,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "build_mcp"))
+sys.path.insert(0, str(ROOT / "build_auto_scripts"))
 
 from bench import generate_e2e_algorithm_matrix_deadline_campaign as generator
 import build_worker
@@ -27,8 +28,30 @@ import build_worker
 class DeadlineCampaignContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.outputs, cls.manifest_raw = generator._expected_outputs()
+        # Historical report numbers are local ignored outputs. Use their
+        # immutable, tracked anchor bindings only for campaign reconstruction;
+        # the real report-validation boundary is exercised separately below.
+        cls.sealed_manifest, sealed_raw = generator._load(generator.MANIFEST_PATH)
+        if hashlib.sha256(sealed_raw).hexdigest() != (
+                build_worker._ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST_SHA256):
+            raise AssertionError("tracked deadline v2 manifest seal changed")
+        anchors = cls.sealed_manifest["calibration_anchors"]
+        if set(anchors) != set(generator.ANCHORS):
+            raise AssertionError("tracked deadline calibration anchor set changed")
+        with mock.patch.object(
+                generator, "_validated_anchor_bindings",
+                return_value=copy.deepcopy(anchors)) as anchor_bindings:
+            cls.outputs, cls.manifest_raw = generator._expected_outputs()
+        anchor_bindings.assert_called_once_with()
         cls.manifest = json.loads(cls.manifest_raw)
+        expected_manifest = copy.deepcopy(cls.sealed_manifest)
+        expected_manifest["source_bindings"] = {
+            relative: hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
+            for relative in generator.SOURCE_BINDINGS
+        }
+        if cls.manifest != expected_manifest:
+            raise AssertionError(
+                "regenerated deadline manifest changed beyond current source bindings")
         cls.schedule = cls.manifest["schedule"]
         cls.parent = json.loads(generator.PARENT_MANIFEST.read_text(encoding="utf-8"))
         cls._current_source_authority_cache = {}
@@ -129,6 +152,75 @@ class DeadlineCampaignContractTests(unittest.TestCase):
         self.assertEqual(campaign["estimated_wall_seconds"], 586_467)
         self.assertEqual(campaign["deadline_seconds"], 604_800)
         self.assertEqual(campaign["operational_margin_seconds"], 18_333)
+
+    def test_anchor_validation_checks_exact_samples_sums_and_raw_bytes(self):
+        """Exercise real validation with synthetic reports in an owned temp tree."""
+        expected = copy.deepcopy(self.sealed_manifest["calibration_anchors"])
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture_root = Path(temporary)
+            reports = {}
+            for name, specification in generator.ANCHORS.items():
+                report = {
+                    "fixture": "synthetic deadline anchor validation only",
+                    "benchmarks": {"bench_e2e": {"execution_tuples": [{
+                        "test_cases": {"fixture": {"all_regions": {
+                            "wall_clock_ns": {
+                                "samples_count": generator.REPETITIONS,
+                                "stats": {"sum": round(
+                                    specification["wall_sum_seconds"] * 1_000_000_000)},
+                            },
+                        }}},
+                    }]}},
+                }
+                raw = json.dumps(report, sort_keys=True, allow_nan=False).encode()
+                path = fixture_root / specification["report"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+                reports[name] = (path, report, raw)
+                expected[name]["report_sha256"] = hashlib.sha256(raw).hexdigest()
+
+            with mock.patch.object(generator, "ROOT", fixture_root):
+                self.assertEqual(generator._validated_anchor_bindings(), expected)
+                for name, (path, report, raw) in reports.items():
+                    for failure in ("samples", "wall_sum"):
+                        with self.subTest(anchor=name, failure=failure):
+                            invalid = copy.deepcopy(report)
+                            metric = invalid["benchmarks"]["bench_e2e"][
+                                "execution_tuples"][0]["test_cases"]["fixture"][
+                                    "all_regions"]["wall_clock_ns"]
+                            if failure == "samples":
+                                metric["samples_count"] = generator.REPETITIONS - 1
+                                message = "five wall samples"
+                            else:
+                                metric["stats"]["sum"] += 1_000_000_000
+                                message = "wall sum changed"
+                            path.write_text(json.dumps(invalid), encoding="utf-8")
+                            try:
+                                with self.assertRaisesRegex(generator.GenerationError, message):
+                                    generator._validated_anchor_bindings()
+                            finally:
+                                path.write_bytes(raw)
+
+                path, _, raw = reports[next(iter(reports))]
+                malformed = (
+                    (b'{"benchmarks": {}}', "anchor report has no exact wall sum"),
+                    (b'[]', "must contain an object"),
+                    (b'{"benchmarks": {}, "benchmarks": {}}', "duplicate JSON key"),
+                )
+                for invalid, message in malformed:
+                    with self.subTest(malformed=message):
+                        path.write_bytes(invalid)
+                        try:
+                            with self.assertRaisesRegex(generator.GenerationError, message):
+                                generator._validated_anchor_bindings()
+                        finally:
+                            path.write_bytes(raw)
+                # Even semantically identical JSON must bind the exact input bytes.
+                path.write_bytes(raw + b"\n")
+                changed_bytes = copy.deepcopy(expected)
+                changed_bytes[next(iter(reports))]["report_sha256"] = (
+                    hashlib.sha256(raw + b"\n").hexdigest())
+                self.assertEqual(generator._validated_anchor_bindings(), changed_bytes)
 
     def test_v2_lineage_is_exact_and_write_targets_are_disjoint(self):
         self.assertEqual(

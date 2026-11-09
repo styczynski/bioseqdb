@@ -158,8 +158,8 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
 
 /**
  * Compute the shader-cache digest used to choose its directory.
- * On Apple, include the checked archive-helper identity so cached shaders
- * match the helper that will load them.
+ * On Apple, include the checked helper and selected Vulkan loader content
+ * identities so a loader replacement selects a fresh immutable cache.
  */
 [[nodiscard]] std::expected<std::string, std::string> runtime_shader_cache_digest(
     const bioseq::gpu::vulkan::shader_cache_build_inputs& inputs) {
@@ -174,7 +174,27 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
         return std::unexpected(
             fmt::format("qualify archive helper before cache selection: {}", helper.error()));
     }
-    return bioseq::gpu::vulkan::shader_cache_digest_hex_with_qualified_helper(inputs, **helper);
+    std::error_code loader_path_error;
+    const auto loader_path =
+        bioseq::gpu::vulkan::selected_vulkan_loader_path(loader_path_error);
+    if (loader_path_error) {
+        return std::unexpected(fmt::format(
+            "resolve Vulkan loader before cache selection: {}", loader_path_error.message()));
+    }
+    if (!loader_path.is_absolute()) {
+        return std::unexpected(
+            "shader cache identity requires a canonical receipt-owned Vulkan loader path");
+    }
+    const auto loader_image =
+        bioseq::gpu::vulkan::sealed_shader_cache_detail::stream_stable_regular_file_digest(
+            loader_path,
+            "Vulkan loader before cache selection",
+            bioseq::gpu::vulkan::sealed_shader_cache_detail::k_maximum_seed_artifact_bytes);
+    if (!loader_image) {
+        return std::unexpected(loader_image.error());
+    }
+    return bioseq::gpu::vulkan::shader_cache_digest_hex_with_qualified_helper(
+        inputs, **helper, *loader_image);
 #endif
 }
 

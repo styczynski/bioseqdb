@@ -58,6 +58,8 @@ struct concurrency_options {
     /// path and a file at least `mmap_parallel_min_bytes` long.
     std::size_t parser_count = 0;
     std::size_t io_buffer_pool_size = 8;
+    /// Maximum queued or executing text-reader batch callbacks per joined task group.
+    /// Zero is treated as one; the producer may own one additional batch.
     std::size_t ring_capacity = 32;
     std::size_t batch_target_record_count = 0;
     std::size_t batch_min_payload_bytes = 256 * 1024;

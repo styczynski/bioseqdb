@@ -4177,7 +4177,9 @@ def _run_live(args: argparse.Namespace) -> Path:
         ),
         "cmake/run_external_postgres_acceptance.py",
         "cmake/bioseq_external_postgres_acceptance.cmake",
-        "build_mcp/server.py",
+        # Parent Git tracks the service as a submodule; the actual server.py
+        # bytes are independently sealed by input_files["mode_source"].
+        "build_auto_scripts",
         "codegen/sql/tests/contract/test_external_feature.py",
     })
     git_provenance = _git_provenance(

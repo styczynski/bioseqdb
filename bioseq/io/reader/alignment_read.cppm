@@ -22,7 +22,6 @@ import bioseq.io.identifier_parser.preservation;
 import bioseq.io.sources;
 import bioseq.io.sinks;
 import bioseq.io.buffer;
-import bioseq.io.compression.aligned_byte_buffer;
 import bioseq.io.compression.parallel_gzip_source;
 import bioseq.io.simd;
 import bioseq.parallelism.pool;
@@ -32,6 +31,9 @@ import bioseq.parallelism.memory_admission;
 
 
 namespace bioseq::io::detail {
+
+/** A framing boundary is either final EOF or a request to drain borrowed slab views. */
+enum class alignment_frame_boundary : std::uint8_t { end_of_input, drain_wave };
 
 /** Existing input slab plus shared admission; mmap sources remain directly borrowed. */
 template<io_source Source>
@@ -54,14 +56,15 @@ public:
         }
     }
 
-    /** Borrow bytes valid until the next fill/consume, or through file close for mmap. */
+    /** Borrow bytes until a refill moves/grows the slab; consume only advances its cursor.
+     * Mapped input remains valid through file close. */
     [[nodiscard]] std::span<const std::uint8_t> available() const {
         if (mapped_) return direct_.subspan(direct_position_);
         if (slab_.raw() == nullptr) return {};
         return {slab_.raw() + slab_.parse_cursor, slab_.remaining()};
     }
-    /** A true result permits record tasks to retain mapped input directly. */
-    [[nodiscard]] bool mapped() const noexcept { return mapped_; }
+    /** Whether the available bytes are final, independent of their consumed prefix. */
+    [[nodiscard]] bool final_buffer() const noexcept { return mapped_ || slab_.is_eof; }
     /** Advance a previously checked record/header span. */
     void consume(const std::size_t bytes) {
         if (mapped_) direct_position_ += bytes;
@@ -150,50 +153,35 @@ public:
         }
     }
 
-    /** Borrow the next whole SAM line, retaining an unterminated final external line. */
-    [[nodiscard]] std::expected<std::optional<std::string_view>, std::string> line() {
+    /** Borrow a whole SAM line, including an unterminated final external line.
+     * A nonempty wave disables refill so every preceding borrowed frame stays immutable. */
+    [[nodiscard]] std::expected<std::variant<std::string_view, alignment_frame_boundary>, std::string>
+    line(const bool allow_refill = true) {
         for (;;) {
             const auto bytes = available();
             const auto newline = simd::scan_first_byte('\n', bytes.data(), bytes.size());
             if (newline != bytes.size())
-                return std::optional<std::string_view>{{reinterpret_cast<const char*>(bytes.data()), newline + 1}};
-            if (mapped_ || slab_.is_eof) {
-                if (bytes.empty()) return std::optional<std::string_view>{};
-                return std::optional<std::string_view>{{reinterpret_cast<const char*>(bytes.data()), bytes.size()}};
+                return std::string_view{reinterpret_cast<const char*>(bytes.data()), newline + 1};
+            if (final_buffer()) {
+                if (bytes.empty()) return alignment_frame_boundary::end_of_input;
+                return std::string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
             }
             if (bytes.size() == std::numeric_limits<std::size_t>::max())
                 return std::unexpected(std::string{"SAM line length overflows"});
+            if (!allow_refill) return alignment_frame_boundary::drain_wave;
             const auto filled = ensure(bytes.size() + 1);
             if (!filled) return std::unexpected(filled.error());
         }
     }
 };
 
-/** One immutable raw record; compressed input owns a copy, mmap keeps a borrowed span. */
+/** One immutable record borrowed from the input owner, or retained by a private spill.
+ * The source slab cannot refill until every dependent slot and callback has finished. */
 struct alignment_record_frame {
-    parallelism::memory_permit permit;
-    compression::chunk_byte_buffer owned;
     std::optional<posix_pwrite_sink> spill_file;
     std::optional<mapped_read_window> spill_mapping;
     std::span<const std::uint8_t> bytes;
     std::uint64_t ordinal{};
-
-    /** Freeze a record before advancing a refillable source slab. */
-    [[nodiscard]] static std::expected<alignment_record_frame, std::string> acquire(
-        std::span<const std::uint8_t> input, const bool directly_mapped, const std::uint64_t ordinal) {
-        alignment_record_frame frame;
-        frame.ordinal = ordinal;
-        if (directly_mapped) { frame.bytes = input; return frame; }
-        auto permit = parallelism::memory_admission_controller::instance().try_reserve(input.size());
-        if (!permit) return std::unexpected(std::string{"Cannot admit alignment record framing"});
-        frame.permit = std::move(*permit);
-        if (auto reserved = frame.owned.reserve(input.size()); !reserved)
-            return std::unexpected(reserved.error());
-        std::copy(input.begin(), input.end(), frame.owned.data.get());
-        frame.owned.size = input.size();
-        frame.bytes = frame.owned.view();
-        return frame;
-    }
 
     /** Reuse the admitted input slab to spool a frame that cannot be retained in RAM. */
     template<io_source Source>
@@ -275,7 +263,7 @@ struct alignment_input_header {
     if (auto finished = header.native.finish_manifest(); !finished) return finished;
     parallelism::memory_permit validation_permit;
     alignment::alignment_context_admission admission{
-        &validation_permit, [](void* state, const std::size_t bytes) -> std::expected<void, std::string> {
+        &validation_permit, [](void* state, const std::size_t bytes, io_memory_credit*) -> std::expected<void, std::string> {
             auto& permit = *static_cast<parallelism::memory_permit*>(state);
             const auto wanted = common::checked_add(permit.bytes(), static_cast<std::uint64_t>(bytes));
             if (!wanted) return std::unexpected(std::string{"Header validation admission overflows"});
@@ -340,12 +328,18 @@ template<io_source Source>
     std::uint32_t bam_reference_count{};
     if (format == sequence_file_format::sam) {
         for (;;) {
-            const auto line = input.line();
-            if (!line) return std::unexpected(line.error());
-            if (!*line || (**line).empty() || (**line).front() != '@') break;
-            const auto added = add_alignment_header_line(header, **line, options);
+            const auto step = input.line();
+            if (!step) return std::unexpected(step.error());
+            if (const auto* boundary = std::get_if<alignment_frame_boundary>(&*step)) {
+                DEBUG_ASSERT(*boundary == alignment_frame_boundary::end_of_input,
+                    "Header parsing allows refill and cannot require a record-wave drain");
+                break;
+            }
+            const auto line = std::get<std::string_view>(*step);
+            if (line.empty() || line.front() != '@') break;
+            const auto added = add_alignment_header_line(header, line, options);
             if (!added) return std::unexpected(added.error());
-            input.consume((**line).size());
+            input.consume(line.size());
         }
     } else {
         const auto initial = input.ensure(12);
@@ -427,6 +421,10 @@ template<io_source Source>
 
 /** Stable native frame, parser recipes and restored owner retained through one callback. */
 struct alignment_decoded_slot {
+    // Immutable operation selection avoids CPU feature probes in each record/tile.
+    const bioseq::simd::sequence_rank_transform_kernel transform;
+    // The enclosing wave bank outlives this stable slot and all child owners.
+    io_memory_credit* memory_credit{};
     alignment_record_frame frame;
     parallelism::memory_permit permit;
     std::unique_ptr<decoded_record> decoded;
@@ -441,19 +439,35 @@ struct alignment_decoded_slot {
     std::vector<auxiliary_field_view> auxiliary_views;
     bool sequence_present{}, quality_present{}, needs_reference{};
     std::optional<std::string> error;
+    // Decode errors retain wave-wide priority; projection errors are delivered
+    // in source order only after every worker has finished native decoding.
+    std::optional<std::string> finalization_error;
 
-    /** Transfer an immutable frame while keeping parser recipe addresses stable. */
-    explicit alignment_decoded_slot(alignment_record_frame input) : frame(std::move(input)) {}
+    /** Retain the stream's selected codec and an immutable frame at stable addresses. */
+    alignment_decoded_slot(alignment_record_frame input,
+        bioseq::simd::sequence_rank_transform_kernel selected_transform)
+        : transform(selected_transform), frame(std::move(input)) {}
+
+    /** Bounded speculative cover; correctness always falls back to exact admission.
+     * Small records have many fixed owners compared with their wire length. The
+     * cap bounds unused reservations without restricting long-record streaming.
+     */
+    [[nodiscard]] std::uint64_t credit_request_bytes() const {
+        constexpr std::uint64_t owner_bytes = sizeof(decoded_record);
+        constexpr auto maximum = std::max<std::uint64_t>(owner_bytes, 64u * 1024u);
+        constexpr std::uint64_t wire_factor = 16u;
+        const auto bounded_wire = std::min<std::uint64_t>(frame.bytes.size(), (maximum - owner_bytes) / wire_factor);
+        return owner_bytes + bounded_wire * wire_factor;
+    }
 
     /** Charge variable native parsing storage before allocating it. */
     [[nodiscard]] std::expected<void, std::string> charge(std::size_t bytes) {
         const auto wanted = common::checked_add(permit.bytes(), static_cast<std::uint64_t>(bytes));
         if (!wanted) return std::unexpected(std::string{"Native record admission overflows"});
-        if (!permit) {
-            auto acquired = parallelism::memory_admission_controller::instance().try_reserve(*wanted);
-            if (!acquired) return std::unexpected(std::string{"Cannot admit native record metadata"});
-            permit = std::move(*acquired);
-        } else if (!permit.grow_to(*wanted)) return std::unexpected(std::string{"Cannot grow native record metadata"});
+        const bool growing = static_cast<bool>(permit);
+        if (!grow_io_memory(permit, *wanted, memory_credit))
+            return std::unexpected(std::string{growing ? "Cannot grow native record metadata"
+                : "Cannot admit native record metadata"});
         return {};
     }
 
@@ -465,7 +479,7 @@ struct alignment_decoded_slot {
             return {};
         }
         if (auto admitted = charge(2u * sizeof(owned_auxiliary_field) + 2u * sizeof(auxiliary_field_view)); !admitted) return admitted;
-        owned_auxiliary_field owner{field.tag, field.type, field.array_element_type};
+        owned_auxiliary_field owner{field.tag, field.type, field.array_element_type, memory_credit};
         if (auto appended = owner.payload.append(field.payload); !appended) return appended;
         const auto count = field.type == 'B' ? alignment::read_wire_unsigned<std::uint32_t>(
             {reinterpret_cast<const std::uint8_t*>(field.payload.data()), 4}) : 1u;
@@ -475,6 +489,23 @@ struct alignment_decoded_slot {
         return {};
     }
 };
+
+/** Admit one optional bounded tranche shared by every record in this wave.
+ * Refusal or sum overflow leaves every record on its original exact admission path.
+ */
+inline void prepare_alignment_record_credits(std::vector<std::unique_ptr<alignment_decoded_slot>>& slots,
+    io_memory_credit& credit) {
+    std::uint64_t requested{};
+    for (const auto& slot : slots) {
+        const auto total = common::checked_add(requested, slot->credit_request_bytes());
+        if (!total) return;
+        requested = *total;
+    }
+    auto admitted = parallelism::memory_admission_controller::instance().try_reserve(requested);
+    if (!admitted) return;
+    credit.reset(std::move(*admitted));
+    for (auto& slot : slots) slot->memory_credit = &credit;
+}
 
 /** Shared bounded metadata admission for lookup tables whose storage outlives record waves. */
 [[nodiscard]] inline std::expected<void, std::string> grow_alignment_admission(
@@ -569,11 +600,11 @@ struct alignment_dictionary_index {
     alignment_decoded_slot& slot, const alignment_input_header& header,
     const alignment_dictionary_index& dictionary, const sequence_file_format format) {
     if (auto admitted = slot.charge(sizeof(decoded_record)); !admitted) return admitted;
-    slot.decoded = std::make_unique<decoded_record>();
+    slot.decoded = std::make_unique<decoded_record>(slot.memory_credit);
     std::bitset<52u * 62u> seen;
     if (format == sequence_file_format::bam) {
         const auto parsed = alignment::parse_bam_record(slot.frame.bytes,
-            static_cast<std::uint32_t>(header.native.source_metadata.references.size()));
+            static_cast<std::uint32_t>(header.native.source_metadata.references.size()), slot.transform);
         if (!parsed) return std::unexpected(parsed.error());
         if (parsed->consumed_bytes != slot.frame.bytes.size())
             return std::unexpected(std::string{"BAM record framing contains trailing bytes"});
@@ -618,7 +649,7 @@ struct alignment_dictionary_index {
             if (text.size() >= 4 && text[3] == 'B') {
                 if (auto admitted = slot.charge(2u * sizeof(owned_auxiliary_field) + 2u * sizeof(auxiliary_field_view)); !admitted)
                     return admitted;
-                auto array = alignment::parse_sam_auxiliary_array(text);
+                auto array = alignment::parse_sam_auxiliary_array(text, slot.memory_credit);
                 if (!array) return std::unexpected(array.error());
                 slot.auxiliary.push_back(std::move(*array));
                 field = slot.auxiliary.back().view();
@@ -728,13 +759,13 @@ struct alignment_dictionary_index {
         return count;
     }
     constexpr std::size_t capacity = 1024;
-    std::array<std::uint8_t, capacity + 1> ranks{};
+    std::array<std::uint8_t, capacity + 1> ranks;
     const auto skip = offset % 2;
     const auto decoded_count = count + skip;
     if (decoded_count > ranks.size()) return std::unexpected(std::string{"BAM sequence tile exceeds bounded scratch"});
     const auto bytes = decoded_count / 2 + decoded_count % 2;
     const auto decoded = alignment::decode_bam_wire_tile(slot.bam->sequence_nibbles.subspan(offset / 2, bytes),
-        std::span{ranks}.first(decoded_count));
+        std::span{ranks}.first(decoded_count), slot.transform);
     if (!decoded) return std::unexpected(decoded.error());
     constexpr auto table = [] {
         std::array<std::uint32_t, 16> values{};
@@ -742,7 +773,7 @@ struct alignment_dictionary_index {
             values[index] = static_cast<std::uint8_t>(alignment::bam_nucleotide_symbols[index]);
         return values;
     }();
-    const auto transform = alignment::sequence_codec_kernel();
+    const auto transform = slot.transform;
     if (!transform(bioseq::simd::sequence_rank_transform::map_bytes,
             std::span<const std::uint8_t>{ranks}.subspan(skip, count), table.size(), table, output.first(count)))
         return std::unexpected(std::string{"BAM native symbol mapping failed"});
@@ -758,15 +789,15 @@ template<seqan3::nucleotide_alphabet Alphabet, bool Reverse, class EqualResolver
     if (descriptor.original_length != static_cast<std::uint64_t>(slot.core.sequence_length))
         return std::unexpected(std::string{"Original sequence length differs from native sequence"});
     constexpr std::size_t capacity = 1024;
-    std::array<std::uint8_t, capacity> characters{}, ranks{}, reversed{};
-    std::array<std::uint8_t, capacity + 1> packed_ranks{};
+    std::array<std::uint8_t, capacity> characters, ranks, reversed;
+    std::array<std::uint8_t, capacity + 1> packed_ranks;
     constexpr auto complement = [] {
         std::array<std::uint32_t, seqan3::alphabet_size<Alphabet>> table{};
         for (std::size_t rank = 0; rank < table.size(); ++rank)
             table[rank] = seqan3::to_rank(seqan3::complement(seqan3::assign_rank_to(rank, Alphabet{})));
         return table;
     }();
-    const auto transform = alignment::sequence_codec_kernel();
+    const auto transform = slot.transform;
     const auto length = static_cast<std::size_t>(descriptor.original_length);
     for (std::size_t consumed = 0; consumed < length;) {
         const auto count = std::min(capacity, length - consumed);
@@ -830,7 +861,7 @@ template<class EqualResolver>
         return std::unexpected(std::string{"Original sequence alphabet is unavailable"});
     const bool reverse = (slot.core.flags & 16u) != 0 && (!destination.record.alignment
         || destination.record.alignment->sequence_orientation == record_orientation::original_query);
-    std::expected<bool, std::string> result = std::unexpected(std::string{"Protein sequence requires preserved source ranks"});
+    std::optional<std::expected<bool, std::string>> result;
     supported_biological_alphabets::dispatch_alphabet_by_code(*descriptor.alphabet_code,
         [&slot, &resolve_equal, reverse, &result]<class Alphabet>() {
             if constexpr (seqan3::nucleotide_alphabet<Alphabet>) {
@@ -838,7 +869,8 @@ template<class EqualResolver>
                 else result = decode_native_sequence<Alphabet, false>(slot, resolve_equal);
             }
         });
-    return result;
+    if (!result) return std::unexpected(std::string{"Protein sequence requires preserved source ranks"});
+    return std::move(*result);
 }
 
 /** Restore standard qualities with independent alphabet dispatch and optional triplet collapse. */
@@ -852,8 +884,8 @@ template<sequences::quality_alphabet Quality, bool Reverse>
         || (!slot.quality_present && descriptor.original_length != 0))
         return std::unexpected(std::string{"Original quality geometry differs from native quality"});
     constexpr std::size_t capacity = 1024;
-    std::array<std::uint8_t, capacity> values{}, ranks{}, reverse_scratch{};
-    const auto transform = alignment::sequence_codec_kernel();
+    std::array<std::uint8_t, capacity> values, ranks, reverse_scratch;
+    const auto transform = slot.transform;
     const auto length = static_cast<std::size_t>(descriptor.original_length);
     for (std::size_t consumed = 0; consumed < length;) {
         const auto count = std::min(capacity, length - consumed);
@@ -889,7 +921,7 @@ template<sequences::quality_alphabet Quality, bool Reverse>
         return std::unexpected(std::string{"Original quality alphabet is unavailable"});
     const bool reverse = (slot.core.flags & 16u) != 0 && (!destination.record.alignment
         || destination.record.alignment->sequence_orientation == record_orientation::original_query);
-    std::expected<void, std::string> result = std::unexpected(std::string{"Original quality alphabet is unsupported"});
+    std::optional<std::expected<void, std::string>> result;
     supported_storage_alphabets::dispatch_alphabet_by_code(*descriptor.alphabet_code,
         [&slot, reverse, &result]<class Alphabet>() {
             if constexpr (sequences::quality_alphabet<Alphabet>) {
@@ -897,7 +929,8 @@ template<sequences::quality_alphabet Quality, bool Reverse>
                 else result = decode_native_quality<Alphabet, false>(slot);
             }
         });
-    return result;
+    if (!result) return std::unexpected(std::string{"Original quality alphabet is unsupported"});
+    return std::move(*result);
 }
 
 /** Parallel-safe parsing and compact restoration; reference callbacks never run here. */
@@ -926,18 +959,19 @@ template<bool Packed>
     if (!row.sequence || row.sequence->symbol_count == 0) return sink.finish();
     if (row.sequence->alphabet_code >= supported_biological_alphabets::alphabet_count)
         return std::unexpected(std::string{"Original sequence alphabet is not biological"});
-    std::expected<std::size_t, std::string> result = std::unexpected(std::string{"Original sequence has no wire projection"});
+    std::optional<std::expected<std::size_t, std::string>> result;
     supported_biological_alphabets::dispatch_alphabet_by_code(row.sequence->alphabet_code,
-        [&row, &sink, reverse, &result]<class Alphabet>() {
+        [&row, &slot, &sink, reverse, &result]<class Alphabet>() {
             if constexpr (seqan3::aminoacid_alphabet<Alphabet>) {
-                if (reverse) result = alignment::emit_protein_sequence<Alphabet, true, Packed>(sink, *row.sequence);
-                else result = alignment::emit_protein_sequence<Alphabet, false, Packed>(sink, *row.sequence);
+                if (reverse) result = alignment::emit_protein_sequence<Alphabet, true, Packed>(sink, *row.sequence, slot.transform);
+                else result = alignment::emit_protein_sequence<Alphabet, false, Packed>(sink, *row.sequence, slot.transform);
             } else {
-                if (reverse) result = alignment::emit_native_sequence<Alphabet, true, Packed>(sink, *row.sequence);
-                else result = alignment::emit_native_sequence<Alphabet, false, Packed>(sink, *row.sequence);
+                if (reverse) result = alignment::emit_native_sequence<Alphabet, true, Packed>(sink, *row.sequence, slot.transform);
+                else result = alignment::emit_native_sequence<Alphabet, false, Packed>(sink, *row.sequence, slot.transform);
             }
         });
-    if (!result) return std::unexpected(result.error());
+    if (!result) return std::unexpected(std::string{"Original sequence has no wire projection"});
+    if (!*result) return std::unexpected(result->error());
     return sink.finish();
 }
 
@@ -956,15 +990,16 @@ template<bool Packed>
     alignment::native_projection_comparison_sink sink{expected};
     if (row.quality->alphabet_code >= supported_storage_alphabets::alphabet_count)
         return std::unexpected(std::string{"Original quality alphabet is unavailable"});
-    std::expected<std::size_t, std::string> result = std::unexpected(std::string{"Original quality has no wire projection"});
+    std::optional<std::expected<std::size_t, std::string>> result;
     supported_storage_alphabets::dispatch_alphabet_by_code(row.quality->alphabet_code,
         [&row, &slot, &sink, reverse, &result]<class Alphabet>() {
             if constexpr (sequences::quality_alphabet<Alphabet>) {
-                if (reverse) result = alignment::emit_quality<Alphabet, true, !Packed>(sink, *row.quality, slot.decoded->synthetic_codons, !Packed);
-                else result = alignment::emit_quality<Alphabet, false, !Packed>(sink, *row.quality, slot.decoded->synthetic_codons, !Packed);
+                if (reverse) result = alignment::emit_quality<Alphabet, true, !Packed>(sink, *row.quality, slot.decoded->synthetic_codons, !Packed, slot.transform);
+                else result = alignment::emit_quality<Alphabet, false, !Packed>(sink, *row.quality, slot.decoded->synthetic_codons, !Packed, slot.transform);
             }
         });
-    if (!result) return std::unexpected(result.error());
+    if (!result) return std::unexpected(std::string{"Original quality has no wire projection"});
+    if (!*result) return std::unexpected(result->error());
     return sink.finish();
 }
 
@@ -1179,6 +1214,7 @@ template<bool Packed>
 
 /** Caller-thread '=' resolver advances the existing CIGAR cursor and reads bounded reference tiles. */
 class alignment_equal_resolver {
+    const bioseq::simd::sequence_rank_transform_kernel transform_;
     storage::borrowed_rank_window_source reference_;
     bioseq::borrowed_cigar_cursor cigar_;
     std::optional<bioseq::cigar_run> run_;
@@ -1191,8 +1227,10 @@ class alignment_equal_resolver {
 public:
     /** Bind only a backend-owned reference recipe; no worker may call this resolver. */
     alignment_equal_resolver(storage::borrowed_rank_window_source reference, bioseq::borrowed_cigar_run_source cigar,
-        const std::uint64_t position, const bool circular)
-        : reference_(reference), cigar_(cigar), reference_position_(position), circular_(circular) {
+        const std::uint64_t position, const bool circular,
+        bioseq::simd::sequence_rank_transform_kernel transform)
+        : transform_(transform), reference_(reference), cigar_(cigar),
+          reference_position_(position), circular_(circular) {
         characters_.fill(256u);
         supported_biological_alphabets::dispatch_alphabet_by_code(reference.alphabet_code,
             [this]<class Alphabet>() {
@@ -1226,8 +1264,7 @@ public:
                     cached_count_ = static_cast<std::size_t>(std::min<std::uint64_t>(reference_ranks_.size(), reference_.symbol_count - cached_start_));
                     const auto ranks = reference_.read_checked(cached_start_, cached_count_, reference_ranks_);
                     if (!ranks) return std::unexpected(std::string{"Cannot read reference tile needed by '=' sequence symbols"});
-                    const auto transform = alignment::sequence_codec_kernel();
-                    if (!transform(bioseq::simd::sequence_rank_transform::map_bytes, *ranks,
+                    if (!transform_(bioseq::simd::sequence_rank_transform::map_bytes, *ranks,
                             characters_.size(), characters_, std::span{reference_characters_}.first(cached_count_)))
                         return std::unexpected(std::string{"Reference tile has an invalid nucleotide rank"});
                 }
@@ -1275,7 +1312,8 @@ template<class Consumer>
             found = header.reference_sources.emplace(slot.core.reference_id, **reference).first;
         } else return std::unexpected(std::string{"'=' sequence symbols need a reference_sequence provider"});
     }
-    alignment_equal_resolver resolver{found->second, slot.cigar, static_cast<std::uint64_t>(slot.core.position), descriptor.circular};
+    alignment_equal_resolver resolver{found->second, slot.cigar, static_cast<std::uint64_t>(slot.core.position),
+        descriptor.circular, slot.transform};
     const auto restored = restore_native_sequence(slot, resolver);
     if (!restored) return std::unexpected(restored.error());
     if (!*restored) return std::unexpected(std::string{"Caller-thread reference resolution did not complete"});
@@ -1285,60 +1323,65 @@ template<class Consumer>
 
 /** Recognize only explicit framing admission/size pressure; malformed input never triggers spill. */
 [[nodiscard]] inline bool alignment_frame_pressure(std::string_view error) {
-    return error.starts_with("Cannot admit alignment input") || error.starts_with("Cannot admit alignment record")
+    return error.starts_with("Cannot admit alignment input")
         || error.starts_with("Alignment record/header exceeds configured input buffer limit");
 }
 
-/** Extract exactly one immutable frame, spilling only after the caller drains its prior wave. */
+/** Borrow one complete frame without mutating any preceding frame in the wave.
+ * Only an empty wave may ensure/refill/grow or spill; a typed drain leaves the next
+ * record's bytes and ordinal untouched. Known final truncation remains an error. */
 template<io_source Source>
-[[nodiscard]] std::expected<std::optional<alignment_record_frame>, std::string> next_alignment_frame(
-    alignment_input_buffer<Source>& input, const sequence_file_format format, const std::uint64_t ordinal,
-    const bool allow_spill) {
+[[nodiscard]] std::expected<std::variant<alignment_record_frame, alignment_frame_boundary>, std::string>
+next_alignment_frame(alignment_input_buffer<Source>& input, const sequence_file_format format,
+    const std::uint64_t ordinal, const bool allow_refill) {
     std::optional<std::size_t> length;
     if (format == sequence_file_format::bam) {
-        const auto prefix = input.ensure(4);
-        if (!prefix) return std::unexpected(prefix.error());
-        if (!*prefix) {
-            if (input.available().empty()) return std::optional<alignment_record_frame>{};
-            return std::unexpected(std::string{"BAM final record length is truncated"});
+        if (input.available().size() < 4u) {
+            if (!allow_refill && !input.final_buffer()) return alignment_frame_boundary::drain_wave;
+            if (allow_refill) {
+                const auto prefix = input.ensure(4);
+                if (!prefix) return std::unexpected(prefix.error());
+            }
+            if (input.available().size() < 4u) {
+                if (input.available().empty()) return alignment_frame_boundary::end_of_input;
+                return std::unexpected(std::string{"BAM final record length is truncated"});
+            }
         }
         const auto block_size = alignment::read_wire_signed<std::int32_t>(input.available().first(4));
         if (block_size < 33) return std::unexpected(std::string{"BAM block_size is invalid"});
         length = static_cast<std::size_t>(block_size) + 4;
-        const auto complete = input.ensure(*length);
-        if (!complete) {
-            if (!allow_spill || !alignment_frame_pressure(complete.error())) return std::unexpected(complete.error());
-            auto frame = alignment_record_frame::spill(input, length, ordinal);
-            if (!frame) return std::unexpected(frame.error());
-            return std::optional<alignment_record_frame>{std::move(*frame)};
+        if (input.available().size() < *length) {
+            if (!allow_refill && !input.final_buffer()) return alignment_frame_boundary::drain_wave;
+            if (!allow_refill) return std::unexpected(std::string{"BAM record is truncated"});
+            const auto complete = input.ensure(*length);
+            if (!complete) {
+                if (!alignment_frame_pressure(complete.error())) return std::unexpected(complete.error());
+                auto frame = alignment_record_frame::spill(input, length, ordinal);
+                if (!frame) return std::unexpected(frame.error());
+                return std::move(*frame);
+            }
+            if (!*complete) return std::unexpected(std::string{"BAM record is truncated"});
         }
-        if (!*complete) return std::unexpected(std::string{"BAM record is truncated"});
     } else {
-        const auto line = input.line();
-        if (!line) {
-            if (!allow_spill || !alignment_frame_pressure(line.error())) return std::unexpected(line.error());
+        const auto step = input.line(allow_refill);
+        if (!step) {
+            if (!allow_refill || !alignment_frame_pressure(step.error())) return std::unexpected(step.error());
             auto frame = alignment_record_frame::spill(input, {}, ordinal);
             if (!frame) return std::unexpected(frame.error());
-            return std::optional<alignment_record_frame>{std::move(*frame)};
+            return std::move(*frame);
         }
-        if (!*line) return std::optional<alignment_record_frame>{};
-        length = (**line).size();
+        if (const auto* boundary = std::get_if<alignment_frame_boundary>(&*step)) return *boundary;
+        length = std::get<std::string_view>(*step).size();
     }
-    auto frame = alignment_record_frame::acquire(input.available().first(*length), input.mapped(), ordinal);
-    if (!frame) {
-        if (!allow_spill || !alignment_frame_pressure(frame.error())) return std::unexpected(frame.error());
-        auto spilled = alignment_record_frame::spill(input, length, ordinal);
-        if (!spilled) return std::unexpected(spilled.error());
-        return std::optional<alignment_record_frame>{std::move(*spilled)};
-    }
+    alignment_record_frame frame{.bytes = input.available().first(*length), .ordinal = ordinal};
     input.consume(*length);
-    return std::optional<alignment_record_frame>{std::move(*frame)};
+    return frame;
 }
 
 /** Imported native names identify templates and first/last segments without hashing their values. */
 struct alignment_native_identities {
     parallelism::memory_permit permit;
-    std::deque<std::string> template_names;
+    std::forward_list<std::string> template_names;
     std::map<std::string_view, std::array<std::optional<std::uint64_t>, 2>, std::less<>> templates;
     std::map<std::pair<std::uint64_t, std::uint16_t>, std::uint64_t> segments;
     std::uint64_t next_template{}, next_segment{};
@@ -1357,10 +1400,13 @@ struct alignment_native_identities {
             return {};
         }
         auto found = templates.find(slot.qname);
-        if (found == templates.end()) {
-            if (auto admitted = grow_alignment_admission(permit, slot.qname.size() + 320u); !admitted) return admitted;
-            template_names.emplace_back(slot.qname);
-            found = templates.emplace(std::string_view{template_names.back()}, std::array<std::optional<std::uint64_t>, 2>{}).first;
+        const bool new_template_name = found == templates.end();
+        if (new_template_name) {
+            // A fresh template identity necessarily creates its first segment.
+            // Admit the exact existing charges together before either allocation.
+            if (auto admitted = grow_alignment_admission(permit, slot.qname.size() + 320u + 128u); !admitted) return admitted;
+            template_names.emplace_front(slot.qname);
+            found = templates.emplace(std::string_view{template_names.front()}, std::array<std::optional<std::uint64_t>, 2>{}).first;
         }
         auto& template_identity = found->second[paired ? 1u : 0u];
         if (!template_identity) template_identity = next_template++;
@@ -1369,7 +1415,9 @@ struct alignment_native_identities {
             static_cast<std::uint16_t>(paired ? slot.core.flags & 0xc0u : 0u)};
         const auto segment = segments.find(segment_key);
         if (segment == segments.end()) {
-            if (auto admitted = grow_alignment_admission(permit, 128u); !admitted) return admitted;
+            if (!new_template_name) {
+                if (auto admitted = grow_alignment_admission(permit, 128u); !admitted) return admitted;
+            }
             identity.segment_id = next_segment++;
             segments.emplace(segment_key, *identity.segment_id);
         } else identity.segment_id = segment->second;
@@ -1387,6 +1435,11 @@ template<io_source Source, class Consumer>
     alignment_dictionary_index dictionary;
     if (auto initialized = dictionary.initialize(*header); !initialized) return std::unexpected(initialized.error());
     if (auto delivered = consumer.header(header->metadata()); !delivered) return std::unexpected(delivered.error());
+    // Bind once per operation, after the public header callback. A later read
+    // selects again, so Highway target changes remain visible between operations.
+    const auto transform = alignment::sequence_codec_kernel();
+    if (transform == nullptr)
+        return std::unexpected(std::string{"no compiled SIMD sequence codec is available"});
     auto& pool = parallelism::global_pool::instance();
     auto workers = options.concurrency.parser_count != 0 ? options.concurrency.parser_count : options.concurrency.worker_count;
     if (workers == 0) workers = std::max<std::size_t>(1, parallelism::default_concurrency_limit());
@@ -1407,26 +1460,33 @@ template<io_source Source, class Consumer>
         permit = parallelism::memory_admission_controller::instance().try_reserve(wave_size * slot_bytes);
     }
     if (!permit) return std::unexpected(std::string{"Cannot admit alignment decode wave"});
+    // Declare the bank first: retained slots and every borrowed bank pointer die before it.
+    io_memory_credit credit;
     std::vector<std::unique_ptr<alignment_decoded_slot>> slots;
     slots.reserve(wave_size);
     alignment_native_identities identities;
     std::uint64_t ordinal{}, delivered{};
     bool eof{};
     while (!eof) {
+        // Destroy every prior borrowed recipe before any next-wave refill can
+        // compact, grow or overwrite the admitted source slab.
         slots.clear();
         for (std::size_t index = 0; index < wave_size; ++index) {
-            auto frame = next_alignment_frame(input, format, ordinal, slots.empty());
-            if (!frame) {
-                if (!slots.empty() && alignment_frame_pressure(frame.error())) break;
-                return std::unexpected(frame.error());
+            auto step = next_alignment_frame(input, format, ordinal, slots.empty());
+            if (!step) return std::unexpected(step.error());
+            if (const auto* boundary = std::get_if<alignment_frame_boundary>(&*step)) {
+                eof = *boundary == alignment_frame_boundary::end_of_input;
+                DEBUG_ASSERT(eof || !slots.empty(), "Only a nonempty record wave can require draining");
+                break;
             }
-            if (!*frame) { eof = true; break; }
-            slots.push_back(std::make_unique<alignment_decoded_slot>(std::move(**frame)));
+            slots.push_back(std::make_unique<alignment_decoded_slot>(
+                std::move(std::get<alignment_record_frame>(*step)), transform));
             if (ordinal == std::numeric_limits<std::uint64_t>::max())
                 return std::unexpected(std::string{"Alignment record ordinal overflows"});
             ++ordinal;
         }
         if (slots.empty()) break;
+        prepare_alignment_record_credits(slots, credit);
         const bool parallel = workers > 1u && slots.size() > 1u
             && parallelism::has_parallel_dispatch(pool.get_mode());
         auto group = parallel ? pool.make_task_group() : parallelism::scoped_task_group{};
@@ -1435,20 +1495,41 @@ template<io_source Source, class Consumer>
             const auto end = std::min(slots.size(), begin + records_per_task);
             group.run(parallelism::task_body{[&slots, &header, &dictionary, &options, format, begin, end]() {
                 for (std::size_t index = begin; index < end; ++index) {
-                    const auto decoded = decode_alignment_record(*slots[index], *header, dictionary, format, options);
-                    if (!decoded) { slots[index]->error = decoded.error(); break; }
+                    auto& slot = *slots[index];
+                    const auto decoded = decode_alignment_record(slot, *header, dictionary, format, options);
+                    if (!decoded) {
+                        slot.error = decoded.error();
+                        if (slot.memory_credit != nullptr) slot.memory_credit->release();
+                        break;
+                    }
+                    // Independent owners and immutable header/dictionary data
+                    // permit validation here. Reference providers remain caller-only.
+                    if (!slot.needs_reference) {
+                        if (const auto finished = finish_alignment_record(slot, *header, dictionary); !finished) {
+                            slot.finalization_error = finished.error();
+                            if (slot.memory_credit != nullptr) slot.memory_credit->release();
+                        }
+                    }
                 }
             }});
         }
         group.wait();
+        // Public providers/consumers may reserve independently. No speculative
+        // bytes from any row may compete with those required allocations.
+        credit.release();
         for (const auto& slot : slots)
             if (slot->error) return std::unexpected(std::string{"Alignment record "} + std::to_string(slot->frame.ordinal)
                 + ": " + *slot->error);
         for (auto& slot : slots) {
-            if (auto resolved = resolve_alignment_equal_symbols(*slot, *header, consumer); !resolved)
-                return std::unexpected(resolved.error());
-            if (auto finished = finish_alignment_record(*slot, *header, dictionary); !finished)
-                return std::unexpected(std::string{"Alignment record "} + std::to_string(slot->frame.ordinal) + ": " + finished.error());
+            if (slot->needs_reference) {
+                if (auto resolved = resolve_alignment_equal_symbols(*slot, *header, consumer); !resolved)
+                    return std::unexpected(resolved.error());
+                if (auto finished = finish_alignment_record(*slot, *header, dictionary); !finished)
+                    slot->finalization_error = finished.error();
+            }
+            if (slot->finalization_error)
+                return std::unexpected(std::string{"Alignment record "} + std::to_string(slot->frame.ordinal)
+                    + ": " + *slot->finalization_error);
             if (auto identified = identities.apply(*slot); !identified) return std::unexpected(identified.error());
             if (auto consumed = consumer.record(*slot->decoded); !consumed) return std::unexpected(consumed.error());
             ++delivered;

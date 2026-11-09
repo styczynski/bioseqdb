@@ -1095,7 +1095,7 @@ namespace {
     codec::alignment_export_context context;
     // Syntax-only fixtures are small; production admission remains owned by the writer.
     const codec::alignment_context_admission admission{
-        nullptr, [](void*, std::size_t) -> std::expected<void, std::string> { return {}; }};
+        nullptr, [](void*, std::size_t, bioseq::io::io_memory_credit*) -> std::expected<void, std::string> { return {}; }};
     if (const auto initialized = context.initialize(metadata, options, admission); !initialized)
         return std::unexpected(initialized.error());
     if (const auto finalized = context.finalize(); !finalized) return std::unexpected(finalized.error());

@@ -86,12 +86,12 @@ run_sync_pipeline(p_source source,
         /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
     };
 
-    // Deliver a nonempty batch synchronously and prepare its replacement.
+    // Reuse storage still owned after delivery; moved buffers remain with the handler.
     auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
         if (batch.empty())
             return;
         handler_fn(std::move(batch));
-        batch = batch_type{};
+        batch.clear();
         prepare_fresh_batch();
     };
 
@@ -276,10 +276,9 @@ run_sync_pipeline(p_source source,
     }
 }
 
-/// Parses a mapped qile directly on the calling thread The parser reads
-/// the complete mapping, so input does not need copying into refill buffers.
-/// Parsed headers and packed sequences still go into owned batch storage.
-/// File-size estimates reserve  that storage before parsing.
+/// Parse a mapped file directly on the calling thread without refill copies.
+/// Parsed headers, packed sequences, and qualities use the same initial batch
+/// hints as the buffered path, growing as required by complete records.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_handler,
@@ -297,7 +296,6 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
     constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
 
-    const std::size_t file_size = source.mapped_size();
     auto [base_ptr, view_size] = source.direct_view();
 
     batch_type batch;
@@ -318,28 +316,22 @@ run_sync_pipeline_mmap_direct(mmap_source source,
                                                    ? options.concurrency.batch_target_record_count
                                                    : 4096;
 
-    // Estimate batch storage from the input size. These are capacity hints,
-    // and the vectors can grow if the encoded records need more room.
-    const std::size_t sequence_words_hint =
-        std::max<std::size_t>(file_size / 16, flush_record_threshold * 8);
-    const std::size_t header_bytes_hint =
-        std::max<std::size_t>(file_size / 256, flush_record_threshold * 32);
+    // Prime offsets and reuse the buffered reader's initial capacity hints.
+    // These hints do not limit record length; batch vectors grow as needed.
+    auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
+        batch.prepare(flush_record_threshold, is_fastq_format);
+        batch.reserve_storage(
+            /*header_bytes*/ flush_record_threshold * 32,
+            /*seq_words*/ flush_record_threshold * 8,
+            /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
+    };
 
-    // Prime offsets and reserve file-scaled storage for the next batch.
-    auto prepare_fresh_batch =
-        [&batch, &flush_record_threshold, &header_bytes_hint, &sequence_words_hint]() {
-            batch.prepare(flush_record_threshold, is_fastq_format);
-            batch.reserve_storage(header_bytes_hint,
-                                  sequence_words_hint,
-                                  is_fastq_format ? flush_record_threshold * 256 : 0);
-        };
-
-    // Deliver a nonempty direct-path batch and prepare its replacement.
+    // Reuse storage still owned after delivery; moved buffers remain with the handler.
     auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
         if (batch.empty())
             return;
         handler_fn(std::move(batch));
-        batch = batch_type{};
+        batch.clear();
         prepare_fresh_batch();
     };
 
@@ -623,28 +615,16 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
         const std::size_t shard_end = boundaries[shard_index + 1];
         if (shard_start >= shard_end)
             return;
-        const std::size_t shard_size = shard_end - shard_start;
 
-        // Reserve  each region's output buffers using its size, with a minimum
-        // estimate for short records. The buffers can grow beyond these hints.
+        // Use bounded initial hints per batch, independent of mapped shard size.
+        // Longer records grow their buffers without changing batch boundaries.
         batch_type batch;
-        const std::size_t shard_seq_words_hint =
-            std::max<std::size_t>(shard_size / 16, flush_record_threshold * 8);
-        const std::size_t shard_header_bytes_hint =
-            std::max<std::size_t>(shard_size / 256, flush_record_threshold * 32);
-        const std::size_t shard_quality_bytes_hint =
-            is_fastq_format ? std::max<std::size_t>(shard_size / 4, flush_record_threshold * 256)
-                            : 0;
-
-        // Prime offsets and reserve shard-scaled storage for the next batch.
-        auto prepare_fresh_batch = [&batch,
-                                    &flush_record_threshold,
-                                    &shard_header_bytes_hint,
-                                    &shard_quality_bytes_hint,
-                                    &shard_seq_words_hint]() {
+        auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
             batch.prepare(flush_record_threshold, is_fastq_format);
             batch.reserve_storage(
-                shard_header_bytes_hint, shard_seq_words_hint, shard_quality_bytes_hint);
+                /*header_bytes*/ flush_record_threshold * 32,
+                /*seq_words*/ flush_record_threshold * 8,
+                /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
         };
         prepare_fresh_batch();
 
@@ -659,7 +639,8 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
                 std::lock_guard guard{emit_mutex};
                 handler_fn(std::move(batch));
             }
-            batch = batch_type{};
+            // Clear only storage still owned here after the handler returns.
+            batch.clear();
             prepare_fresh_batch();
         };
 

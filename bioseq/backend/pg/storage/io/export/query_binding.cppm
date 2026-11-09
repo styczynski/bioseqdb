@@ -105,6 +105,7 @@ struct export_query_frame {
     std::optional<std::size_t> parent;
     Index parent_range{};
     CommonTableExpr* defining_cte{};
+    std::vector<std::size_t> expression_children;
 };
 
 /** Exact alignment invocation before existing helper rewrites replace its values. */
@@ -235,7 +236,7 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
     CommonTableExpr* defining_cte = nullptr) {
     if (export_frame_index(binding, query)) return;
     const auto current = binding.frames.size();
-    binding.frames.push_back({query, parent, parent_range, defining_cte});
+    binding.frames.push_back({query, parent, parent_range, defining_cte, {}});
     Index range_index = 0;
     for (auto* cell = list_head(query->rtable); cell; cell = lnext(query->rtable, cell)) {
         ++range_index;
@@ -248,6 +249,31 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
         if (IsA(cte->ctequery, Query))
             index_export_queries(binding, reinterpret_cast<Query*>(cte->ctequery), current, 0, cte);
     }
+    // SubLinks have real lexical scopes, but cannot transport added projections
+    // into their parent. Index them for validation and helper detection only.
+    struct expression_query_indexer {
+        export_query_binding& binding;
+        std::size_t parent;
+        /** Index one expression subquery without treating it as a FROM source. */
+        static bool walk(Node* expression, void* opaque) {
+            if (!expression) return false;
+            auto& state = *static_cast<expression_query_indexer*>(opaque);
+            if (IsA(expression, Query)) {
+                auto* child = reinterpret_cast<Query*>(expression);
+                index_export_queries(state.binding, child, state.parent);
+                const auto frame = export_frame_index(state.binding, child);
+                auto& children = state.binding.frames[state.parent].expression_children;
+                if (frame && std::find(children.begin(), children.end(), *frame) == children.end())
+                    children.push_back(*frame);
+                return false;
+            }
+            return expression_tree_walker(expression, walk, opaque);
+        }
+    } expressions{binding, current};
+    bioseq::postgres::support::invoke_pg_as_cpp([query, &expressions] {
+        return query_tree_walker(query, expression_query_indexer::walk, &expressions,
+            QTW_IGNORE_RT_SUBQUERIES | QTW_IGNORE_CTE_SUBQUERIES);
+    });
 }
 
 /** Walk to a lexical outer level, rejecting malformed/correlated unknown scopes. */
@@ -260,15 +286,19 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
     return frame;
 }
 
-/** Resolve a CTE reference in its defining lexical scope. */
+/** Resolve a CTE reference in its defining lexical scope.
+ * Reachability inspection may include recursive definitions; projection/operand
+ * lineage keeps rejecting them. Self-references never authorize a new scope. */
 [[nodiscard]] inline Query* export_cte_query(const export_query_binding& binding,
-    std::size_t frame, const RangeTblEntry& entry) {
+    std::size_t frame, const RangeTblEntry& entry,
+    bool include_recursive_definitions = false) {
     const auto defining_frame = export_outer_frame(binding, frame, entry.ctelevelsup);
     if (!defining_frame || entry.self_reference) return nullptr;
     auto* query = binding.frames[*defining_frame].query;
     for (auto* cell = list_head(query->cteList); cell; cell = lnext(query->cteList, cell)) {
         auto* cte = static_cast<CommonTableExpr*>(lfirst(cell));
-        if (std::strcmp(cte->ctename, entry.ctename) == 0 && !cte->cterecursive
+        if (std::strcmp(cte->ctename, entry.ctename) == 0
+            && (!cte->cterecursive || include_recursive_definitions)
             && IsA(cte->ctequery, Query)) return reinterpret_cast<Query*>(cte->ctequery);
     }
     return nullptr;
@@ -354,13 +384,35 @@ struct export_helper_search {
     std::size_t frame;
     std::size_t depth{};
 };
-/** Inspect transformed descendants through the same identity resolver. */
+/** Suppress name-based role inference for transformed helper descendants.
+ * True normally means a recognized helper was found. It also fails closed when
+ * recursion limits or opaque recursive scopes prevent proving helper absence;
+ * that unknown result never establishes an owner or a coordinate role. */
 inline bool export_contains_helper(Node* expression, void* opaque) {
     if (!expression) return false;
     auto& context = *static_cast<export_helper_search*>(opaque);
-    if (context.depth > 128) return false;
+    if (context.depth > 128) return true;
     const auto [resolved, frame] = resolve_export_expression(*context.binding, context.frame, expression);
-    if (!resolved) return false;
+    if (!resolved) return true;
+    if (IsA(resolved, Var)) {
+        const auto* variable = reinterpret_cast<const Var*>(resolved);
+        const auto* query = context.binding->frames[frame].query;
+        const auto* range = variable->varno > 0 && variable->varno <= list_length(query->rtable)
+            ? static_cast<const RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1)) : nullptr;
+        // A resolved base Var is ordinary data. A terminal CTE Var means the
+        // identity resolver stopped at recursive/self-referencing lineage.
+        if (range && range->rtekind == RTE_CTE) return true;
+    }
+    if (IsA(resolved, Query)) {
+        auto* query = reinterpret_cast<Query*>(resolved);
+        const auto inner = export_frame_index(*context.binding, query);
+        if (!inner) return true;
+        export_helper_search child{context.binding, *inner, context.depth + 1};
+        return bioseq::postgres::support::invoke_pg_as_cpp([query, &child] {
+            return query_tree_walker(query, export_contains_helper, &child,
+                QTW_IGNORE_RT_SUBQUERIES | QTW_IGNORE_CTE_SUBQUERIES);
+        });
+    }
     if (IsA(resolved, FuncExpr)
         && export_helper_role(reinterpret_cast<FuncExpr*>(resolved)->funcid, get_cached_stub_oids())) return true;
     export_helper_search child{context.binding, frame, context.depth + 1};
@@ -431,9 +483,13 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         || export_nullable_join_scope(reinterpret_cast<const Node*>(query.jointree));
 }
 
-/** True only for a scope reached through declared subqueries or CTE references. */
+/** True only for a scope reached through declared subqueries or CTE references.
+ * Discovery can include recursive definitions so their matches retain the normal
+ * completion-barrier rejection. Validation can also visit expression subqueries;
+ * those scopes remain opaque to ownership and companion projection. */
 [[nodiscard]] inline bool export_query_contains_scope(const export_query_binding& binding,
-    std::size_t start, std::size_t wanted) {
+    std::size_t start, std::size_t wanted, bool include_recursive_definitions = false,
+    bool include_expression_children = false) {
     std::vector<std::size_t> pending{start};
     std::vector<bool> visited(binding.frames.size(), false);
     while (!pending.empty()) {
@@ -442,11 +498,15 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         if (frame == wanted) return true;
         if (visited[frame]) continue;
         visited[frame] = true;
+        if (include_expression_children)
+            pending.insert(pending.end(), binding.frames[frame].expression_children.begin(),
+                binding.frames[frame].expression_children.end());
         const auto* query = binding.frames[frame].query;
         for (auto* cell = list_head(query->rtable); cell; cell = lnext(query->rtable, cell)) {
             const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
             auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
-                : entry->rtekind == RTE_CTE ? export_cte_query(binding, frame, *entry) : nullptr;
+                : entry->rtekind == RTE_CTE
+                    ? export_cte_query(binding, frame, *entry, include_recursive_definitions) : nullptr;
             if (const auto child = inner ? export_frame_index(binding, inner) : std::nullopt)
                 pending.push_back(*child);
         }
@@ -843,16 +903,21 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
             }
             std::size_t references = 0;
             for (std::size_t candidate = 0; candidate < binding.frames.size(); ++candidate) {
+                const bool reachable = export_query_contains_scope(binding, 0, candidate, true, true);
                 auto* candidate_query = binding.frames[candidate].query;
                 Index index = 0;
                 for (auto* cell = list_head(candidate_query->rtable); cell; cell = lnext(candidate_query->rtable, cell)) {
                     ++index;
                     auto* entry = static_cast<RangeTblEntry*>(lfirst(cell));
                     if (entry->rtekind != RTE_CTE || export_cte_query(binding, candidate, *entry) != current.query) continue;
-                    ++references;
-                    parent_index = candidate;
-                    parent = candidate_query;
-                    range_number = index;
+                    // Dead consumers cannot make the owning output ambiguous.
+                    // Keep all descriptors consistent, including unreachable CTEs.
+                    if (reachable) {
+                        ++references;
+                        parent_index = candidate;
+                        parent = candidate_query;
+                        range_number = index;
+                    }
                     entry->coltypes = static_cast<List*>(copyObject(cte->ctecoltypes));
                     entry->coltypmods = static_cast<List*>(copyObject(cte->ctecoltypmods));
                     entry->colcollations = static_cast<List*>(copyObject(cte->ctecolcollations));
@@ -1349,6 +1414,9 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
 inline void complete_export_matches(export_query_binding& binding) {
     const bool alignments = export_uses_alignment(binding.format);
     for (std::size_t index = 0; index < binding.frames.size(); ++index) {
+        // Lexical indexing also retains unused CTE definitions. Only reachable
+        // source scopes can own the rows exported by this request.
+        if (!export_query_contains_scope(binding, 0, index, true)) continue;
         export_expression_walk context{&binding, index};
         query_tree_walker(binding.frames[index].query, walk_export_expression, &context,
             QTW_IGNORE_RT_SUBQUERIES | QTW_IGNORE_CTE_SUBQUERIES);

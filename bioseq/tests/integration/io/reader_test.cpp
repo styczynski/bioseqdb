@@ -239,6 +239,10 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
     std::vector<record> got;
     std::vector<std::string> errs;
 
+    reader_options opts;
+    // Deliver each record separately to exercise retained quality and sequence storage.
+    opts.concurrency.batch_target_record_count = 1;
+
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
         path,
         [&got](batch_t&& batch) {
@@ -250,7 +254,8 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
                            std::string(reinterpret_cast<const char*>(qspan.data()), qspan.size())});
             }
         },
-        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); },
+        opts);
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -487,6 +492,8 @@ TEST_CASE("bioseq_io: mmap path round-trip",
     const std::string path = write_tmp_file(corpus);
 
     reader_options opts;
+    // Reuse the same reader-owned buffers across completed record callbacks.
+    opts.concurrency.batch_target_record_count = 1;
     opts.io.gzip_auto_detect = false;
     opts.io.prefer_mmap = true;
 
@@ -523,6 +530,8 @@ TEST_CASE("bioseq_io: gzip path round-trip",
     const std::string path = write_tmp_gzip(corpus);
 
     reader_options opts;
+    // Reuse the same reader-owned buffers across completed record callbacks.
+    opts.concurrency.batch_target_record_count = 1;
     opts.io.gzip_auto_detect = true;
 
     std::vector<std::pair<std::string, std::string>> got;
@@ -577,6 +586,8 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     opts.io.prefer_mmap = false;
     opts.concurrency.worker_count = 2;
     opts.concurrency.batch_target_record_count = 8;
+    // Thirteen batches require several joined groups before the final partial batch.
+    opts.concurrency.ring_capacity = 2;
 
     std::mutex got_mutex;
     std::vector<std::pair<std::string, std::string>> got;

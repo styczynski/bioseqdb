@@ -377,7 +377,7 @@ class BenchE2eConfigOverrideTests(unittest.TestCase):
         missing, missing_error = build_worker._validate_bench_e2e_config_override(
             "benchmark-e2e", "bench/does-not-exist.json")
         non_json, non_json_error = build_worker._validate_bench_e2e_config_override(
-            "benchmark-e2e", "build_mcp/server.py")
+            "benchmark-e2e", str(Path(build_server.__file__).resolve()))
 
         self.assertIsNone(missing)
         self.assertIn("existing file", missing_error)
@@ -4309,7 +4309,8 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         self.assertEqual(
             captured["shared_target_names"],
             ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
-             "bioseq_runtime_core", "bioseq_pipeline_dispatch_owners"),
+             "bioseq_highway_runtime", "bioseq_runtime_core",
+             "bioseq_pipeline_dispatch_owners"),
         )
         self.assertEqual(
             result["build_metadata"]["mode"], "unit-integration")
@@ -4640,14 +4641,17 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         shared_core = ("bioseq_modules_nopg", "bioseq_runtime_core")
         shared_highway = ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
                           "bioseq_runtime_core")
+        shared_runtime_highway = (
+            "bioseq_modules_nopg", "bioseq_highway_fixed_target",
+            "bioseq_highway_runtime", "bioseq_runtime_core")
         expected_owners = {
             "bioseq_benchmark": shared_highway,
-            "bioseq_io_benchmark": shared_core,
-            "bioseq_unit_tests": shared_highway,
-            "bioseq_integration_tests": shared_highway,
+            "bioseq_io_benchmark": shared_runtime_highway,
+            "bioseq_unit_tests": shared_runtime_highway,
+            "bioseq_integration_tests": shared_runtime_highway,
             "bioseq_benchmark_e2e_contract_tests": shared_core,
             "bioseq_benchmark_framework_contract_tests": shared_core,
-            "postgresql_bioseq": shared_highway + (
+            "postgresql_bioseq": shared_runtime_highway + (
                 "bioseq_pipeline_dispatch_owners",),
         }
         for target, definition in build_worker.INSPECT_TARGETS.items():

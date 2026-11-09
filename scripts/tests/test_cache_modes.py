@@ -2779,7 +2779,8 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertEqual(
             definition.shared_target_names,
             ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
-             "bioseq_runtime_core", "bioseq_pipeline_dispatch_owners"),
+             "bioseq_highway_runtime", "bioseq_runtime_core",
+             "bioseq_pipeline_dispatch_owners"),
         )
 
         with tempfile.TemporaryDirectory() as tmp:

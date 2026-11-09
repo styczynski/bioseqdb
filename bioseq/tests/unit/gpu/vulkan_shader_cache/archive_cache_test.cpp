@@ -228,9 +228,14 @@ TEST_CASE("archive helper qualification is terminal and hashes once",
     const auto first = store.load_once();
     REQUIRE(first);
     CHECK((**first).source == "test-env-override");
+    const std::filesystem::path loader_path = temp.path / "vulkan_loader.bin";
+    REQUIRE(gv::durable_write_file(loader_path, bytes_of("first loader")));
+    const auto first_loader = gv::sealed_shader_cache_detail::stream_stable_regular_file_digest(
+        loader_path, "cache-key loader fixture", 1024u);
+    REQUIRE(first_loader);
     const gv::shader_cache_build_inputs cache_inputs{};
     const auto first_cache_digest =
-        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **first);
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **first, *first_loader);
     REQUIRE(first_cache_digest);
     CHECK(store.qualification_attempt_count() == 1u);
     CHECK(store.filesystem_hash_count() == 1u);
@@ -241,7 +246,7 @@ TEST_CASE("archive helper qualification is terminal and hashes once",
     CHECK(first->get() == second->get());
     CHECK((**second).executable_bytes == helper_bytes);
     const auto second_cache_digest =
-        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **second);
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **second, *first_loader);
     REQUIRE(second_cache_digest);
     CHECK(*second_cache_digest == *first_cache_digest);
     CHECK(store.qualification_attempt_count() == 1u);
@@ -251,11 +256,35 @@ TEST_CASE("archive helper qualification is terminal and hashes once",
     const auto changed = changed_store.load_once();
     REQUIRE(changed);
     const auto changed_cache_digest =
-        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **changed);
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **changed, *first_loader);
     REQUIRE(changed_cache_digest);
     CHECK(*changed_cache_digest != *first_cache_digest);
     CHECK(changed_store.qualification_attempt_count() == 1u);
     CHECK(changed_store.filesystem_hash_count() == 1u);
+
+    REQUIRE(gv::durable_write_file(loader_path, bytes_of("other loader")));
+    const auto changed_loader = gv::sealed_shader_cache_detail::stream_stable_regular_file_digest(
+        loader_path, "changed cache-key loader fixture", 1024u);
+    REQUIRE(changed_loader);
+    REQUIRE(changed_loader->size == first_loader->size);
+    REQUIRE(changed_loader->sha256 != first_loader->sha256);
+    const auto changed_loader_cache_digest =
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **first, *changed_loader);
+    REQUIRE(changed_loader_cache_digest);
+    CHECK(*changed_loader_cache_digest != *first_cache_digest);
+
+    auto invalid_loader = *first_loader;
+    invalid_loader.size = 0u;
+    CHECK_FALSE(gv::shader_cache_digest_hex_with_qualified_helper(
+        cache_inputs, **first, invalid_loader));
+    invalid_loader = *first_loader;
+    ++invalid_loader.identity.size;
+    CHECK_FALSE(gv::shader_cache_digest_hex_with_qualified_helper(
+        cache_inputs, **first, invalid_loader));
+    invalid_loader = *first_loader;
+    invalid_loader.sha256.fill(0u);
+    CHECK_FALSE(gv::shader_cache_digest_hex_with_qualified_helper(
+        cache_inputs, **first, invalid_loader));
 
     const std::filesystem::path metallib = temp.path / "input.metallib";
     REQUIRE(gv::durable_write_file(metallib, bytes_of("metallib")));

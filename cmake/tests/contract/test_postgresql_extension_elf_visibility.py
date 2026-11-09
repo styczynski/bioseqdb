@@ -86,7 +86,9 @@ set(fixture_manifest [=[
 "c_finfo_symbol_inventory_count":1,
 "c_wrapper_entity_count":1,
 "generated_wrapper_symbol_count":1,
+"handwritten_fmgr_export_symbol_count":0,
 "handwritten_fmgr_export_external_symbol_count":0,
+"handwritten_fmgr_export_owner_count":0,
 "c_symbol_sharing_group_count":0,
 "c_routine_identities":["fixture.owned_symbol(text)"],
 "c_link_symbols":["owned_symbol"],
@@ -96,7 +98,16 @@ set(fixture_manifest [=[
 "routine_identities":["fixture.owned_symbol(text)"],
 "implementation_declarations":["fixture::owned_symbol"]}}],
 "generated_wrapper_symbols":["owned_symbol"],
-"handwritten_fmgr_export_external_symbols":[]}}
+"fmgr_entrypoint_module_count":1,
+"fmgr_entrypoint_modules":[{{
+"module_name":"fixture.generated.entrypoints",
+"wrappers":[{{"symbol":"owned_symbol",
+"finfo_symbol":"pg_finfo_owned_symbol",
+"overloads":[{{"sql_identity":"fixture.owned_symbol(text)",
+"cpp_declaration":"fixture::owned_symbol"}}]}}]}}],
+"handwritten_fmgr_export_symbols":[],
+"handwritten_fmgr_export_external_symbols":[],
+"handwritten_fmgr_export_owners":[]}}
 ]=])
 file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-one.json"
   "${{fixture_manifest}}")

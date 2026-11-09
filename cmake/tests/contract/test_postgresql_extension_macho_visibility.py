@@ -39,6 +39,18 @@ def manifest() -> dict[str, object]:
             "implementation_declarations": ["fixture::owned_symbol"],
         }],
         "generated_wrapper_symbols": ["owned_symbol"],
+        "fmgr_entrypoint_module_count": 1,
+        "fmgr_entrypoint_modules": [{
+            "module_name": "fixture.generated.entrypoints",
+            "wrappers": [{
+                "symbol": "owned_symbol",
+                "finfo_symbol": "pg_finfo_owned_symbol",
+                "overloads": [{
+                    "sql_identity": "fixture.owned_symbol(text)",
+                    "cpp_declaration": "fixture::owned_symbol",
+                }],
+            }],
+        }],
         "handwritten_fmgr_export_symbols": [],
         "handwritten_fmgr_export_external_symbols": ["external_handler"],
         "handwritten_fmgr_export_owners": [{

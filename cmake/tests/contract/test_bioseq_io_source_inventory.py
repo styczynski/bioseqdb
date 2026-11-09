@@ -12,6 +12,7 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
     """Keep IO production and benchmark module ownership exact."""
 
     benchmark_modules = (
+        "benchmark/alignment.cppm",
         "benchmark/common.cppm",
         "benchmark/index.cppm",
         "benchmark/lazy_expression.cppm",
@@ -20,6 +21,10 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
         "benchmark/writers.cppm",
     )
     production_modules = tuple(sorted((
+        "alignment/bgzf.cppm",
+        "alignment/index.cppm",
+        "alignment/record_codec.cppm",
+        "alignment/sequence_codec.cppm",
         "buffer.cppm",
         "compression/aligned_byte_buffer.cppm",
         "compression/bit_reader.cppm",
@@ -41,18 +46,23 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
         "fasta.cppm",
         "fastq.cppm",
         "file_kind.cppm",
+        "identifier_parser/canonical.cppm",
         "identifier_parser/formats.cppm",
         "identifier_parser/index.cppm",
+        "identifier_parser/preservation.cppm",
         "options.cppm",
         "pipeline.cppm",
         "reader.cppm",
+        "reader/alignment_read.cppm",
         "reader/batch_pipeline.cppm",
         "reader/stream_pipeline.cppm",
         "reader/types.cppm",
+        "record_schema.cppm",
         "simd.cppm",
         "sinks.cppm",
         "source.cppm",
         "sources.cppm",
+        "write_pipeline.cppm",
         "writer.cppm",
     )))
 
@@ -107,7 +117,7 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
                 "EXCLUDE_PATHS",
                 *self.benchmark_modules,
                 "EXPECTED_COUNT",
-                "34",
+                "43",
             ),
         )
         for obsolete_contract in (
@@ -118,7 +128,7 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
                 self.assertNotIn(obsolete_contract, self.bioseq_cmake)
 
     def test_benchmark_exclusions_are_complete_and_exact(self) -> None:
-        """Keep all six benchmark modules outside the shared IO owner."""
+        """Keep all seven benchmark modules outside the shared IO owner."""
         authored_benchmark_modules = tuple(
             sorted(
                 path.relative_to(self.io_root).as_posix()
@@ -129,7 +139,7 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
         self.assertEqual(authored_benchmark_modules, self.benchmark_modules)
 
     def test_guarded_result_matches_the_exact_production_tree(self) -> None:
-        """Freeze the reviewed 34-path shared IO owner."""
+        """Freeze the reviewed 43-path shared IO owner."""
         all_modules = tuple(sorted(
             path.relative_to(self.io_root).as_posix()
             for path in self.io_root.rglob("*.cppm")
@@ -145,7 +155,7 @@ class BioseqIoSourceInventoryContractTest(unittest.TestCase):
             if path not in self.benchmark_modules
         )
         self.assertEqual(production_modules, self.production_modules)
-        self.assertEqual(len(production_modules), 34)
+        self.assertEqual(len(production_modules), 43)
 
     def test_downstream_owner_and_builder_registration_are_stable(self) -> None:
         """Keep the same consumer and run this contract through the builder."""

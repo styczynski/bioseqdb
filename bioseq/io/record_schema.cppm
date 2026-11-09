@@ -533,13 +533,14 @@ public:
 
 /** Reserve compact capacity before selecting the typed owner; optional file backing serves required oversized reads. */
 [[nodiscard]] inline std::expected<std::unique_ptr<record_sequence_owner>, std::string>
-make_record_sequence_owner(std::uint8_t alphabet_code, std::uint64_t length, bool allow_file_backing = true) {
+make_record_sequence_owner(std::uint8_t alphabet_code, std::uint64_t length, bool allow_file_backing = true,
+    io_memory_credit* credit = nullptr) {
     if (alphabet_code >= supported_storage_alphabets::alphabet_count || length > std::numeric_limits<std::size_t>::max())
         return std::unexpected(std::string{"decoded sequence alphabet or length is invalid"});
     std::expected<std::unique_ptr<record_sequence_owner>, std::string> result =
         std::unexpected(std::string{"decoded sequence alphabet is not rank-packed"});
     supported_storage_alphabets::dispatch_alphabet_by_code(alphabet_code,
-        [length, allow_file_backing, &result]<class Alphabet>() {
+        [length, allow_file_backing, credit, &result]<class Alphabet>() {
             if constexpr (!cigar_operation_alphabet<Alphabet>) {
                 using configuration = sequence_custom_alphabet<Alphabet, std::uint64_t>;
                 using traits = typename compact_sequence_range<configuration>::traits;
@@ -548,8 +549,8 @@ make_record_sequence_owner(std::uint8_t alphabet_code, std::uint64_t length, boo
                 if (!payload || *payload > std::numeric_limits<std::uint64_t>::max() - sizeof(typed_record_sequence_owner<Alphabet>)) {
                     result = std::unexpected(std::string{"decoded compact capacity overflows"}); return;
                 }
-                auto permit = parallelism::memory_admission_controller::instance().try_reserve(
-                    *payload + sizeof(typed_record_sequence_owner<Alphabet>));
+                auto permit = reserve_io_memory(
+                    *payload + sizeof(typed_record_sequence_owner<Alphabet>), credit);
                 if (permit) {
                     result = std::make_unique<typed_record_sequence_owner<Alphabet>>(std::move(*permit), static_cast<std::size_t>(length));
                     return;
@@ -558,8 +559,8 @@ make_record_sequence_owner(std::uint8_t alphabet_code, std::uint64_t length, boo
                     result = std::unexpected(std::string{"cannot admit resident compact sequence ownership"});
                     return;
                 }
-                auto scratch = parallelism::memory_admission_controller::instance().try_reserve(
-                    sizeof(file_record_sequence_owner<Alphabet>) + 4096u);
+                auto scratch = reserve_io_memory(
+                    sizeof(file_record_sequence_owner<Alphabet>) + 4096u, credit);
                 if (!scratch) { result = std::unexpected(std::string{"cannot admit decoded sequence packing scratch"}); return; }
                 auto file = posix_pwrite_sink::try_open("/tmp/bioseq_sequence_spool", true);
                 if (!file) { result = std::unexpected(file.error()); return; }
@@ -577,8 +578,9 @@ struct owned_auxiliary_field {
     admitted_byte_buffer payload;
 
     /** Bind one field identity before any payload allocation. */
-    owned_auxiliary_field(std::array<char, 2> field_tag, char field_type, char subtype)
-        : tag(field_tag), type(field_type), array_element_type(subtype) {}
+    owned_auxiliary_field(std::array<char, 2> field_tag, char field_type, char subtype,
+        io_memory_credit* credit = nullptr)
+        : tag(field_tag), type(field_type), array_element_type(subtype), payload(credit) {}
     owned_auxiliary_field(const owned_auxiliary_field&) = delete;
     owned_auxiliary_field& operator=(const owned_auxiliary_field&) = delete;
     /** Transfer frozen backing without invalidating its borrowed payload addresses. */
@@ -602,11 +604,12 @@ struct owned_auxiliary_field {
 
 /** Shared admitted record builder for canonical preservation, native load and replay.
  * Sequence owners pack incoming rank tiles immediately. Scalar strings remain in
- * stable deque nodes; views are frozen only after native inversion completes.
+ * stable singly linked nodes; views are frozen only after native inversion completes.
  */
 class decoded_record {
     parallelism::memory_permit permit_;
-    std::deque<std::string> strings_;
+    io_memory_credit* credit_{};
+    std::forward_list<std::string> strings_;
     std::vector<scalar_field_view> metadata_;
     admitted_byte_buffer cigar_bytes_;
     std::array<cigar_run, 2> pending_cigar_{};
@@ -666,20 +669,24 @@ class decoded_record {
         if (bytes > std::numeric_limits<std::uint64_t>::max() - permit_.bytes())
             return std::unexpected(std::string{"decoded record allocation accounting overflows"});
         const auto wanted = permit_.bytes() + bytes;
-        if (!permit_) {
-            auto admitted = parallelism::memory_admission_controller::instance().try_reserve(wanted);
-            if (!admitted) return std::unexpected(std::string{"cannot admit decoded record metadata"});
-            permit_ = std::move(*admitted);
-        } else if (!permit_.grow_to(wanted)) return std::unexpected(std::string{"cannot grow decoded record metadata"});
+        const bool growing = static_cast<bool>(permit_);
+        if (!grow_io_memory(permit_, wanted, credit_))
+            return std::unexpected(std::string{growing ? "cannot grow decoded record metadata"
+                : "cannot admit decoded record metadata"});
         return {};
+    }
+
+    /** Append one scalar whose allocation charge is already retained by this record. */
+    [[nodiscard]] std::string_view retain_admitted(std::string_view value) {
+        strings_.emplace_front(value);
+        return std::string_view{strings_.front()};
     }
 
     /** Keep one scalar at a stable address after successful admission. */
     [[nodiscard]] std::expected<std::string_view, std::string> retain(std::string_view value) {
         if (const auto admitted = charge(value.size() + sizeof(std::string) + 128u); !admitted)
             return std::unexpected(admitted.error());
-        strings_.emplace_back(value);
-        return std::string_view{strings_.back()};
+        return retain_admitted(value);
     }
 
     /** Three independent owners avoid a sequence-alphabet by quality-alphabet type product. */
@@ -712,6 +719,9 @@ public:
      * avoiding value-initialization of unused CIGAR scratch on ordinary native rows.
      */
     decoded_record() {}
+    /** Borrow a stable wave bank; every allocated child still owns its exact permit. */
+    explicit decoded_record(io_memory_credit* credit)
+        : credit_(credit), cigar_bytes_(credit) {}
     decoded_record(const decoded_record&) = delete;
     decoded_record& operator=(const decoded_record&) = delete;
 
@@ -810,7 +820,7 @@ public:
         if (!descriptor.present) { sequence_finished_[*slot] = true; return {}; }
         if (!descriptor.alphabet_code) return std::unexpected(std::string{"present sequence has no alphabet"});
         if (descriptor.storage == preservation_storage::rank_hex || descriptor.original_length == 0u) {
-            auto owner = make_record_sequence_owner(*descriptor.alphabet_code, descriptor.original_length);
+            auto owner = make_record_sequence_owner(*descriptor.alphabet_code, descriptor.original_length, true, credit_);
             if (!owner) return std::unexpected(owner.error());
             sequences_[*slot] = std::move(*owner);
         }
@@ -825,7 +835,7 @@ public:
             return std::unexpected(std::string{"decoded sequence ranks have no active owner"});
         if (!sequences_[*slot]) {
             const auto& descriptor = descriptors_[*slot];
-            auto owner = make_record_sequence_owner(*descriptor.alphabet_code, descriptor.original_length);
+            auto owner = make_record_sequence_owner(*descriptor.alphabet_code, descriptor.original_length, true, credit_);
             if (!owner) return std::unexpected(owner.error());
             sequences_[*slot] = std::move(*owner);
         }
@@ -914,7 +924,7 @@ public:
             if (const auto admitted = charge(sizeof(cigar_staging_) + sizeof(pending_cigar_)); !admitted) return admitted;
         }
         cigar_present_ = present;
-        cigar_bytes_ = admitted_byte_buffer{};
+        cigar_bytes_ = admitted_byte_buffer{credit_};
         pending_cigar_count_ = 0u;
         cigar_staging_size_ = 0u;
         cigar_finished_ = false;
@@ -960,7 +970,7 @@ public:
         auto& fields = projected ? projected_auxiliary_ : auxiliary_;
         for (const auto& field : fields)
             if (field.tag == tag) return std::unexpected(std::string{"duplicate preserved auxiliary tag"});
-        fields.emplace_back(tag, type, subtype);
+        fields.emplace_back(tag, type, subtype, credit_);
         if (type == 'B') {
             constexpr std::array<std::byte, 4> prefix{};
             if (auto initialized = fields.back().payload.append(prefix); !initialized) return initialized;
@@ -988,12 +998,22 @@ public:
             std::optional<std::string_view> value, bool types_only) {
         for (const auto& field : metadata_)
             if (field.name == name) return std::unexpected(std::string{"duplicate preserved metadata name"});
-        if (const auto admitted = charge(2u * sizeof(scalar_field_view)); !admitted) return admitted;
-        const auto kept_name = retain(name); if (!kept_name) return std::unexpected(kept_name.error());
-        const auto kept_type = retain(type); if (!kept_type) return std::unexpected(kept_type.error());
-        std::string_view kept_value;
-        if (value) { const auto kept = retain(*value); if (!kept) return std::unexpected(kept.error()); kept_value = *kept; }
-        metadata_.push_back({*kept_name, column_value_kind::scalar_text, *kept_type, !value || types_only, kept_value});
+        // The complete event is known now. Admit the same retained charges in
+        // one transaction before allocating its view and two or three strings.
+        std::size_t admission_bytes = 2u * sizeof(scalar_field_view);
+        const std::array<std::optional<std::string_view>, 3> scalars{name, type, value};
+        for (const auto& scalar : scalars) {
+            if (!scalar) continue;
+            const auto string_bytes = common::checked_add(scalar->size(), sizeof(std::string) + 128u);
+            if (!string_bytes || *string_bytes > std::numeric_limits<std::size_t>::max() - admission_bytes)
+                return std::unexpected(std::string{"decoded record allocation accounting overflows"});
+            admission_bytes += *string_bytes;
+        }
+        if (const auto admitted = charge(admission_bytes); !admitted) return admitted;
+        const auto kept_name = retain_admitted(name);
+        const auto kept_type = retain_admitted(type);
+        const auto kept_value = value ? retain_admitted(*value) : std::string_view{};
+        metadata_.push_back({kept_name, column_value_kind::scalar_text, kept_type, !value || types_only, kept_value});
         return {};
     }
 

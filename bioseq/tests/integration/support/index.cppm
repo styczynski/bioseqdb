@@ -4,6 +4,8 @@
  */
 module;
 #include <cctype>
+#include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -13,11 +15,14 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <list>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -130,6 +135,149 @@ inline PGconn* connect_raw(const pg_credentials& credentials) {
     return raw;
 }
 
+/** Execute one lifecycle SELECT with a client deadline and preserve its diagnostic. */
+[[nodiscard]] inline pg_result lifecycle_query(
+        PGconn* connection, std::string_view sql,
+        const std::chrono::steady_clock::time_point deadline) {
+    const int previous_mode = PQisnonblocking(connection);
+    if (PQsetnonblocking(connection, 1) != 0) {
+        throw std::runtime_error(connection_error(connection));
+    }
+    try {
+        const std::string owned_sql{sql};
+        if (PQsendQuery(connection, owned_sql.c_str()) == 0) {
+            throw std::runtime_error(connection_error(connection));
+        }
+        pg_result result{nullptr};
+        for (;;) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                throw std::runtime_error(fmt::format(
+                    "Integration fixture lifecycle deadline expired: {}", sql));
+            }
+            const int flush_status = PQflush(connection);
+            if (flush_status < 0 || PQconsumeInput(connection) == 0) {
+                throw std::runtime_error(connection_error(connection));
+            }
+            if (PQisBusy(connection) == 0) {
+                pg_result next{PQgetResult(connection)};
+                if (next.ptr == nullptr) {
+                    if (result.ptr == nullptr
+                        || PQresultStatus(result.ptr) != PGRES_TUPLES_OK) {
+                        throw std::runtime_error(fmt::format(
+                            "Integration fixture lifecycle query failed: {}; {}", sql,
+                            result.ptr == nullptr ? connection_error(connection)
+                                : std::string{PQresultErrorMessage(result.ptr)}));
+                    }
+                    if (PQsetnonblocking(connection, previous_mode) != 0) {
+                        throw std::runtime_error(connection_error(connection));
+                    }
+                    return result;
+                }
+                if (result.ptr != nullptr) {
+                    throw std::runtime_error(
+                        "Integration fixture lifecycle query returned multiple results");
+                }
+                result = std::move(next);
+                continue;
+            }
+            std::this_thread::sleep_for(
+                std::min(remaining, std::chrono::milliseconds{1}));
+        }
+    } catch (...) {
+        // Preserve the original query/timeout error. The caller must discard
+        // this context after failure; no destructive fixture SQL has run.
+        (void)PQsetnonblocking(connection, previous_mode);
+        throw;
+    }
+}
+
+/** Exact identity of one test-owned server session, retained until cleanup finishes. */
+struct backend_session {
+    int pid = 0;
+    std::int64_t started_us = 0;
+    std::string host;
+    std::string port;
+    std::string database;
+};
+
+/** Closed client sessions awaiting an observed backend-exit barrier. */
+struct retired_backend_sessions {
+    std::mutex mutex;
+    std::list<backend_session> sessions;
+};
+
+/** Return the test client's retired-session registry; live contexts are never included. */
+[[nodiscard]] inline retired_backend_sessions& retired_sessions() {
+    static retired_backend_sessions value;
+    return value;
+}
+
+/** Capture PID plus exact backend-start microseconds before a fixture can create objects. */
+[[nodiscard]] inline backend_session identify_backend(PGconn* connection) {
+    auto result = lifecycle_query(connection,
+        "SELECT (extract(epoch FROM backend_start) * 1000000)::bigint "
+        "FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()",
+        std::chrono::steady_clock::now() + std::chrono::seconds{10});
+    if (PQntuples(result.ptr) != 1 || PQnfields(result.ptr) != 1
+        || PQgetisnull(result.ptr, 0, 0) != 0 || PQbackendPID(connection) <= 0) {
+        throw std::runtime_error("Cannot identify the integration fixture backend");
+    }
+    const std::string_view start_text{PQgetvalue(result.ptr, 0, 0)};
+    std::int64_t started_us = 0;
+    const auto parsed = std::from_chars(
+        start_text.data(), start_text.data() + start_text.size(), started_us);
+    if (parsed.ec != std::errc{} || parsed.ptr != start_text.data() + start_text.size()) {
+        throw std::runtime_error("Invalid integration fixture backend start timestamp");
+    }
+    return backend_session{
+        .pid = PQbackendPID(connection), .started_us = started_us,
+        .host = PQhost(connection), .port = PQport(connection),
+        .database = PQdb(connection),
+    };
+}
+
+/** Observe retired-session exit before global fixture DDL, with a 30-second deadline. */
+inline void await_retired_backends(PGconn* observer) {
+    if (observer == nullptr || PQstatus(observer) != CONNECTION_OK
+        || PQtransactionStatus(observer) != PQTRANS_IDLE) {
+        throw std::runtime_error(
+            "Integration fixture reset requires an idle, connected observer");
+    }
+    auto& registry = retired_sessions();
+    const std::lock_guard lock{registry.mutex};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    for (auto session = registry.sessions.begin(); session != registry.sessions.end();) {
+        if (session->host != PQhost(observer) || session->port != PQport(observer)
+            || session->database != PQdb(observer)) {
+            ++session;
+            continue;
+        }
+        const std::string sql = fmt::format(
+            "SELECT (extract(epoch FROM backend_start) * 1000000)::bigint = {} "
+            "FROM pg_catalog.pg_stat_activity WHERE pid = {}",
+            session->started_us, session->pid);
+        for (;;) {
+            // Each SELECT is its own transaction, so the activity snapshot is fresh.
+            auto result = lifecycle_query(observer, sql, deadline);
+            if (PQntuples(result.ptr) == 0) break;
+            if (PQntuples(result.ptr) != 1 || PQnfields(result.ptr) != 1
+                || PQgetisnull(result.ptr, 0, 0) != 0) {
+                throw std::runtime_error("Invalid integration fixture backend-exit probe");
+            }
+            const std::string_view present{PQgetvalue(result.ptr, 0, 0)};
+            if (present == "f") break;
+            if (present != "t") {
+                throw std::runtime_error("Invalid integration fixture backend-exit state");
+            }
+            // Retry pacing only: passing requires observed disappearance, never elapsed sleep.
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        session = registry.sessions.erase(session);
+    }
+}
+
 }  // namespace detail
 
 // Symbol-tount tests compare, exact base counts, such as four of each base
@@ -141,6 +289,18 @@ export class connection_test_context {
 private:
     PGconn* _raw_conn = nullptr;
     std::vector<std::string> _notices;
+    std::list<detail::backend_session> _backend_identity;
+
+    /** Allocate retirement ownership at construction, never while unwinding a test. */
+    void identify_session() {
+        try {
+            (void)detail::retired_sessions();
+            _backend_identity.push_back(detail::identify_backend(_raw_conn));
+        } catch (...) {
+            PQfinish(std::exchange(_raw_conn, nullptr));
+            throw;
+        }
+    }
 
     static void capture_notice(void* arg, const char* message) noexcept {
         auto* self = static_cast<connection_test_context*>(arg);
@@ -169,6 +329,7 @@ public:
     connection_test_context()
         : _raw_conn(detail::connect_raw(detail::make_default_credentials())) {
         install_notice_capture();
+        identify_session();
     }
 
     explicit connection_test_context(std::string_view database_name) {
@@ -176,6 +337,7 @@ public:
         credentials.dbname = std::string(database_name);
         _raw_conn = detail::connect_raw(credentials);
         install_notice_capture();
+        identify_session();
     }
 
     connection_test_context(const connection_test_context&) = delete;
@@ -183,26 +345,34 @@ public:
 
     connection_test_context(connection_test_context&& other) noexcept
         : _raw_conn(std::exchange(other._raw_conn, nullptr)),
-          _notices(std::move(other._notices)) {
+          _notices(std::move(other._notices)),
+          _backend_identity(std::move(other._backend_identity)) {
         install_notice_capture();
     }
 
     connection_test_context& operator=(connection_test_context&& other) noexcept {
         if (this != &other) {
-            if (_raw_conn != nullptr) {
-                PQfinish(_raw_conn);
-            }
+            close();
             _raw_conn = std::exchange(other._raw_conn, nullptr);
             _notices = std::move(other._notices);
+            _backend_identity = std::move(other._backend_identity);
             install_notice_capture();
         }
         return *this;
     }
 
-    ~connection_test_context() {
-        if (_raw_conn != nullptr) {
-            PQfinish(_raw_conn);
+    ~connection_test_context() { close(); }
+
+    /** Retire the identity without allocation or SQL, then request connection shutdown. */
+    void close() noexcept {
+        if (_raw_conn == nullptr) return;
+        PGconn* connection = std::exchange(_raw_conn, nullptr);
+        auto& registry = detail::retired_sessions();
+        {
+            const std::lock_guard lock{registry.mutex};
+            registry.sessions.splice(registry.sessions.end(), _backend_identity);
         }
+        PQfinish(connection);
     }
 
     [[nodiscard, always_inline]] PGconn* raw() const noexcept {
@@ -541,6 +711,7 @@ public:
 /** @brief Recreates the extension and removes the supplied fixture tables. */
 export inline void reset_extension(const connection_test_context& ctx,
                                    std::span<const std::string_view> tables) {
+    detail::await_retired_backends(ctx.raw());
     for (const auto& table : tables) {
         exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table);
     }

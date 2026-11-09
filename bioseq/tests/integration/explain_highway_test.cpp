@@ -21,27 +21,29 @@ std::mutex highway_target_force_mutex;
 /** Resets the Highway target override when the test scope ends. */
 class highway_target_force_reset final {
   public:
-    explicit highway_target_force_reset(PGconn* connection) noexcept : connection_{connection} {}
+    explicit highway_target_force_reset(connection_test_context& context) noexcept : context_{context} {}
 
     highway_target_force_reset(const highway_target_force_reset&) = delete;
     highway_target_force_reset& operator=(const highway_target_force_reset&) = delete;
 
     ~highway_target_force_reset() noexcept {
-        if (connection_ == nullptr)
+        PGconn* connection = context_.raw();
+        if (connection == nullptr)
             return;
         PGresult* result =
-            PQexec(connection_, "SELECT bioseq_internal.set_highway_target_for_test(0);");
+            PQexec(connection, "SELECT bioseq_internal.set_highway_target_for_test(0);");
         const bool restored = result != nullptr && PQresultStatus(result) == PGRES_TUPLES_OK;
         if (result != nullptr)
             PQclear(result);
         if (!restored) {
-            // Reconnecting discards the backend-local override if the reset query fails.
-            PQreset(connection_);
+            // The context is leaving scope next. Close through its owner so
+            // the old backend remains covered by the fixture teardown barrier.
+            context_.close();
         }
     }
 
   private:
-    PGconn* connection_ = nullptr;
+    connection_test_context& context_;
 };
 #endif
 
@@ -164,7 +166,7 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:planner][resource:postgres][resource:highway]") {
     const std::scoped_lock serialized{highway_target_force_mutex};
     auto ctx = fresh_context({k_table});
-    highway_target_force_reset restore{ctx.raw()};
+    highway_target_force_reset restore{ctx};
     (void)query_scalar(ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
     seed_small_bioseq_column(ctx, k_table);
     constexpr std::string_view highway_probe =
@@ -245,7 +247,7 @@ TEST_CASE(
     "[component:bioseq][layer:integration][feature:planner][resource:postgres][resource:highway]") {
     const std::scoped_lock serialized{highway_target_force_mutex};
     auto ctx = fresh_context();
-    highway_target_force_reset restore{ctx.raw()};
+    highway_target_force_reset restore{ctx};
     (void)query_scalar(ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
 
     const auto baseline_mask = static_cast<std::int64_t>(

@@ -62,15 +62,16 @@ struct match_result {
     bool has_dp_score = false;              ///< Base alignment produced the DP score.
     bool has_edit_distance = false;         ///< Unit-cost edit distance was computed exactly.
     bool has_sam_classification = false;    ///< Classification covers the final surviving region set.
-    bool is_sam_primary = false;            ///< First surviving chain root in this result set.
-    bool is_supplementary = false;          ///< Other surviving chain roots; nonroots are secondary.
+    bool is_sam_primary = false;            ///< First surviving SAM root in this result set.
+    bool is_sam_secondary = false;          ///< Alternative mapping after available query-overlap classification.
+    bool is_supplementary = false;          ///< Other surviving nonsecondary SAM pieces.
     std::uint64_t alignment_ordinal = 0;    ///< Stable ordinal within this query/target result set.
 
     /** Return native SAM flag bits and explicit validity without sentinel inference. */
     [[nodiscard]] constexpr std::uint64_t export_status() const noexcept {
         std::uint64_t result = is_reverse ? 0x10u : 0u;
         if (has_sam_classification) {
-            if (!is_primary) result |= 0x100u;
+            if (is_sam_secondary) result |= 0x100u;
             if (is_supplementary) result |= 0x800u;
             result |= static_cast<std::uint64_t>(match_export_status::has_classification);
         }
@@ -81,15 +82,16 @@ struct match_result {
     }
 };
 
-/** Reconcile classification after filtering or merging completed result sets.
- *  Preserve producer validity; coordinate-only results remain unclassified. */
+/** Refresh representative election and ordinals after filtering or merging.
+ *  Preserve producer validity and reconciled secondary status; coordinate-only
+ *  results remain unclassified. */
 inline void finalize_match_result_classification(std::span<match_result> results) noexcept {
     bool primary_selected = false;
     std::uint64_t ordinal = 0;
     for (auto& result : results) {
         result.alignment_ordinal = ordinal++;
-        result.is_sam_primary = result.has_sam_classification && result.is_primary && !primary_selected;
-        result.is_supplementary = result.has_sam_classification && result.is_primary && primary_selected;
+        result.is_sam_primary = result.has_sam_classification && !result.is_sam_secondary && !primary_selected;
+        result.is_supplementary = result.has_sam_classification && !result.is_sam_secondary && primary_selected;
         primary_selected = primary_selected || result.is_sam_primary;
     }
 }
@@ -103,6 +105,7 @@ inline void finalize_match_result_classification(std::span<match_result> results
         result.has_mapq = mapq_computed;
         result.has_edit_distance = edit_distance_computed && result.has_dp_score;
         result.has_sam_classification = classification_available;
+        result.is_sam_secondary = classification_available && !result.is_primary;
     }
     finalize_match_result_classification(results);
 }

@@ -11,6 +11,7 @@ import bioseq.io.options;
 import bioseq.io.file_kind;
 import bioseq.io.record_schema;
 import bioseq.io.sinks;
+import bioseq.io.compression.aligned_byte_buffer;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
@@ -92,7 +93,7 @@ class ordered_output_sink {
                 if (!written) block.error = written.error();
             }
         };
-        if (parallelism::has_parallel_dispatch(pool.get_mode()))
+        if (filled_ > 1u && parallelism::has_parallel_dispatch(pool.get_mode()))
             pool.parallel_for(0u, filled_, 1u, write_blocks);
         else write_blocks(0u, filled_);
         checkpoint_();
@@ -166,8 +167,12 @@ public:
         workers = std::max<std::size_t>(1u,
             std::min<std::size_t>(workers, pool.maximum_concurrency()));
         if (!parallelism::has_parallel_dispatch(pool.get_mode())) workers = 1u;
-        const auto maximum_slots = std::max(std::size_t{1u}, std::min(workers,
-            std::max(std::size_t{1u}, concurrency.io_buffer_pool_size)));
+        // Plain output has no independent compression work. One staging block
+        // avoids dispatch and same-file write contention; formatting may still
+        // use the caller's full participant budget in record_format_wave.
+        const auto maximum_slots = compression == sequence_compression::none ? std::size_t{1u}
+            : std::max(std::size_t{1u}, std::min(workers,
+                std::max(std::size_t{1u}, concurrency.io_buffer_pool_size)));
         const auto input_capacity = compression == sequence_compression::none
             ? std::min(options.chunk_capacity_bytes, std::size_t{1024u * 1024u})
             : alignment::bgzf_payload_limit;
@@ -388,19 +393,20 @@ template<class Sink>
     if (!header) return header;
     if (auto written = sink.append("\n"); !written) return written;
     if (row.sequence) {
-        std::expected<std::size_t, std::string> sequence_written = std::unexpected(std::string{"unsupported sequence alphabet"});
+        std::optional<std::expected<std::size_t, std::string>> sequence_written;
         fasta_body_sink<Sink> body{sink, format == sequence_file_format::fasta ? options.fasta_line_width : 0u};
         supported_biological_alphabets::dispatch_alphabet_by_code(row.sequence->alphabet_code,
             [&row, &body, transform, &sequence_written]<class Alphabet>() {
                 sequence_written = alignment::emit_native_sequence<Alphabet, false, false>(body, *row.sequence, transform);
             });
-        if (!sequence_written) return std::unexpected(sequence_written.error());
+        if (!sequence_written) return std::unexpected(std::string{"unsupported sequence alphabet"});
+        if (!*sequence_written) return std::unexpected(sequence_written->error());
     }
     if (auto written = sink.append("\n"); !written) return written;
     if (format == sequence_file_format::fastq) {
         if (auto written = sink.append("+\n"); !written) return written;
         if (row.quality && row.sequence) {
-            std::expected<std::size_t, std::string> quality_written = std::unexpected(std::string{"unsupported quality alphabet"});
+            std::optional<std::expected<std::size_t, std::string>> quality_written;
             if (row.quality->alphabet_code >= supported_storage_alphabets::alphabet_count)
                 return std::unexpected(std::string{"unsupported quality alphabet"});
             supported_storage_alphabets::dispatch_alphabet_by_code(row.quality->alphabet_code,
@@ -408,7 +414,8 @@ template<class Sink>
                     if constexpr (sequences::quality_alphabet<Alphabet>)
                         quality_written = alignment::emit_quality<Alphabet, false, true>(sink, *row.quality, false, false, transform);
                 });
-            if (!quality_written) return std::unexpected(quality_written.error());
+            if (!quality_written) return std::unexpected(std::string{"unsupported quality alphabet"});
+            if (!*quality_written) return std::unexpected(quality_written->error());
         } else if (row.sequence) {
             std::array<std::uint8_t, bioseq::simd::sequence_rank_io_chunk_capacity> unknown{};
             unknown.fill(static_cast<std::uint8_t>('!'));
@@ -433,7 +440,7 @@ template<bool Packed, class Sink>
     }
     if (row.sequence->alphabet_code >= supported_biological_alphabets::alphabet_count)
         return std::unexpected(std::string{"alignment sequence alphabet is not biological"});
-    std::expected<std::size_t, std::string> outcome = std::unexpected(std::string{"alignment sequence alphabet is unsupported"});
+    std::optional<std::expected<std::size_t, std::string>> outcome;
     supported_biological_alphabets::dispatch_alphabet_by_code(row.sequence->alphabet_code,
         [&sink, &row, reverse, transform, &outcome]<class Alphabet>() {
             if constexpr (seqan3::aminoacid_alphabet<Alphabet>) {
@@ -444,7 +451,8 @@ template<bool Packed, class Sink>
                 else outcome = alignment::emit_native_sequence<Alphabet, false, Packed>(sink, *row.sequence, transform);
             }
         });
-    if (!outcome) return std::unexpected(outcome.error());
+    if (!outcome) return std::unexpected(std::string{"alignment sequence alphabet is unsupported"});
+    if (!*outcome) return std::unexpected(outcome->error());
     return {};
 }
 
@@ -469,7 +477,7 @@ template<bool Packed, class Sink>
     if (!row.sequence || row.quality->symbol_count != row.sequence->symbol_count
         || row.quality->alphabet_code >= supported_storage_alphabets::alphabet_count)
         return std::unexpected(std::string{"alignment quality length/alphabet differs from sequence"});
-    std::expected<std::size_t, std::string> outcome = std::unexpected(std::string{"alignment quality alphabet is unsupported"});
+    std::optional<std::expected<std::size_t, std::string>> outcome;
     supported_storage_alphabets::dispatch_alphabet_by_code(row.quality->alphabet_code,
         [&sink, &row, reverse, protein_triplets, transform, &outcome]<class Alphabet>() {
             if constexpr (sequences::quality_alphabet<Alphabet>) {
@@ -479,20 +487,45 @@ template<bool Packed, class Sink>
                     sink, *row.quality, protein_triplets, !Packed, transform);
             }
         });
-    if (!outcome) return std::unexpected(outcome.error());
+    if (!outcome) return std::unexpected(std::string{"alignment quality alphabet is unsupported"});
+    if (!*outcome) return std::unexpected(outcome->error());
     return {};
 }
 
 
-/** Exact generated NM/MD storage; large MD payloads retain a private mapped file. */
+/** Exact generated NM/MD storage; short tags stay local, large tags use admitted/file storage. */
 class derived_alignment_tags {
     admitted_byte_buffer md_bytes_;
+    // Only the initialized prefix is exposed; no speculative memory reservation
+    // remains live while query/reference callbacks execute.
+    std::array<std::byte, 512> inline_md_;
+    std::size_t inline_md_size_{};
+    bool md_streamed_{};
     std::array<std::byte, 4> nm_bytes_{};
     std::uint64_t differences_{};
     bool active_{};
 public:
-    /** Retain one bounded MD fragment through the shared admitted byte owner. */
+    /** Keep every borrowed field address inside its one formatting scope. */
+    derived_alignment_tags() = default;
+    derived_alignment_tags(const derived_alignment_tags&) = delete;
+    derived_alignment_tags& operator=(const derived_alignment_tags&) = delete;
+    derived_alignment_tags(derived_alignment_tags&&) = delete;
+    derived_alignment_tags& operator=(derived_alignment_tags&&) = delete;
+
+    /** Fill local MD storage, transferring its prefix once on admitted streaming overflow. */
     [[nodiscard]] std::expected<void, std::string> append(std::span<const std::uint8_t> bytes) {
+        if (active_) return std::unexpected(std::string{"derived alignment tags are already sealed"});
+        if (!md_streamed_ && bytes.size() <= inline_md_.size() - inline_md_size_) {
+            if (!bytes.empty())
+                std::memcpy(inline_md_.data() + inline_md_size_, bytes.data(), bytes.size());
+            inline_md_size_ += bytes.size();
+            return {};
+        }
+        if (!md_streamed_) {
+            if (const auto prefix = md_bytes_.append(std::span<const std::byte>{inline_md_}.first(inline_md_size_));
+                !prefix) return prefix;
+            md_streamed_ = true;
+        }
         return md_bytes_.append(std::as_bytes(bytes));
     }
 
@@ -517,7 +550,8 @@ public:
         if (*differences > std::numeric_limits<std::uint32_t>::max())
             return std::unexpected(std::string{"derived NM exceeds native representation limits"});
         differences_ = *differences;
-        if (const auto sealed = md_bytes_.seal(); !sealed) return sealed;
+        if (md_streamed_)
+            if (const auto sealed = md_bytes_.seal(); !sealed) return sealed;
         for (std::size_t index{}; index < nm_bytes_.size(); ++index)
             nm_bytes_[index] = static_cast<std::byte>((differences_ >> (8u * index)) & 255u);
         active_ = true;
@@ -528,7 +562,9 @@ public:
     [[nodiscard]] bool active() const noexcept { return active_; }
     /** Borrow exact generated fields; this owner outlives preservation and native serialization. */
     [[nodiscard]] std::array<auxiliary_field_view, 2> fields() const {
-        const auto md = md_bytes_.view();
+        const auto md = !active_ ? std::span<const std::byte>{}
+            : md_streamed_ ? md_bytes_.view()
+                : std::span<const std::byte>{inline_md_}.first(inline_md_size_);
         return {auxiliary_field_view{{'N', 'M'}, differences_ <= std::numeric_limits<std::int32_t>::max() ? 'i' : 'I', 0, nm_bytes_},
             auxiliary_field_view{{'M', 'D'}, 'Z', 0, md}};
     }
@@ -555,10 +591,20 @@ template<class Sink, class Resolved>
     if (!auxiliary_capacity) return std::unexpected(std::string{"auxiliary view count overflows"});
     const auto auxiliary_view_bytes = common::checked_mul(*auxiliary_capacity, sizeof(auxiliary_field_view));
     if (!auxiliary_view_bytes) return std::unexpected(std::string{"auxiliary view size overflows"});
-    auto views_permit = parallelism::memory_admission_controller::instance().try_reserve(*auxiliary_view_bytes);
-    if (!views_permit) return std::unexpected(std::string{"auxiliary views exceed available memory"});
-    std::vector<auxiliary_field_view> projected_auxiliary;
-    projected_auxiliary.reserve(*auxiliary_capacity);
+    parallelism::memory_permit views_permit;
+    std::array<auxiliary_field_view, 8> inline_auxiliary;
+    std::vector<auxiliary_field_view> overflow_auxiliary;
+    std::span<auxiliary_field_view> auxiliary_storage;
+    if (*auxiliary_capacity <= inline_auxiliary.size()) {
+        auxiliary_storage = std::span{inline_auxiliary}.first(*auxiliary_capacity);
+    } else {
+        auto admitted = parallelism::memory_admission_controller::instance().try_reserve(*auxiliary_view_bytes);
+        if (!admitted) return std::unexpected(std::string{"auxiliary views exceed available memory"});
+        views_permit = std::move(*admitted);
+        overflow_auxiliary.resize(*auxiliary_capacity);
+        auxiliary_storage = overflow_auxiliary;
+    }
+    std::size_t projected_auxiliary_size{};
     std::bitset<52 * 62> occupied_tags;
     std::uint64_t auxiliary_bytes{};
     for (const auto& field : original_auxiliary) {
@@ -578,7 +624,7 @@ template<class Sink, class Resolved>
         if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
             return std::unexpected(measured ? std::string{"auxiliary size overflows"} : measured.error());
         auxiliary_bytes += *measured;
-        projected_auxiliary.push_back(field);
+        auxiliary_storage[projected_auxiliary_size++] = field;
     }
     if (derived.active()) {
         for (const auto& field : derived_fields) {
@@ -586,9 +632,11 @@ template<class Sink, class Resolved>
             if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
                 return std::unexpected(measured ? std::string{"derived auxiliary size overflows"} : measured.error());
             auxiliary_bytes += *measured;
-            projected_auxiliary.push_back(field);
+            auxiliary_storage[projected_auxiliary_size++] = field;
         }
     }
+    const std::span<const auxiliary_field_view> projected_auxiliary =
+        auxiliary_storage.first(projected_auxiliary_size);
     preservation_options preservation{
         .synthetic_codons = resolved.protein_triplets,
         .projected_flag = native.core.flags,
@@ -774,18 +822,18 @@ struct record_format_job {
     } reference;
     std::vector<cigar_run> cigar_runs;
     cigar_span_source cigar_source;
-    std::vector<std::uint8_t> output;
+    compression::chunk_byte_buffer output;
     std::size_t written{};
     bool retry_serial{};
     std::string error;
 
     /** Append within the admitted bound; oversized records resume on the serial streaming path. */
     [[nodiscard]] std::expected<void, std::string> append(std::span<const std::uint8_t> bytes) {
-        if (bytes.size() > output.size() - written) {
+        if (bytes.size() > output.size - written) {
             retry_serial = true;
             return std::unexpected(std::string{"record exceeds parallel formatting capacity"});
         }
-        std::memcpy(output.data() + written, bytes.data(), bytes.size());
+        std::memcpy(output.data.get() + written, bytes.data(), bytes.size());
         written += bytes.size();
         return {};
     }
@@ -902,17 +950,26 @@ public:
             for (const auto& field : original.alignment->auxiliary)
                 if (!charge(field.payload.size(), 12u) || !charge(1u, 256u)) return false;
         }
-        auto admitted = parallelism::memory_admission_controller::instance().try_reserve(
-            estimate + sizeof(record_format_job) + cigar_limit * sizeof(cigar_run) + 256u);
+        const auto job_bytes = estimate + sizeof(record_format_job) + cigar_limit * sizeof(cigar_run) + 256u;
+        const auto context_bytes = context == nullptr ? 0u : context->resolution_admission_bytes(original);
+        auto admitted = parallelism::memory_admission_controller::instance().try_reserve(job_bytes + context_bytes);
         if (!admitted) return false;
+        // One live admission probe, then independent owners with their original lifetimes.
+        // Refusal takes the same drain/serial fallback before invoking any source callback.
+        auto job_permit = admitted->split_off(job_bytes);
+        io_memory_credit context_credit{std::move(*admitted)};
         auto job = std::make_unique<record_format_job>();
-        job->permit = std::move(*admitted);
+        job->permit = std::move(job_permit);
         job->row = original;
         job->original_row = original;
-        job->output.resize(static_cast<std::size_t>(estimate));
+        // Fresh aligned storage has exactly the admitted capacity. Only the
+        // initialized written prefix becomes visible after the worker joins.
+        if (const auto allocated = job->output.extend(static_cast<std::size_t>(estimate)); !allocated)
+            return false;
         if (context != nullptr) {
             const checkpointed_export_record checked{job->row, checkpoint};
-            auto resolved = context->resolve(checked.row);
+            auto resolved = context->resolve(checked.row, &context_credit);
+            context_credit.release();
             if (!resolved) return std::unexpected(resolved.error());
             if (detach_reference && resolved->reference_is_circular) return false;
             resolved->native.cigar.source = job->row.alignment ? job->row.alignment->cigar : std::nullopt;
@@ -961,7 +1018,7 @@ public:
                 const auto row = job->original_row;
                 job.reset();
                 if (auto result = serial(row); !result) return result;
-            } else if (auto result = output.append(std::span<const std::uint8_t>{job->output}.first(job->written)); !result)
+            } else if (auto result = output.append(job->output.view().first(job->written)); !result)
                 return std::unexpected(record_error{job->row.ordinal, std::nullopt, result.error()});
             job.reset();
         }
@@ -1089,14 +1146,16 @@ public:
             header[first + 1u] = source.alphabet_code;
             header[first + 2u] = source.symbol_count;
             header[first + 3u] = file_.size_bytes();
-            std::expected<std::uint64_t, std::string> encoded = std::unexpected(std::string{"unsupported replay alphabet"});
-            if (source.alphabet_code >= supported_storage_alphabets::alphabet_count) return std::unexpected(encoded.error());
+            std::optional<std::expected<std::uint64_t, std::string>> encoded;
+            if (source.alphabet_code >= supported_storage_alphabets::alphabet_count)
+                return std::unexpected(std::string{"unsupported replay alphabet"});
             supported_storage_alphabets::dispatch_alphabet_by_code(source.alphabet_code,
                 [this, &source, &encoded]<class Alphabet>() {
                     if constexpr (!cigar_operation_alphabet<Alphabet>) encoded = append_replay_sequence<Alphabet>(file_, source);
                 });
-            if (!encoded) return std::unexpected(encoded.error());
-            header[first + 4u] = *encoded;
+            if (!encoded) return std::unexpected(std::string{"unsupported replay alphabet"});
+            if (!*encoded) return std::unexpected(encoded->error());
+            header[first + 4u] = **encoded;
         }
         if (original.alignment && original.alignment->cigar) {
             header[31] = 1u;
@@ -1219,19 +1278,18 @@ struct export_context_memory {
     parallelism::memory_permit permit;
     bool memory_pressure{};
     /** Acquire a checked incremental reservation; no new budgeting policy is introduced. */
-    [[nodiscard]] static std::expected<void, std::string> acquire(void* context, std::size_t increment) {
+    [[nodiscard]] static std::expected<void, std::string> acquire(void* context, std::size_t increment,
+            io_memory_credit* credit) {
         auto& owner = *static_cast<export_context_memory*>(context);
         owner.memory_pressure = false;
         if (increment > std::numeric_limits<std::uint64_t>::max() - owner.permit.bytes())
             return std::unexpected(std::string{"alignment context admission overflows"});
         const auto required = owner.permit.bytes() + increment;
-        if (!owner.permit) {
-            auto admitted = parallelism::memory_admission_controller::instance().try_reserve(required);
-            if (!admitted) { owner.memory_pressure = true; return std::unexpected(std::string{"cannot admit alignment context"}); }
-            owner.permit = std::move(*admitted);
-        } else if (!owner.permit.grow_to(required)) {
+        const bool growing = static_cast<bool>(owner.permit);
+        if (!grow_io_memory(owner.permit, required, credit)) {
             owner.memory_pressure = true;
-            return std::unexpected(std::string{"cannot grow alignment context"});
+            return std::unexpected(std::string{growing ? "cannot grow alignment context"
+                : "cannot admit alignment context"});
         }
         return {};
     }

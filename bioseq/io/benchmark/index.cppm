@@ -138,6 +138,22 @@ int run(int argc, char** argv) {
                 const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
     };
 
+    bioseq::bench::framework::iteration_boundary_callbacks<reader_input,
+        io_pool_scope, io_measurement> reader_boundaries{
+        .enabled = [](std::string_view, const parameter_map&, const reader_input&) { return true; },
+        .before_iteration = [](std::string_view algorithm, const parameter_map&,
+                const reader_input&, std::size_t repeat) {
+            return prepare_reader_iteration(algorithm, repeat);
+        },
+        .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
+                const reader_input& input, io_pool_scope&) {
+            return run_reader(algorithm, parameters, input);
+        },
+        .after_iteration = [](std::string_view, const parameter_map&, const reader_input&,
+                io_pool_scope& preparation, io_measurement&,
+                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+    };
+
     bioseq::bench::framework::iteration_boundary_callbacks<writer_input,
         io_pool_scope, io_measurement> writer_boundaries{
         .enabled = [](std::string_view, const parameter_map&, const writer_input&) { return true; },
@@ -163,41 +179,45 @@ int run(int argc, char** argv) {
         argv,
         report_dir,
         data_dir,
-        create_benchmark<reader_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<reader_input,
+            io_pool_scope, io_measurement>(
             "IO readers — FASTA (plain / async / mmap)",
             "bench_io_readers_fasta",
             config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
-            reader_evaluator{evaluate_reader},
+            reader_evaluator{evaluate_reader}, reader_boundaries,
             reader_cleanup{cleanup_reader}),
-        create_benchmark<reader_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<reader_input,
+            io_pool_scope, io_measurement>(
             "IO readers — native protein alphabets",
             "bench_io_readers_protein",
             config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
-            reader_evaluator{evaluate_reader},
+            reader_evaluator{evaluate_reader}, reader_boundaries,
             reader_cleanup{cleanup_reader}),
-        create_benchmark<reader_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<reader_input,
+            io_pool_scope, io_measurement>(
             "IO readers — FASTQ (plain / async / mmap)",
             "bench_io_readers_fastq",
             config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
-            reader_evaluator{evaluate_reader},
+            reader_evaluator{evaluate_reader}, reader_boundaries,
             reader_cleanup{cleanup_reader}),
-        create_benchmark<reader_input, io_measurement>(
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<reader_input,
+            io_pool_scope, io_measurement>(
             "IO readers — gzipped paths",
             "bench_io_readers_gz",
             config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
-            reader_evaluator{evaluate_reader},
+            reader_evaluator{evaluate_reader}, reader_boundaries,
             reader_cleanup{cleanup_reader}),
         bioseq::bench::framework::create_benchmark_with_iteration_boundaries<writer_input,
             io_pool_scope, io_measurement>(

@@ -12,6 +12,7 @@ export module bioseq.io.alignment.record_codec;
 
 import std;
 import bioseq.io.record_schema;
+import bioseq.io.sinks;
 import bioseq.common.seqan_adapter;
 import bioseq.common.json_string;
 import bioseq.io.simd;
@@ -322,7 +323,8 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
  * treated as transport only with the prescribed two-operation placeholder.
  */
 [[nodiscard]] inline std::expected<bam_record_view, std::string> parse_bam_record(
-    std::span<const std::uint8_t> bytes, const std::uint32_t reference_count) {
+    std::span<const std::uint8_t> bytes, const std::uint32_t reference_count,
+    bioseq::simd::sequence_rank_transform_kernel transform = sequence_codec_kernel()) {
     if (bytes.size() < 36)
         return std::unexpected(std::string{"BAM record fixed core is truncated"});
     const auto signed_block_size = read_wire_signed<std::int32_t>(bytes.first(4));
@@ -377,7 +379,7 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
     result.quality = record.subspan(cursor, quality_bytes);
     cursor += quality_bytes;
     result.quality_missing = result.quality.empty() || result.quality.front() == 255;
-    if (!validate_bam_quality(result.quality, result.quality_missing))
+    if (!validate_bam_quality(result.quality, result.quality_missing, transform))
         return std::unexpected(std::string{"BAM quality contains invalid or mixed missing scores"});
     result.auxiliary = record.subspan(cursor);
     std::bitset<52 * 62> seen_tags;
@@ -1324,7 +1326,8 @@ inline void store_wire_integer(std::span<std::uint8_t> output, const Integer val
 }
 
 /** Stream one SAM B array into the shared admitted auxiliary owner, spilling on pressure. */
-[[nodiscard]] inline std::expected<owned_auxiliary_field, std::string> parse_sam_auxiliary_array(std::string_view text) {
+[[nodiscard]] inline std::expected<owned_auxiliary_field, std::string> parse_sam_auxiliary_array(
+    std::string_view text, io_memory_credit* credit = nullptr) {
     if (text.size() < 6 || text[2] != ':' || text[3] != 'B' || text[4] != ':')
         return std::unexpected(std::string{"SAM array auxiliary prefix is invalid"});
     const std::array<char, 2> tag{text[0], text[1]};
@@ -1334,7 +1337,7 @@ inline void store_wire_integer(std::span<std::uint8_t> output, const Integer val
     const auto width = auxiliary_element_bytes(subtype);
     if (width == 0 || subtype == 'A' || (value.size() > 1 && value[1] != ','))
         return std::unexpected(std::string{"SAM B auxiliary subtype is invalid"});
-    owned_auxiliary_field owner{tag, 'B', subtype};
+    owned_auxiliary_field owner{tag, 'B', subtype, credit};
     constexpr std::array<std::byte, 4> prefix{};
     if (auto begun = owner.payload.append(prefix); !begun) return std::unexpected(begun.error());
     std::array<std::uint8_t, 4096> scratch{};
@@ -1748,8 +1751,13 @@ struct alignment_wire_source {
         const auto begin = Reverse ? source.original.symbol_count - first - original_count : first;
         const alignment_rank_slice slice{source.original, begin, original_count};
         const auto borrowed = slice.borrow();
-        std::array<std::uint8_t, capacity + 6u> projected{};
-        alignment_window_sink sink{std::span{projected}.first(original_count * scale)};
+        // Whole native windows already have their exact final extent. Only a
+        // partial protein codon needs extra projected symbols beside the result.
+        std::array<std::uint8_t, capacity + 6u> projected;
+        const auto projected_size = original_count * scale;
+        const bool direct = prefix == 0u && projected_size == output.size();
+        const auto destination = direct ? output : std::span{projected}.first(projected_size);
+        alignment_window_sink sink{destination};
         std::expected<std::size_t, std::string> encoded;
         if constexpr (seqan3::aminoacid_alphabet<Alphabet>)
             encoded = emit_protein_sequence<Alphabet, Reverse, false>(sink, borrowed, source.transform);
@@ -1767,12 +1775,12 @@ struct alignment_wire_source {
                     return table;
                 }();
                 if (!source.transform(bioseq::simd::sequence_rank_transform::map_bytes,
-                        std::span{projected}.subspan(prefix, output.size()), spelling.size(), spelling, output))
+                        destination.subspan(prefix, output.size()), spelling.size(), spelling, output))
                     return std::unexpected(std::string{"RNA alignment wire spelling conversion failed"});
                 return {};
             }
         }
-        std::ranges::copy(std::span{projected}.subspan(prefix, output.size()), output.begin());
+        if (!direct) std::ranges::copy(destination.subspan(prefix, output.size()), output.begin());
         return {};
     }
 

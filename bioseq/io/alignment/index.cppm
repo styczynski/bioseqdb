@@ -12,6 +12,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
 import bioseq.io.options;
 import bioseq.io.record_schema;
+import bioseq.io.sinks;
 import bioseq.io.simd;
 import bioseq.parallelism.memory_admission;
 import bioseq.io.identifier_parser.preservation;
@@ -48,7 +49,7 @@ struct resolved_alignment_record {
 /** Admission bridge to the existing caller-owned memory permits, never a second budget. */
 struct alignment_context_admission {
     void* state{};
-    std::expected<void, std::string> (*acquire)(void*, std::size_t){};
+    std::expected<void, std::string> (*acquire)(void*, std::size_t, io_memory_credit*){};
 };
 
 /** File-level state borrows immutable source declarations and owns only derived data.
@@ -57,6 +58,7 @@ struct alignment_context_admission {
  * finalize once before emitting a header. Explicit imported native rows can stream.
  */
 class alignment_export_context {
+    static constexpr std::size_t read_name_allocation_bytes = 2048u;
     struct reference_entry {
         const reference_descriptor* source{};
         std::string wire_name;
@@ -110,7 +112,8 @@ class alignment_export_context {
 
     /** Pre-admit retained growth through the shared ledger before allocating containers. */
     [[nodiscard]] std::expected<void, std::string> admit_growth(const std::size_t fixed,
-        std::initializer_list<std::pair<std::size_t, std::size_t>> variable = {}) {
+        std::initializer_list<std::pair<std::size_t, std::size_t>> variable = {},
+        io_memory_credit* credit = nullptr) {
         auto bytes = fixed;
         for (const auto& [count, width] : variable) {
             const auto term = common::checked_mul(count, width);
@@ -122,7 +125,7 @@ class alignment_export_context {
         const auto total = common::checked_add(admitted_bytes_, bytes);
         if (!total || admission_.acquire == nullptr)
             return std::unexpected(std::string{"Alignment context requires valid shared memory admission"});
-        const auto acquired = admission_.acquire(admission_.state, bytes);
+        const auto acquired = admission_.acquire(admission_.state, bytes, credit);
         if (!acquired) return acquired;
         admitted_bytes_ = *total;
         return {};
@@ -669,8 +672,15 @@ public:
         return {};
     }
 
-    /** Resolve one row without altering its original alignment/preservation fields. */
-    [[nodiscard]] std::expected<resolved_alignment_record, std::string> resolve(const export_record_view& row) {
+    /** Exact retained-name charge for this row; no mutation or source callbacks occur. */
+    [[nodiscard]] std::size_t resolution_admission_bytes(const export_record_view& row) const {
+        return candidate_read_name(row) == "*" || assigned_read_names_.contains(read_identity(row))
+            ? 0u : read_name_allocation_bytes;
+    }
+
+    /** Resolve one row, consuming optional exact credit before any source callback. */
+    [[nodiscard]] std::expected<resolved_alignment_record, std::string> resolve(
+        const export_record_view& row, io_memory_credit* credit = nullptr) {
         if (!finalized_) return std::unexpected(std::string{"Alignment dictionary is not finalized"});
         if (row.alignment && row.alignment->header_context_id
             && !context_ids_.contains(*row.alignment->header_context_id))
@@ -682,7 +692,8 @@ public:
         else if (const auto existing = assigned_read_names_.find(identity); existing != assigned_read_names_.end())
             result.qname = existing->second;
         else {
-            if (auto admitted = admit_growth(2048); !admitted) return std::unexpected(admitted.error());
+            if (auto admitted = admit_growth(read_name_allocation_bytes, {}, credit); !admitted)
+                return std::unexpected(admitted.error());
             const auto owner = assigned_name_owners_.find(candidate);
             if (valid_read_name(candidate) && (owner == assigned_name_owners_.end() || owner->second == identity))
                 result.qname = candidate;
@@ -698,6 +709,9 @@ public:
             assigned_read_names_.emplace(identity, result.qname);
             assigned_name_owners_.emplace(result.qname, identity);
         }
+        // The caller's combined reservation is now an actual context owner.
+        // No spare credit may compete with a borrowed CIGAR callback below.
+        if (credit != nullptr) credit->release();
         const auto flags = original_flags(row);
         if (!flags) return std::unexpected(flags.error());
         result.flags = *flags;

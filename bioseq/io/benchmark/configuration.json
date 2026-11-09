@@ -28,6 +28,13 @@
     "naive_ofstream_fasta":          {"_": {"type": "integer", "default": 0}},
     "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}},
 
+    "bioseq_records_sync_fasta": {"_": {"type": "integer", "default": 0}},
+    "bioseq_records_parallel4_fasta": {"_": {"type": "integer", "default": 0}},
+    "canonical_ofstream_fasta": {"_": {"type": "integer", "default": 0}},
+    "bioseq_records_sync_fastq": {"_": {"type": "integer", "default": 0}},
+    "bioseq_records_parallel4_fastq": {"_": {"type": "integer", "default": 0}},
+    "canonical_ofstream_fastq": {"_": {"type": "integer", "default": 0}},
+
     "bioseq_dumb_header_fasta":             {"_": {"type": "integer", "default": 0}},
     "bioseq_identifier_parse_uniprot_fasta": {"_": {"type": "integer", "default": 0}},
 
@@ -52,7 +59,20 @@
     "FASTQ_LONG":      { "data": { "format": "fastq", "kind": "synthetic", "record_count": 200,   "mean_record_length_bp": 50000,  "seed": 7 }, "description": "~11 MiB FASTQ of ~50 kbp records" },
     "FASTQ_VERY_LONG": { "data": { "format": "fastq", "kind": "synthetic", "record_count": 15,    "mean_record_length_bp": 1000000,"seed": 8 }, "description": "~16 MiB FASTQ of ~1 Mbp records" },
 
-    "FASTA_REAL_HUMAN_GENOME":    { "data": { "format": "fasta", "kind": "real", "real_data_path": "homo_sapiens_GRCh38_dna4.fasta" },                  "description": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)" },
+    "FASTA_WRITER_DNA5": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "dna5", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: dna5, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTA_WRITER_DNA15": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "dna15", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: dna15, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTA_WRITER_AA10LI": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "aa10li", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: aa10li, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTA_WRITER_AA10MURPHY": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "aa10murphy", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: aa10murphy, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTA_WRITER_AA20": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "aa20", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: aa20, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTA_WRITER_AA27": {"concurrency": 1, "data": {"format": "fasta", "kind": "synthetic", "alphabet": "aa27", "record_count": 4096, "mean_record_length_bp": 200, "seed": 1}, "description": "Writer alphabet coverage: aa27, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_DNA5": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "dna5", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: dna5, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_DNA15": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "dna15", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: dna15, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_AA10LI": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "aa10li", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: aa10li, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_AA10MURPHY": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "aa10murphy", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: aa10murphy, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_AA20": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "aa20", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: aa20, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+    "FASTQ_WRITER_AA27": {"concurrency": 1, "data": {"format": "fastq", "kind": "synthetic", "alphabet": "aa27", "record_count": 4096, "mean_record_length_bp": 200, "seed": 5}, "description": "Writer alphabet coverage: aa27, 4096 native records of about 200 symbols; exact ordered full-record validation"},
+
+    "FASTA_REAL_HUMAN_GENOME":    { "data": { "format": "fasta", "kind": "real", "real_data_path": "homo_sapiens_GRCh38_dna4.fasta" },                  "description": "Real-data FASTA: 234,322,497 bytes; one record with 230,481,012 DNA4 symbols (ACGT only)" },
     "FASTQ_REAL_HUMAN_FASTQ_6GB": {"data": {"format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq", "alphabet": "dna5"}, "description": "Strict DNA5 reader corpus preserving N. Historical DNA4-drop-N measurements are not comparable to this corrected native DNA5 input. Uncompressed input."},
     "FASTQ_REAL_HUMAN_FASTQ_GZ":  {"data": {"format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true, "alphabet": "dna5"}, "description": "Strict DNA5 reader corpus preserving N. Historical DNA4-drop-N measurements are not comparable to this corrected native DNA5 input. Gzip compressed input."},
 
@@ -1242,19 +1262,23 @@
 
   "bench_io_writers_fasta": {
     "tags": ["io", "writer", "fasta"],
-    "description": "FASTA writer paths. sync vs parallel4 vs parallel8 vs bounded-pwrite bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash.",
+    "description": "FASTA writers over native DNA4/5/15 and all four protein alphabets. Historical native sequence_writer/naive_ofstream cells are retained. Separately named bioseq_records cells measure canonical write_records with escaped headers and four typed scalar fields; canonical_ofstream uses the SAME canonical formatter and measures sink overhead, not an independent codec or samtools. Both ofstream baselines only flush/close; bioseq fsyncs and atomically publishes, so their durability costs differ. Exact original fields, wire records, order and count are checked outside timing; a failed check is nonfinite and fails correctness rules.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
       "for": {
-        "FASTA_SHORT": 6, "FASTA_MEDIUM": 4, "FASTA_LONG": 3, "FASTA_VERY_LONG": 2, "FASTA_REAL_HUMAN_GENOME": 3
+        "FASTA_SHORT": 6, "FASTA_MEDIUM": 4, "FASTA_LONG": 3, "FASTA_VERY_LONG": 2, "FASTA_REAL_HUMAN_GENOME": 3,
+        "FASTA_WRITER_DNA5": 3, "FASTA_WRITER_DNA15": 3, "FASTA_WRITER_AA10LI": 3, "FASTA_WRITER_AA10MURPHY": 3, "FASTA_WRITER_AA20": 3, "FASTA_WRITER_AA27": 3
       },
       "over": {
         "bioseq_writer_sync_fasta":      {},
         "bioseq_writer_parallel4_fasta": {},
         "bioseq_writer_parallel8_fasta": {},
         "bioseq_writer_bounded_pwrite_fasta":      {},
-        "naive_ofstream_fasta":          {}
+        "naive_ofstream_fasta":          {},
+        "bioseq_records_sync_fasta": {},
+        "bioseq_records_parallel4_fasta": {},
+        "canonical_ofstream_fasta": {}
       },
       "by_regions": false,
       "metrics": {
@@ -1299,7 +1323,9 @@
             [ "writer_naive_fasta_roundtrip_matches_sync",
               { "key": "naive_ofstream_fasta" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
-              { "key": "bioseq_writer_sync_fasta" } ]
+              { "key": "bioseq_writer_sync_fasta" } ],
+            ["bioseq_records_parallel4_fasta_exact_records_match_canonical_sync", {"key": "bioseq_records_parallel4_fasta"}, {"compare": "=", "tolerance%": 0, "aggregate": "p50"}, {"key": "bioseq_records_sync_fasta"}],
+            ["canonical_ofstream_fasta_exact_records_match_canonical_sync", {"key": "canonical_ofstream_fasta"}, {"compare": "=", "tolerance%": 0, "aggregate": "p50"}, {"key": "bioseq_records_sync_fasta"}]
           ]
         },
         "output_bytes_nonzero":   { "type": "evaluation" },
@@ -1311,19 +1337,23 @@
 
   "bench_io_writers_fastq": {
     "tags": ["io", "writer", "fastq"],
-    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs bounded-pwrite bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The writer matrix uses only DNA4 corpora. The separate real-data reader matrix explicitly selects DNA5 to preserve N and exercise mmap-parallel and parallel-gzip throughput.",
+    "description": "FASTQ writers over native DNA4/5/15 and all four protein alphabets. Historical native sequence_writer/naive_ofstream cells are retained. Separately named bioseq_records cells measure canonical write_records with escaped headers and four typed scalar fields; canonical_ofstream uses the SAME canonical formatter and measures sink overhead, not an independent codec or samtools. Both ofstream baselines only flush/close; bioseq fsyncs and atomically publishes, so their durability costs differ. Exact original fields, wire records, order and count are checked outside timing; a failed check is nonfinite and fails correctness rules.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
       "for": {
-        "FASTQ_SHORT": 6, "FASTQ_MEDIUM": 4, "FASTQ_LONG": 3, "FASTQ_VERY_LONG": 2
+        "FASTQ_SHORT": 6, "FASTQ_MEDIUM": 4, "FASTQ_LONG": 3, "FASTQ_VERY_LONG": 2,
+        "FASTQ_WRITER_DNA5": 3, "FASTQ_WRITER_DNA15": 3, "FASTQ_WRITER_AA10LI": 3, "FASTQ_WRITER_AA10MURPHY": 3, "FASTQ_WRITER_AA20": 3, "FASTQ_WRITER_AA27": 3
       },
       "over": {
         "bioseq_writer_sync_fastq":      {},
         "bioseq_writer_parallel4_fastq": {},
         "bioseq_writer_parallel8_fastq": {},
         "bioseq_writer_bounded_pwrite_fastq":      {},
-        "naive_ofstream_fastq":          {}
+        "naive_ofstream_fastq":          {},
+        "bioseq_records_sync_fastq": {},
+        "bioseq_records_parallel4_fastq": {},
+        "canonical_ofstream_fastq": {}
       },
       "by_regions": false,
       "metrics": {
@@ -1368,7 +1398,9 @@
             [ "writer_naive_fastq_roundtrip_matches_sync",
               { "key": "naive_ofstream_fastq" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
-              { "key": "bioseq_writer_sync_fastq" } ]
+              { "key": "bioseq_writer_sync_fastq" } ],
+            ["bioseq_records_parallel4_fastq_exact_records_match_canonical_sync", {"key": "bioseq_records_parallel4_fastq"}, {"compare": "=", "tolerance%": 0, "aggregate": "p50"}, {"key": "bioseq_records_sync_fastq"}],
+            ["canonical_ofstream_fastq_exact_records_match_canonical_sync", {"key": "canonical_ofstream_fastq"}, {"compare": "=", "tolerance%": 0, "aggregate": "p50"}, {"key": "bioseq_records_sync_fastq"}]
           ]
         },
         "output_bytes_nonzero":   { "type": "evaluation" },

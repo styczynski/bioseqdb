@@ -221,6 +221,7 @@ linux_process_charge_bytes(std::string_view status) noexcept {
 [[nodiscard]] inline std::uint64_t system_available_bytes() noexcept {
 #if defined(__APPLE__)
     const mach_port_t host = ::mach_host_self();
+    if (host == MACH_PORT_NULL) return 0;
     vm_size_t bytes_per_page = 0;
     if (::host_page_size(host, &bytes_per_page) != KERN_SUCCESS
         || bytes_per_page == 0) {
@@ -228,12 +229,13 @@ linux_process_charge_bytes(std::string_view status) noexcept {
     }
     vm_statistics64_data_t statistics{};
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-    if (::host_statistics64(
-            host, HOST_VM_INFO64,
-            reinterpret_cast<host_info64_t>(&statistics), &count)
-        != KERN_SUCCESS) {
-        return 0;
-    }
+    const kern_return_t status = ::host_statistics64(
+        host, HOST_VM_INFO64,
+        reinterpret_cast<host_info64_t>(&statistics), &count);
+    // mach_host_self returns an owned send right, including on the failure path
+    // below. Release it after the last host query instead of leaking one per probe.
+    static_cast<void>(::mach_port_deallocate(::mach_task_self(), host));
+    if (status != KERN_SUCCESS) return 0;
     return darwin_conservative_available_page_bytes(
                static_cast<std::uint64_t>(statistics.free_count),
                static_cast<std::uint64_t>(statistics.inactive_count),

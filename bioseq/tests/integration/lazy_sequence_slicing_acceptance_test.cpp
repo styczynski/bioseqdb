@@ -86,7 +86,9 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "sequence_acceptance_match_binding_target";
     constexpr std::string_view secondary_table =
         "sequence_acceptance_match_binding_secondary";
-    auto ctx = fresh_context({target_table, secondary_table});
+    constexpr std::string_view cartesian_table =
+        "sequence_acceptance_match_binding_cartesian";
+    auto ctx = fresh_context({target_table, secondary_table, cartesian_table});
     const std::string motif = sequence_acceptance_match_binding_motif();
     const std::string short_motif = motif.substr(0u, 96u);
     create_seq_table(
@@ -448,6 +450,19 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "DEALLOCATE sequence_acceptance_base_param_sliced_join; "
         "RESET plan_cache_mode;");
 
+    /* Use two complete occurrences for the Cartesian-product check. The
+     * shared fixture's truncated second occurrence can fail the ordinary
+     * secondary-score threshold and must remain unchanged for sliced helpers. */
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{cartesian_table},
+            .typmod = {.alphabet = "dna4", .width = 64},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {motif + motif}}});
+
     /* The base filter and join search the same target with different query
      * expressions. Each needs its own scan, and mmsearch must be removed from
      * the ordinary SQL filters. */
@@ -458,7 +473,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "ON q.id=1 AND mmsearch(t.seq0, q.seq[0:]) "
         "WHERE mmsearch(t.seq0, {}) "
         "ORDER BY t.pk, q.id",
-        target_table,
+        cartesian_table,
         format_literal(
             motif, seq_typmod{.alphabet = "dna4", .width = 64}));
     const auto base_const_same_target_plan = explain_text<false>(
@@ -481,12 +496,12 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         base_const_same_target_plan, "Filter: mmsearch"));
     REQUIRE_FALSE(plan_contains(
         base_const_same_target_plan, "Join Filter: mmsearch"));
-    /* Each search returns two rows on its own Combining them must produce
+    /* Each search must retain two rows on its own. Combining them must produce
      * all four pairs. */
     const auto base_const_rows = query_rows(ctx, fmt::format(
         "SELECT t.pk FROM {} AS t WHERE mmsearch(t.seq0, {}) "
         "ORDER BY t.pk",
-        target_table,
+        cartesian_table,
         format_literal(
             motif, seq_typmod{.alphabet = "dna4", .width = 64})));
     const auto sliced_query_rows = query_rows(ctx, fmt::format(
@@ -494,7 +509,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "INNER JOIN sequence_acceptance_match_binding_queries AS q "
         "ON q.id=1 AND mmsearch(t.seq0, q.seq[0:]) "
         "ORDER BY t.pk, q.id",
-        target_table));
+        cartesian_table));
     REQUIRE(base_const_rows.size() == 2u);
     REQUIRE(sliced_query_rows.size() == 2u);
     const auto base_const_same_target_rows = query_rows(

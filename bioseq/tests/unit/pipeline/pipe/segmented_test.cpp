@@ -70,7 +70,7 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     params.base_alignment_algorithm = base_alignment_algorithm::ksw2;
     params.do_cigar = false;
 
-    const auto result = ::bioseq::simd::
+    auto result = ::bioseq::simd::
         minimap_port_segmented(query_view, target_view, params);
     REQUIRE(result.is_bounded_nthash_query_execution_consistent(true));
     REQUIRE(result.is_bounded_nthash_target_execution_consistent(true));
@@ -90,13 +90,19 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
         REQUIRE(root != result.results.end());
         REQUIRE(root->is_reverse);
     }
+    // Later completion callbacks retain secondary decisions from the merged set.
+    finalize_match_result_classification(result.results);
     const auto roots = std::ranges::count_if(result.results,
         [](const auto& match) { return match.is_primary; });
     REQUIRE(roots >= 2);
     REQUIRE(std::ranges::count_if(result.results,
         [](const auto& match) { return match.is_sam_primary; }) == 1);
+    // These roots cover the same complete query. They are alternative placements,
+    // not disjoint pieces of a chimeric alignment.
+    REQUIRE(std::ranges::none_of(result.results,
+        [](const auto& match) { return match.is_supplementary; }));
     REQUIRE(std::ranges::count_if(result.results,
-        [](const auto& match) { return match.is_supplementary; }) == roots - 1);
+        [](const auto& match) { return match.is_primary && match.is_sam_secondary; }) == roots - 1);
     for (std::size_t index = 0; index < result.results.size(); ++index) {
         const auto& match = result.results[index];
         REQUIRE(match.has_sam_classification);
@@ -109,57 +115,116 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
 
 TEST_CASE("merged classification preserves producer validity after core filtering",
           "[component:bioseq][layer:unit][feature:alignment]") {
-    std::array<match_result, 3> first_segment{};
-    first_segment[1].has_dp_score = true;
-    first_segment[2].is_primary = false;
-    finalize_match_result_classification(first_segment, true, true);
-    REQUIRE(first_segment[0].is_sam_primary);
-    REQUIRE(first_segment[1].is_supplementary);
-
-    std::array<match_result, 2> second_segment{};
-    second_segment[1].is_primary = false;
-    finalize_match_result_classification(second_segment, false, false);
-    REQUIRE(second_segment[0].is_sam_primary);
-
-    std::vector<match_result> merged;
-    merged.emplace_back(); // Coarse-only producer: validity must remain unavailable.
-    // The first segment's original primary was outside its accepted core.
-    merged.push_back(std::move(first_segment[1]));
-    merged.push_back(std::move(first_segment[2]));
-    merged.push_back(std::move(second_segment[0]));
-    merged.push_back(std::move(second_segment[1]));
-    const std::array<std::uint64_t, 5> sam_flags{0u, 0u, 0x100u, 0x800u, 0x100u};
-    for (unsigned pass = 0; pass != 2; ++pass) {
-        finalize_match_result_classification(merged);
-        REQUIRE_FALSE(merged[0].has_sam_classification);
-        REQUIRE_FALSE(merged[0].has_mapq);
-        REQUIRE_FALSE(merged[0].has_dp_score);
-        REQUIRE_FALSE(merged[0].has_edit_distance);
-        REQUIRE_FALSE(merged[0].is_sam_primary);
-        REQUIRE_FALSE(merged[0].is_supplementary);
-        REQUIRE(merged[0].export_status() == 0u);
-        REQUIRE(merged[1].is_sam_primary);
-        REQUIRE(merged[1].has_mapq); // A computed zero is still available.
-        REQUIRE(merged[1].mapq == 0);
-        REQUIRE(merged[1].has_dp_score);
-        REQUIRE(merged[1].has_edit_distance);
-        REQUIRE(merged[2].has_mapq);
-        REQUIRE_FALSE(merged[2].has_dp_score);
-        REQUIRE_FALSE(merged[2].has_edit_distance);
-        REQUIRE(merged[3].is_supplementary);
-        REQUIRE_FALSE(merged[3].has_mapq);
-        REQUIRE_FALSE(merged[3].has_edit_distance);
-        REQUIRE_FALSE(merged[4].has_mapq);
-        REQUIRE_FALSE(merged[4].has_edit_distance);
-        for (std::size_t index = 0; index < merged.size(); ++index) {
-            REQUIRE(merged[index].has_sam_classification == (index != 0));
-            REQUIRE(merged[index].alignment_ordinal == index);
-            REQUIRE((merged[index].export_status() & 0x900u) == sam_flags[index]);
+    const std::array<sequence_size_t, 2> query_origins{0u,
+        (sequence_size_t{1} << 32) + (sequence_size_t{1} << 31) - 500u};
+    for (const sequence_size_t query_origin : query_origins) {
+        CAPTURE(query_origin);
+        // Drop an early weak secondary before a later root and its secondary. Both
+        // parent links must be remapped before the survivor records move.
+        std::array<alignment_region, 4> regions{};
+        const std::array<std::int32_t, 4> scores{100, 70, 60, 55};
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            regions[index].query_start = query_origin + (index < 2 ? 0u : 1000u);
+            regions[index].query_end = regions[index].query_start + 1000;
+            regions[index].ref_start = index * 2000;
+            regions[index].ref_end = regions[index].ref_start + 1000;
+            regions[index].score = scores[index];
         }
-        REQUIRE(std::ranges::count_if(merged,
-            [](const auto& match) { return match.is_sam_primary; }) == 1);
-        REQUIRE(std::ranges::count_if(merged,
-            [](const auto& match) { return match.is_supplementary; }) == 1);
+        classify_primary_secondary(regions, 0.5f,
+            std::numeric_limits<std::int32_t>::max(), 0);
+        REQUIRE(filter_secondary_regions(regions, 0.8f, 0, 5) == 3);
+        REQUIRE(regions[0].region_id == 0);
+        REQUIRE(regions[0].parent == 0);
+        REQUIRE(regions[1].region_id == 1);
+        REQUIRE(regions[1].parent == 1);
+        REQUIRE(regions[2].region_id == 2);
+        REQUIRE(regions[2].parent == 1);
+        std::array<match_result, 3> first_segment{};
+        for (std::size_t index = 0; index < first_segment.size(); ++index)
+            first_segment[index] = region_to_match_result(std::move(regions[index]), query_origin + 3000, 7000);
+        REQUIRE(first_segment[1].is_primary);
+        REQUIRE_FALSE(first_segment[2].is_primary);
+        first_segment[1].has_dp_score = true;
+        first_segment[2].is_primary = false;
+        finalize_match_result_classification(first_segment, true, true);
+        REQUIRE(first_segment[0].is_sam_primary);
+        REQUIRE(first_segment[1].is_supplementary);
+
+        std::array<match_result, 3> second_segment{};
+        second_segment[0].query_start = query_origin + 2000;
+        second_segment[0].query_end = query_origin + 3000;
+        second_segment[1].query_start = query_origin + 2000;
+        second_segment[1].query_end = query_origin + 3000;
+        second_segment[2].query_start = query_origin + 1000;
+        second_segment[2].query_end = query_origin + 2000; // Alternative to the surviving first-segment root.
+        for (auto& result : second_segment) result.query_len = query_origin + 3000;
+        second_segment[1].is_primary = false;
+        finalize_match_result_classification(second_segment, false, false);
+        REQUIRE(second_segment[0].is_sam_primary);
+
+        std::vector<match_result> merged;
+        merged.emplace_back(); // Coarse-only producer: validity must remain unavailable.
+        merged.back().query_len = query_origin + 3000;
+        // The first segment's original primary was outside its accepted core.
+        merged.push_back(std::move(first_segment[1]));
+        merged.push_back(std::move(first_segment[2]));
+        merged.push_back(std::move(second_segment[0]));
+        merged.push_back(std::move(second_segment[1]));
+        merged.push_back(std::move(second_segment[2]));
+        const std::array<std::uint64_t, 6> sam_flags{0u, 0u, 0x100u, 0x800u, 0x100u, 0x100u};
+        for (unsigned pass = 0; pass != 2; ++pass) {
+            const auto classified = reconcile_match_result_classification(merged, 0.5f,
+                std::numeric_limits<std::int32_t>::max());
+            REQUIRE(classified.has_value());
+            finalize_match_result_classification(merged);
+            REQUIRE_FALSE(merged[0].has_sam_classification);
+            REQUIRE_FALSE(merged[0].has_mapq);
+            REQUIRE_FALSE(merged[0].has_dp_score);
+            REQUIRE_FALSE(merged[0].has_edit_distance);
+            REQUIRE_FALSE(merged[0].is_sam_primary);
+            REQUIRE_FALSE(merged[0].is_supplementary);
+            REQUIRE(merged[0].export_status() == 0u);
+            REQUIRE(merged[1].is_sam_primary);
+            REQUIRE(merged[1].has_mapq); // A computed zero is still available.
+            REQUIRE(merged[1].mapq == 0);
+            REQUIRE(merged[1].has_dp_score);
+            REQUIRE(merged[1].has_edit_distance);
+            REQUIRE(merged[2].has_mapq);
+            REQUIRE_FALSE(merged[2].has_dp_score);
+            REQUIRE_FALSE(merged[2].has_edit_distance);
+            REQUIRE(merged[3].is_supplementary);
+            REQUIRE_FALSE(merged[3].has_mapq);
+            REQUIRE_FALSE(merged[3].has_edit_distance);
+            REQUIRE_FALSE(merged[4].has_mapq);
+            REQUIRE_FALSE(merged[4].has_edit_distance);
+            for (std::size_t index = 0; index < merged.size(); ++index) {
+                REQUIRE(merged[index].query_len == query_origin + 3000);
+                REQUIRE(merged[index].has_sam_classification == (index != 0));
+                REQUIRE(merged[index].is_sam_secondary == (index == 2 || index == 4 || index == 5));
+                REQUIRE(merged[index].alignment_ordinal == index);
+                REQUIRE((merged[index].export_status() & 0x900u) == sam_flags[index]);
+            }
+            REQUIRE(std::ranges::count_if(merged,
+                [](const auto& match) { return match.is_sam_primary; }) == 1);
+            REQUIRE(std::ranges::count_if(merged,
+                [](const auto& match) { return match.is_supplementary; }) == 1);
+        }
+        // A stronger placement in a later target segment retains producer priority.
+        std::array<match_result, 2> alternatives{};
+        for (std::size_t index = 0; index < alternatives.size(); ++index) {
+            alternatives[index].query_start = query_origin;
+            alternatives[index].query_end = query_origin + 1000;
+            alternatives[index].chain_score = index == 0 ? 100 : 200;
+        }
+        finalize_match_result_classification(alternatives, false, false);
+        REQUIRE(reconcile_match_result_classification(alternatives, 0.5f,
+            std::numeric_limits<std::int32_t>::max()).has_value());
+        REQUIRE(alternatives[0].is_sam_secondary);
+        REQUIRE(alternatives[1].is_sam_primary);
+        for (std::size_t index = 0; index < alternatives.size(); ++index) {
+            REQUIRE(alternatives[index].is_primary);
+            REQUIRE(alternatives[index].alignment_ordinal == index);
+        }
     }
 }
 

@@ -94,7 +94,7 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       --static-contract-script
         "${_bioseq_external_acceptance_static_contract}"
       --cmake-fragment "${CMAKE_CURRENT_LIST_FILE}"
-      --mode-source "${BIOSEQ_REPOSITORY_ROOT}/build_mcp/server.py"
+      --mode-source "${BIOSEQ_REPOSITORY_ROOT}/build_auto_scripts/server.py"
       --timeout-seconds 180
     DEPENDS
       postgresql_bioseq
@@ -107,7 +107,7 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       "${_bioseq_external_acceptance_manifest}"
       "${_bioseq_external_acceptance_static_contract}"
       "${CMAKE_CURRENT_LIST_FILE}"
-      "${BIOSEQ_REPOSITORY_ROOT}/build_mcp/server.py"
+      "${BIOSEQ_REPOSITORY_ROOT}/build_auto_scripts/server.py"
       "${CMAKE_CURRENT_LIST_DIR}/private_postgres.py"
     COMMENT
       "Running external-enabled generated SQL in a clean private PostgreSQL 17 cluster"

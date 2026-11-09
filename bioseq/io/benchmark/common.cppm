@@ -15,13 +15,18 @@ module;
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <oneapi/tbb/global_control.h>
 #include <random>
 #include <simdjson.h>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <variant>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -40,8 +45,12 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
+import bioseq.simd.utils;
 import bioseq.io.reader;
+import bioseq.io.record_schema;
 import bioseq.io.options;
+import bioseq.io.compression.chunk_fetcher;
+import bioseq.io.compression.deflate;
 import bioseq.io.writer;
 import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser;
@@ -118,7 +127,6 @@ struct io_pool_scope {
 };
 
 using benchmark_alphabet = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using benchmark_batch = sequence_batch<benchmark_alphabet>;
 
 /// Corpus path and size estimates for a reader run. Cleanup deletes synthetic
 /// files created for the benchmark and keeps supplied data files.
@@ -134,25 +142,51 @@ struct reader_input {
     bool is_synthetic = false;
 };
 
-/// Corpus loaded before timing so a writer run measures writing the batches.
+/** One immutable resident corpus; native packing follows its declared alphabet. */
+template<sequence_alphabet Alphabet>
+struct writer_corpus {
+    using alphabet_type = Alphabet;
+    using alphabet_config = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+    using batch_type = sequence_batch<alphabet_config>;
+    std::vector<batch_type> batches;
+    std::vector<compact_sequence_view<alphabet_config>> sequences;
+};
+
+/** Derive the fixture alternatives from the existing biological registry. */
+using writer_corpus_storage = typename decltype(
+    []<class... Alphabets>(std::tuple<Alphabets...>*) {
+        return std::type_identity<std::variant<writer_corpus<Alphabets>...>>{};
+    }(static_cast<supported_biological_alphabets::alphabets_tuple*>(nullptr)))::type;
+
+/** Stable ASCII quality descriptor with the fixture's selected checked SIMD decoder. */
+struct writer_quality_source {
+    std::span<const std::uint8_t> bytes;
+    bioseq::simd::sequence_rank_transform_kernel transform{};
+};
+
+/** Corpus and stable borrowed record views prepared outside every measured write. */
 struct writer_input {
     std::string source_corpus_path;
-    std::size_t source_bytes_on_disk = 0;
-    std::size_t source_record_count = 0;
-    bool is_fastq = false;
-    bool is_synthetic_source = false;
-
-    /// Output path reused by writer runs. Evaluation reads the result  back, and
-    /// cleanup removes the file.
+    std::size_t source_bytes_on_disk{};
+    std::size_t source_record_count{};
+    std::string alphabet{"dna4"};
+    bool is_fastq{};
+    bool is_synthetic_source{};
+    bool valid{};
     std::string output_scratch_path;
+    writer_corpus_storage corpus;
+    std::vector<writer_quality_source> qualities;
+    std::vector<std::string> canonical_headers;
+    std::vector<export_record_view> records;
+    record_source_metadata metadata;
 
-    /// In-memory corpus for the writer loop. Populated in `on_input`.
-    std::vector<benchmark_batch> batches;
-
-    /// Expected XOR of record hashes for checking the written output. FASTA hashes
-    /// headers and sequences. FASTQ also hashes quality bytes up to sequence length.
-    std::uint64_t expected_content_hash_fastq = 0;
-    std::uint64_t expected_content_hash_fasta = 0;
+    /** Empty input is invalid until its fixture and every borrowed view are complete. */
+    writer_input() = default;
+    writer_input(const writer_input&) = delete;
+    writer_input& operator=(const writer_input&) = delete;
+    /** Moving standard-vector backing preserves all frozen descriptor addresses. */
+    writer_input(writer_input&&) noexcept = default;
+    writer_input& operator=(writer_input&&) noexcept = default;
 };
 
 /// Measurements shared by reader and writer workloads.
@@ -539,11 +573,20 @@ struct corpus_descriptor {
     return generated;
 }
 
-/// Estimate corpus memory from the configured record count and mean length,
-/// or from a supplied file's size. Compressed files use a rough expansion factor.
-/// Return zero when the size cannot be determined.
+/** Apply the existing nominal gzip expansion heuristic without floating conversion or overflow. */
+[[nodiscard]] constexpr std::size_t estimate_gzip_decoded_bytes(std::size_t compressed_bytes) noexcept {
+    const auto whole = common::checked_mul(compressed_bytes / 5u, std::size_t{16u});
+    const auto remainder = (compressed_bytes % 5u) * 16u / 5u;
+    const auto decoded = whole ? common::checked_add(*whole, remainder) : std::nullopt;
+    return decoded.value_or(std::numeric_limits<std::size_t>::max());
+}
+
+/// Estimate nominal body bytes for synthetic data or file bytes for supplied data.
+/// Expand gzip file bytes by the existing 3.2x heuristic unless the encoded size is requested.
+/// Missing files return zero for the input builder to diagnose; invalid sizes saturate.
 [[nodiscard]] std::size_t estimate_corpus_bytes(std::string_view data_dir,
-                                                simdjson::dom::element data) noexcept {
+                                                simdjson::dom::element data,
+                                                bool expand_gzip = true) noexcept {
     const std::string kind = read_string_field(data, "kind", "synthetic");
     if (kind == "real") {
         const std::string relative = read_string_field(data, "real_data_path", "");
@@ -554,31 +597,65 @@ struct corpus_descriptor {
         const auto observed_size = filesystem::file_size(joined, ec);
         if (ec)
             return 0;
-        std::size_t bytes = static_cast<std::size_t>(observed_size);
-        if (read_bool_field(data, "compressed", false)) {
-            // Same factor `build_reader_input` uses for `decompressed_bytes`.
-            bytes = static_cast<std::size_t>(static_cast<double>(bytes) * 3.2);
-        }
-        return bytes;
+        if (observed_size > std::numeric_limits<std::size_t>::max())
+            return std::numeric_limits<std::size_t>::max();
+        const std::size_t bytes = static_cast<std::size_t>(observed_size);
+        return expand_gzip && read_bool_field(data, "compressed", false)
+            ? estimate_gzip_decoded_bytes(bytes) : bytes;
     }
     if (kind != "synthetic")
         return 0;
-    const auto record_count = static_cast<std::size_t>(read_int_field(data, "record_count", 1000));
-    const auto mean_record_logical_length =
-        static_cast<std::size_t>(read_int_field(data, "mean_record_length_bp", 200));
-    return record_count * mean_record_logical_length;
+    const auto record_count = read_int_field(data, "record_count", 1000);
+    const auto mean_length = read_int_field(data, "mean_record_length_bp", 200);
+    if (record_count < 0 || mean_length < 0
+        || !std::in_range<std::size_t>(record_count) || !std::in_range<std::size_t>(mean_length))
+        return std::numeric_limits<std::size_t>::max();
+    return common::checked_mul(static_cast<std::size_t>(record_count),
+                               static_cast<std::size_t>(mean_length))
+        .value_or(std::numeric_limits<std::size_t>::max());
 }
 
-/// Estimate memory for reader buffers and decoded batches so the benchmark
-/// framework can limit concurrent runs. The estimate is based on corpus  size.
+/** Estimate one reader group's simultaneous owners; this is scheduling guidance, not an allocation cap.
+ * The cached input is a descriptor. Algorithms run sequentially and count/discard batches, so reserve
+ * one working-space estimate rather than a second resident corpus. The same byte model applies to
+ * every registered biological alphabet and to the identifier benchmark's buffered reader.
+ */
 [[nodiscard]] run_constraints estimate_reader_resources(std::string_view data_dir,
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {
+    constexpr std::size_t descriptor_allowance = 64u * 1024u;
+    // Heuristic headroom for slabs, ordinary batch/offset storage, parser/identifier scratch,
+    // stdio/zlib state and task owners. Neither allowance is a universal allocation bound.
+    constexpr std::size_t fixed_workspace = 64u * 1024u * 1024u;
     const std::size_t bytes = estimate_corpus_bytes(data_dir, data);
-    return {
-        .base_memory = bytes * 2,
-        .extra_memory = bytes * 2,
-    };
+    const auto doubled = common::checked_mul(bytes, std::size_t{2u});
+    if (!doubled)
+        return {.base_memory = descriptor_allowance,
+                .extra_memory = std::numeric_limits<std::size_t>::max()};
+    std::size_t workspace = std::max(fixed_workspace, *doubled);
+
+    if (read_bool_field(data, "compressed", false)) {
+        // Parallel gzip plans 32 MiB compressed ranges, not the source's 4 MiB output target.
+        // Each of eight slots can retain ~2A byte capacity +4A marker bytes. Worker growth adds
+        // ~2A old marker bytes per slot, and ordered resolution can retain ~A old byte storage.
+        // A uses the nominal expansion ratio: atypical expansion/headers still need observation.
+        const auto chunk_bytes = common::checked_add(
+            std::min(bytes, estimate_gzip_decoded_bytes(compression::default_chunk_target_bytes)),
+            2u * compression::predecoded_buffer_size);
+        constexpr std::size_t chunk_capacity_factor = compression::chunk_arena_capacity * 8u + 1u;
+        const auto arena_bytes = chunk_bytes
+            ? common::checked_mul(*chunk_bytes, chunk_capacity_factor) : std::nullopt;
+        const auto mapped_and_arena = arena_bytes
+            ? common::checked_add(estimate_corpus_bytes(data_dir, data, false), *arena_bytes)
+            : std::nullopt;
+        const auto gzip_workspace = mapped_and_arena
+            ? common::checked_add(*mapped_and_arena, fixed_workspace) : std::nullopt;
+        if (!gzip_workspace)
+            return {.base_memory = descriptor_allowance,
+                    .extra_memory = std::numeric_limits<std::size_t>::max()};
+        workspace = std::max(workspace, *gzip_workspace);
+    }
+    return {.base_memory = descriptor_allowance, .extra_memory = workspace};
 }
 
 /// Estimate memory for the batches kept by a writer run and its output
@@ -587,9 +664,14 @@ struct corpus_descriptor {
                                                         std::string_view /*test_case_name*/,
                                                         simdjson::dom::element data) noexcept {
     const std::size_t bytes = estimate_corpus_bytes(data_dir, data);
+    const auto rows = static_cast<std::size_t>(read_int_field(data, "record_count", 1000));
+    // Packed batches plus stable views/header owners; biological bodies are never copied.
+    const auto views = common::checked_mul(rows, sizeof(export_record_view) + 256u);
+    const auto doubled = common::checked_mul(bytes, 2u);
+    const auto resident = views && doubled ? common::checked_add(*views, *doubled) : std::nullopt;
     return {
-        .base_memory = bytes * 2,
-        .extra_memory = bytes * 2,
+        .base_memory = resident.value_or(std::numeric_limits<std::size_t>::max()),
+        .extra_memory = doubled.value_or(std::numeric_limits<std::size_t>::max()),
     };
 }
 

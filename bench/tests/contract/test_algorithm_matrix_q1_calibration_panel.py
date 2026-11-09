@@ -13,7 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "build_mcp"))
+sys.path.insert(0, str(ROOT / "build_auto_scripts"))
 
 from bench import generate_e2e_algorithm_matrix_q1_calibration_panel as generator
 import build_worker

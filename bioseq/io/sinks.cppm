@@ -22,6 +22,7 @@ module;
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <oneapi/tbb/spin_mutex.h>
 
 export module bioseq.io.sinks;
 
@@ -29,6 +30,76 @@ import bioseq.common.logging;
 import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::io {
+
+/** Share one bounded, already-admitted tranche across a quiescent IO wave.
+ * Actual allocations always take independent owned permits. The bank is stable
+ * and outlives every borrower; a short TBB lock protects only unused credit.
+ */
+class io_memory_credit {
+    parallelism::memory_permit permit_;
+    oneapi::tbb::spin_mutex mutex_;
+public:
+    /** Start empty; absence of speculative admission preserves the exact path. */
+    io_memory_credit() = default;
+    /** Adopt one existing reservation without sampling memory again. */
+    explicit io_memory_credit(parallelism::memory_permit permit) : permit_(std::move(permit)) {}
+    io_memory_credit(const io_memory_credit&) = delete;
+    io_memory_credit& operator=(const io_memory_credit&) = delete;
+    io_memory_credit(io_memory_credit&&) = delete;
+    io_memory_credit& operator=(io_memory_credit&&) = delete;
+
+    /** Replace spare credit only between waves, after all previous borrowers stop. */
+    void reset(parallelism::memory_permit permit) {
+        const oneapi::tbb::spin_mutex::scoped_lock lock{mutex_};
+        permit_ = std::move(permit);
+    }
+
+    /** Release all unused speculation before external callbacks or abandonment. */
+    void release() {
+        const oneapi::tbb::spin_mutex::scoped_lock lock{mutex_};
+        permit_.release();
+    }
+
+    /** Split exact owned bytes, or drop all spare before the caller's normal fallback.
+     * No host sampling, allocation, or controller reservation runs under this lock.
+     */
+    [[nodiscard]] std::optional<parallelism::memory_permit> take(
+        const std::uint64_t bytes, parallelism::memory_admission_controller& controller) {
+        const oneapi::tbb::spin_mutex::scoped_lock lock{mutex_};
+        if (permit_.controller() == &controller && bytes <= permit_.bytes())
+            return permit_.split_off(bytes);
+        permit_.release();
+        return std::nullopt;
+    }
+};
+
+/** Acquire exact owned bytes from a shared tranche or the unchanged live controller. */
+[[nodiscard]] inline std::optional<parallelism::memory_permit> reserve_io_memory(
+    const std::uint64_t bytes, io_memory_credit* credit = nullptr) {
+    auto& controller = parallelism::memory_admission_controller::instance();
+    if (credit != nullptr)
+        if (auto reserved = credit->take(bytes, controller); reserved) return reserved;
+    return controller.try_reserve(bytes);
+}
+
+/** Grow an actual allocation's owned permit while preserving its existing peak charge.
+ * Only the additional bytes transfer from the bank. Exhaustion releases all spare
+ * before exact global admission, preventing another row's speculation from blocking it.
+ */
+[[nodiscard]] inline bool grow_io_memory(parallelism::memory_permit& owner,
+    const std::uint64_t wanted, io_memory_credit* credit = nullptr) {
+    if (wanted <= owner.bytes()) return true;
+    if (!owner) {
+        auto reserved = reserve_io_memory(wanted, credit);
+        if (!reserved) return false;
+        owner = std::move(*reserved);
+        return true;
+    }
+    if (credit != nullptr)
+        if (auto extra = credit->take(wanted - owner.bytes(), *owner.controller()); extra)
+            return owner.absorb(std::move(*extra));
+    return owner.grow_to(wanted);
+}
 
 /** Optional caller-thread cancellation checkpoint; never copied into worker jobs.
  * The callback may unwind through its caller's existing error bridge. It must
@@ -367,6 +438,7 @@ static_assert(positional_byte_source<posix_pwrite_sink>);
  */
 class admitted_byte_buffer {
     parallelism::memory_permit permit_;
+    io_memory_credit* credit_{};
     std::vector<std::byte> bytes_;
     std::optional<posix_pwrite_sink> file_;
     std::optional<mapped_read_window> mapped_;
@@ -382,20 +454,12 @@ class admitted_byte_buffer {
         if (capacity > std::numeric_limits<std::size_t>::max() - bytes_.capacity())
             return std::unexpected("byte-buffer growth accounting overflows");
         const auto peak = capacity + bytes_.capacity();
-        bool admitted = permit_ && permit_.grow_to(peak);
-        if (!permit_) {
-            auto permit = parallelism::memory_admission_controller::instance().try_reserve(peak);
-            if (permit) { permit_ = std::move(*permit); admitted = true; }
-        }
+        bool admitted = grow_io_memory(permit_, peak, credit_);
         if (admitted) { bytes_.reserve(capacity); permit_.shrink_to(bytes_.capacity()); return {}; }
         if (bytes_.capacity() > std::numeric_limits<std::size_t>::max() - 4096u)
             return std::unexpected("byte-buffer spill accounting overflows");
         const auto spill_peak = bytes_.capacity() + 4096u;
-        admitted = permit_ && permit_.grow_to(spill_peak);
-        if (!permit_) {
-            auto permit = parallelism::memory_admission_controller::instance().try_reserve(spill_peak);
-            if (permit) { permit_ = std::move(*permit); admitted = true; }
-        }
+        admitted = grow_io_memory(permit_, spill_peak, credit_);
         if (!admitted) return std::unexpected("cannot admit private byte-buffer ownership");
         auto opened = posix_pwrite_sink::try_open("/tmp/bioseq_byte_spool", true);
         if (!opened) return std::unexpected(opened.error());
@@ -411,6 +475,8 @@ class admitted_byte_buffer {
 public:
     /** Start empty; no allocation or IO occurs until bytes arrive. */
     admitted_byte_buffer() = default;
+    /** Borrow stable spare admission while retaining every allocation's own permit. */
+    explicit admitted_byte_buffer(io_memory_credit* credit) : credit_(credit) {}
     admitted_byte_buffer(const admitted_byte_buffer&) = delete;
     admitted_byte_buffer& operator=(const admitted_byte_buffer&) = delete;
     admitted_byte_buffer(admitted_byte_buffer&&) noexcept = default;
@@ -422,6 +488,7 @@ public:
             std::vector<std::byte>{}.swap(bytes_);
             permit_.release();
             permit_ = std::move(other.permit_);
+            credit_ = other.credit_;
             bytes_ = std::move(other.bytes_);
             file_ = std::move(other.file_);
             mapped_ = std::move(other.mapped_);

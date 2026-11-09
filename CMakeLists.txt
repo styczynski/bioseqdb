@@ -373,19 +373,11 @@ if(BIOSEQ_PACKAGE_BUILD)
     "Package builds never use an install RPATH in the build tree" FORCE)
 endif()
 
-# Fallback defaults for the per-build-type flag variables. These run AFTER
-# CMake has imported cache values from CMakePresets.json, so they MUST be
-# guarded — an unconditional `set(CMAKE_CXX_FLAGS_DEBUG "-g")` silently
-# clobbers presets that explicitly cleared the variable to drop -g (e.g.
-# bench-opt sets it to "" so DWARF generation is OFF for the -O3 + Debug
-# combo; without the guard, every bench-opt build compiles every TU with
-# -g and pays the DWARF RSS tax that the preset comment warns about
-# — dispatch_buffer.cppm jumps from ~5 GB to >11 GB peak RSS, which is
-# enough to push lower-RAM Apple Silicon hosts into swap and stall single
-# compiles for hours on memory-pressure-driven major page faults). Using
-# DEFINED CACHE{...} keeps
-# the fallback for non-preset configures while letting any preset value
-# (including the empty string) take precedence.
+# Fallback defaults for per-configuration flags. Preserve preset cache values,
+# including empty strings: optimized presets supply -O3 and NDEBUG explicitly,
+# while inspection presets also choose their own DWARF level. Overriding those
+# settings can add multi-gigabyte debug information to heavy module owners.
+# Non-preset configurations retain the defaults below.
 if(NOT DEFINED CACHE{CMAKE_CXX_FLAGS_DEBUG})
   set(CMAKE_CXX_FLAGS_DEBUG "-g")
 endif()
@@ -897,19 +889,19 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cmake_configure_freshness.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_cmake_configure_freshness.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_postgresql_config_invariant.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_postgresql_config_invariant.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_sanitizer_presets.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_sanitizer_presets.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_cache_modes.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
@@ -917,27 +909,27 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_server.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_server.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_clang_tidy.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_clang_tidy.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_subagent.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_subagent.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_package_linux.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_package_linux.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_highway_profile_modes.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_highway_profile_modes.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_highway_gcc_canary_mode.py"
+      "${CMAKE_SOURCE_DIR}/build_auto_scripts/tests/test_highway_gcc_canary_mode.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"

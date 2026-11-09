@@ -271,7 +271,9 @@ enum class sequence_rank_transform : std::uint8_t {
     unpack_nibbles, reverse_bytes, validate_phred, validate_fastq, validate_missing_quality
 };
 
-/** Scalar-only ABI; input/output are disjoint bounded native-rank tiles.
+/** Scalar-only ABI over bounded native-rank tiles.
+ * Input/output must be disjoint, except map_bytes also permits exactly identical
+ * byte ranges. Shifted or partial overlap is unsupported for every operation.
  * Forward lookup uses one entry per source triplet; inverse entries pack three
  * destination rank bytes. False reports a malformed shape or source rank. */
 using sequence_rank_transform_kernel = bool (*)(sequence_rank_transform,

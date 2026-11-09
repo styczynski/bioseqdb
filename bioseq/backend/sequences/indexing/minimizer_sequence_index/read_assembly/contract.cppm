@@ -279,17 +279,30 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         sort_unique(wanted);
         // Read the selected buckets and discard hashes above the occurrence limit.
         auto& pairs = scratch.pairs;
-        const auto accept_bucket = [&qkmers, max_occ_threshold](
+        const auto pair_bound = detail::minimizer_sequence_query_pair_bound(
+            clip_hi_bp - clip_lo_bp, static_cast<std::uint64_t>(qkmers.size()), max_occ);
+        const auto accept_bucket = [&qkmers, &storage, target_len, max_occ_threshold](
                                        const std::uint64_t hash, const std::uint32_t count) {
-            return count <= max_occ_threshold &&
-                std::binary_search(qkmers.begin(), qkmers.end(), hash);
+            if (count > max_occ_threshold ||
+                !std::binary_search(qkmers.begin(), qkmers.end(), hash)) {
+                return false;
+            }
+            // Validate before wire_for_each_bucket resizes position scratch.
+            if (count > target_len) {
+                storage.index_error("minimizers_per_sequence: bucket count exceeds target length");
+            }
+            return true;
         };
-        auto emit_kept = [&pairs, &clip_lo_bp, &clip_hi_bp](
+        auto emit_kept = [&pairs, &storage, clip_lo_bp, clip_hi_bp, pair_bound](
                              std::uint64_t kmer, std::uint32_t pos_count, const std::uint64_t* gpos) {
             for (std::uint32_t j = 0; j < pos_count; ++j) {
                 const sequence_size_t pos_bp = static_cast<sequence_size_t>(gpos[j] >> 1);
                 if (pos_bp < clip_lo_bp || pos_bp >= clip_hi_bp) {
                     continue;
+                }
+                // Malformed repeated bucket descriptors must not exceed admission.
+                if (pairs.size() >= pair_bound) {
+                    storage.index_error("minimizers_per_sequence: query postings exceed admission bound");
                 }
                 pairs.emplace_back(kmer, gpos[j]);
             }
@@ -302,15 +315,15 @@ template <class p_storage> struct direct_minimizer_bucket_index {
             if (nc > 1) {
                 // A multi-chunk bucket contains one hash Count its positions from chunk
                 // sizes before deciding whether to load the payloads.
-                std::size_t exact = 0;
+                std::uint64_t exact = 0u;
                 for (std::size_t c = 0; c < nc; ++c) {
                     storage.validate_minimizer_chunk_metadata_or_error(
                         sk, c, k_encoded_header_bytes + k_encoded_bucket_bytes, alignof(std::uint64_t));
                     const std::size_t cb = storage.chunk_byte_size(sk, c);
-                    exact +=
-                        (cb - k_encoded_header_bytes - k_encoded_bucket_bytes) / sizeof(std::uint64_t);
+                    exact = bioseq::common::saturating_add(exact, static_cast<std::uint64_t>(
+                        (cb - k_encoded_header_bytes - k_encoded_bucket_bytes) / sizeof(std::uint64_t)));
                 }
-                if (exact > static_cast<std::size_t>(max_occ_threshold))
+                if (exact > max_occ_threshold)
                     continue;                          // The full count exceeds the occurrence limit.
                 for (std::size_t c = 0; c < nc; ++c) { // Read every  chunk of this hash.
                     const std::size_t cb = storage.chunk_byte_size(sk, c);

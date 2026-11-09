@@ -70,18 +70,25 @@ inline constexpr std::string_view k_direct_metallib_array_length_policy =
     return out.str();
 }
 
-/// @brief Adds the verified helper executable's identity to the shader-cache ID.
-/// Rejects a helper, that has not passed its checks.
+/// @brief Adds checked helper and Vulkan loader content identities to the cache ID.
+/// Rejects incomplete identities; filesystem location and timestamps do not affect the key.
 [[nodiscard]] inline std::expected<std::string, std::string>
 shader_cache_digest_hex_with_qualified_helper(
     const shader_cache_build_inputs& inputs,
-    const qualified_metal_archive_helper& helper) {
+    const qualified_metal_archive_helper& helper,
+    const sealed_shader_cache_detail::stable_regular_file_digest& loader_image) {
     if (!helper.is_accepted()) {
         return std::unexpected(
             "shader cache identity requires an accepted once-qualified helper executable");
     }
+    if (loader_image.size == 0u || loader_image.identity.size != loader_image.size ||
+        !std::any_of(loader_image.sha256.begin(), loader_image.sha256.end(),
+                     [](std::uint8_t byte) { return byte != 0u; })) {
+        return std::unexpected(
+            "shader cache identity requires a checked nonempty Vulkan loader image");
+    }
     std::uint64_t hash =
-        bioseq::common::fnv1a_64("bioseq-shader-cache-qualified-helper-contract-v1");
+        bioseq::common::fnv1a_64("bioseq-shader-cache-qualified-helper-loader-contract-v1");
     hash = bioseq::common::hash_combine_64(hash, shader_cache_digest_hex(inputs));
     hash = bioseq::common::hash_combine_64(hash, helper.source);
     hash = bioseq::common::hash_combine_64(hash, helper.executable_size);
@@ -89,6 +96,11 @@ shader_cache_digest_hex_with_qualified_helper(
         hash,
         bioseq::common::fnv1a_64(std::as_bytes(
             std::span<const std::uint8_t, 32>{helper.executable_sha256})));
+    hash = bioseq::common::hash_combine_64(hash, loader_image.size);
+    hash = bioseq::common::hash_combine_64(
+        hash,
+        bioseq::common::fnv1a_64(std::as_bytes(
+            std::span<const std::uint8_t, 32>{loader_image.sha256})));
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << hash;
     return out.str();

@@ -198,6 +198,11 @@ inline bool contains_export_call(Node* expression, void*) {
         : std::vector<bioseq::io::identifier_parser::user_column_mapping>{};
     const auto format = *options.writer.format;
     auto binding = describe_export_query(query, mappings, format);
+    for (std::size_t frame = 0; frame < binding.frames.size(); ++frame) {
+        if (!export_query_contains_scope(binding, 0, frame, true, true)) continue;
+        if (binding.frames[frame].query->rowMarks != NIL)
+            export_binding_error("bioseq.write accepts a SELECT without modifying CTEs or row locks");
+    }
     complete_export_matches(binding);
     finish_export_role_inference(binding);
     qualify_export_metadata_names(binding);

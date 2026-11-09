@@ -252,7 +252,9 @@ template<class D>
     return mapped;
 }
 
-/** Map small native alphabets across full byte lanes with the shared lookup banks. */
+/** Map small native alphabets across full byte lanes with the shared lookup banks.
+ * Exact input/output aliasing is supported: each chunk is loaded before its
+ * same-position store. Shifted or partial overlap is unsupported. */
 template<class D>
 [[nodiscard]] HWY_INLINE bool map_small_sequence_bytes_for(D tag,
         std::span<const std::uint8_t> input, std::size_t cardinality,
@@ -339,7 +341,9 @@ template<class D>
     return true;
 }
 
-/** Map arbitrary byte-alphabet ranks using the same checked gather as codon algebra. */
+/** Map arbitrary byte-alphabet ranks using the same checked gather as codon algebra.
+ * Exact input/output aliasing is supported: each chunk is loaded before its
+ * same-position store. Shifted or partial overlap is unsupported. */
 template<class D>
 [[nodiscard]] HWY_INLINE bool map_sequence_bytes_for(D tag,
         std::span<const std::uint8_t> input, std::size_t cardinality,

@@ -13,6 +13,7 @@ import :results;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.common.memory_budget;
+import bioseq.parallelism.memory_admission;
 import bioseq.highway.dispatch_contract;
 import bioseq.chaining.core;
 import bioseq.chaining.scalar;
@@ -312,6 +313,76 @@ void generate_regions(std::span<chain> chains,
 
 // Classify primary and secondary regions.
 
+/** Query-coordinate access shared by chain regions and finalized match results. */
+template<class Region>
+concept query_interval_region = requires(const Region& region) {
+    { region.query_start } -> std::convertible_to<sequence_size_t>;
+    { region.query_end } -> std::convertible_to<sequence_size_t>;
+};
+
+/**
+ * Find the first primary whose query overlap masks this region. Reuse caller-owned
+ * scratch for the union of primary coverage; indices keep full-width coordinates
+ * in their original records instead of packing two positions into one word.
+ * Preserve primary priority order and the existing mask-level/uncovered-length rule.
+ */
+template<query_interval_region Region, std::ranges::random_access_range Scratch>
+    requires std::same_as<std::ranges::range_value_t<Scratch>, std::size_t>
+[[nodiscard]] std::optional<std::size_t> find_masking_query_primary(
+    std::span<const Region> regions,
+    std::size_t region_index,
+    std::span<const std::size_t> primary_indices,
+    Scratch& coverage_indices,
+    float mask_level,
+    std::int32_t mask_len) {
+    const auto& current_region = regions[region_index];
+    const sequence_size_t current_start = current_region.query_start;
+    const sequence_size_t current_end = current_region.query_end;
+    coverage_indices.clear();
+    if (current_end <= current_start || mask_len < 0) return std::nullopt;
+    for (const std::size_t primary_index : primary_indices) {
+        const auto& primary = regions[primary_index];
+        if (primary.query_end > primary.query_start
+            && primary.query_end > current_start && primary.query_start < current_end)
+            coverage_indices.push_back(primary_index);
+    }
+    if (coverage_indices.empty()) return std::nullopt;
+    std::sort(coverage_indices.begin(), coverage_indices.end(),
+        [regions](std::size_t left, std::size_t right) {
+            if (regions[left].query_start != regions[right].query_start)
+                return regions[left].query_start < regions[right].query_start;
+            return left < right;
+        });
+    sequence_size_t uncovered_length = 0;
+    sequence_size_t coverage_position = current_start;
+    for (const std::size_t primary_index : coverage_indices) {
+        const auto& primary = regions[primary_index];
+        const sequence_size_t interval_start = std::max(primary.query_start, current_start);
+        const sequence_size_t interval_end = std::min(primary.query_end, current_end);
+        if (interval_start > coverage_position)
+            uncovered_length += interval_start - coverage_position;
+        coverage_position = std::max(coverage_position, interval_end);
+    }
+    if (current_end > coverage_position) uncovered_length += current_end - coverage_position;
+    if (uncovered_length > static_cast<sequence_size_t>(mask_len)) return std::nullopt;
+    for (const std::size_t primary_index : primary_indices) {
+        const auto& primary = regions[primary_index];
+        if (primary.query_end <= primary.query_start || primary.query_end <= current_start
+            || primary.query_start >= current_end) continue;
+        const sequence_size_t minimum_span = std::min(
+            primary.query_end - primary.query_start, current_end - current_start);
+        const sequence_size_t maximum_span = std::max(
+            primary.query_end - primary.query_start, current_end - current_start);
+        const sequence_size_t overlap_length = std::min(current_end, primary.query_end)
+            - std::max(current_start, primary.query_start);
+        if (minimum_span != 0 && maximum_span != 0
+            && (static_cast<float>(overlap_length) / static_cast<float>(minimum_span)
+                - static_cast<float>(uncovered_length) / static_cast<float>(maximum_span)) > mask_level)
+            return primary_index;
+    }
+    return std::nullopt;
+}
+
 /**
  * @brief Assign secondary regions to overlapping primaries.
  *
@@ -354,104 +425,49 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     primary_indices.push_back(0);
     regions[0].parent = 0;
 
-    // Reuse enough interval storage to compare against every primary.
-    alignment_result_vector<std::uint64_t> coverage_intervals;
+    // Reuse enough index storage to compare against every primary.
+    alignment_result_vector<std::size_t> coverage_indices;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    coverage_intervals.set_logical_bounds(
+    coverage_indices.set_logical_bounds(
         tail_storage_plan->coverage_interval_capacity,
         tail_storage_plan->coverage_interval_capacity);
-    coverage_intervals.reserve(tail_storage_plan->coverage_interval_capacity);
+    coverage_indices.reserve(tail_storage_plan->coverage_interval_capacity);
 #else
-    coverage_intervals.reserve(region_count);
+    coverage_indices.reserve(region_count);
 #endif
 
     for (std::size_t region_idx = 1; region_idx < region_count; ++region_idx) {
         alignment_region& current_region = regions[region_idx];
-        const std::int32_t current_query_start = current_region.query_start;
-        const std::int32_t current_query_end = current_region.query_end;
-        std::int32_t uncovered_length = 0;
-
-        // Collect the parts of this query range covered by existing primaries.
-        coverage_intervals.clear();
-        for (const std::size_t primary_idx : primary_indices) {
-            const alignment_region& primary_region = regions[primary_idx];
-            std::int32_t primary_query_start = primary_region.query_start;
-            std::int32_t primary_query_end = primary_region.query_end;
-            if (primary_query_end <= current_query_start ||
-                primary_query_start >= current_query_end) {
-                continue;
-            }
-            primary_query_start = std::max(primary_query_start, current_query_start);
-            primary_query_end = std::min(primary_query_end, current_query_end);
-            coverage_intervals.push_back((static_cast<std::uint64_t>(primary_query_start) << 32) |
-                                         static_cast<std::uint32_t>(primary_query_end));
-        }
-
-        if (!coverage_intervals.empty()) {
-            std::sort(coverage_intervals.begin(), coverage_intervals.end());
-            std::int32_t coverage_pos = current_query_start;
-            for (const std::uint64_t interval : coverage_intervals) {
-                const std::int32_t interval_start = static_cast<std::int32_t>(interval >> 32);
-                const std::int32_t interval_end = static_cast<std::int32_t>(interval);
-                if (interval_start > coverage_pos) {
-                    uncovered_length += interval_start - coverage_pos;
-                }
-                coverage_pos = std::max(coverage_pos, interval_end);
-            }
-            if (current_query_end > coverage_pos) {
-                uncovered_length += current_query_end - coverage_pos;
-            }
-        }
-
-        // Find the first primary that meets the overlap  and uncovered-length rules.
-        bool is_secondary = false;
-        for (const std::size_t primary_idx : primary_indices) {
-            alignment_region& primary_region = regions[primary_idx];
-            const std::int32_t primary_query_start = primary_region.query_start;
-            const std::int32_t primary_query_end = primary_region.query_end;
-            if (primary_query_end <= current_query_start ||
-                primary_query_start >= current_query_end) {
-                continue;
-            }
-
-            const std::int32_t min_span = std::min(primary_query_end - primary_query_start,
-                                              current_query_end - current_query_start);
-            const std::int32_t max_span = std::max(primary_query_end - primary_query_start,
-                                              current_query_end - current_query_start);
-            const std::int32_t overlap_length =
-                std::max(0,
-                         std::min(current_query_end, primary_query_end) -
-                             std::max(current_query_start, primary_query_start));
-
-            if (min_span > 0 && max_span > 0 &&
-                (static_cast<float>(overlap_length) / min_span -
-                 static_cast<float>(uncovered_length) / max_span) > mask_level &&
-                uncovered_length <= mask_len) {
-                const std::int32_t resolved_parent =
-                    (primary_region.parent >= 0) ? primary_region.parent : primary_region.region_id;
-                current_region.parent = resolved_parent;
-                primary_region.secondary_score =
-                    std::max(primary_region.secondary_score, current_region.score);
-                // Record the strongest competing alignment for mapping-quality estimation.
-                if (current_region.has_alignment && primary_region.has_alignment &&
-                    (primary_region.reference_id != current_region.reference_id ||
-                     primary_region.ref_start != current_region.ref_start ||
-                     primary_region.ref_end != current_region.ref_end ||
-                     overlap_length != min_span)) {
-                    primary_region.secondary_dp_max =
-                        std::max(primary_region.secondary_dp_max, current_region.dp_max_score);
-                    if (primary_region.dp_max_score - current_region.dp_max_score <= sub_diff) {
-                        ++primary_region.secondary_count;
-                    }
-                } else if (current_region.seed_count >= primary_region.seed_count) {
+        const auto primary_index = find_masking_query_primary(
+            std::span<const alignment_region>{regions.data(), regions.size()}, region_idx,
+            std::span<const std::size_t>{primary_indices.data(), primary_indices.size()},
+            coverage_indices, mask_level, mask_len);
+        if (primary_index) {
+            alignment_region& primary_region = regions[*primary_index];
+            current_region.parent = primary_region.parent >= 0
+                ? primary_region.parent : primary_region.region_id;
+            primary_region.secondary_score =
+                std::max(primary_region.secondary_score, current_region.score);
+            const sequence_size_t minimum_span = std::min(
+                primary_region.query_end - primary_region.query_start,
+                current_region.query_end - current_region.query_start);
+            const sequence_size_t overlap_length =
+                std::min(current_region.query_end, primary_region.query_end)
+                - std::max(current_region.query_start, primary_region.query_start);
+            // Preserve the existing competing-score and MAPQ bookkeeping.
+            if (current_region.has_alignment && primary_region.has_alignment &&
+                (primary_region.reference_id != current_region.reference_id ||
+                 primary_region.ref_start != current_region.ref_start ||
+                 primary_region.ref_end != current_region.ref_end ||
+                 overlap_length != minimum_span)) {
+                primary_region.secondary_dp_max =
+                    std::max(primary_region.secondary_dp_max, current_region.dp_max_score);
+                if (primary_region.dp_max_score - current_region.dp_max_score <= sub_diff)
                     ++primary_region.secondary_count;
-                }
-                is_secondary = true;
-                break;
+            } else if (current_region.seed_count >= primary_region.seed_count) {
+                ++primary_region.secondary_count;
             }
-        }
-
-        if (!is_secondary) {
+        } else {
             primary_indices.push_back(region_idx);
             current_region.parent = static_cast<std::int32_t>(region_idx);
             current_region.secondary_count = 0;
@@ -461,6 +477,86 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     bioseq_log<logging_level::debug>("[minimap_port] Classification: {} primary, {} secondary",
                                      primary_indices.size(),
                                      region_count - primary_indices.size());
+}
+
+/**
+ * Reconcile independently classified target segments for native SAM export.
+ * Existing chain-root and score fields remain unchanged. Full-query alternatives
+ * become secondary; only nonmasked query pieces become supplementary. Scratch
+ * uses the existing result-vector admission and is absent for fewer than two roots.
+ */
+[[nodiscard]] inline std::expected<void, alignment_contract_error>
+reconcile_match_result_classification(std::span<match_result> results,
+    float mask_level, std::int32_t mask_len) {
+    std::size_t root_count = 0;
+    for (auto& result : results) {
+        result.is_sam_secondary = result.has_sam_classification && !result.is_primary;
+        if (result.has_sam_classification && result.is_primary) ++root_count;
+    }
+    if (root_count > 1u) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        // Segment workspaces have already returned; use the same direct admission
+        // owner as merged match-result vectors instead of a retired worker context.
+        admitted_alignment_result_vector<std::size_t, false> primary_indices;
+        admitted_alignment_result_vector<std::size_t, false> coverage_indices;
+        // Each scratch count is bounded by the already materialized match vector.
+        // The checked owner handles byte arithmetic and admission without adding
+        // a narrower signed region-ID constraint to these size_t-only indices.
+        primary_indices.set_logical_bounds(root_count, root_count);
+        coverage_indices.set_logical_bounds(root_count, root_count);
+#else
+        // Release buffers before their retained admission permits on every exit.
+        bioseq::parallelism::memory_permit primary_permit;
+        bioseq::parallelism::memory_permit coverage_permit;
+        std::vector<std::size_t> primary_indices;
+        std::vector<std::size_t> coverage_indices;
+#endif
+        try {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            primary_indices.reserve(root_count);
+            coverage_indices.reserve(root_count);
+#else
+            bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error,
+                bioseq::parallelism::vector_admission_policy::retain_permit>(
+                    primary_indices, primary_permit, root_count);
+            bioseq::parallelism::prepare_admitted_vector_capacity<std::runtime_error,
+                bioseq::parallelism::vector_admission_policy::retain_permit>(
+                    coverage_indices, coverage_permit, root_count);
+#endif
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(alignment_contract_error::memory_admission);
+        } catch (const std::length_error&) {
+            return std::unexpected(alignment_contract_error::memory_admission);
+        } catch (const std::runtime_error&) {
+            return std::unexpected(alignment_contract_error::memory_admission);
+        }
+        for (std::size_t index = 0; index < results.size(); ++index) {
+            if (results[index].has_sam_classification && results[index].is_primary)
+                primary_indices.push_back(index);
+        }
+        // Segment order is target order, while producer masking uses descending
+        // chain score. Sort indices only, preserving match and ordinal order.
+        std::sort(primary_indices.begin(), primary_indices.end(),
+            [results](std::size_t left, std::size_t right) {
+                if (results[left].chain_score != results[right].chain_score)
+                    return results[left].chain_score > results[right].chain_score;
+                return left < right;
+            });
+        std::size_t accepted_count = 0;
+        for (std::size_t candidate = 0; candidate < root_count; ++candidate) {
+            const std::size_t index = primary_indices[candidate];
+            auto& result = results[index];
+            const auto primary_index = find_masking_query_primary(
+                std::span<const match_result>{results.data(), results.size()}, index,
+                std::span<const std::size_t>{primary_indices.data(), accepted_count},
+                coverage_indices, mask_level, mask_len);
+            result.is_sam_secondary = primary_index.has_value();
+            // The accepted prefix never overwrites an unread candidate index.
+            if (!primary_index) primary_indices[accepted_count++] = index;
+        }
+    }
+    finalize_match_result_classification(results);
+    return {};
 }
 
 // Keep the strongest secondary mappings.
@@ -526,6 +622,24 @@ void classify_primary_secondary(std::span<alignment_region> regions,
         }
     }
 
+    // Classification uses dense region IDs as parent indices. Assign retained
+    // IDs in the original slots, then resolve every parent before compaction can
+    // overwrite a slot another record still references. Missing parents remain
+    // unclassified; negative sentinel values are preserved.
+    std::size_t retained_count = 0;
+    for (std::size_t region_idx = 0; region_idx < region_count; ++region_idx) {
+        if (keep[region_idx])
+            regions[region_idx].region_id = static_cast<std::int32_t>(retained_count++);
+    }
+    for (std::size_t region_idx = 0; region_idx < region_count; ++region_idx) {
+        if (!keep[region_idx]) continue;
+        auto& region = regions[region_idx];
+        if (region.parent < 0) continue;
+        const auto parent_index = static_cast<std::size_t>(region.parent);
+        region.parent = parent_index < region_count && keep[parent_index]
+            ? regions[parent_index].region_id : -1;
+    }
+
     // Move survivors to the front and return the shorter range to the caller.
     // The owning slab still destroys every constructed region, including
     // rejected records and records whose CIGAR was moved to the front.
@@ -537,11 +651,6 @@ void classify_primary_secondary(std::span<alignment_region> regions,
             }
             ++write_pos;
         }
-    }
-
-    // Assign consecutive IDs to surviviug regions.
-    for (std::size_t region_idx = 0; region_idx < write_pos; ++region_idx) {
-        regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
     }
 
     bioseq_log<logging_level::debug>("[minimap_port] After secondary filtering: {} regions remain",

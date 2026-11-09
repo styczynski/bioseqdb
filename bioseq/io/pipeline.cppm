@@ -86,6 +86,9 @@ run_async_pipeline(p_source source,
         });
     }
     auto task_group = pool.make_task_group();
+    const std::size_t maximum_pending_batches =
+        std::max<std::size_t>(1, options.concurrency.ring_capacity);
+    std::size_t submitted_batches = 0;
 
     // Read and parse on the calling thread.
     buffer_slab slab(options.io.initial_buffer_size);
@@ -118,15 +121,23 @@ run_async_pipeline(p_source source,
     };
     prepare_fresh_batch();
 
-    // Move a nonempty batch to the worker pool and prepare its replacement.
-    auto dispatch_batch = [&current_batch, &handler_fn, &prepare_fresh_batch, &task_group]() {
+    // Bound queued owning batches with cooperative waits in the existing TBB arena.
+    auto dispatch_batch = [&current_batch, &handler_fn, &pool, &prepare_fresh_batch,
+                           &submitted_batches, &task_group, maximum_pending_batches]() {
         if (current_batch.empty())
             return;
+        if (submitted_batches >= maximum_pending_batches) {
+            task_group.wait();
+            // wait() releases this group's implementation; later work needs a new group.
+            task_group = pool.make_task_group();
+            submitted_batches = 0;
+        }
         p_batch batch_to_dispatch = std::move(current_batch);
         task_group.run(bioseq::parallelism::task_body{
             [&handler_fn, batch = std::move(batch_to_dispatch)]() mutable {
                 handler_fn(std::move(batch));
             }});
+        ++submitted_batches;
         current_batch = p_batch{};
         prepare_fresh_batch();
     };
