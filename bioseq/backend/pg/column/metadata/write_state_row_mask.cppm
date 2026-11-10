@@ -235,19 +235,19 @@ pop_all_row_mask_write_states(SubTransactionId current_sub_xid,
 	row_mask_state_cache.for_each(
 		[current_sub_xid, parent_sub_xid, commit](
 				row_mask_write_state_map_entry* entry) {
-		/* Handle DROP even when no write frame remains. Aborting a failed DROP
-		 * must restore this backend's relation state. */
+		/* Restore or reparent DROP, then discard this subtransaction's own
+		 * mask frame. Preserve ancestor frames for a later rollback. */
 		if (entry->dropped)
 		{
-			if (entry->drop_subtransaction_id == current_sub_xid)
+			if (entry->drop_subtransaction_id != current_sub_xid)
 			{
-				if (commit) {
-					entry->drop_subtransaction_id = parent_sub_xid;
-				} else {
-					entry->dropped = false;
-				}
+				return;
 			}
-			return;
+			if (commit) {
+				entry->drop_subtransaction_id = parent_sub_xid;
+			} else {
+				entry->dropped = false;
+			}
 		}
 
 		if (entry->write_state_stack == nullptr)
@@ -258,7 +258,7 @@ pop_all_row_mask_write_states(SubTransactionId current_sub_xid,
 		row_mask_subtransaction_write_frame* stack_head = entry->write_state_stack;
 		if (stack_head->subtransaction_id == current_sub_xid)
 		{
-			if (commit)
+			if (commit && !entry->dropped)
 			{
 				flush_pending_row_mask_writes(stack_head->row_mask_rows);
 			}

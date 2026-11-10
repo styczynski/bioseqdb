@@ -65,6 +65,7 @@ enum class exact_simd_index_status : std::uint8_t {
     non_contiguous_range,
     arithmetic_overflow,
     collector_overflow,
+    admission_denied,
 };
 
 /// Return the stable diagnostic name for an exact SIMD indexing status.
@@ -101,6 +102,8 @@ exact_simd_index_status_name(exact_simd_index_status status) noexcept {
         return "arithmetic_overflow";
     case exact_simd_index_status::collector_overflow:
         return "collector_overflow";
+    case exact_simd_index_status::admission_denied:
+        return "admission_denied";
     }
     return "unknown";
 }
@@ -548,7 +551,7 @@ collect_reference_simd_index_range_or_throw(
                 access.admission_bytes);
             if (!permit) {
                 throw exact_simd_index_runtime_error{
-                    exact_simd_index_status::non_contiguous_range, operation};
+                    exact_simd_index_status::admission_denied, operation};
             }
             auto materialized = bioseq::storage::materialize_packed_sequence(
                 sequence, lo_bp, hi_bp, packed_width, std::move(*permit));
@@ -686,7 +689,7 @@ struct admitted_fragment_source {
         auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
             access.admission_bytes);
         if (!permit)
-            throw exact_simd_index_runtime_error{exact_simd_index_status::non_contiguous_range,
+            throw exact_simd_index_runtime_error{exact_simd_index_status::admission_denied,
                                                 context.operation};
         auto admitted = bioseq::storage::materialize_packed_sequence(
             context.sequence, access.from, access.to, context.packed_width, std::move(*permit));

@@ -11,6 +11,14 @@ extern "C" {
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "access/genam.h"
+#include "access/heapam.h"
+#include "access/table.h"
+#include "catalog/indexing.h"
+#include "storage/lmgr.h"
+#include "utils/rel.h"
+#include "utils/lsyscache.h"
+#include "utils/snapmgr.h"
 #include "common/relpath.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
@@ -40,6 +48,8 @@ export module bioseq.postgres.storage.indexing.chunked_storage:file_actions;
 import std;
 import bioseq.common.logging;
 import bioseq.postgres.support; // bioseq::postgres::support::invoke_pg_as_cpp
+import bioseq.postgres.column.table_access;
+import bioseq.postgres.storage.manager;
 import :catalog;
 export namespace bioseq::storage::indexing {
 
@@ -1003,6 +1013,170 @@ arm_generation_file_unlink_on_commit(const file_action_reservation reservation,
                       observed.st_dev,
                       observed.st_ino,
                       k_no_paired_file_action);
+}
+
+/** Stage catalog-authorized image removal before dropping a source or one column.
+ *
+ * The caller holds the source's deletion lock until transaction end. Scan all
+ * LIVE and RETIRED descriptors for its logical OID, including older physical
+ * incarnations, and reserve the whole owner batch before arming any action.
+ * All files pass the existing path/inode checks before any descriptor is
+ * deleted. PostgreSQL rolls back descriptor deletion; the existing transaction
+ * queue cancels commit unlinks on abort and reparents them on subcommit.
+ *
+ * @param source Locked Bioseq source relation, still present in pg_class.
+ * @param column_attno Positive physical column number, or zero for the table.
+ * @throws A PostgreSQL/C++ error that the DROP hook must propagate as ERROR.
+ */
+inline void stage_minimizer_generation_owner_drop(Relation source,
+                                                 const AttrNumber column_attno = 0) {
+    using bioseq::postgres::support::invoke_pg_as_cpp;
+    const bool source_valid = invoke_pg_as_cpp([source, column_attno] {
+        return source != nullptr && RelationGetRelid(source) != InvalidOid &&
+               source->rd_locator.dbOid == MyDatabaseId &&
+               relation_uses_column_table_access_method(source) &&
+               CheckRelationLockedByMe(source, AccessExclusiveLock, false) &&
+               column_attno >= 0 &&
+               (column_attno == 0 ||
+                (column_attno <= RelationGetDescr(source)->natts &&
+                 !bioseq::postgres::support::tuple_descriptor_attribute(
+                      RelationGetDescr(source), column_attno - 1)->attisdropped));
+    });
+    if (!source_valid) {
+        minimizer_generation_storage_error_as_cpp(
+            "generation owner DROP requires the exact locked Bioseq source or column");
+    }
+    const Oid owner_oid = RelationGetRelid(source);
+    const Oid storage_oid = invoke_pg_as_cpp([] {
+        return get_relname_relid("minimizer_generation_storage", bioseq_internal_ns());
+    });
+    if (!OidIsValid(storage_oid)) {
+        minimizer_generation_storage_error_as_cpp(
+            "generation owner DROP descriptor catalog is missing");
+    }
+
+    Relation storage = nullptr;
+    SysScanDesc scan = nullptr;
+    file_action_reservation reservation{};
+    try {
+        storage = invoke_pg_as_cpp(
+            [storage_oid] { return table_open(storage_oid, RowExclusiveLock); });
+        // Retain the catalog lock through transaction end. The source deletion
+        // lock excludes publishers/readers of this owner across all three passes.
+        bioseq::storage::validate_minimizer_generation_storage_catalogs_pg();
+        const bool catalog_identity_valid = invoke_pg_as_cpp([storage] {
+            return RelationGetNamespace(storage) == bioseq_internal_ns() &&
+                   std::string_view{RelationGetRelationName(storage)} ==
+                       "minimizer_generation_storage";
+        });
+        if (!catalog_identity_valid) {
+            minimizer_generation_storage_error_as_cpp(
+                "generation owner DROP descriptor catalog identity changed");
+        }
+        std::array<ScanKeyData, 3> keys{
+            minimizer_generation_storage_codec::scan_key<
+                &minimizer_generation_storage_catalog_row::database_oid>(MyDatabaseId),
+            minimizer_generation_storage_codec::scan_key<
+                &minimizer_generation_storage_catalog_row::user_relid>(owner_oid),
+            minimizer_generation_storage_codec::scan_key<
+                &minimizer_generation_storage_catalog_row::column_attno>(column_attno),
+        };
+        const int key_count = column_attno == 0 ? 2 : 3;
+        enum class drop_pass { validate, arm, erase };
+        constexpr std::array passes{drop_pass::validate, drop_pass::arm, drop_pass::erase};
+        std::size_t descriptor_count = 0u;
+        for (const drop_pass pass : passes) {
+            scan = invoke_pg_as_cpp([storage, key_count, &keys] {
+                return systable_beginscan(
+                    storage, InvalidOid, false, SnapshotSelf, key_count, keys.data());
+            });
+            std::size_t ordinal = 0u;
+            for (;;) {
+                const HeapTuple tuple = invoke_pg_as_cpp([scan] { return systable_getnext(scan); });
+                if (!HeapTupleIsValid(tuple))
+                    break;
+                if (ordinal >= k_pending_file_action_capacity ||
+                    (pass != drop_pass::validate && ordinal >= descriptor_count)) {
+                    minimizer_generation_storage_error_as_cpp(
+                        "generation owner DROP descriptor batch exceeds its reservation");
+                }
+                // The generated codec owns no C++ allocation for this row: names
+                // are fixed NameData and retirement is an optional scalar.
+                static_assert(std::is_trivially_destructible_v<
+                              minimizer_generation_storage_catalog_row>);
+                const auto catalog = minimizer_generation_storage_codec::deform(
+                    tuple, RelationGetDescr(storage), CurrentMemoryContext);
+                const bool live = catalog.state ==
+                    static_cast<std::int16_t>(minimizer_generation_storage_state::live);
+                const bool retired = catalog.state ==
+                    static_cast<std::int16_t>(minimizer_generation_storage_state::retired);
+                if (catalog.database_oid != MyDatabaseId || catalog.user_relid != owner_oid ||
+                    !OidIsValid(catalog.tablespace_oid) ||
+                    !OidIsValid(catalog.main_relfilenode) || catalog.column_attno <= 0 ||
+                    (column_attno != 0 && catalog.column_attno != column_attno) ||
+                    std::string_view{NameStr(catalog.index_name)} !=
+                        k_minimizers_per_fragment_index_name ||
+                    catalog.query_key < 0 || catalog.generation_id <= 0 ||
+                    catalog.provider != static_cast<std::int16_t>(
+                        bioseq::indexing::k_minimizer_fragment_image_relation_backed_storage_kind) ||
+                    catalog.image_bytes < static_cast<std::int64_t>(
+                        bioseq::indexing::k_minimizer_fragment_image_header_bytes) ||
+                    !OidIsValid(catalog.payload_relation_oid) ||
+                    catalog.payload_database_oid != catalog.database_oid ||
+                    !OidIsValid(catalog.payload_tablespace_oid) ||
+                    !OidIsValid(catalog.payload_relfilenode) ||
+                    NameStr(catalog.payload_relation_name)[0] == '\0' ||
+                    (!live && !retired) || live == catalog.retire_full_xid.has_value()) {
+                    minimizer_generation_storage_error_as_cpp(
+                        "generation owner DROP descriptor scalar shape is invalid");
+                }
+                if (pass == drop_pass::arm) {
+                    arm_generation_file_unlink_on_commit(
+                        reservation, ordinal,
+                        minimizer_generation_file_identity{
+                            .database_oid = catalog.database_oid,
+                            .tablespace_oid = catalog.tablespace_oid,
+                            .main_relfilenode = catalog.main_relfilenode,
+                            .user_relid = catalog.user_relid,
+                            .column_attno = catalog.column_attno,
+                            .query_key = static_cast<std::uint64_t>(catalog.query_key),
+                            .generation_id = static_cast<std::uint64_t>(catalog.generation_id),
+                        });
+                } else if (pass == drop_pass::erase) {
+                    invoke_pg_as_cpp(
+                        [storage, tuple] { CatalogTupleDelete(storage, &tuple->t_self); });
+                }
+                ++ordinal;
+            }
+            invoke_pg_as_cpp([scan] { systable_endscan(scan); });
+            scan = nullptr;
+            if (pass == drop_pass::validate) {
+                descriptor_count = ordinal;
+                if (descriptor_count == 0u)
+                    break;
+                reservation = reserve_file_actions(descriptor_count);
+            } else if (ordinal != descriptor_count) {
+                minimizer_generation_storage_error_as_cpp(
+                    "generation owner DROP descriptor count changed under source lock");
+            }
+        }
+        invoke_pg_as_cpp([storage] { table_close(storage, NoLock); });
+        storage = nullptr;
+        if (descriptor_count != 0u)
+            invoke_pg_as_cpp([] { CommandCounterIncrement(); });
+        release_unarmed_file_action_reservation(reservation);
+    } catch (const bioseq::postgres::support::postgres_error&) {
+        // PostgreSQL abort owns scan/relation cleanup after the hook rethrows.
+        release_unarmed_file_action_reservation(reservation);
+        throw;
+    } catch (...) {
+        if (scan != nullptr)
+            invoke_pg_as_cpp([scan] { systable_endscan(scan); });
+        if (storage != nullptr)
+            invoke_pg_as_cpp([storage] { table_close(storage, NoLock); });
+        release_unarmed_file_action_reservation(reservation);
+        throw;
+    }
 }
 
 /// Copy recent cleanup diagnostics for inspection by the backend.

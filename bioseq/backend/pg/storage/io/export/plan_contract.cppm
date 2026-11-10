@@ -16,7 +16,7 @@ export namespace bioseq::postgres::storage::io::exporting {
 /** Versioned custom_private fields are nodes, never process-local pointers. */
 enum class export_plan_field : int {
     version, function_oid, destination, mappings, options, query_text,
-    columns, visible_columns, match_owner, count
+    columns, visible_columns, match_owner, match_fields_required, count
 };
 inline constexpr int export_plan_codec_version = 1;
 
@@ -36,9 +36,10 @@ inline constexpr int export_plan_codec_version = 1;
         fields = lappend(fields, makeInteger(column.private_companion));
         fields = lappend(fields, makeInteger(static_cast<int>(column.internal_fields)));
         fields = lappend(fields, makeInteger(static_cast<int>(column.coordinate_basis)));
-        const std::string tag = column.auxiliary_tag
-            ? std::string{column.auxiliary_tag->data(), column.auxiliary_tag->size()} : std::string{};
-        fields = lappend(fields, makeString(pstrdup(tag.c_str())));
+        const std::array<char, 3> tag = column.auxiliary_tag
+            ? std::array<char, 3>{(*column.auxiliary_tag)[0], (*column.auxiliary_tag)[1], '\0'}
+            : std::array<char, 3>{};
+        fields = lappend(fields, makeString(pstrdup(tag.data())));
         fields = lappend(fields, makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
             ObjectIdGetDatum(column.source_relation), false, true));
         fields = lappend(fields, makeInteger(column.source_attribute));

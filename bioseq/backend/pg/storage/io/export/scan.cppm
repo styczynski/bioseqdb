@@ -37,6 +37,7 @@ struct export_scan_runtime {
     export_execution_phase phase{export_execution_phase::ready};
     std::int64_t count{};
     bool match_owner{};
+    bool match_fields_required{};
 };
 
 /** Context callback remains POD even after the nontrivial runtime was destroyed. */
@@ -119,7 +120,9 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
         state.cleanup = cleanup;
         cleanup->callback.func = export_context_cleanup;
         cleanup->callback.arg = cleanup;
-        MemoryContextRegisterResetCallback(estate->es_query_cxt, &cleanup->callback);
+        invoke_pg_as_cpp([estate, cleanup] {
+            MemoryContextRegisterResetCallback(estate->es_query_cxt, &cleanup->callback);
+        });
         auto* storage = invoke_pg_as_cpp([estate] {
             return MemoryContextAlloc(estate->es_query_cxt, sizeof(export_scan_runtime));
         });
@@ -127,12 +130,11 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
         auto& runtime = *cleanup->runtime;
         const auto& destination = export_private_const(plan, export_plan_field::destination, TEXTOID);
         if (destination.constisnull) export_binding_error("export destination must not be NULL");
-        runtime.destination = invoke_pg_as_cpp([value = destination.constvalue] {
-            char* encoded = TextDatumGetCString(value);
-            std::string result{encoded};
-            pfree(encoded);
-            return result;
+        char* encoded_destination = invoke_pg_as_cpp([value = destination.constvalue] {
+            return TextDatumGetCString(value);
         });
+        runtime.destination = encoded_destination;
+        invoke_pg_as_cpp([encoded_destination] { pfree(encoded_destination); });
         const auto& options = export_private_const(plan, export_plan_field::options, JSONBOID);
         runtime.options = decode_export_options(options.constisnull
             ? std::nullopt : std::optional<Datum>{options.constvalue}, runtime.destination);
@@ -140,10 +142,14 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
         auto* match_node = export_private_node(plan, export_plan_field::match_owner);
         if (!IsA(match_node, Integer)) export_binding_error("invalid BioseqExport match-owner marker");
         runtime.match_owner = intVal(match_node) != 0;
+        auto* fields_node = export_private_node(plan, export_plan_field::match_fields_required);
+        if (!IsA(fields_node, Integer) || (intVal(fields_node) != 0 && intVal(fields_node) != 1))
+            export_binding_error("invalid BioseqExport explicit-match-fields marker");
+        runtime.match_fields_required = intVal(fields_node) != 0;
         auto* child = invoke_pg_as_cpp([node, estate, flags, &plan] {
             return ExecInitNode(static_cast<Plan*>(linitial(plan.custom_plans)), estate, flags);
         });
-        node->custom_ps = list_make1(child);
+        node->custom_ps = invoke_pg_as_cpp([child] { return list_make1(child); });
         return nullptr;
     }));
 }
@@ -151,10 +157,12 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
 /** Fill the existing virtual result slot; generic ExecCustomScan returns it directly. */
 [[nodiscard]] inline TupleTableSlot* export_count_slot(CustomScanState& node, std::int64_t count) {
     auto* slot = node.ss.ps.ps_ResultTupleSlot;
-    ExecClearTuple(slot);
-    slot->tts_values[0] = Int64GetDatum(count);
-    slot->tts_isnull[0] = false;
-    ExecStoreVirtualTuple(slot);
+    bioseq::postgres::support::invoke_pg_as_cpp([slot, count] {
+        ExecClearTuple(slot);
+        slot->tts_values[0] = Int64GetDatum(count);
+        slot->tts_isnull[0] = false;
+        ExecStoreVirtualTuple(slot);
+    });
     return slot;
 }
 
@@ -163,9 +171,13 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
     return export_callback(*node, [node]() -> TupleTableSlot* {
         auto& state = *reinterpret_cast<export_scan_state*>(node);
         auto& runtime = export_runtime(*node);
-        if (state.explain_only) return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+        if (state.explain_only) return bioseq::postgres::support::invoke_pg_as_cpp([node] {
+                return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+            });
         if (runtime.phase == export_execution_phase::published) {
-            if (state.result_emitted) return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+            if (state.result_emitted) return bioseq::postgres::support::invoke_pg_as_cpp([node] {
+                return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+            });
             state.result_emitted = true;
             return export_count_slot(*node, runtime.count);
         }
@@ -179,7 +191,8 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
         runtime.phase = export_execution_phase::running;
         auto* child = static_cast<PlanState*>(linitial(node->custom_ps));
         runtime.source.emplace(*child, node->ss.ps.state->es_query_cxt,
-            runtime.bindings, runtime.match_owner, *runtime.options.writer.format, runtime.options.supplied_header);
+            runtime.bindings, runtime.match_owner, runtime.match_fields_required,
+            *runtime.options.writer.format, runtime.options.supplied_header);
         const auto written = bioseq::io::write_records(*runtime.source, runtime.destination,
             runtime.options.writer, runtime.options.concurrency);
         if (!written) bioseq::postgres::support::raise_sql_error(ERRCODE_DATA_EXCEPTION,
@@ -237,23 +250,27 @@ inline void explain_export_scan(CustomScanState* node, List*, ExplainState* expl
         const char* format_name = format == bioseq::io::sequence_file_format::fasta ? "FASTA"
             : format == bioseq::io::sequence_file_format::fastq ? "FASTQ"
             : format == bioseq::io::sequence_file_format::sam ? "SAM" : "BAM";
-        ExplainPropertyText("Format", format_name, explain);
-        std::size_t visible = 0;
-        std::size_t companions = 0;
-        for (const auto& column : runtime.bindings) {
-            visible += !column.private_companion;
-            companions += column.private_companion;
-        }
-        ExplainPropertyInteger("Visible Columns", nullptr, static_cast<std::int64_t>(visible), explain);
-        ExplainPropertyInteger("Completion Columns", nullptr, static_cast<std::int64_t>(companions), explain);
-        ExplainPropertyBool("Alignment Owner", runtime.match_owner, explain);
-        if (export_uses_alignment(format) && runtime.match_owner) {
-            const bool native_mapq = export_has_native_mapping_quality(runtime.bindings);
-            ExplainPropertyText("Mapping Quality", native_mapq ? "source projection or imported alignment"
-                : "native unavailable (255); pair-local confidence in bM when known", explain);
-        }
-        ExplainPropertyText("Order", "executor", explain);
-        if (explain->analyze) ExplainPropertyInteger("Records", nullptr, runtime.count, explain);
+        bioseq::postgres::support::invoke_pg_as_cpp([&runtime, format, format_name, explain] {
+            ExplainPropertyText("Format", format_name, explain);
+            std::size_t visible = 0;
+            std::size_t companions = 0;
+            for (const auto& column : runtime.bindings) {
+                visible += !column.private_companion;
+                companions += column.private_companion;
+            }
+            ExplainPropertyInteger("Visible Columns", nullptr, static_cast<std::int64_t>(visible), explain);
+            ExplainPropertyInteger("Completion Columns", nullptr, static_cast<std::int64_t>(companions), explain);
+            ExplainPropertyBool("Alignment Owner", runtime.match_owner, explain);
+            if (runtime.match_fields_required)
+                ExplainPropertyBool("Explicit Alignment Fields Required", true, explain);
+            if (export_uses_alignment(format) && runtime.match_owner) {
+                const bool native_mapq = export_has_native_mapping_quality(runtime.bindings);
+                ExplainPropertyText("Mapping Quality", native_mapq ? "source projection or imported alignment"
+                    : "native unavailable (255); pair-local confidence in bM when known", explain);
+            }
+            ExplainPropertyText("Order", "executor", explain);
+            if (explain->analyze) ExplainPropertyInteger("Records", nullptr, runtime.count, explain);
+        });
         return nullptr;
     }));
 }

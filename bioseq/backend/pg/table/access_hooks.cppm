@@ -34,6 +34,7 @@ import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.manager;
+import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.external.relation;
 import bioseq.codegen.sql.annotation_model;
@@ -339,6 +340,9 @@ static void handle_column_table_drop(Oid relid) {
     const RelFileLocator relfilelocator =
         is_bioseq_relation ? drop_target->rd_locator : RelFileLocator{};
     const Oid relation_oid = RelationGetRelid(drop_target);
+    if (is_bioseq_relation && !extension_teardown) {
+        bioseq::storage::indexing::stage_minimizer_generation_owner_drop(drop_target);
+    }
 
     /* Source invalidation can advance the command counter and rebuild cached
      * relations. Release our reference first, keeping the transaction  lock. */
@@ -435,15 +439,40 @@ static void validate_column_trigger(Oid tgid) {
     }
 }
 
+/** Stage images for one physical column while PostgreSQL retains its DROP lock. */
+static void handle_column_table_column_drop(const Oid relation_oid, const int sub_id) {
+    // Extension teardown can remove descriptor authority before source callbacks.
+    // Keep its existing catalog-dependent-cleanup exclusion explicit.
+    if (in_extension_teardown())
+        return;
+    Relation source = relation_open(relation_oid, NoLock);
+    if (relation_uses_column_table_access_method(source)) {
+        if (sub_id <= 0 || sub_id > (std::numeric_limits<AttrNumber>::max)()) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("bioseq column DROP has an invalid physical attribute number")));
+        }
+        bioseq::storage::indexing::stage_minimizer_generation_owner_drop(
+            source, static_cast<AttrNumber>(sub_id));
+    }
+    relation_close(source, NoLock);
+}
+
 /** Dispatch one PostgreSQL object-access event after the previously installed hook. */
 static void handle_column_table_object_access(
     ObjectAccessType access, Oid class_id, Oid object_id, int sub_id, void* arg) {
+    bioseq::postgres::support::scoped_relation_identity::validate_object_access(
+        access, class_id, object_id, sub_id);
     if (previous_object_access_hook) {
         previous_object_access_hook(access, class_id, object_id, sub_id, arg);
     }
+    bioseq::postgres::support::scoped_relation_identity::validate_object_access(
+        access, class_id, object_id, sub_id);
 
     if (access == OAT_DROP && class_id == RelationRelationId && !OidIsValid(sub_id)) {
         handle_column_table_drop(object_id);
+    } else if (access == OAT_DROP && class_id == RelationRelationId && sub_id > 0) {
+        handle_column_table_column_drop(object_id, sub_id);
     } else if (access == OAT_POST_CREATE && class_id == RelationRelationId && sub_id == 0 &&
                external_create_capture_active) {
         Relation created_relation = relation_open(object_id, NoLock);

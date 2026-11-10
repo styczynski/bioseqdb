@@ -11,13 +11,17 @@ extern "C" {
 #include "access/nbtree.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "catalog/dependency.h"
 #include "catalog/namespace.h" // RelnameGetRelid
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_sequence.h"
 #include "catalog/pg_type_d.h"
+#include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "executor/spi.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/errcodes.h"
 #include "utils/lsyscache.h"
@@ -159,15 +163,72 @@ inline void run_internal_ddl(const char* ddl) {
     subtransaction.commit();
 }
 
-/// Return UNLOGGED for an unlogged parent, or an empty keyword otherwise.
-[[nodiscard]] inline const char* persistence_kw_for(Oid user_relid) {
-    char persist = 'p';
-    Relation r = bioseq::postgres::support::try_open_postgres_relation(user_relid, AccessShareLock);
-    if (r != nullptr) {
-        persist = r->rd_rel->relpersistence;
-        relation_close(r, AccessShareLock);
-    }
-    return persist == 'u' ? "UNLOGGED" : "";
+/// Validate and retain the exact physical source lock before creating an index table.
+/// Partition leaves are ordinary relations; the partitioned parent has no matching
+/// physical file. Temporary Bioseq sources are unsupported by the table AM.
+[[nodiscard]] inline const char* lock_index_source_for_creation(
+    Oid source_oid, Oid database_oid, Oid tablespace_oid,
+    Oid main_relfilenode, std::int16_t column_attno) {
+    const char persistence = bioseq::postgres::support::invoke_pg_as_cpp(
+        [source_oid, database_oid, tablespace_oid, main_relfilenode, column_attno] noexcept {
+            if (!OidIsValid(source_oid) || database_oid != MyDatabaseId ||
+                !OidIsValid(tablespace_oid) || !OidIsValid(main_relfilenode) || column_attno <= 0) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("bioseq index creation requires a valid physical source identity")));
+            }
+            Relation source = table_open(source_oid, AccessShareLock);
+            const TupleDesc descriptor = RelationGetDescr(source);
+            if (source->rd_rel->relkind != RELKIND_RELATION ||
+                source->rd_rel->relam != get_table_am_oid("bioseq", false) ||
+                (source->rd_rel->relpersistence != RELPERSISTENCE_PERMANENT &&
+                 source->rd_rel->relpersistence != RELPERSISTENCE_UNLOGGED) ||
+                source->rd_locator.dbOid != database_oid ||
+                source->rd_locator.spcOid != tablespace_oid ||
+                source->rd_locator.relNumber != main_relfilenode ||
+                column_attno > descriptor->natts ||
+                TupleDescAttr(descriptor, column_attno - 1)->attisdropped) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("bioseq index creation source identity changed"),
+                    errdetail("relation_oid=%u column_attno=%d", source_oid, column_attno)));
+            }
+            const char result = source->rd_rel->relpersistence;
+            relation_close(source, NoLock);
+            return result;
+        });
+    return persistence == RELPERSISTENCE_UNLOGGED ? "UNLOGGED" : "";
+}
+
+/// Attach only a relation just created by this caller to its locked source column.
+/// AUTO permits explicit index clearing and removes the heap, its primary key and
+/// TOAST storage on source/column DROP. Catalog rollback restores the relationship.
+/// Existing name matches do not acquire inferred ownership through this helper.
+inline void record_created_index_source_dependency(
+    Oid index_oid, const char* index_name, Oid source_oid, Oid database_oid,
+    Oid tablespace_oid, Oid main_relfilenode, std::int16_t column_attno) {
+    // DDL event triggers may have changed the source in this backend.
+    (void)lock_index_source_for_creation(
+        source_oid, database_oid, tablespace_oid, main_relfilenode, column_attno);
+    bioseq::postgres::support::invoke_pg_as_cpp(
+        [index_oid, index_name, source_oid, column_attno] noexcept {
+            if (!OidIsValid(index_oid) || index_name == nullptr || *index_name == '\0') {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("bioseq index dependency requires a newly created relation")));
+            }
+            Relation index = table_open(index_oid, AccessShareLock);
+            if (index_oid == source_oid || index->rd_rel->relkind != RELKIND_RELATION ||
+                index->rd_rel->relam != HEAP_TABLE_AM_OID ||
+                RelationGetNamespace(index) != get_namespace_oid("bioseq_internal", false) ||
+                std::strcmp(RelationGetRelationName(index), index_name) != 0) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("bioseq newly created index relation identity changed")));
+            }
+            ObjectAddress dependent;
+            ObjectAddress referenced;
+            ObjectAddressSet(dependent, RelationRelationId, index_oid);
+            ObjectAddressSubSet(referenced, RelationRelationId, source_oid, column_attno);
+            recordDependencyOn(&dependent, &referenced, DEPENDENCY_AUTO);
+            relation_close(index, NoLock);
+        });
 }
 
 /// Raise a PostgreSQL storage error. Call this inside invoke_pg_as_cpp().

@@ -37,6 +37,7 @@ extern char** environ;
 
 import bioseq.bench.e2e.tests.support;
 import bioseq.bench.framework;
+import bioseq.sequences;
 
 namespace {
 
@@ -1092,6 +1093,144 @@ TEST_CASE("E2E input setup follows exact expanded execution tuples",
     const auto absent = resolve_just_index_setup_requirements(no_index_only);
     REQUIRE_FALSE(absent.any_bioseq());
     REQUIRE_FALSE(absent.minimap2);
+}
+
+TEST_CASE("SQL sequence IO default covers every native alphabet and policy",
+          "[component:benchmark][layer:contract][feature:configuration]") {
+    const auto config = load_e2e_contract_config(
+        std::filesystem::path{BIOSEQ_E2E_CONFIG_PATH});
+    const auto& group = config.at("bench_sequence_io");
+    REQUIRE(group.at("fast") == false);
+    REQUIRE(group.at("concurrency").at("bench_lock") == true);
+    REQUIRE(group.at("concurrency").at("concurrency") == false);
+    REQUIRE(group.at("iteration_order").at("mode") == "interleaved_seeded");
+    REQUIRE(group.at("iteration_order").at("seed") == 42);
+    const auto& matrix = group.at("matrix");
+    REQUIRE(matrix.at("by_regions") == true);
+    REQUIRE(matrix.at("for").size() == 1);
+    // Two validated warmups run in preparation; only seven calls are timed.
+    REQUIRE(matrix.at("for").at("SQL_SEQUENCE_IO_SHORT") == 7);
+    const auto& input = config.at("test_cases").at("SQL_SEQUENCE_IO_SHORT");
+    REQUIRE(input.at("concurrency") == 1);
+    REQUIRE(input.at("data") == nlohmann::json::parse(
+        R"json({"row_count":4096,"sequence_length":150,"seed":42})json"));
+
+    const auto closed_strings = [](const nlohmann::json& array) {
+        REQUIRE(array.is_array());
+        std::set<std::string> values;
+        for (const auto& value : array) {
+            REQUIRE(value.is_string());
+            REQUIRE(values.insert(value.get<std::string>()).second);
+        }
+        return values;
+    };
+    const std::set<std::string> biological_names{
+        "dna4", "dna5", "dna15", "aa10li", "aa10murphy", "aa20", "aa27"};
+    std::set<std::string> registry_names;
+    for (std::size_t code = 0; code < supported_biological_alphabets::alphabet_count; ++code) {
+        registry_names.emplace(supported_biological_alphabets::name_of_alphabet_code(
+            static_cast<supported_biological_alphabets::alphabet_code_t>(code)));
+    }
+    REQUIRE(registry_names == biological_names);
+    const std::set<std::string> formats{"fasta", "fastq", "sam", "bam"};
+    const std::set<std::string> modes{"single_thread", "parallel_dispatch", "task_parallel"};
+    const auto& over = matrix.at("over");
+    REQUIRE(over.size() == 2);
+    std::size_t cells = 0;
+    for (const std::string operation : {"sql_write", "sql_load"}) {
+        CAPTURE(operation);
+        const auto& axes = over.at(operation);
+        REQUIRE(axes.size() == 3);
+        REQUIRE(closed_strings(axes.at("alphabet")) == biological_names);
+        REQUIRE(closed_strings(axes.at("format")) == formats);
+        REQUIRE(closed_strings(axes.at("pipeline_mode")) == modes);
+        const auto& parameters = config.at("params").at(operation);
+        REQUIRE(parameters.size() == 4);
+        REQUIRE(parameters.at("_").at("default") == 0);
+        for (const std::string key : {"alphabet", "format", "pipeline_mode"}) {
+            REQUIRE(parameters.at(key).at("type") == "string");
+            const auto declared = closed_strings(parameters.at(key).at("enum"));
+            REQUIRE(declared == closed_strings(axes.at(key)));
+            REQUIRE(declared.contains(parameters.at(key).at("default").get<std::string>()));
+        }
+        cells += axes.at("alphabet").size() * axes.at("format").size()
+            * axes.at("pipeline_mode").size();
+    }
+    REQUIRE(cells == 168);
+    REQUIRE(cells * matrix.at("for").at("SQL_SEQUENCE_IO_SHORT").get<std::size_t>() == 1176);
+    REQUIRE(matrix.at("metrics").at("wall_clock_ns").at("rules").empty());
+}
+
+TEST_CASE("SQL sequence IO additions preserve the existing default workloads",
+          "[component:benchmark][layer:contract][feature:configuration]") {
+    const auto config = load_e2e_contract_config(
+        std::filesystem::path{BIOSEQ_E2E_CONFIG_PATH});
+    const auto previous_over = nlohmann::json::parse(R"json({
+      "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+        "minimizer_index":["minimizers_per_fragment"],"pipeline_mode":["task_parallel"]},
+      "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+        "minimizer_index":["minimizers_per_fragment"],"pipeline_mode":["task_parallel"]},
+      "bioseq_block_gpu_dp_gpu_seed_no_index": {
+        "minimizer_index":["minimizers_per_fragment"],"pipeline_mode":["task_parallel"]},
+      "bioseq_block_gpu_dp_gpu_seed_just_index": {
+        "minimizer_index":["minimizers_per_fragment"],"pipeline_mode":["task_parallel"]},
+      "minimap2_no_index":{"threads":[0]},"minimap2_just_index":{"threads":[0]}
+    })json");
+    for (const auto& [name, repetitions] : std::array{
+             std::pair{"bench_e2e", 3}, std::pair{"bench_e2e_signoff", 5}}) {
+        CAPTURE(name);
+        const auto& group = config.at(name);
+        nlohmann::json cases;
+        for (const std::string case_name :
+             {"E2E_2GBP_DNA4", "E2E_2GBP_DNA5", "E2E_4GBP_DNA4", "E2E_4GBP_DNA5"}) {
+            cases[case_name] = repetitions;
+        }
+        REQUIRE(group.at("matrix").at("for") == cases);
+        REQUIRE(group.at("matrix").at("over") == previous_over);
+        REQUIRE(group.at("matrix").at("acceptance").at("exact_test_case_iterations") == cases);
+        REQUIRE(group.at("iteration_order").at("mode") == "interleaved_seeded");
+        REQUIRE(group.at("iteration_order").at("seed") == 370);
+    }
+    const auto& gpu = config.at("bench_e2e_gpu_batch_validation").at("matrix");
+    REQUIRE(gpu.at("for") == nlohmann::json::parse(
+        R"json({"E2E_GPU_BATCH_16_300M_SEG_COORD":1,"E2E_GPU_BATCH_4096_BOUNDED_CIGAR":1})json"));
+    auto previous_gpu_over = previous_over;
+    previous_gpu_over.erase("bioseq_block_simd_dp_two_stack_nthash_just_index");
+    previous_gpu_over.erase("bioseq_block_gpu_dp_gpu_seed_just_index");
+    previous_gpu_over.erase("minimap2_just_index");
+    REQUIRE(gpu.at("over") == previous_gpu_over);
+
+    const auto& random = config.at("bench_random_generation");
+    REQUIRE(random.at("matrix").at("for").size() == 24);
+    REQUIRE(random.at("iteration_order").at("mode") == "interleaved_seeded");
+    REQUIRE(random.at("iteration_order").at("seed") == 42);
+    const auto previous_random_over = nlohmann::json::parse(R"json({
+      "sample_table":{"vectorization":["on","off"]},
+      "insert_random":{"vectorization":["on","off"]},
+      "query_target_sample":{"vectorization":["on","off"]},
+      "insert_mutate":{"vectorization":["on","off"],"source":["column","constant"]}
+    })json");
+    REQUIRE(random.at("matrix").at("over") == previous_random_over);
+    struct previous_geometry { const char* suffix; std::size_t rows; std::size_t length; };
+    for (const auto& [prefix, alphabet] : std::array{
+             std::pair{"DNA4", "dna4"}, std::pair{"DNA5", "dna5"},
+             std::pair{"AA10LI", "aa10li"}, std::pair{"AA10MURPHY", "aa10murphy"},
+             std::pair{"AA20", "aa20"}, std::pair{"AA27", "aa27"}}) {
+        for (const auto& geometry : std::array{
+                 previous_geometry{"STARTUP", 32, 150}, previous_geometry{"LONG", 16, 100000},
+                 previous_geometry{"150", 4096, 150}, previous_geometry{"2000", 1024, 2000}}) {
+            const auto name = std::string{"RANDOM_"} + prefix + "_" + geometry.suffix;
+            CAPTURE(name);
+            REQUIRE(random.at("matrix").at("for").at(name) == 3);
+            const auto& input = config.at("test_cases").at(name);
+            REQUIRE(input.at("concurrency") == 1);
+            REQUIRE(input.at("data").at("alphabet") == alphabet);
+            REQUIRE(input.at("data").at("row_count") == geometry.rows);
+            REQUIRE(input.at("data").at("sequence_length") == geometry.length);
+            REQUIRE(input.at("data").at("seed") == 42);
+        }
+    }
+    REQUIRE(config.at("regression_rules").empty());
 }
 
 TEST_CASE("Persisted matrix setup admits supported DNA4 and DNA5 Vulkan profiles",

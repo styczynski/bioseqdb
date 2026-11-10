@@ -10,6 +10,7 @@ module;
 #include <cstring>
 #include <hwy/aligned_allocator.h>
 #include <libassert/assert.hpp>
+#include <limits>
 #include <utility>
 
 export module bioseq.io.buffer;
@@ -31,9 +32,23 @@ struct buffer_slab {
     /// Construct an empty slab without an allocation.
     buffer_slab() = default;
 
-    /// Allocate an empty slab with the requested byte capacity.
-    explicit buffer_slab(std::size_t initial_capacity)
-        : data(hwy::AllocateAligned<std::uint8_t>(initial_capacity)), capacity(initial_capacity) {}
+    /// Allocate an empty slab, leaving capacity zero on refusal. Optional Highway
+    /// callbacks apply only to this allocation; their free/context must outlive it.
+    explicit buffer_slab(std::size_t initial_capacity, hwy::AllocPtr allocate = nullptr,
+                         hwy::FreePtr release = nullptr, void* context = nullptr) {
+        // Highway asserts for zero and for payloads at least SIZE_MAX/2.
+        if (initial_capacity == 0u || initial_capacity >= std::numeric_limits<std::size_t>::max() / 2u)
+            return;
+        data = hwy::AllocateAligned<std::uint8_t>(initial_capacity, allocate, release, context);
+        if (data) capacity = initial_capacity;
+    }
+
+    /// Normalize reader initialization to [1,max] when max is nonzero; max zero
+    /// leaves an empty slab for the caller's ordinary failure callback.
+    explicit buffer_slab(const reader_options& options, hwy::AllocPtr allocate = nullptr,
+                         hwy::FreePtr release = nullptr, void* context = nullptr)
+        : buffer_slab(std::min(options.io.max_buffer_size,
+              std::max<std::size_t>(1u, options.io.initial_buffer_size)), allocate, release, context) {}
 
     /// Return a writable pointer to the buffer.
     [[nodiscard]] std::uint8_t* raw() noexcept {
@@ -66,18 +81,25 @@ struct buffer_slab {
 
     /// Enlarge the buffer while preserving filled bytes. Growth slows to fixed
     /// increments for large records and stops at max_buffer_size.
-    /// Return false when the capacity has already reached that limit.
-    bool grow(const reader_options& options) {
+    /// Return false at the limit or on allocation failure, preserving every field.
+    /// Per-call callbacks affect only new storage; each old owner retains its own
+    /// Highway deleter. A successful allocation's free/context must outlive it.
+    bool grow(const reader_options& options, hwy::AllocPtr allocate = nullptr,
+              hwy::FreePtr release = nullptr, void* context = nullptr) {
         if (capacity >= options.io.max_buffer_size)
             return false;
         // Limit spare capacity when a record needs a large buffer.
         constexpr std::size_t geometric_growth_limit_bytes = static_cast<std::size_t>(1)
                                                              << 23; // 8 MiB
-        std::size_t new_capacity = (capacity < geometric_growth_limit_bytes)
-                                       ? capacity * 2
-                                       : capacity + geometric_growth_limit_bytes;
-        new_capacity = std::min(new_capacity, options.io.max_buffer_size);
-        auto new_data = hwy::AllocateAligned<std::uint8_t>(new_capacity);
+        const std::size_t increment = capacity == 0u ? 1u
+            : std::min(capacity, geometric_growth_limit_bytes);
+        // Bound the increment before adding, including near SIZE_MAX. Empty
+        // slabs make positive progress without invoking Highway with zero.
+        const std::size_t new_capacity = capacity
+            + std::min(increment, options.io.max_buffer_size - capacity);
+        if (new_capacity >= std::numeric_limits<std::size_t>::max() / 2u) return false;
+        auto new_data = hwy::AllocateAligned<std::uint8_t>(new_capacity, allocate, release, context);
+        if (!new_data) return false;
         if (fill_size > 0) {
             std::memcpy(new_data.get(), raw(), fill_size);
         }

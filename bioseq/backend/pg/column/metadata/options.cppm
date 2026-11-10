@@ -183,7 +183,12 @@ export void initialize_column_options(Oid regclass) {
 export void write_io_provenance(Oid regclass, std::string_view json) {
     const bioseq::postgres::support::jsonb_value owned{std::string{json}};
     const auto encoded = bioseq::postgres::support::detail::encode_jsonb(owned);
-    initialize_column_options(regclass);
+    // The initializer's generated datum arrays borrow PostgreSQL-owned storage.
+    // Keep reader, JSON and admission owners outside the PostgreSQL error boundary.
+    static_assert(std::is_trivially_destructible_v<options_codec::encoded_row>);
+    bioseq::postgres::support::invoke_pg_as_cpp([regclass] {
+        initialize_column_options(regclass);
+    });
     const auto updated = visit_column_options_row(regclass, RowExclusiveLock,
         [encoded](Relation relation, HeapTuple tuple) {
             if (!HeapTupleIsValid(tuple)) return false;

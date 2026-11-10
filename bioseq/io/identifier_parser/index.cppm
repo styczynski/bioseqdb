@@ -1077,8 +1077,6 @@ parse_and_route_header(header_format format,
     if (!canonical) return std::unexpected(canonical.error());
     if (*canonical) {
         constexpr std::size_t scalar_capacity = 4096u;
-        auto scratch = parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
-        if (!scratch) return std::unexpected("cannot admit canonical descriptor validation scratch");
         text_record_shape shape{**canonical};
         if (const auto validated = decode_preservation_record((**canonical).payload, shape, true, scalar_capacity); !validated)
             return std::unexpected(validated.error());

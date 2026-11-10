@@ -94,23 +94,24 @@ pop_current_write_state_entry(write_state_map_entry* entry,
 		return;
 	}
 
-	/* A DROP marker can remain after the last writer frame is removed.
-	 * Handle it first so abort restores the relation's state even when
-	 * the stack is empty. Commit transfers the marker to the parent. */
+	/* Restore or reparent this subtransaction's DROP marker, then discard
+	 * its own writer frame. Ancestor frames must remain available if a
+	 * later rollback restores the relation. A committed DROP must never
+	 * flush buffered writes into the removed relation. */
 	if (entry->dropped)
 	{
-		if (entry->drop_subtransaction_id == current_sub_xid)
+		if (entry->drop_subtransaction_id != current_sub_xid)
 		{
-			if (commit)
-			{
-				entry->drop_subtransaction_id = parent_sub_xid;
-			}
-			else
-			{
-				entry->dropped = false;
-			}
+			return;
 		}
-		return;
+		if (commit)
+		{
+			entry->drop_subtransaction_id = parent_sub_xid;
+		}
+		else
+		{
+			entry->dropped = false;
+		}
 	}
 
 	if (entry->write_state_stack == nullptr)
@@ -124,13 +125,14 @@ pop_current_write_state_entry(write_state_map_entry* entry,
 		return;
 	}
 
-	// Commit or discard sequence-cache deltas before ending the write state.
+	// A dropped relation discards its frame even when the savepoint commits.
+	const bool flush_writes = commit && !entry->dropped;
 	if (stack_head->write_state->seq_caches && close_sequence_caches_hook)
 	{
-		close_sequence_caches_hook(stack_head->write_state->seq_caches, commit);
+		close_sequence_caches_hook(stack_head->write_state->seq_caches, flush_writes);
 		stack_head->write_state->seq_caches = nullptr;
 	}
-	if (commit)
+	if (flush_writes)
 	{
 		end_write_hook(stack_head->write_state);
 	}

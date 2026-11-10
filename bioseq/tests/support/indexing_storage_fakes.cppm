@@ -787,6 +787,15 @@ struct fake_fragment_storage {
         ++segment_spill_binding_state_.binding.mutation_revision;
     }
 
+    /** Prepare the semantic fake's run list; this fake does not model PG admission. */
+    [[nodiscard]] bool try_prepare_sorted_run_append(std::size_t incoming_count) {
+        if (incoming_count > runs_.max_size() - runs_.size()) {
+            return false;
+        }
+        runs_.reserve(runs_.size() + incoming_count);
+        return true;
+    }
+
     /** Copies a sorted run into fake spill storage. */
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>> s) {
         runs_.push_back(std::vector<std::pair<std::uint64_t, std::uint64_t>>(s.begin(), s.end()));

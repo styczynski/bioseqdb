@@ -904,3 +904,189 @@ TEST_CASE("FASTQ gzip readers preserve raw quality bytes across decoder boundari
     }
     fs::remove(path);
 }
+
+TEST_CASE("FASTQ mapped shards follow complete records through marker quality lines",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
+    using namespace bioseq::io;
+    using batch_type = sequence_batch<sequence_custom_alphabet<seq::dna4, std::uint64_t>>;
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    struct restore_pool {
+        bioseq::parallelism::global_pool& pool;
+        bool active{pool.is_active()};
+        bioseq::parallelism::pool_config config{pool.maximum_concurrency(), pool.get_mode()};
+        ~restore_pool() { if (active) pool.configure(config); else pool.shutdown(); }
+    } restore{pool};
+    pool.configure({4u, bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel});
+    using record = std::tuple<std::string, std::string, std::string>;
+    const std::string witness = "@q\n" + std::string(32, 'A') + "\n+\nIIIIII\n@fake\nACGT\n+\n" + std::string(16, 'I') + "\n";
+    const std::string witnessed_quality = "IIIIII@fakeACGT+" + std::string(16, 'I');
+    const std::string multiline = "@multi\r\nAC\r\nGT\r\n+comment\r\nI@\r\n+!\r\n@empty\n+\n\n@last\nT\n+\n@";
+    const std::string lenient = "@first\nAC\n@second\nGT\n+\n!!\n";
+    struct fixture_type { std::string input; bool strict; std::vector<record> expected; };
+    const std::vector<fixture_type> fixtures{
+        {witness, true, {{"q", std::string(32, 'A'), witnessed_quality}}},
+        {witness + multiline, true, {{"q", std::string(32, 'A'), witnessed_quality},
+            {"multi", "ACGT", "I@+!"}, {"empty", "", ""}, {"last", "T", "@"}}},
+        {lenient, false, {{"first", "AC", ""}, {"second", "GT", "!!"}}},
+        {"@empty\n+\n", true, {{"empty", "", ""}}},
+        {"", true, {}}};
+    for (const auto& fixture : fixtures) {
+        const auto path = write_tmp_file(fixture.input);
+        std::vector<record> sequential;
+        for (const std::size_t parsers : {1u, 2u, 4u}) {
+            CAPTURE(parsers, fixture.input, fixture.strict);
+            auto options = default_reader_options;
+            options.concurrency.worker_count = 0;
+            options.concurrency.parser_count = parsers;
+            options.concurrency.mmap_parallel_min_bytes = 1;
+            options.concurrency.batch_target_record_count = 1;
+            options.encoder.strict_fastq = fixture.strict;
+            std::vector<batch_type> retained;
+            std::vector<std::string> errors;
+            const auto read = read_sequences_file<seq::dna4, sequence_file_format::fastq>(path,
+                [&retained](batch_type&& batch) { retained.push_back(std::move(batch)); },
+                [&errors](std::string&& error) { errors.push_back(std::move(error)); }, options);
+            REQUIRE(read.has_value()); REQUIRE(errors.empty()); REQUIRE(*read == fixture.expected.size());
+            std::vector<record> actual;
+            for (const auto& batch : retained)
+                for (std::size_t index = 0; index < batch.size(); ++index) {
+                    const auto quality = batch.quality(index);
+                    actual.emplace_back(batch.header(index), decode_to_ascii(batch.sequence(index)),
+                        quality.empty() ? std::string{} : std::string{reinterpret_cast<const char*>(quality.data()), quality.size()});
+                }
+            // Inter-shard delivery order is intentionally unspecified; names and multiplicities stay exact.
+            std::ranges::sort(actual);
+            auto expected = fixture.expected; std::ranges::sort(expected);
+            REQUIRE(actual == expected);
+            if (parsers == 1) sequential = actual;
+            else REQUIRE(actual == sequential);
+        }
+        fs::remove(path);
+    }
+    for (const auto& invalid : std::vector<std::string>{
+            "@bad\nAA\n+\n!\n", "@bad\nAA\n+\n!!!\n", "@bad\nAZ\n+\n!!\n",
+            "@bad\nAA\n+\n! \n", "@bad\nA\rA\n+\n!!\n", "@bad\nAA\n+\n!\r!\n",
+            "@bad\nAA\n", "@bad", "@bad\nAA\n+", "@bad\nAA\n+\n!!\r"}) {
+        const auto path = write_tmp_file(invalid);
+        for (const std::size_t parsers : {1u, 2u, 4u}) {
+            auto options = default_reader_options;
+            options.concurrency.worker_count = 0; options.concurrency.parser_count = parsers;
+            options.concurrency.mmap_parallel_min_bytes = 1;
+            std::vector<std::string> errors;
+            const auto read = read_sequences_file<seq::dna4, sequence_file_format::fastq>(path,
+                [](batch_type&&) {}, [&errors](std::string&& error) { errors.push_back(std::move(error)); }, options);
+            REQUIRE_FALSE(read.has_value()); REQUIRE(errors.size() == 1u);
+        }
+        fs::remove(path);
+    }
+}
+
+TEST_CASE("Text reader slab initialization refuses unavailable storage before delivery",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
+    using namespace bioseq::io;
+    using batch_type = sequence_batch<sequence_custom_alphabet<seq::dna4, std::uint64_t>>;
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    struct restore_pool {
+        bioseq::parallelism::global_pool& pool;
+        bool active{pool.is_active()};
+        bioseq::parallelism::pool_config config{pool.maximum_concurrency(), pool.get_mode()};
+        ~restore_pool() { if (active) pool.configure(config); else pool.shutdown(); }
+    } restore{pool};
+    pool.configure({2u, bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel});
+    struct stream_sink {
+        std::size_t begun{}, chunks{}, committed{}, symbols{};
+        std::string header, sequence, quality;
+        void begin_record(std::string_view value) { ++begun; header = value; }
+        void chunk(packed_sequence_chunk<std::uint64_t> value) {
+            ++chunks; symbols += value.logical_length;
+            const auto capacity = value.words.size() * batch_type::sequence_view::traits::letters_per_unit;
+            sequence += decode_to_ascii(batch_type::sequence_view{value.words.data(), value.words.size(),
+                capacity - static_cast<std::size_t>(value.logical_length)});
+        }
+        void quality_chunk(std::span<const std::uint8_t> value, std::size_t) {
+            quality.append(reinterpret_cast<const char*>(value.data()), value.size());
+        }
+        void end_record() { ++committed; }
+    };
+    struct owning_stream_sink : stream_sink {
+        std::vector<std::vector<std::uint64_t>> retained;
+        void chunk_owned(std::vector<std::uint64_t>&& words, std::uint64_t length, bool final) {
+            stream_sink::chunk({std::span<const std::uint64_t>{words}, length, final});
+            retained.push_back(std::move(words));
+        }
+    };
+    struct initial_bounds { std::size_t initial{}, maximum{}; bool success{}; };
+    const std::array<initial_bounds, 4> cases{{
+        {16u, 0u, false},
+        {std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max(), false},
+        {0u, 64u, true},
+        {std::numeric_limits<std::size_t>::max(), 64u, true}}};
+    for (const auto format : {sequence_file_format::fasta, sequence_file_format::fastq}) {
+        struct remove_file {
+            std::string path;
+            ~remove_file() { std::error_code ignored; fs::remove(path, ignored); }
+        } input{write_tmp_file(format == sequence_file_format::fasta ? ">r\nACGT\n" : "@r\nACGT\n+\nIIII\n")};
+        for (const bool mapped : {false, true})
+            for (const std::size_t workers : {0u, 2u})
+                for (const auto bounds : cases) {
+                    CAPTURE(format, mapped, workers, bounds.initial, bounds.maximum);
+                    auto options = default_reader_options;
+                    options.io.prefer_mmap = mapped; options.io.mmap_zero_copy = false;
+                    options.io.gzip_auto_detect = false;
+                    options.io.initial_buffer_size = bounds.initial; options.io.max_buffer_size = bounds.maximum;
+                    options.concurrency.worker_count = workers; options.concurrency.parser_count = 1;
+                    std::atomic<std::size_t> batches{}, rows{};
+                    std::atomic<bool> content_matches{true};
+                    std::vector<std::pair<std::string, input_failure_kind>> errors;
+                    const auto failure = [&errors](std::string&& message, input_failure_kind kind = input_failure_kind::other) {
+                        errors.emplace_back(std::move(message), kind);
+                    };
+                    const auto handler = [&batches, &rows, &content_matches](batch_type&& batch) {
+                        batches.fetch_add(1u); rows.fetch_add(batch.size());
+                        for (std::size_t ordinal{}; ordinal < batch.size(); ++ordinal)
+                            if (batch.header(ordinal) != "r" || decode_to_ascii(batch.sequence(ordinal)) != "ACGT")
+                                content_matches.store(false);
+                    };
+                    reader_backend backend{reader_backend::unknown};
+                    const auto read = format == sequence_file_format::fasta
+                        ? read_sequences_file<seq::dna4, sequence_file_format::fasta>(input.path, handler, failure, options, &backend)
+                        : read_sequences_file<seq::dna4, sequence_file_format::fastq>(input.path, handler, failure, options, &backend);
+                    REQUIRE(backend == (mapped ? reader_backend::memory_mapped : reader_backend::posix_read));
+                    if (bounds.success) {
+                        REQUIRE(read.has_value()); REQUIRE(*read == 1u); REQUIRE(errors.empty());
+                        REQUIRE(batches.load() == 1u); REQUIRE(rows.load() == 1u); REQUIRE(content_matches.load());
+                    } else {
+                        REQUIRE_FALSE(read.has_value()); REQUIRE(errors.size() == 1u);
+                        REQUIRE(errors.front().first == read.error()); REQUIRE(errors.front().second == input_failure_kind::other);
+                        REQUIRE(batches.load() == 0u); REQUIRE(rows.load() == 0u);
+                    }
+                    if (workers != 0u) continue;
+                    const auto check_stream = [&input, &options, &failure, &errors, format, bounds]<class Sink>() {
+                        Sink sink; errors.clear();
+                        const auto streamed = format == sequence_file_format::fasta
+                            ? stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fasta>(input.path.c_str(), sink, failure, options)
+                            : stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(input.path.c_str(), sink, failure, options);
+                        if (bounds.success) {
+                            REQUIRE(streamed.has_value()); REQUIRE(*streamed == 1u); REQUIRE(errors.empty());
+                            REQUIRE(sink.begun == 1u); REQUIRE(sink.committed == 1u); REQUIRE(sink.symbols == 4u);
+                            REQUIRE(sink.header == "r"); REQUIRE(sink.sequence == "ACGT");
+                            REQUIRE(sink.quality == (format == sequence_file_format::fastq ? "IIII" : ""));
+                            if constexpr (requires { sink.retained; }) {
+                                REQUIRE(sink.retained.size() == 1u);
+                                const auto& words = sink.retained.front();
+                                const auto padding = words.size() * batch_type::sequence_view::traits::letters_per_unit - 4u;
+                                REQUIRE(decode_to_ascii(batch_type::sequence_view{words.data(), words.size(), padding}) == "ACGT");
+                            }
+                        } else {
+                            REQUIRE_FALSE(streamed.has_value()); REQUIRE(errors.size() == 1u);
+                            REQUIRE(errors.front().first == streamed.error()); REQUIRE(errors.front().second == input_failure_kind::other);
+                            REQUIRE(sink.begun == 0u); REQUIRE(sink.chunks == 0u); REQUIRE(sink.committed == 0u);
+                            REQUIRE(sink.sequence.empty()); REQUIRE(sink.quality.empty());
+                            if constexpr (requires { sink.retained; }) REQUIRE(sink.retained.empty());
+                        }
+                    };
+                    check_stream.template operator()<stream_sink>();
+                    check_stream.template operator()<owning_stream_sink>();
+                }
+    }
+}

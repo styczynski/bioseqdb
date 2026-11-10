@@ -956,11 +956,13 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
     "bioseq_benchmark_e2e_contract_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_benchmark_e2e_contract_tests",),
-        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
+        shared_target_names=("bioseq_modules_nopg", "bioseq_highway_runtime",
+                             "bioseq_runtime_core")),
     "bioseq_benchmark_framework_contract_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_benchmark_framework_contract_tests",),
-        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
+        shared_target_names=("bioseq_modules_nopg", "bioseq_highway_runtime",
+                             "bioseq_runtime_core")),
     "postgresql_bioseq": InspectTargetDefinition(
         mode="benchmark-e2e",
         artifact_names=("bioseq.dylib", "bioseq.so", "bioseq.dll"),
@@ -1716,17 +1718,38 @@ def _stable_artifact_digest(
         raise RuntimeError(f"artifact changed while it was hashed: {path}")
     return after, digest.hexdigest()
 
+def _mode_runtime_artifact_paths(mode: str, build_dir: Path) -> list[Path]:
+    """Closed executable inventory, including the IO benchmark's pinned oracle."""
+    bin_dir = build_dir / MODES[mode].binary_subdir
+    paths = [bin_dir / command[0] for command in MODES[mode].commands if command]
+    if mode == "benchmark-io":
+        paths.append(build_dir / "bench/tool_samtools/samtools")
+    return paths
+
+
+def _benchmark_io_identity_path(build_dir: Path) -> Path:
+    """Do not permit the required oracle or its identity to redirect via a parent."""
+    current = build_dir.resolve(strict=True)
+    for part in ("bench", "tool_samtools"):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise RuntimeError(f"required samtools artifact directory is missing: {current}") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"samtools artifact parent must be a real directory: {current}")
+    return current / "runtime_identity.json"
+
+
 def _runtime_artifact_evidence(
         mode: str, build_dir: Path, *, deadline: float | None = None
 ) -> list[dict[str, object]]:
-    """Seal every directly executed mode command for no-rebuild reuse."""
-    bin_dir = build_dir / MODES[mode].binary_subdir
+    """Seal mode commands and required transitive executables for no-rebuild reuse."""
+    if mode == "benchmark-io":
+        _benchmark_io_identity_path(build_dir)
     evidence: list[dict[str, object]] = []
-    for command in MODES[mode].commands:
+    for path in _mode_runtime_artifact_paths(mode, build_dir):
         _require_control_deadline(deadline, "runtime-artifact validation")
-        if not command:
-            continue
-        path = bin_dir / command[0]
         try:
             metadata, digest = _stable_artifact_digest(
                 path, deadline=deadline)
@@ -2105,11 +2128,12 @@ def _receipt_authorized_artifact_evidence(
             library_aliases[hop.path] = hop_snapshot
         select_regular(snapshot.terminal_path, required=True)
 
-    # Every directly executed command is mandatory.
-    for command in MODES[mode].commands:
+    # Commands and explicitly registered transitive runtime helpers are mandatory.
+    for path in _mode_runtime_artifact_paths(mode, build_dir):
         _require_control_deadline(deadline, "authorized-artifact selection")
-        if command:
-            select_regular(bin_dir / command[0], required=True)
+        select_regular(path, required=True)
+    if mode == "benchmark-io":
+        select_regular(_benchmark_io_identity_path(build_dir), required=True)
 
     # Private cache runners resolve their stage/DSO inputs through one
     # generated manifest.  Receipt-pinned execution must authenticate that
@@ -2376,11 +2400,8 @@ def _build_artifact_counts(
                 install_scripts += 1
             if suffix in {".bc", ".s"}:
                 inspect_listings += 1
-    for command in MODES[mode].commands:
+    for path in _mode_runtime_artifact_paths(mode, build_dir):
         _require_control_deadline(deadline, "runtime-artifact count")
-        if not command:
-            continue
-        path = bin_dir / command[0]
         try:
             metadata = path.lstat()
         except OSError:

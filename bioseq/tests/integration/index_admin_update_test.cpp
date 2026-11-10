@@ -31,6 +31,63 @@ TEST_CASE(
               ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
                                "'minimizers_per_fragment');",
                                k_table)) == 3);
+
+  // Ordinary MPS creation exercises the five-column heap and its backing key.
+  // Multiple source rows reuse one created heap without adding duplicate dependencies.
+  exec_sql(ctx, "SET bioseq.aligner.grouped_soa_generation.enabled = off;");
+  REQUIRE(query_scalar_int(ctx, fmt::format(
+      "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_sequence');",
+      k_table)) == 3);
+  REQUIRE(index_table_row_count(ctx, "minimizers_per_sequence", k_table) > 0);
+  const auto source_oid = query_scalar_int(ctx, fmt::format("SELECT '{}'::regclass::oid;", k_table));
+  const auto attno = query_scalar_int(ctx, fmt::format(
+      "SELECT attnum FROM pg_attribute WHERE attrelid={} AND attname='seq0';", source_oid));
+  const std::string owned_query = fmt::format(
+      "SELECT c.oid FROM pg_class c JOIN pg_depend d ON d.objid=c.oid "
+      "WHERE d.classid='pg_class'::regclass AND d.objsubid=0 "
+      "AND d.refclassid='pg_class'::regclass AND d.refobjid={} "
+      "AND d.refobjsubid={} AND d.deptype='a' AND c.relkind='r' "
+      "AND c.relnamespace='bioseq_internal'::regnamespace ORDER BY c.oid;",
+      source_oid, attno);
+  const auto owned_oids = query_int_column(ctx, owned_query);
+  REQUIRE(owned_oids.size() >= 3u); // Fragment, inline symbol counts and ordinary MPS.
+  REQUIRE(std::adjacent_find(owned_oids.begin(), owned_oids.end()) == owned_oids.end());
+  const auto require_owned_presence = [&ctx, &owned_oids](bool present) {
+    for (const auto oid : owned_oids) {
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM pg_class WHERE oid={};", oid)) == (present ? 1 : 0));
+    }
+  };
+
+  exec_sql(ctx, "BEGIN;");
+  exec_sqlf(ctx, "DROP TABLE {};", k_table);
+  require_owned_presence(false);
+  exec_sql(ctx, "ROLLBACK;");
+  require_owned_presence(true);
+  REQUIRE(query_int_column(ctx, owned_query) == owned_oids);
+  REQUIRE(index_table_row_count(ctx, "minimizers_per_sequence", k_table) > 0);
+
+  exec_sql(ctx, "BEGIN;");
+  exec_sqlf(ctx, "ALTER TABLE {} DROP COLUMN seq0;", k_table);
+  require_owned_presence(false);
+  exec_sql(ctx, "ROLLBACK;");
+  require_owned_presence(true);
+  REQUIRE(query_int_column(ctx, owned_query) == owned_oids);
+
+  // Actual committed source removal also removes the backing keys and TOAST
+  // through PostgreSQL's dependency traversal, without a name-prefix DROP.
+  const auto index_oids = query_int_column(ctx, fmt::format(
+      "SELECT i.indexrelid FROM pg_index i WHERE i.indrelid IN ("
+      "SELECT d.objid FROM pg_depend d WHERE d.classid='pg_class'::regclass "
+      "AND d.refclassid='pg_class'::regclass AND d.refobjid={} "
+      "AND d.refobjsubid={} AND d.deptype='a') ORDER BY 1;", source_oid, attno));
+  REQUIRE(index_oids.size() == owned_oids.size());
+  exec_sqlf(ctx, "DROP TABLE {};", k_table);
+  require_owned_presence(false);
+  for (const auto oid : index_oids) {
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM pg_class WHERE oid={};", oid)) == 0);
+  }
 }
 
 TEST_CASE("update_index rejects an unknown index name",

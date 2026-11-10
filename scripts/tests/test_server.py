@@ -4108,6 +4108,79 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         self.assertIn(str(core.relative_to(build_dir)), relative_paths)
         self.assertIn(str(cache.relative_to(build_dir)), relative_paths)
 
+    @staticmethod
+    def _write_receipted_io_baseline(build_dir: Path) -> tuple[Path, Path]:
+        binary = build_dir / "bioseq/bioseq_io_benchmark"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"test IO benchmark\n")
+        binary.chmod(0o755)
+        helper = build_dir / "bench/tool_samtools/samtools"
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"pinned independent baseline\n")
+        helper.chmod(0o755)
+        identity = helper.parent / "runtime_identity.json"
+        identity.write_text('{"source_sha256":"fixture","build_sha256":"fixture"}\n')
+        return helper, identity
+
+    def test_io_receipt_seals_transitive_oracle_and_source_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            helper, identity = self._write_receipted_io_baseline(build_dir)
+            runtime = build_worker._runtime_artifact_evidence("benchmark-io", build_dir)
+            authority = build_worker._receipt_authorized_artifact_evidence(
+                "benchmark-io", build_dir, debug=False)
+            self.assertEqual({Path(item["path"]) for item in runtime}, {
+                build_dir / "bioseq/bioseq_io_benchmark", helper})
+            self.assertIn("bench/tool_samtools/runtime_identity.json",
+                          {item["relative_path"] for item in authority})
+            helper.write_bytes(b"replaced oracle with the same public pathname\n")
+            self.assertNotEqual(runtime, build_worker._runtime_artifact_evidence(
+                "benchmark-io", build_dir))
+            self.assertNotEqual(authority, build_worker._receipt_authorized_artifact_evidence(
+                "benchmark-io", build_dir, debug=False))
+            changed = build_worker._receipt_authorized_artifact_evidence(
+                "benchmark-io", build_dir, debug=False)
+            identity.write_text('{"source_sha256":"different"}\n')
+            self.assertNotEqual(changed, build_worker._receipt_authorized_artifact_evidence(
+                "benchmark-io", build_dir, debug=False))
+
+    def test_io_runtime_oracle_rejects_missing_nonexecutable_and_symlink(self):
+        for mutation in ("missing", "nonexecutable", "inside_symlink", "outside_symlink"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                build_dir = Path(temporary).resolve() / "build"
+                helper, _ = self._write_receipted_io_baseline(build_dir)
+                if mutation == "nonexecutable":
+                    helper.chmod(0o644)
+                else:
+                    helper.unlink()
+                    if mutation.endswith("symlink"):
+                        target = (build_dir if mutation == "inside_symlink"
+                                  else Path(temporary)) / "replacement"
+                        target.write_bytes(b"replacement\n")
+                        target.chmod(0o755)
+                        helper.symlink_to(target)
+                with self.assertRaises(RuntimeError):
+                    build_worker._runtime_artifact_evidence("benchmark-io", build_dir)
+
+    def test_io_receipt_rejects_identity_loss_and_parent_indirection(self):
+        for mutation in ("missing_identity", "symlink_identity", "symlink_parent"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                build_dir = Path(temporary).resolve()
+                helper, identity = self._write_receipted_io_baseline(build_dir)
+                if mutation == "symlink_parent":
+                    moved = helper.parent.with_name("other_baseline")
+                    helper.parent.rename(moved)
+                    helper.parent.symlink_to(moved, target_is_directory=True)
+                else:
+                    identity.unlink()
+                    if mutation == "symlink_identity":
+                        replacement = build_dir / "replacement.json"
+                        replacement.write_text("{}\n")
+                        identity.symlink_to(replacement)
+                with self.assertRaises(RuntimeError):
+                    build_worker._receipt_authorized_artifact_evidence(
+                        "benchmark-io", build_dir, debug=False)
+
     def test_runtime_artifact_must_be_executable(self):
         with tempfile.TemporaryDirectory() as temporary:
             build_dir = Path(temporary).resolve()
@@ -4638,7 +4711,8 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         self.assertFalse(result["build_metadata"]["test_indexes_expected"])
 
     def test_inspect_default_modes_directly_own_their_target_names(self):
-        shared_core = ("bioseq_modules_nopg", "bioseq_runtime_core")
+        shared_core = ("bioseq_modules_nopg", "bioseq_highway_runtime",
+                       "bioseq_runtime_core")
         shared_highway = ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
                           "bioseq_runtime_core")
         shared_runtime_highway = (

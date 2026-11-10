@@ -1345,7 +1345,10 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                         return std::unexpected(
                             minimizer_generation_encoding_error::storage_contract_mismatch);
                     }
-                } catch (const exact_simd_index_runtime_error&) {
+                } catch (const exact_simd_index_runtime_error& error) {
+                    if (error.status() == exact_simd_index_status::admission_denied) {
+                        return std::unexpected(minimizer_generation_encoding_error::admission);
+                    }
                     return std::unexpected(
                         minimizer_generation_encoding_error::storage_contract_mismatch);
                 } catch (const std::invalid_argument&) {

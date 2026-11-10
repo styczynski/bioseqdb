@@ -109,6 +109,185 @@ TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer r
             REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         }
     }
+    DYNAMIC_SECTION("catalog-authorized external images follow source DROP transactions") {
+        auto ctx = fresh_context({"index_image_drop_a", "index_image_drop_b",
+                                  "index_image_drop_same_xact"});
+        exec_sql(ctx,
+            "SET bioseq.index.insert_maintenance.enabled=off;"
+            "SET bioseq.index.async_persistence.enabled=off;"
+            "SET bioseq.index.recompute_async_persistence.enabled=off;"
+            "SET bioseq.aligner.grouped_soa_generation.enabled=on;"
+            "SET bioseq.aligner.minimizer.algorithm='two_stack_nthash';"
+            "CREATE TABLE index_image_drop_a "
+            "(id int, seq0 bioseq.seq('dna4',64), seq1 bioseq.seq('dna4',64)) USING bioseq;"
+            "CREATE TABLE index_image_drop_b "
+            "(id int, seq0 bioseq.seq('dna4',64)) USING bioseq;"
+            "CREATE TABLE index_image_drop_same_xact "
+            "(id int, seq0 bioseq.seq('dna4',64)) USING bioseq;"
+            "INSERT INTO index_image_drop_a VALUES (1,repeat('ACGT',4096)::bioseq.seq('dna4',64),"
+            "repeat('TGCA',4096)::bioseq.seq('dna4',64));"
+            "INSERT INTO index_image_drop_b VALUES (1,repeat('GATTACA',2341)::bioseq.seq('dna4',64));"
+            "INSERT INTO index_image_drop_same_xact VALUES "
+            "(1,repeat('ACGT',4096)::bioseq.seq('dna4',64));");
+        exec_sql(ctx,
+            "SELECT bioseq.update_index('index_image_drop_a'::regclass,'minimizers_per_fragment');"
+            "SELECT bioseq.update_index('index_image_drop_a'::regclass,'minimizers_per_fragment');"
+            "SELECT bioseq.update_index('index_image_drop_b'::regclass,'minimizers_per_fragment');");
+        // This fixture uses the default tablespace and no table rewrites. The
+        // exact stored scalar identities construct each canonical file name.
+        exec_sql(ctx,
+            "CREATE TEMP VIEW index_image_drop_paths AS SELECT "
+            "s.user_relid,s.column_attno,s.query_key,s.generation_id,s.state,s.image_bytes,"
+            "regexp_replace(pg_relation_filepath(s.user_relid),'/[^/]+$','') || "
+            "'/bioseq_minimizer_fragment_images/' || "
+            "lpad(to_hex(s.generation_id & 255),2,'0') || '/' || "
+            "s.main_relfilenode || '.' || s.user_relid || '.' || s.column_attno || "
+            "'.1.' || s.query_key || '.' || s.generation_id || '.minimizer_fragment_index' AS path "
+            "FROM bioseq_internal.minimizer_generation_storage s;"
+            "CREATE TEMP TABLE index_image_drop_receipts AS SELECT p.*,"
+            "md5(pg_read_binary_file(path)) AS content_md5 "
+            "FROM index_image_drop_paths p WHERE user_relid IN "
+            "('index_image_drop_a'::regclass,'index_image_drop_b'::regclass);");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts WHERE state=1;") == 3);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts WHERE state=2;") >= 2);
+        const auto verify_original_files = [&ctx] {
+            REQUIRE(query_scalar_int(ctx,
+                "SELECT count(*) FROM index_image_drop_receipts "
+                "WHERE (pg_stat_file(path,true)).size IS DISTINCT FROM image_bytes "
+                "OR md5(pg_read_binary_file(path)) IS DISTINCT FROM content_md5;") == 0);
+        };
+        verify_original_files();
+        const auto original_rows = query_rows(ctx,
+            "SELECT user_relid::text,column_attno::text,query_key::text,generation_id::text,state::text "
+            "FROM index_image_drop_paths WHERE user_relid IN "
+            "(SELECT user_relid FROM index_image_drop_receipts) ORDER BY 1,2,3,4;");
+
+        exec_sql(ctx,
+            "BEGIN; SAVEPOINT owner_drop;"
+            "ALTER TABLE index_image_drop_a DROP COLUMN seq0;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM bioseq_internal.minimizer_generation_storage "
+            "WHERE user_relid='index_image_drop_a'::regclass AND column_attno=2;") == 0);
+        verify_original_files(); // No filesystem mutation before top-level COMMIT.
+        exec_sql(ctx, "ROLLBACK TO owner_drop; RELEASE owner_drop; COMMIT;");
+        REQUIRE(query_rows(ctx,
+            "SELECT user_relid::text,column_attno::text,query_key::text,generation_id::text,state::text "
+            "FROM index_image_drop_paths WHERE user_relid IN "
+            "(SELECT user_relid FROM index_image_drop_receipts) ORDER BY 1,2,3,4;") == original_rows);
+        verify_original_files();
+
+        // A second owner's refusal must undo the already staged first owner.
+        // Synthetic catalog rows are local to this aborted savepoint; no files
+        // are fabricated. Validation/counting must refuse before the arm pass.
+        for (const int synthetic_count : {4092, 4096}) {
+            exec_sql(ctx, "BEGIN; SAVEPOINT later_owner;");
+            exec_sqlf(ctx,
+                "INSERT INTO bioseq_internal.minimizer_generation_storage "
+                "SELECT (jsonb_populate_record(NULL::bioseq_internal.minimizer_generation_storage,"
+                "to_jsonb(s)||jsonb_build_object('query_key',100000+number))).* "
+                "FROM bioseq_internal.minimizer_generation_storage s "
+                "CROSS JOIN generate_series(1,{}) AS generated(number) "
+                "WHERE s.user_relid='index_image_drop_b'::regclass AND s.state=1;"
+                "DROP TABLE index_image_drop_a;", synthetic_count);
+            verify_original_files();
+            const auto refused = sql_error(ctx, "DROP TABLE index_image_drop_b;");
+            REQUIRE(refused.contains(synthetic_count == 4092
+                ? "generation file-action queue capacity exhausted before mutation"
+                : "generation owner DROP descriptor batch exceeds"));
+            exec_sql(ctx, "ROLLBACK TO later_owner; RELEASE later_owner; COMMIT;");
+            REQUIRE(query_rows(ctx,
+                "SELECT user_relid::text,column_attno::text,query_key::text,generation_id::text,state::text "
+                "FROM index_image_drop_paths WHERE user_relid IN "
+                "(SELECT user_relid FROM index_image_drop_receipts) ORDER BY 1,2,3,4;") == original_rows);
+            verify_original_files();
+            REQUIRE(query_scalar_int(ctx, "SELECT count(*) FROM index_image_drop_a;") == 1);
+        }
+
+        exec_sql(ctx,
+            "BEGIN; SELECT bioseq.update_index('index_image_drop_same_xact'::regclass,"
+            "'minimizers_per_fragment');");
+        const auto aborted_publication = query_rows(ctx,
+            "SELECT path FROM index_image_drop_paths "
+            "WHERE user_relid='index_image_drop_same_xact'::regclass;");
+        REQUIRE(aborted_publication.size() == 1);
+        exec_sql(ctx, "DROP TABLE index_image_drop_same_xact; ROLLBACK;");
+        REQUIRE(query_scalar_int(ctx, "SELECT count(*) FROM index_image_drop_same_xact;") == 1);
+        REQUIRE(query_one(ctx, fmt::format(
+            "SELECT (pg_stat_file('{}',true)).size::text;",
+            aborted_publication.front().front().value())).front() == std::nullopt);
+
+        // Both publication's abort action and DROP's commit action can own the
+        // same new inode in one transaction; commit must remove it exactly once.
+        exec_sql(ctx,
+            "BEGIN; SELECT bioseq.update_index('index_image_drop_same_xact'::regclass,"
+            "'minimizers_per_fragment');"
+            "CREATE TEMP TABLE index_image_drop_new_receipts AS SELECT * FROM index_image_drop_paths "
+            "WHERE user_relid='index_image_drop_same_xact'::regclass;"
+            "DROP TABLE index_image_drop_same_xact;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_new_receipts "
+            "WHERE (pg_stat_file(path,true)).size=image_bytes;") == 1);
+        exec_sql(ctx, "COMMIT;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_new_receipts "
+            "WHERE (pg_stat_file(path,true)).size IS NOT NULL;") == 0);
+        verify_original_files();
+
+        exec_sql(ctx, "ALTER TABLE index_image_drop_a DROP COLUMN seq0;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts "
+            "WHERE user_relid='index_image_drop_a'::regclass AND column_attno=2 "
+            "AND (pg_stat_file(path,true)).size IS NOT NULL;") == 0);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts WHERE "
+            "NOT(user_relid='index_image_drop_a'::regclass AND column_attno=2) "
+            "AND (pg_stat_file(path,true)).size IS DISTINCT FROM image_bytes;") == 0);
+        const auto dropped_oid = query_scalar_int(ctx,
+            "SELECT 'index_image_drop_a'::regclass::oid::bigint;");
+        exec_sql(ctx, "DROP TABLE index_image_drop_a;");
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM index_image_drop_receipts WHERE user_relid={} "
+            "AND (pg_stat_file(path,true)).size IS NOT NULL;", dropped_oid)) == 0);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts "
+            "WHERE user_relid='index_image_drop_b'::regclass "
+            "AND md5(pg_read_binary_file(path)) IS DISTINCT FROM content_md5;") == 0);
+        REQUIRE(query_scalar_int(ctx, "SELECT count(*) FROM index_image_drop_b;") == 1);
+        exec_sql(ctx,
+            "DROP SCHEMA IF EXISTS index_image_drop_schema CASCADE;"
+            "CREATE SCHEMA index_image_drop_schema;"
+            "CREATE TABLE index_image_drop_schema.source (LIKE index_image_drop_b) USING bioseq;"
+            "INSERT INTO index_image_drop_schema.source SELECT * FROM index_image_drop_b;"
+            "SELECT bioseq.update_index('index_image_drop_schema.source'::regclass,"
+            "'minimizers_per_fragment');"
+            "CREATE TEMP TABLE index_image_drop_schema_receipts AS SELECT * FROM index_image_drop_paths "
+            "WHERE user_relid='index_image_drop_schema.source'::regclass;");
+        // PQexec keeps preceding statements in the transaction opened by BEGIN.
+        // Finish setup first so this schema DROP tests committed source storage;
+        // publication plus DROP in one transaction is covered separately above.
+        exec_sql(ctx,
+            "BEGIN; SAVEPOINT schema_drop; DROP SCHEMA index_image_drop_schema CASCADE;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_schema_receipts "
+            "WHERE (pg_stat_file(path,true)).size=image_bytes;") == 1);
+        exec_sql(ctx, "ROLLBACK TO schema_drop; RELEASE schema_drop; COMMIT;");
+        REQUIRE(query_scalar_int(ctx, "SELECT count(*) FROM index_image_drop_schema.source;") == 1);
+        exec_sql(ctx, "DROP SCHEMA index_image_drop_schema CASCADE;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_schema_receipts "
+            "WHERE (pg_stat_file(path,true)).size IS NOT NULL;") == 0);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts "
+            "WHERE user_relid='index_image_drop_b'::regclass "
+            "AND md5(pg_read_binary_file(path)) IS DISTINCT FROM content_md5;") == 0);
+        exec_sql(ctx, "DROP TABLE index_image_drop_b;");
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT count(*) FROM index_image_drop_receipts "
+            "WHERE (pg_stat_file(path,true)).size IS NOT NULL;") == 0);
+    }
+
 }
 
 TEST_CASE("sequence-source invalidation is terminal across parent update and delete",

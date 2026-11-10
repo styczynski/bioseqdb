@@ -3,6 +3,7 @@ module;
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -929,10 +930,13 @@ inline void verify_generated_closure() {
                 break;
             case artifact_kind::unit_probe_implementation:
             case artifact_kind::minimizer_representation_instantiation:
+            case artifact_kind::scalar_codec_primary:
+            case artifact_kind::scalar_codec_partition:
+            case artifact_kind::scalar_codec_implementation:
                 require(
                     false,
                     "the minimal generated-closure fixture has no optional "
-                    "probe or representation owners");
+                    "probe, representation, or scalar codec owners");
                 break;
         }
     }
@@ -2007,10 +2011,202 @@ namespace bioseq { namespace simd {
 
 }
 
+/** Own the tiny source/header files used by the existing generator contract suite. */
+struct scalar_contract_directory {
+    std::filesystem::path path;
+    scalar_contract_directory() {
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        for (std::size_t attempt{}; attempt < 32u; ++attempt) {
+            const auto candidate = std::filesystem::temp_directory_path()
+                / ("bioseq-scalar-contract-" + std::to_string(nonce) + '-' + std::to_string(attempt));
+            std::error_code error;
+            if (std::filesystem::create_directory(candidate, error)) { path = candidate; return; }
+            if (error) throw std::runtime_error("cannot create scalar contract directory: " + error.message());
+        }
+        throw std::runtime_error("cannot acquire scalar contract directory");
+    }
+    ~scalar_contract_directory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path, ignored);
+    }
+    scalar_contract_directory(const scalar_contract_directory&) = delete;
+    scalar_contract_directory& operator=(const scalar_contract_directory&) = delete;
+};
+
+/** Self-contained heads test real unmarked token/Clang association, not codec arithmetic. */
+[[nodiscard]] inline std::string scalar_contract_source(const bool ranks,
+        const bool outside_call = false, const bool local_macro = false,
+        const bool external_call = false, const bool assertion_call = false) {
+    std::string source{"module;\n#include \"scalar_macro_fixture.h\"\n#define HWY_NAMESPACE N_EMU128\n"};
+    if (local_macro) source += "#define CALL_HELPER() unselected_helper()\n";
+
+    source += "export module " + std::string{ranks ? "bioseq.highway.sources.sequence_ops" : "bioseq.io.simd"} + ";\n";
+    if (ranks) source += "namespace bioseq::simd { enum class sequence_rank_transform { translate_triplets }; }\n";
+    source += ranks ? "namespace bioseq::simd::target {\n" : "namespace bioseq::io::simd::HWY_NAMESPACE {\n";
+    source += "constexpr bool unselected_helper() { return true; }\n";
+    source += "static_assert(true);\n";
+    for (const auto& specification : scalar_codec_declarations(ranks)) {
+        source += specification.head;
+        if (specification.name == "byte_scan_kind") {
+            source += " { needles, json_escape, printable_ascii, upper_hex, header_unreserved };\n";
+            continue;
+        }
+        source += " { static_assert(true); ";
+        if (specification.name == "valid_upper_hex_byte" && assertion_call)
+            source += "static_assert(unselected_helper()); ";
+        if (specification.name == "scan_for_each") source += "return;";
+        else if (specification.name == "valid_upper_hex_byte" && local_macro) source += "return CALL_HELPER();";
+        else if (specification.name == "valid_upper_hex_byte" && outside_call) source += "return unselected_helper();";
+        else if (specification.name == "valid_upper_hex_byte" && external_call) source += "return foreign_native::helper();";
+        else source += "return {};";
+        source += " }\n";
+    }
+    return source + "}\n";
+}
+
+/** Build one genuine Clang semantic fixture for the unchanged unmarked IO selector. */
+[[nodiscard]] inline extracted_source scalar_contract_extract(const std::filesystem::path& path,
+        const bool ranks, const std::string& source) {
+    // A real external macro spelling location exercises the authorized head rule.
+    const std::string scaffold = std::string{"#define HWY_INLINE inline\n#define HWY_RESTRICT __restrict__\n"}
+        + R"CPP(namespace std {
+using size_t = decltype(sizeof(0)); using uint8_t = unsigned char; using uint32_t = unsigned int;
+template<class A, class B> concept same_as = __is_same(A, B);
+template<class T, size_t Count> struct array {}; template<class T> struct span {};
+}
+namespace hn { template<class D> using TFromD = unsigned char;
+template<class D> struct Vec {}; template<class D> struct Mask {}; }
+namespace foreign_native { constexpr bool helper() { return true; } }
+)CPP";
+    publish_artifact_if_changed(path.parent_path() / "scalar_macro_fixture.h", scaffold);
+    publish_artifact_if_changed(path, source);
+    const source_spec owner{
+        .key = ranks ? "codec_scalar_rank" : "codec_scalar_bytes", .path = path,
+        .module_name = ranks ? "bioseq.highway.sources.sequence_ops" : "bioseq.io.simd",
+        .partition = ranks ? "rank" : "bytes", .family = "codec_scalar",
+    };
+    const auto semantic = structural_analysis::scan_translation_unit_from_code(
+        path, source, {"-std=c++26", "-xc++"}, "scalar_codec_contract");
+    require(ranks || semantic.marked_namespaces.empty(), "IO scalar fixture remains genuinely unmarked");
+    const structural_analysis::module_graph_unit graph{.provided_module = owner.module_name};
+    return extract_scalar_codec_source(owner, ranks, "N_EMU128", semantic, graph);
+}
+
+/** Keep native generation byte-identical while proving role policy, closure and publication rejection. */
+inline void verify_scalar_codec_role() {
+    scalar_contract_directory temporary;
+    generation_plan plan = two_target_plan();
+    const auto before = render_generation(plan);
+    require(before.artifacts.size() == 11u, "scalar-free fixture remains eleven artifacts");
+    const auto sequence_path = temporary.path / "rank.cppm";
+    const auto io_path = temporary.path / "bytes.cppm";
+    plan.scalar_codec_sources.push_back(scalar_contract_extract(sequence_path, true, scalar_contract_source(true)));
+    plan.scalar_codec_sources.push_back(scalar_contract_extract(io_path, false, scalar_contract_source(false)));
+    require(plan.scalar_codec_sources[0].callables.size() == 8u
+        && plan.scalar_codec_sources[1].callables.size() == 14u,
+        "closed rank and unmarked byte owners retain every reviewed callable");
+    require(occurrences(plan.scalar_codec_sources[0].body, "static_assert(true);") == 8u
+        && occurrences(plan.scalar_codec_sources[1].body, "static_assert(true);") == 14u,
+        "selected bodies retain assertions while namespace assertions remain outside the closure");
+    require_rejected([&io_path] {
+        (void)scalar_contract_extract(io_path, false,
+            scalar_contract_source(false, false, false, false, true));
+    }, "an unselected helper inside a valid constant assertion remains rejected");
+    require_rejected([&io_path] {
+        (void)scalar_contract_extract(io_path, false, scalar_contract_source(false, true));
+    }, "a body-only reference outside the scalar closure is rejected");
+    require_rejected([&io_path] {
+        (void)scalar_contract_extract(io_path, false, scalar_contract_source(false, false, true));
+    }, "a source-local macro alias outside the copied range is rejected");
+    require_rejected([&io_path] {
+        (void)scalar_contract_extract(io_path, false, scalar_contract_source(false, false, false, true));
+    }, "an external native namespace call cannot escape the scalar closure");
+    require_rejected([&io_path] {
+        auto changed = scalar_contract_source(false);
+        const std::string before{"constexpr bool valid_upper_hex_byte"};
+        const auto position = changed.find(before);
+        require(position != std::string::npos, "signature mutation finds the exact reviewed head");
+        changed.replace(position, before.size(), "constexpr unsigned valid_upper_hex_byte");
+        (void)scalar_contract_extract(io_path, false, changed);
+    }, "a same-arity incompatible return type is rejected before rendering");
+    publish_artifact_if_changed(io_path, scalar_contract_source(false));
+
+    scalar_codec_spec scalar{
+        .sequence_source = sequence_path, .io_source = io_path,
+        .policy_digest = bioseq::common::sha256_hex(scalar_codec_policy_fragment(plan.target_inventory)),
+        .header_manifest = temporary.path / "headers.tsv",
+    };
+    std::string digest_material{"bioseq-highway-header-closure\nrevision=1\n"};
+    std::string header_rows;
+    constexpr std::array<std::string_view, 4> headers{
+        "hwy/detect_targets.h", "hwy/highway.h", "hwy/ops/scalar-inl.h", "hwy/targets.h"};
+    for (const auto header : headers) {
+        const auto path = temporary.path / header;
+        std::filesystem::create_directories(path.parent_path());
+        const std::string content = "fixture header " + std::string{header} + '\n';
+        publish_artifact_if_changed(path, content);
+        const auto hash = bioseq::common::sha256_hex(content);
+        const auto identity = "0/" + std::string{header};
+        digest_material += identity + '\t' + hash + '\n';
+        header_rows += "header\t" + identity + '\t' + path.generic_string() + '\t' + hash + '\n';
+    }
+    scalar.highway_digest = bioseq::common::sha256_hex(digest_material);
+    const auto manifest = "bioseq-highway-scalar-headers\nrevision\t1\npolicy\t" + scalar.policy_digest
+        + "\ndigest\t" + scalar.highway_digest + '\n' + header_rows;
+    publish_artifact_if_changed(scalar.header_manifest, manifest);
+    scalar.header_manifest_sha256 = bioseq::common::sha256_hex(manifest);
+    validate_scalar_codec_header_evidence(plan.target_inventory, scalar);
+    auto wrong_policy = scalar;
+    wrong_policy.policy_digest = std::string(64u, '0');
+    require_rejected([&plan, &wrong_policy] {
+        validate_scalar_codec_header_evidence(plan.target_inventory, wrong_policy);
+    }, "scalar effective prelude cannot be self-labelled by a valid-looking digest");
+    const auto scalar_header = temporary.path / "hwy/ops/scalar-inl.h";
+    publish_artifact_if_changed(scalar_header, "changed scalar operations\n");
+    require_rejected([&plan, &scalar] {
+        validate_scalar_codec_header_evidence(plan.target_inventory, scalar);
+    }, "changed actual scalar ops fail even with unchanged metadata digests");
+    publish_artifact_if_changed(scalar_header, "fixture header hwy/ops/scalar-inl.h\n");
+    validate_scalar_codec_header_evidence(plan.target_inventory, scalar);
+    plan.source_inventory.scalar_codec = scalar;
+    const auto generated = render_generation(plan);
+    require(generated.artifacts.size() == 15u, "scalar role adds exactly four isolated artifacts");
+    for (const auto& old : before.artifacts) {
+        const auto current = std::ranges::find_if(generated.artifacts, [&old](const auto& candidate) {
+            return candidate.relative_path == old.relative_path;
+        });
+        require(current != generated.artifacts.end() && current->content == old.content
+            && current->module_name == old.module_name && current->kind == old.kind,
+            "every native artifact remains byte-identical when adding the scalar role");
+    }
+    const auto scalar_artifact = std::ranges::find_if(generated.artifacts, [](const auto& artifact) {
+        return artifact.kind == artifact_kind::scalar_codec_partition;
+    });
+    require(scalar_artifact != generated.artifacts.end()
+        && scalar_artifact->content.contains("#define HWY_COMPILE_ONLY_SCALAR 1")
+        && !scalar_artifact->content.contains("BIOSEQ_TEST_INDEXES"),
+        "actual scalar role is independent of native fixed-target validation flags");
+    auto native_with_scalar = plan.target_inventory;
+    native_with_scalar.targets.push_back({.platform = "x86", .slug = "scalar", .token = "HWY_SCALAR",
+        .target_namespace = "N_SCALAR", .bit = 4u});
+    require_rejected([&native_with_scalar] { validate_complete_table_target_policy(native_with_scalar); },
+        "separate scalar role never relaxes the native complete-table policy");
+    const auto publication = make_publication_artifacts(generated);
+    (void)render_highway_publication_manifest(temporary.path / "output", {}, plan, generated, publication);
+    auto stale = generated;
+    const auto scalar_index = static_cast<std::size_t>(std::distance(generated.artifacts.begin(), scalar_artifact));
+    stale.artifacts[scalar_index].content += "// tampered scalar body\n";
+    const auto tampered = make_publication_artifacts(stale);
+    require_rejected([&temporary, &plan, &stale, &tampered] {
+        (void)render_highway_publication_manifest(temporary.path / "output", {}, plan, stale, tampered);
+    }, "scalar output content remains bound to the shared publication evidence");
+}
+
 }  // namespace contract_detail
 
 void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
+    contract_detail::verify_scalar_codec_role();
     contract_detail::verify_debug_assert_partition_preamble();
     contract_detail::verify_template_flatten_separation();
     contract_detail::verify_slot_callable_ownership();

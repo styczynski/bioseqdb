@@ -35,6 +35,76 @@ import bioseq.bench.prefilter_algorithm_selection;
 
 namespace {
 
+TEST_CASE("Measured output observations bind bytes to every ordered row",
+    "[component:benchmark_framework][layer:contract][feature:reporting]") {
+    using bioseq::bench::framework::ordered_output_observation;
+    const std::array<std::string, 3> expected{"header|sequence|quality", "different|fields", ""};
+    SECTION("Chunking has no effect and empty rows remain records") {
+        ordered_output_observation observed{expected};
+        REQUIRE_FALSE(observed.complete());
+        for (const auto& row : expected) {
+            REQUIRE(observed.begin_record());
+            for (char character : row) REQUIRE(observed.append(std::string_view{&character, 1}));
+            REQUIRE(observed.end_record());
+        }
+        REQUIRE(observed.complete());
+        REQUIRE(observed.records() == expected.size());
+        REQUIRE_FALSE(observed.begin_record());
+        REQUIRE_FALSE(observed.complete());
+    }
+    SECTION("Count-preserving duplication and swapping cannot pass") {
+        for (const auto order : {std::array{0, 0, 2}, std::array{1, 0, 2}}) {
+            ordered_output_observation observed{expected};
+            for (const auto index : order) {
+                (void)observed.begin_record();
+                (void)observed.append(expected[index]);
+                (void)observed.end_record();
+            }
+            REQUIRE(observed.records() == expected.size());
+            REQUIRE_FALSE(observed.complete());
+        }
+    }
+    SECTION("A changed field, omitted tail or merged row is rejected") {
+        for (const std::string corrupt : std::array<std::string, 3>{"header|sequence|qualitY", "header|sequence|",
+                expected[0] + expected[1]}) {
+            ordered_output_observation observed{expected};
+            REQUIRE(observed.begin_record());
+            (void)observed.append(corrupt);
+            (void)observed.end_record();
+            REQUIRE_FALSE(observed.complete());
+        }
+    }
+    SECTION("Native binary records retain NUL bytes and partition-relative boundaries") {
+        const std::array<std::string, 4> binary{std::string{"\0BAM", 4},
+            std::string{"record\0tail", 11}, "", std::string(131073u, static_cast<char>(0xa5))};
+        std::size_t rows{};
+        for (std::size_t partition{}; partition < 2u; ++partition) {
+            ordered_output_observation observed{std::span<const std::string>{binary}.subspan(partition * 2u, 2u)};
+            for (std::size_t ordinal = partition * 2u; ordinal < (partition + 1u) * 2u; ++ordinal) {
+                REQUIRE(observed.begin_record());
+                REQUIRE(observed.append(binary[ordinal]));
+                REQUIRE(observed.end_record());
+            }
+            REQUIRE(observed.complete());
+            rows += observed.records();
+        }
+        REQUIRE(rows == binary.size());
+        ordered_output_observation truncated{std::span<const std::string>{binary}.first(1u)};
+        REQUIRE(truncated.begin_record());
+        REQUIRE(truncated.append(std::string_view{binary.front()}.substr(0u, 1u)));
+        REQUIRE_FALSE(truncated.end_record());
+    }
+    SECTION("Truncation, unfinished rows and unframed writes cannot pass") {
+        ordered_output_observation observed{expected};
+        REQUIRE_FALSE(observed.append(expected[0]));
+        REQUIRE_FALSE(observed.complete());
+        ordered_output_observation unfinished{expected};
+        REQUIRE(unfinished.begin_record());
+        REQUIRE(unfinished.append(expected[0]));
+        REQUIRE_FALSE(unfinished.complete());
+    }
+}
+
 using bioseq::bench::framework::config_value;
 using bioseq::bench::framework::create_benchmark_with_iteration_boundaries;
 using bioseq::bench::framework::iteration_boundary_callbacks;
@@ -2348,6 +2418,59 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
             == Catch::Approx(70.0 / 60.0));
     REQUIRE(paired_evidence["accepted"] == false);
 
+    static constexpr std::string_view median_ratio_rules = R"json([
+      ["paired_median_ratio",{"key":"lhs"},{"compare":"<","tolerance%":10,"aggregate":"p50","pairing":"by_iteration_ratio","paired_reduction":"ratio_of_medians"},{"key":"rhs"}]
+    ])json";
+    // The medians are 60/60 = 1; the historical median of ratios is 70/60.
+    auto [median_dir, median_ratio] = run_fixture(
+        median_ratio_rules, true, lhs_values, rhs_values);
+    (void)median_dir;
+    REQUIRE(median_ratio.exit_code == 0);
+    const auto& median_evidence = median_ratio.report["paired_rule_evidence"][0];
+    REQUIRE(median_evidence["comparator"]["paired_reduction"] == "ratio_of_medians");
+    REQUIRE(median_evidence["observed_paired_ratio"].get<double>() == Catch::Approx(1.0));
+    REQUIRE(median_evidence["median_summary"]["numerator"]["p50"] == 60.0);
+    REQUIRE(median_evidence["median_summary"]["numerator"]["min"] == 1.0);
+    REQUIRE(median_evidence["median_summary"]["numerator"]["max"] == 70.0);
+    REQUIRE(median_evidence["median_summary"]["numerator"]["mad"] == 10.0);
+    REQUIRE(median_evidence["median_summary"]["denominator"]["p50"] == 60.0);
+    {
+        paired_schedule_evidence_fault_reset reset_fault;
+        set_paired_schedule_evidence_fault_for_testing(
+            paired_schedule_evidence_fault::wrong_shuffle_seed);
+        auto [bad_median_dir, bad_median] = run_fixture(
+            median_ratio_rules, true, lhs_values, rhs_values);
+        (void)bad_median_dir;
+        REQUIRE(bad_median.exit_code == 1);
+        REQUIRE(bad_median.report["paired_rule_evidence"][0]["observed_paired_ratio"].is_null());
+        REQUIRE(bad_median.report["meta"]["history_eligible"] == false);
+    }
+    static constexpr std::string_view median_warm_rules = R"json([
+      ["paired_median_warm",{"key":"lhs"},{"compare":"<","aggregate":"p50","pairing":"by_iteration_ratio","paired_reduction":"ratio_of_medians","warmup_repetitions":1},{"key":"rhs"}]
+    ])json";
+    auto [median_warm_dir, median_warm] = run_fixture(median_warm_rules, true,
+        std::array<std::int64_t, 3>{{1000, 50, 50}}, std::array<std::int64_t, 3>{{1, 100, 100}});
+    (void)median_warm_dir;
+    REQUIRE(median_warm.exit_code == 0);
+    REQUIRE(median_warm.report["paired_rule_evidence"][0]["median_summary"]["numerator"]["count"] == 2);
+    REQUIRE(median_warm.report["paired_rule_evidence"][0]["observed_paired_ratio"].get<double>()
+            == Catch::Approx(0.5));
+    auto [bad_warm_dir, bad_warm] = run_fixture(median_warm_rules, true,
+        std::array<std::int64_t, 3>{{1000, 50, 50}}, std::array<std::int64_t, 3>{{0, 100, 100}});
+    (void)bad_warm_dir;
+    REQUIRE(bad_warm.exit_code == 1);
+    REQUIRE(bad_warm.report["paired_rule_evidence"][0]["observed_paired_ratio"].is_null());
+
+    static constexpr std::string_view invalid_median_reduction_rules = R"json([
+      ["invalid_unpaired_median",{"key":"lhs"},{"compare":"<","aggregate":"p50","paired_reduction":"ratio_of_medians"},{"key":"rhs"}]
+    ])json";
+    auto [invalid_median_dir, invalid_median] = run_fixture(
+        invalid_median_reduction_rules, true, lhs_values, rhs_values);
+    (void)invalid_median_dir;
+    REQUIRE(invalid_median.exit_code == 1);
+    REQUIRE(stderr_contains(invalid_median.captured_stderr, "median_ratio_requires_paired_p50"));
+
+
     static constexpr std::string_view independent_min_equality_rules = R"json([
       ["independent_min_equality",{"key":"lhs"},{"compare":"=","tolerance%":0,"aggregate":"min"},{"key":"rhs"}]
     ])json";
@@ -4148,6 +4271,97 @@ inline constexpr char k_small_seed_benchmark_key[] =
         config_stream, nullptr, /*allow_exceptions=*/false);
     if (config.is_discarded()) return nlohmann::json::object();
     return config;
+}
+
+TEST_CASE("Alignment IO defaults retain full operations and qualify native and cold controls",
+    "[component:benchmark_framework][layer:contract][feature:configuration][resource:filesystem]") {
+    const auto path = production_benchmark_configuration_path().parent_path().parent_path()
+        / "bioseq" / "io" / "benchmark" / "configuration.json";
+    std::ifstream stream{path};
+    REQUIRE(stream.good());
+    const auto config = nlohmann::json::parse(stream, nullptr, false);
+    REQUIRE_FALSE(config.is_discarded());
+    const auto& benchmark = config.at("bench_io_alignment");
+    const auto& matrix = benchmark.at("matrix");
+    REQUIRE(benchmark.at("concurrency").at("bench_lock") == true);
+    REQUIRE(benchmark.at("concurrency").at("concurrency") == false);
+    REQUIRE((matrix.at("for") == nlohmann::json{{"ALIGNMENT_RECORD_IO", 7}, {"ALIGNMENT_QUAL_SHORT", 9},
+        {"ALIGNMENT_QUAL_SMALL_UNCOMPRESSED", 9}, {"ALIGNMENT_QUAL_LONG_HIGH_COMPRESSION", 9}}));
+    REQUIRE(matrix.at("over").size() == 2u);
+    std::size_t tuples{};
+    for (const auto algorithm : {"bioseq_alignment", "samtools_alignment"}) {
+        const auto& axes = matrix.at("over").at(algorithm);
+        REQUIRE(axes.size() == 4u);
+        REQUIRE(axes.at("alphabet") == nlohmann::json::array({"dna4", "dna5", "dna15", "aa10li", "aa10murphy", "aa20", "aa27"}));
+        REQUIRE(axes.at("format") == nlohmann::json::array({"sam", "bam"}));
+        REQUIRE(axes.at("operation") == nlohmann::json::array({"read", "write", "native_encode", "read_cold"}));
+        REQUIRE(axes.at("workers") == nlohmann::json::array({1, 4}));
+        const auto& declared = config.at("params").at(algorithm);
+        REQUIRE(declared.at("operation").at("enum") == axes.at("operation"));
+        for (const auto& [axis, values] : axes.items()) {
+            REQUIRE(declared.contains(axis));
+            const auto& allowed = declared.at(axis).at("enum");
+            REQUIRE(allowed.is_array());
+            REQUIRE_FALSE(allowed.empty());
+            for (const auto& value : values)
+                REQUIRE(std::find(allowed.begin(), allowed.end(), value) != allowed.end());
+            REQUIRE(std::find(allowed.begin(), allowed.end(), declared.at(axis).at("default")) != allowed.end());
+        }
+        tuples += axes.at("alphabet").size() * axes.at("format").size()
+            * axes.at("operation").size() * axes.at("workers").size();
+    }
+    REQUIRE(tuples == 224u);
+    std::size_t raw_samples{};
+    for (const auto& [name, repeats] : matrix.at("for").items()) {
+        (void)name;
+        raw_samples += tuples * repeats.get<std::size_t>();
+    }
+    REQUIRE(raw_samples == 7616u);
+    const auto& metrics = matrix.at("metrics");
+    for (const auto metric : {"encoded_bytes", "native_sequence_symbols", "full_file_byte_metrics_present",
+            "uncompressed_file_bytes", "uncompressed_to_physical_ratio", "uncompressed_file_bytes_per_second"}) {
+        REQUIRE(metrics.at(metric).at("type") == "evaluation");
+        REQUIRE_FALSE(metrics.at(metric).at("description").get<std::string>().empty());
+    }
+    const auto& rules = matrix.at("metrics").at("wall_clock_ns").at("rules");
+    REQUIRE(rules.size() == 336u);
+    std::set<std::string> selected;
+    std::size_t original_rules{}, new_rules{};
+    for (const auto& rule : rules) {
+        REQUIRE(rule.size() == 4u);
+        auto left = rule.at(1), right = rule.at(3);
+        REQUIRE(left.size() == 6u);
+        REQUIRE(right.size() == 6u);
+        REQUIRE(left.at("key") == "bioseq_alignment");
+        REQUIRE(right.at("key") == "samtools_alignment");
+        left.erase("key"); right.erase("key");
+        REQUIRE(left == right);
+        REQUIRE(left.at("test_case") != "ALIGNMENT_RECORD_IO");
+        REQUIRE(selected.insert(left.dump()).second);
+        const auto operation = left.at("operation").get<std::string>();
+        if (operation == "read" || operation == "write") ++original_rules;
+        else { REQUIRE((operation == "native_encode" || operation == "read_cold")); ++new_rules; }
+        const auto& policy = rule.at(2);
+        REQUIRE(policy.at("warmup_repetitions") == 2);
+        REQUIRE(policy.at("pairing") == "by_iteration_ratio");
+        REQUIRE(policy.at("paired_reduction") == "ratio_of_medians");
+        REQUIRE(policy.at("aggregate") == "p50");
+        REQUIRE(policy.at("tolerance%") == 0);
+        REQUIRE(policy.at("blocking") == true);
+    }
+    REQUIRE(original_rules == 168u);
+    REQUIRE(new_rules == 168u);
+    const auto& axes = matrix.at("over").at("bioseq_alignment");
+    for (const auto& [name, ignored] : matrix.at("for").items()) {
+        (void)ignored;
+        if (name == "ALIGNMENT_RECORD_IO") continue;
+        for (const auto& alphabet : axes.at("alphabet"))
+            for (const auto& format : axes.at("format"))
+                for (const auto& operation : axes.at("operation"))
+                    for (const auto& workers : axes.at("workers"))
+                        REQUIRE((selected.contains(nlohmann::json{{"test_case", name}, {"alphabet", alphabet},
+                            {"format", format}, {"operation", operation}, {"workers", workers}}.dump())));
+    }
 }
 
 /// Keep the production small-seed benchmark and the declarations it uses.

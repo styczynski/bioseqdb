@@ -98,9 +98,9 @@ class alignment_export_context {
     std::map<std::uint64_t, std::size_t> explicit_primaries_;
     std::vector<std::string> retained_header_lines_;
     std::vector<identifier_parser::preservation_reference_view> manifest_references_;
-    std::set<std::string> read_group_ids_;
+    std::set<std::string, std::less<>> read_group_ids_;
     std::map<std::string, std::optional<std::string>> read_group_programs_;
-    std::map<std::string, std::optional<std::string>> program_parents_;
+    std::map<std::string, std::optional<std::string>, std::less<>> program_parents_;
     std::array<std::uint8_t, supported_biological_alphabets::alphabet_count> sequence_alphabets_{};
     std::array<std::uint8_t, supported_storage_alphabets::alphabet_count> quality_alphabets_{};
     std::size_t sequence_alphabet_count_{};
@@ -439,9 +439,17 @@ public:
             }
             if (!context_ids_.insert(context.id).second)
                 return std::unexpected(std::string{"Duplicate preservation header context ID"});
-            if (options.sam_header.empty()) {
+            if (options.sam_header.empty() && !metadata.replay_header_lines) {
                 if (const auto added = add_header_lines(context.original_header_lines); !added) return added;
             }
+        }
+        if (options.sam_header.empty() && metadata.replay_header_lines) {
+            for (const auto& line : *metadata.replay_header_lines) {
+                if (!is_sam_replay_header_line(line))
+                    return std::unexpected(std::string{"Invalid non-geometric replay header line"});
+                if (auto admitted = admit_growth(2048, {{line.size(), 16}}); !admitted) return admitted;
+            }
+            if (const auto added = add_header_lines(*metadata.replay_header_lines); !added) return added;
         }
         if (!options.sam_header.empty()) {
             for (const auto& line : options.sam_header) {
@@ -685,6 +693,9 @@ public:
         if (row.alignment && row.alignment->header_context_id
             && !context_ids_.contains(*row.alignment->header_context_id))
             return std::unexpected(std::string{"Alignment row refers to an undeclared preservation context"});
+        if (row.alignment)
+            if (auto links = validate_auxiliary_header_links(row.alignment->auxiliary); !links)
+                return std::unexpected(links.error());
         resolved_alignment_record result;
         const auto identity = read_identity(row);
         const auto candidate = candidate_read_name(row);
@@ -834,7 +845,8 @@ public:
         } adapter{sink};
         if (auto written = identifier_parser::append_preservation_manifest(adapter, *metadata_, manifest_references_,
                 std::span<const std::uint8_t>{sequence_alphabets_}.first(sequence_alphabet_count_),
-                std::span<const std::uint8_t>{quality_alphabets_}.first(quality_alphabet_count_));
+                std::span<const std::uint8_t>{quality_alphabets_}.first(quality_alphabet_count_),
+                std::span<const std::string>{retained_header_lines_});
             !written) return written;
         return text("\n");
     }
@@ -888,7 +900,7 @@ public:
             if (!read_group && !program) continue;
             if (field.type != 'Z')
                 return std::unexpected(std::string{"SAM RG/PG auxiliary links must be Z strings"});
-            const std::string id{reinterpret_cast<const char*>(field.payload.data()), field.payload.size()};
+            const std::string_view id{reinterpret_cast<const char*>(field.payload.data()), field.payload.size()};
             if ((read_group && !read_group_ids_.contains(id)) || (program && !program_parents_.contains(id)))
                 return std::unexpected(std::string{"SAM auxiliary link has no declared RG/PG header ID"});
         }
@@ -909,6 +921,8 @@ struct manifest_wire_reference {
 /** Shared admitted manifest destination for file readers and PG provenance lookup. */
 class alignment_manifest_builder {
     parallelism::memory_permit permit_;
+    parallelism::memory_permit replay_vector_permit_;
+    parallelism::memory_permit replay_text_permit_;
     std::set<std::uint64_t> context_ids_;
     std::set<std::uint64_t> reference_ids_;
     std::set<std::string, std::less<>> wire_names_;
@@ -960,6 +974,25 @@ public:
         return {};
     }
 
+    /** Start or replace file replay defaults without changing original contexts.
+     * Destroy prior storage before returning its independent admission shares.
+     */
+    [[nodiscard]] std::expected<void, std::string> begin_replay_header(const bool present) {
+        source_metadata.replay_header_lines.reset();
+        replay_text_permit_.release();
+        replay_vector_permit_.release();
+        if (present) source_metadata.replay_header_lines.emplace();
+        return {};
+    }
+
+    /** Retain one native non-geometric header line through the shared owners. */
+    [[nodiscard]] std::expected<void, std::string> replay_header_line(const std::string_view line) {
+        if (!source_metadata.replay_header_lines || !is_sam_replay_header_line(line))
+            return std::unexpected(std::string{"Manifest replay header line is invalid"});
+        return append_admitted_text(*source_metadata.replay_header_lines,
+            replay_vector_permit_, replay_text_permit_, line);
+    }
+
     /** Start an original header context after admitting its identity/container owner. */
     [[nodiscard]] std::expected<void, std::string> begin_context(const std::uint64_t identity) {
         if (context_open_ || reference_open_ || context_ids_.contains(identity))
@@ -991,9 +1024,12 @@ public:
         return {};
     }
 
-    /** Copy a checked reference declaration and its emitted name into stable ownership. */
+    /** Copy borrowed names after admission; geometry carries no uncharged strings. */
     [[nodiscard]] std::expected<void, std::string> begin_reference(
-        const reference_descriptor& reference, std::string_view wire_name, const bool synthetic) {
+        const reference_descriptor& reference, std::string_view original_name,
+        std::string_view wire_name, const bool synthetic) {
+        if (!reference.name.empty() || !reference.attributes.empty())
+            return std::unexpected("Manifest reference geometry must borrow its names and attributes");
         if (context_open_ || reference_open_ || reference_ids_.contains(reference.identity)
             || wire_names_.contains(wire_name) || !valid_reference_name(wire_name))
             return std::unexpected(std::string{"Manifest reference identity/name is invalid or duplicated"});
@@ -1003,12 +1039,12 @@ public:
                 return std::unexpected(std::string{"Manifest alphabet disagrees with its projection domain"});
         } else if (synthetic)
             return std::unexpected(std::string{"Synthetic manifest reference has no source alphabet"});
-        if (!synthetic && !reference.name.empty() && reference.name != wire_name)
+        if (!synthetic && !original_name.empty() && original_name != wire_name)
             return std::unexpected(std::string{"Native manifest reference changes its source name"});
         if (reference.length == 0 || reference.length > static_cast<std::uint64_t>(
                 std::numeric_limits<std::int32_t>::max()) / (synthetic ? 3u : 1u))
             return std::unexpected(std::string{"Manifest reference length exceeds native limits"});
-        const auto names = common::checked_add(reference.name.size(), wire_name.size());
+        const auto names = common::checked_add(original_name.size(), wire_name.size());
         const auto multiplied = names ? common::checked_mul(*names, std::size_t{4}) : std::nullopt;
         const auto bytes = multiplied ? common::checked_add(*multiplied, std::size_t{1024}) : std::nullopt;
         if (!bytes) return std::unexpected(std::string{"Manifest reference allocation overflows"});
@@ -1016,28 +1052,29 @@ public:
         reference_ids_.insert(reference.identity);
         wire_names_.emplace(wire_name);
         source_metadata.references.push_back(reference);
+        source_metadata.references.back().name.assign(original_name);
         wire_references.push_back({std::string{wire_name}, synthetic});
         reference_open_ = true;
         return {};
     }
 
     /** Retain original @SQ attributes once; emitted geometry remains independently checked. */
-    [[nodiscard]] std::expected<void, std::string> reference_attribute(const sam_header_field& field) {
-        if (!reference_open_ || !auxiliary_tag_index(field.tag)
-            || field.tag == std::array<char, 2>{'S', 'N'} || field.tag == std::array<char, 2>{'L', 'N'})
+    [[nodiscard]] std::expected<void, std::string> reference_attribute(std::array<char, 2> tag, std::string_view value) {
+        if (!reference_open_ || !auxiliary_tag_index(tag)
+            || tag == std::array<char, 2>{'S', 'N'} || tag == std::array<char, 2>{'L', 'N'})
             return std::unexpected(std::string{"Manifest reference attribute is invalid"});
-        if (const auto valid = validate_sam_header_value("@SQ", field.tag, field.value); !valid) return valid;
+        if (const auto valid = validate_sam_header_value("@SQ", tag, value); !valid) return valid;
         auto& reference = source_metadata.references.back();
         if (std::any_of(reference.attributes.begin(), reference.attributes.end(),
-                [tag = field.tag](const sam_header_field& previous) { return previous.tag == tag; }))
+                [tag](const sam_header_field& previous) { return previous.tag == tag; }))
             return std::unexpected(std::string{"Manifest reference attribute is duplicated"});
-        if (field.tag == std::array<char, 2>{'T', 'P'}
-            && field.value != (reference.circular ? "circular" : "linear"))
+        if (tag == std::array<char, 2>{'T', 'P'}
+            && value != (reference.circular ? "circular" : "linear"))
             return std::unexpected(std::string{"Manifest reference TP disagrees with topology"});
-        const auto bytes = common::checked_add(field.value.size(), std::size_t{128});
+        const auto bytes = common::checked_add(value.size(), std::size_t{128});
         if (!bytes) return std::unexpected(std::string{"Manifest reference attribute allocation overflows"});
         if (auto admitted = charge(*bytes); !admitted) return admitted;
-        reference.attributes.push_back(field);
+        reference.attributes.push_back({tag, std::string{value}});
         return {};
     }
 
@@ -1063,9 +1100,10 @@ static_assert(identifier_parser::preservation_manifest_destination<alignment_man
 
 /** Decode a canonical manifest while keeping its memory permit with its owned metadata. */
 [[nodiscard]] inline std::expected<alignment_manifest_builder, std::string> decode_alignment_manifest(
-    std::string_view payload, const std::size_t admitted_scalar_limit) {
+    std::string_view payload, const std::size_t admitted_scalar_limit,
+    io_memory_credit* credit = nullptr) {
     alignment_manifest_builder owner;
-    const auto decoded = identifier_parser::decode_preservation_manifest(payload, owner, admitted_scalar_limit);
+    const auto decoded = identifier_parser::decode_preservation_manifest(payload, owner, admitted_scalar_limit, credit);
     if (!decoded) return std::unexpected(decoded.error());
     return owner;
 }

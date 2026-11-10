@@ -199,7 +199,8 @@ exact_default(Relation relation,
     case default_kind::empty_text: {
         if (constant->consttype != TEXTOID)
             return false;
-        const text* value = DatumGetTextPP(constant->constvalue);
+        const text* value = bioseq::postgres::support::invoke_pg_as_cpp(
+            [constant] { return DatumGetTextPP(constant->constvalue); });
         return VARSIZE_ANY_EXHDR(value) == 0;
     }
     }
@@ -333,11 +334,15 @@ validate_check_expressions(Relation relation,
     }
     for (std::uint16_t actual_index = 0; actual_index < constraints->num_check; ++actual_index) {
         const ConstrCheck& check = constraints->check[actual_index];
-        Node* actual = static_cast<Node*>(stringToNode(check.ccbin));
+        Node* actual = bioseq::postgres::support::invoke_pg_as_cpp(
+            [expression = check.ccbin] { return static_cast<Node*>(stringToNode(expression)); });
         bool found = false;
         for (std::size_t expected_index = 0; expected_index < expected_nodes.size();
              ++expected_index) {
-            if (!matched[expected_index] && equal(actual, expected_nodes[expected_index])) {
+            if (!matched[expected_index] && bioseq::postgres::support::invoke_pg_as_cpp(
+                    [actual, expected = expected_nodes[expected_index]] {
+                        return equal(actual, expected);
+                    })) {
                 matched[expected_index] = true;
                 found = true;
                 break;
@@ -428,10 +433,12 @@ template <std::size_t p_key_count>
         const Oid expected_opclass = bioseq::postgres::support::invoke_pg_as_cpp(
             [&key_types, key] { return GetDefaultOpClass(key_types[key], BTREE_AM_OID); });
         if (!OidIsValid(expected_opclass) || shape->indkey.values[key] != keys[key] ||
-            get_index_column_opclass(RelationGetRelid(index), static_cast<int>(key + 1)) !=
-                expected_opclass ||
+            bioseq::postgres::support::invoke_pg_as_cpp([index, key] {
+                return get_index_column_opclass(RelationGetRelid(index), static_cast<int>(key + 1));
+            }) != expected_opclass ||
             index->rd_indcollation == nullptr ||
-            index->rd_indcollation[key] != get_typcollation(key_types[key]) ||
+            index->rd_indcollation[key] != bioseq::postgres::support::invoke_pg_as_cpp(
+                [type_oid = key_types[key]] { return get_typcollation(type_oid); }) ||
             index->rd_indoption == nullptr || index->rd_indoption[key] != 0 ||
             (index->rd_opcoptions != nullptr && index->rd_opcoptions[key] != nullptr)) {
             return false;

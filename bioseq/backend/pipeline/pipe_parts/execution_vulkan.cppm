@@ -47,6 +47,7 @@ import bioseq.storage.size;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.indexing.gpu_minimizer_index;
@@ -72,9 +73,11 @@ template<class p_minimizer, minimizer_lookup_index p_index, sequence_alphabet Al
         bioseq::instrumentation::register_static_region("collect_seed_hits");
     auto _seed_hits_scope = bioseq::instrumentation::region(_seed_hits_desc);
     anchors_out.resize(0u);
-    if (max_occ < 0 || kmer_size <= 0
+    if (kmer_size <= 0
         || static_cast<std::uint64_t>(kmer_size) > std::numeric_limits<decltype(anchor::query_span)>::max())
         return std::unexpected(alignment_contract_error::coordinates);
+    // Keep negative, zero and positive limits identical to the persisted reader.
+    const auto occurrence_threshold = bioseq::indexing::detail::effective_max_occ_threshold(max_occ);
     const auto query_len = query.bp_size();
     const auto target_len = target.bp_size();
     // Reserve an initial capacity for direct callers. An already-large slab
@@ -93,7 +96,7 @@ template<class p_minimizer, minimizer_lookup_index p_index, sequence_alphabet Al
                 lookup_minimizer_spans(target_index, query_minimizer.kmer());
             const std::uint64_t global_occurrence_count = target_hits.global_occurrence_count();
             if (global_occurrence_count == 0 ||
-                global_occurrence_count > static_cast<std::uint64_t>(max_occ)) {
+                global_occurrence_count > occurrence_threshold) {
                 continue;
             }
             if (!target_hits.positions_complete() || !target_hits.well_formed()) {

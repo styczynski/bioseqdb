@@ -15,6 +15,7 @@ import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -24,6 +25,7 @@ import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.concepts;
@@ -144,8 +146,9 @@ lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
 }
 
 /// Build expected query results from the whole-sequence sketch, applying max_occ.
+template <class p_minimizer_type>
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
-baseline_for_query(const std::vector<minimap_sketch_data>& whole,
+baseline_for_query(const std::vector<p_minimizer_type>& whole,
                    const std::vector<std::uint64_t>& query_kmers,
                    std::size_t max_occ) {
     std::map<std::uint64_t, std::vector<std::uint64_t>> per_kmer;
@@ -270,6 +273,57 @@ TEST_CASE("per-sequence admitted run keeps its permit live through unwind, move 
     }
     REQUIRE(move_release_observed);
     REQUIRE(admission.reserved_bytes() == baseline);
+
+    // One wave admission is split into the actual run owners; constructing
+    // the second vector must not reserve its payload a second time.
+    {
+        using pair_type = bioseq::indexing::detail::sorted_pair_t;
+        constexpr std::uint64_t count = 128u;
+        const auto per_task =
+            bioseq::indexing::detail::admitted_vector_preallocation_bytes<pair_type>(count);
+        admission.set_index_memory_cap_bytes(baseline + 2u * per_task);
+        auto wave = bioseq::parallelism::try_reserve_budgeted_wave(3u, per_task);
+        REQUIRE(wave.is_admitted);
+        REQUIRE(wave.fanout == 2u);
+        bioseq::indexing::detail::admitted_pair_run first;
+        bioseq::indexing::detail::admitted_pair_run second;
+        first.permit = wave.permit.split_off(per_task);
+        REQUIRE(bioseq::indexing::detail::reserve_admitted_vector_run_capacity(first, count));
+        second.permit = wave.permit.split_off(per_task);
+        REQUIRE(bioseq::indexing::detail::reserve_admitted_vector_run_capacity(second, count));
+        REQUIRE(wave.permit.bytes() == 0u);
+        REQUIRE(admission.reserved_bytes() == baseline + first.admitted_bytes + second.admitted_bytes);
+        admission.set_index_memory_cap_bytes(admission.reserved_bytes() + 1u);
+        bioseq::indexing::detail::admitted_pair_run refused;
+        REQUIRE_THROWS_AS(bioseq::indexing::detail::ensure_admitted_vector_run_capacity(refused, 1u),
+                          std::bad_alloc);
+        REQUIRE(admission.reserved_bytes() == baseline + first.admitted_bytes + second.admitted_bytes);
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    // Real budget refusal is recoverable; invalid accounting remains a separate
+    // false result for callers that diagnose corruption.
+    using pair_type = bioseq::indexing::detail::sorted_pair_t;
+    bioseq::indexing::detail::admitted_vector_run<pair_type> denied;
+    admission.set_index_memory_cap_bytes(baseline + 1u);
+    REQUIRE_THROWS_AS(bioseq::indexing::detail::ensure_admitted_vector_run_capacity(
+        denied, 1u), std::bad_alloc);
+    REQUIRE(denied.pairs.capacity() == 0u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    admission.set_index_memory_cap_bytes(baseline + 1024u);
+    REQUIRE(bioseq::indexing::detail::ensure_admitted_vector_run_capacity(denied, 1u));
+    const auto retained = denied.permit.bytes();
+    const auto capacity = denied.pairs.capacity();
+    admission.set_index_memory_cap_bytes(baseline + retained + 1u);
+    REQUIRE_THROWS_AS(bioseq::indexing::detail::ensure_admitted_vector_run_capacity(
+        denied, capacity + 1u), std::bad_alloc);
+    REQUIRE(denied.pairs.capacity() == capacity);
+    REQUIRE(denied.permit.bytes() == retained);
+    denied.release_capacity_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+    denied.admitted_bytes = 1u;
+    REQUIRE_FALSE(bioseq::indexing::detail::ensure_admitted_vector_run_capacity(denied, 1u));
 }
 
 TEST_CASE("per-sequence admitted post-sort compaction preserves pair order and accounting",
@@ -408,6 +462,71 @@ TEST_CASE("assemble_for_query equals whole-sequence build restricted to query km
     } else {
         SUCCEED("ordinary Vulkan bucket parity requires a hardware Vulkan device");
     }
+
+    // Wide exact hashes cross several complete core boundaries and a short
+    // final core. Compare every encoded position against one unsplit sketch.
+    using aa_config = sequence_custom_alphabet<seq::aa20, std::uint64_t>;
+    using aa_range = compact_sequence_range<aa_config>;
+    std::vector<seq::aa20> amino_acids(163848u); // Complete 12-symbol units, 8-bp final core.
+    std::uint64_t aa_state = 0x123456789abcdefu;
+    for (auto& symbol : amino_acids) {
+        aa_state = aa_state * 6364136223846793005ULL + 1442695040888963407ULL;
+        symbol.assign_rank(static_cast<std::uint8_t>((aa_state >> 33) % 20u));
+    }
+    aa_range protein(amino_acids);
+    constexpr auto protein_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::aa20, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::scalar, 163848u, 12u, 10u);
+    using protein_minimizer = bioseq::minimizers::minimizer_representation<
+        protein_layout.record_position_log2, protein_layout.hash_bits>;
+    constexpr auto exact_key_bits = aa_range::traits::bits_per_char * 12u;
+    STATIC_REQUIRE(exact_key_bits == 60u);
+    // The registered physical field may be wider than the exact k-mer key.
+    STATIC_REQUIRE(protein_minimizer::layout_type::k_hash_bits >= exact_key_bits);
+    bioseq::minimizers::basic_sketch_collector<protein_minimizer> protein_collector;
+    collect_minimizers_view<minimap_int_hasher, protein_minimizer>(
+        protein_collector, protein, protein.begin(), protein.end(), 10u, 12u);
+    const auto& protein_query = protein_collector.extract_sketches_data();
+    std::vector<std::uint64_t> protein_keys;
+    for (const auto& value : protein_query) {
+        protein_keys.push_back(value.kmer());
+    }
+    const auto protein_expected = baseline_for_query(protein_query, protein_keys, INT32_MAX);
+    std::sort(protein_keys.begin(), protein_keys.end());
+    protein_keys.erase(std::unique(protein_keys.begin(), protein_keys.end()), protein_keys.end());
+    REQUIRE_FALSE(protein_keys.empty());
+    REQUIRE(protein_keys.back() > std::numeric_limits<std::uint32_t>::max());
+    const bioseq::indexing::canonical_query_hash_view protein_hashes{
+        .values64 = std::span<const std::uint64_t>(protein_keys),
+        .width_bytes = sizeof(std::uint64_t),
+        .storage_width_bytes = sizeof(std::uint64_t)};
+    REQUIRE_FALSE(protein_expected.empty());
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    struct stop_pool_guard {
+        bioseq::parallelism::global_pool& pool;
+        ~stop_pool_guard() { pool.shutdown(); }
+    } stop_pool{pool};
+    for (const unsigned workers : {2u, 3u}) {
+        pool.restart(bioseq::parallelism::pool_config{
+            .maximum_concurrency = workers,
+            .mode = bioseq::parallelism::pipeline_concurrency_mode::task_parallel});
+        for (const auto backend : {minimizer_sketch_backend::scalar,
+                                   minimizer_sketch_backend::exact_simd}) {
+            test_fragment_storage protein_storage;
+            protein_storage.run_buffer_bytes_ = 4096u;
+            auto protein_lazy = bioseq::storage::make_resident_lazy_sequence(protein);
+            bioseq::indexing::direct_minimizer_bucket_index<test_fragment_storage>::build(
+                protein_storage, bioseq::storage::make_lazy_sequence_view(protein_lazy),
+                backend, fixed_minimizer_kernels(), nullptr, fixed_alphabet_code<seq::aa20>());
+            REQUIRE(protein_storage.runs_.empty());
+            bioseq::indexing::minimizer_assembly_scratch protein_scratch;
+            auto protein_index =
+                bioseq::indexing::direct_minimizer_bucket_index<test_fragment_storage>::assemble_for_query_segment(
+                    protein_storage, protein_hashes, protein.bp_size(), INT32_MAX,
+                    0u, protein.bp_size(), protein_scratch);
+            require_lookup_maps_equal(lookup_map(protein_index, protein_keys), protein_expected);
+        }
+    }
 }
 
 TEST_CASE("scalar direct-bucket build stats are operation-originated and fail-closed",
@@ -490,12 +609,12 @@ TEST_CASE("scalar direct-bucket build stats aggregate deterministically across w
     } shutdown{pool};
 
     const auto run = [range_pointer = &range, pool_pointer = &pool](
-            bioseq::parallelism::pipeline_concurrency_mode mode) {
+            bioseq::parallelism::pipeline_concurrency_mode mode, unsigned workers = 2u) {
         auto& pool = *pool_pointer;
         pool.restart(bioseq::parallelism::pool_config{
             .maximum_concurrency = mode
                     == bioseq::parallelism::pipeline_concurrency_mode::single_thread
-                ? 1u : 2u,
+                ? 1u : workers,
             .mode = mode,
         });
         fake_fragment_storage<> storage;
@@ -522,6 +641,9 @@ TEST_CASE("scalar direct-bucket build stats aggregate deterministically across w
     REQUIRE(serial.is_internally_consistent());
     REQUIRE(parallel.is_internally_consistent());
     CHECK(serial == parallel);
+    const auto parallel_three = run(
+        bioseq::parallelism::pipeline_concurrency_mode::task_parallel, 3u);
+    CHECK(serial == parallel_three);
     CHECK(serial.scalar_collection_calls > 1);
     CHECK(serial.input_symbols >= range.bp_size());
     CHECK(serial.input_bytes
@@ -530,6 +652,55 @@ TEST_CASE("scalar direct-bucket build stats aggregate deterministically across w
     CHECK(serial.input_symbols
         <= serial.input_storage_units
             * serial.letters_per_storage_unit);
+
+    // The real collection callback throws after the builder has reserved its
+    // worker buffers. Both schedules must unwind those owners and preserve the
+    // original error type instead of aborting the backend/process.
+    struct nonstandard_worker_failure {};
+    const std::array<bioseq::minimizers::minimizer_kernel_function, 3> failures{{
+        +[](bioseq::minimizers::minimizer_kernel_invocation&)
+            -> bioseq::minimizers::minimizer_kernel_result {
+            throw std::runtime_error("injected minimizer worker failure");
+        },
+        +[](bioseq::minimizers::minimizer_kernel_invocation&)
+            -> bioseq::minimizers::minimizer_kernel_result { throw std::bad_alloc{}; },
+        +[](bioseq::minimizers::minimizer_kernel_invocation&)
+            -> bioseq::minimizers::minimizer_kernel_result { throw nonstandard_worker_failure{}; },
+    }};
+    for (const auto mode : {bioseq::parallelism::pipeline_concurrency_mode::single_thread,
+                           bioseq::parallelism::pipeline_concurrency_mode::task_parallel}) {
+        pool.restart(bioseq::parallelism::pool_config{
+            .maximum_concurrency = mode
+                    == bioseq::parallelism::pipeline_concurrency_mode::single_thread ? 1u : 2u,
+            .mode = mode,
+        });
+        for (std::size_t failure_index = 0; failure_index < failures.size(); ++failure_index) {
+            fake_fragment_storage<> failed_storage;
+            failed_storage.run_buffer_bytes_ = 4096;
+            auto lazy = bioseq::storage::make_resident_lazy_sequence(range);
+            const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
+            const bioseq::minimizers::minimizer_kernels kernels{
+                .two_stack_nthash = failures[failure_index]};
+            auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+            const auto baseline = admission.reserved_bytes();
+            const auto fail_build = [&failed_storage, view, &kernels] {
+                bioseq::indexing::direct_minimizer_bucket_index<fake_fragment_storage<>>::build(
+                    failed_storage, view, minimizer_sketch_backend::exact_simd,
+                    &kernels, nullptr, fixed_alphabet_code<::seq::dna4>());
+            };
+            if (failure_index == 0u) {
+                REQUIRE_THROWS_AS(fail_build(), std::runtime_error);
+            } else if (failure_index == 1u) {
+                REQUIRE_THROWS_AS(fail_build(), std::bad_alloc);
+            } else {
+                REQUIRE_THROWS_AS(fail_build(), nonstandard_worker_failure);
+            }
+            REQUIRE(failed_storage.runs_.empty());
+            REQUIRE(admission.reserved_bytes() == baseline);
+        }
+    }
+    // The same pool and source remain usable after all injected worker failures.
+    REQUIRE(run(bioseq::parallelism::pipeline_concurrency_mode::task_parallel) == parallel);
 }
 
 TEST_CASE("exact_simd per-sequence collection accepts fragmented DNA5 with N resets",
@@ -610,6 +781,106 @@ TEST_CASE("assemble_for_query drops an over-frequent kmer under a tiny max_occ",
 
     // A cap of one excludes every position for this repeated hash.
     REQUIRE(idx.lookup(over_freq_kmer).empty());
+
+    // One repeated hash is a normal bucket with ample admission and a streamed
+    // singleton under a small aggregation allowance. The fake checks exact
+    // serialization here; its retained runs/payloads do not model PG memory use.
+    std::vector<seq::dna4> singleton_letters(131072u);
+    for (auto& letter : singleton_letters) {
+        letter.assign_rank(0u);
+    }
+    range_t singleton_range(singleton_letters);
+    const auto singleton_query = whole_sequence_minimizers(singleton_range, 10u, 15u);
+    REQUIRE_FALSE(singleton_query.empty());
+    const std::vector<std::uint64_t> singleton_keys{singleton_query.front().kmer()};
+    const auto singleton_expected = baseline_for_query(
+        singleton_query, singleton_keys, static_cast<std::size_t>(INT32_MAX));
+    REQUIRE(singleton_expected.size() == 1u);
+    REQUIRE(std::all_of(singleton_query.begin(), singleton_query.end(),
+        [key = singleton_keys.front()](const auto& value) { return value.kmer() == key; }));
+    const auto& expected_positions = singleton_expected.at(singleton_keys.front());
+
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct restore_cap_guard {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        ~restore_cap_guard() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, previous_cap};
+    constexpr std::uint64_t roomy_headroom = std::uint64_t{32} << 20;
+    constexpr std::uint64_t limited_headroom = std::uint64_t{256} << 10;
+    REQUIRE(baseline <= std::numeric_limits<std::uint64_t>::max() - roomy_headroom);
+    REQUIRE(expected_positions.size() * sizeof(std::uint64_t) > limited_headroom);
+    REQUIRE(expected_positions.size() * sizeof(std::uint64_t) + 48u < (std::uint64_t{8} << 20));
+
+    fake_fragment_storage<> roomy_storage;
+    fake_fragment_storage<> limited_storage;
+    roomy_storage.run_buffer_bytes_ = 4096u;
+    limited_storage.run_buffer_bytes_ = 4096u;
+    const auto build_singleton = [&singleton_range](fake_fragment_storage<>& destination) {
+        lazy_sequence<dna4_u64, chunked> singleton_lazy{chunked::from_range(singleton_range)};
+        bioseq::indexing::direct_minimizer_bucket_index<fake_fragment_storage<>>::build(
+            destination, bioseq::storage::make_lazy_sequence_view(singleton_lazy));
+    };
+    admission.set_index_memory_cap_bytes(baseline + roomy_headroom);
+    REQUIRE_NOTHROW(build_singleton(roomy_storage));
+    REQUIRE(admission.reserved_bytes() == baseline);
+    admission.set_index_memory_cap_bytes(baseline + limited_headroom);
+    REQUIRE_NOTHROW(build_singleton(limited_storage));
+    REQUIRE(admission.reserved_bytes() == baseline);
+    REQUIRE(roomy_storage.runs_.empty());
+    REQUIRE(limited_storage.runs_.empty());
+
+    // The whole hash's position bytes alone exceed every available admitted
+    // byte in the limited build. Its prepared normal frame therefore cannot
+    // hold this hash; the unchanged sub-8MiB writer must take the streamed path.
+    REQUIRE(roomy_storage.chunks_.size() == 2u); // One data chunk and its directory.
+    REQUIRE(limited_storage.chunks_.size() == roomy_storage.chunks_.size());
+    for (const auto& [key, row] : roomy_storage.chunks_) {
+        const auto limited = limited_storage.chunks_.find(key);
+        REQUIRE(limited != limited_storage.chunks_.end());
+        REQUIRE(limited->second.chunk_bytes == row.chunk_bytes);
+        REQUIRE(limited->second.checksum == row.checksum);
+        REQUIRE(limited->second.blob == row.blob);
+    }
+
+    const auto& singleton_bytes = limited_storage.chunks_.at(
+        fake_fragment_storage<>::default_plane_key(0, 0)).blob;
+    using wire_index = bioseq::indexing::minimizer_hashmap_fragment_index;
+    wire_index::encoded_header header{};
+    wire_index::encoded_bucket record{};
+    REQUIRE(singleton_bytes.size() ==
+        sizeof(header) + sizeof(record) + expected_positions.size() * sizeof(std::uint64_t));
+    std::memcpy(&header, singleton_bytes.data(), sizeof(header));
+    std::memcpy(&record, singleton_bytes.data() + sizeof(header), sizeof(record));
+    REQUIRE(header.magic == wire_index::k_encoded_magic);
+    REQUIRE(header.layout_revision == wire_index::k_encoded_layout_revision);
+    REQUIRE(header.target_len == singleton_range.bp_size());
+    REQUIRE(header.bucket_count == 1u);
+    REQUIRE(header.reserved == 0u);
+    REQUIRE(header.total_positions == expected_positions.size());
+    REQUIRE(record.hash == singleton_keys.front());
+    REQUIRE(record.pos_offset == 0u);
+    REQUIRE(record.pos_count == expected_positions.size());
+    std::vector<std::uint64_t> stored_positions(expected_positions.size());
+    std::memcpy(stored_positions.data(), singleton_bytes.data() + sizeof(header) + sizeof(record),
+                stored_positions.size() * sizeof(std::uint64_t));
+    REQUIRE(stored_positions == expected_positions);
+
+    admission.set_index_memory_cap_bytes(baseline + roomy_headroom);
+    const std::array<minimap_sketch_data, 1> singleton_probe{singleton_query.front()};
+    for (auto* destination : {&roomy_storage, &limited_storage}) {
+        bioseq::indexing::minimizer_assembly_scratch singleton_scratch;
+        const auto singleton_index =
+            bioseq::indexing::direct_minimizer_bucket_index<fake_fragment_storage<>>::assemble_for_query(
+                *destination, std::span<const minimap_sketch_data>(singleton_probe),
+                singleton_range.bp_size(), INT32_MAX, singleton_scratch);
+        REQUIRE(singleton_index.target_length() == singleton_range.bp_size());
+        require_lookup_maps_equal(
+            lookup_map(singleton_index, singleton_keys), singleton_expected);
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
 }
 
 // Ordinary payloads do not carry a scheme identity. Explicit bounded32 must use a tagged generation.

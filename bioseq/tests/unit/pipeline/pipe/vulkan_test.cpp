@@ -774,37 +774,43 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
     const auto target_view = bioseq::storage::make_lazy_sequence_view(target_owner);
 
     SECTION("all spans emit when their global count is admitted") {
-        context::context ctx;
-        context::installed_context_scope installed{ctx};
-        auto scope = ctx.push<context::arena::chain>();
-        auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
-        segmented_seed_index index;
-        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
-                                          index,
-                                          query_view, target_view,
-                                          /*max_occ=*/3,
-                                          /*kmer_size=*/15,
-                                          anchors));
-        REQUIRE(anchors.size() == 3);
-        REQUIRE(anchors.data()[0].ref_position == 100);
-        REQUIRE(anchors.data()[1].ref_position == 300);
-        REQUIRE(anchors.data()[2].ref_position == 200);
-        REQUIRE(anchors.data()[2].is_reverse == 1u);
+        for (const std::int32_t occurrence_limit : std::array<std::int32_t, 3>{3, -1, (std::numeric_limits<std::int32_t>::min)()}) {
+            CAPTURE(occurrence_limit);
+            context::context ctx;
+            context::installed_context_scope installed{ctx};
+            auto scope = ctx.push<context::arena::chain>();
+            auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+            segmented_seed_index index;
+            REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+                                              index,
+                                              query_view, target_view,
+                                              /*max_occ=*/occurrence_limit,
+                                              /*kmer_size=*/15,
+                                              anchors));
+            REQUIRE(anchors.size() == 3);
+            REQUIRE(anchors.data()[0].ref_position == 100);
+            REQUIRE(anchors.data()[1].ref_position == 300);
+            REQUIRE(anchors.data()[2].ref_position == 200);
+            REQUIRE(anchors.data()[2].is_reverse == 1u);
+        }
     }
 
     SECTION("global count prunes although every available span is individually admissible") {
-        context::context ctx;
-        context::installed_context_scope installed{ctx};
-        auto scope = ctx.push<context::arena::chain>();
-        auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
-        segmented_seed_index index;
-        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
-                                          index,
-                                          query_view, target_view,
-                                          /*max_occ=*/2,
-                                          /*kmer_size=*/15,
-                                          anchors));
-        REQUIRE(anchors.size() == 0);
+        for (const std::int32_t occurrence_limit : std::array<std::int32_t, 3>{0, 1, 2}) {
+            CAPTURE(occurrence_limit);
+            context::context ctx;
+            context::installed_context_scope installed{ctx};
+            auto scope = ctx.push<context::arena::chain>();
+            auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+            segmented_seed_index index;
+            REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+                                              index,
+                                              query_view, target_view,
+                                              /*max_occ=*/occurrence_limit,
+                                              /*kmer_size=*/15,
+                                              anchors));
+            REQUIRE(anchors.size() == 0);
+        }
     }
 
     SECTION("global pruning does not require deliberately unloaded positions") {
@@ -824,36 +830,55 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
     }
 
     SECTION("a surviving hash without positions fails closed") {
+        for (const std::int32_t occurrence_limit : std::array<std::int32_t, 2>{3, -1}) {
+            CAPTURE(occurrence_limit);
+            context::context ctx;
+            context::installed_context_scope installed{ctx};
+            auto scope = ctx.push<context::arena::chain>();
+            auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+            segmented_seed_index index;
+            index.positions_available = false;
+            REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+                                                                index,
+                                                                query_view, target_view,
+                                                                /*max_occ=*/occurrence_limit,
+                                                                /*kmer_size=*/15,
+                                                                anchors),
+                              ::bioseq::indexing::persisted_minimizer_lookup_error);
+        }
+    }
+
+    SECTION("an admitted malformed global count fails closed") {
+        for (const std::int32_t occurrence_limit : std::array<std::int32_t, 2>{2, -1}) {
+            CAPTURE(occurrence_limit);
+            context::context ctx;
+            context::installed_context_scope installed{ctx};
+            auto scope = ctx.push<context::arena::chain>();
+            auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
+            segmented_seed_index index;
+            index.reported_count = 2;
+            REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
+                                                                index,
+                                                                query_view, target_view,
+                                                                /*max_occ=*/occurrence_limit,
+                                                                /*kmer_size=*/15,
+                                                                anchors),
+                              ::bioseq::indexing::persisted_minimizer_lookup_error);
+            REQUIRE(anchors.size() == 0);
+        }
+    }
+
+    SECTION("negative limit keeps the persisted reader unsigned-32 bound") {
         context::context ctx;
         context::installed_context_scope installed{ctx};
         auto scope = ctx.push<context::arena::chain>();
         auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
         segmented_seed_index index;
         index.positions_available = false;
-        REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
-                                                            index,
-                                                            query_view, target_view,
-                                                            /*max_occ=*/3,
-                                                            /*kmer_size=*/15,
-                                                            anchors),
-                          ::bioseq::indexing::persisted_minimizer_lookup_error);
-    }
-
-    SECTION("an admitted malformed global count fails closed") {
-        context::context ctx;
-        context::installed_context_scope installed{ctx};
-        auto scope = ctx.push<context::arena::chain>();
-        auto anchors = ::bioseq::chaining::make_arena_slab<::bioseq::chaining::anchor>();
-        segmented_seed_index index;
-        index.reported_count = 2;
-        REQUIRE_THROWS_AS(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query},
-                                                            index,
-                                                            query_view, target_view,
-                                                            /*max_occ=*/2,
-                                                            /*kmer_size=*/15,
-                                                            anchors),
-                          ::bioseq::indexing::persisted_minimizer_lookup_error);
-        REQUIRE(anchors.size() == 0);
+        index.reported_count = std::uint64_t{(std::numeric_limits<std::uint32_t>::max)()} + 1u;
+        REQUIRE(::bioseq::simd::collect_seed_hits(std::span<const sketch_type>{query}, index,
+            query_view, target_view, -1, 15, anchors));
+        REQUIRE(anchors.empty());
     }
 
     SECTION("native rank disagreement retains an in-bounds hash candidate") {

@@ -173,7 +173,8 @@ template <class p_value_type>
 
 /**
  * Grow the vector after reserving enough, memory for its old and new allocations.
- * Return false if the current accounting is invalid or memory cannot be reserved.
+ * Return false if the current accounting is invalid. Throw std::bad_alloc
+ * when a valid replacement cannot be admitted.
  * @tparam p_value_type Vector element type
  */
 template <class p_value_type>
@@ -199,7 +200,7 @@ template <class p_value_type>
     }
     if (run.permit) {
         if (!run.permit.grow_to(allocation_peak)) {
-            return false;
+            throw std::bad_alloc{};
         }
     } else {
         if (retained != 0u) {
@@ -208,7 +209,7 @@ template <class p_value_type>
         auto permit = bioseq::parallelism::memory_admission_controller::instance()
             .try_reserve(allocation_peak);
         if (!permit) {
-            return false;
+            throw std::bad_alloc{};
         }
         run.permit = std::move(*permit);
     }

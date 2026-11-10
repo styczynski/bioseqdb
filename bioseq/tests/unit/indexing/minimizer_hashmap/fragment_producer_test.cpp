@@ -19,6 +19,7 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.chaining.core;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
@@ -52,6 +53,61 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 using namespace minimizer_hashmap_test_support;
 using namespace fragment_producer_test_support;
+
+namespace {
+
+/** Rank-only source that can tighten the existing cap at the first packed probe. */
+struct materialization_admission_source {
+    using view_type = bioseq::storage::lazy_sequence_view<::seq::dna4>;
+    using size_type = bioseq::storage::sequence_size_t;
+    view_type original;
+    bioseq::parallelism::memory_admission_controller& admission;
+    mutable bool deny_at_probe = false;
+    mutable std::uint64_t reserved_at_probe = 0u;
+    mutable std::size_t probe_calls = 0u;
+    mutable std::size_t read_calls = 0u;
+
+    /** Delegate real rank reads while retaining all source orientation semantics. */
+    template <bool Reverse, bool WriteReverse>
+    static const std::uint8_t* read(const void* opaque, size_type from,
+                                   std::size_t count, std::span<std::uint8_t> scratch) {
+        const auto& source = *static_cast<const materialization_admission_source*>(opaque);
+        ++source.read_calls;
+        source.original.template copy_ranks<Reverse, WriteReverse>(scratch, from, from + count);
+        return scratch.data();
+    }
+
+    /** Refuse borrowing and optionally force only the next input admission to fail. */
+    static view_type::resident_packed_result probe(const void* opaque, size_type,
+                                                  size_type, std::uint8_t) noexcept {
+        const auto& source = *static_cast<const materialization_admission_source*>(opaque);
+        ++source.probe_calls;
+        if (source.deny_at_probe) {
+            source.deny_at_probe = false;
+            source.reserved_at_probe = source.admission.reserved_bytes();
+            source.admission.set_index_memory_cap_bytes(source.reserved_at_probe + 1u);
+        }
+        return std::nullopt;
+    }
+
+    /** Keep this cap-changing fixture on the caller thread. */
+    [[nodiscard]] view_type view() const noexcept {
+        static const view_type::backend_ops ops{
+            .bp_size = +[](const void* opaque) noexcept {
+                return static_cast<const materialization_admission_source*>(opaque)->original.bp_size();
+            },
+            .read_at = {&read<false, false>, &read<false, true>,
+                        &read<true, false>, &read<true, true>},
+            .try_resident_packed = &probe,
+            .copy_packed_sequence = nullptr,
+            .copy_packed_window = nullptr,
+            .worker_shareable = +[](const void*) noexcept { return false; },
+        };
+        return view_type{this, &ops};
+    }
+};
+
+} // namespace
 
 TEST_CASE("independent fragment halo and spill-run merge producers are canonical",
           "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
@@ -311,6 +367,125 @@ TEST_CASE("reference fragment and sequence producers execute the generated K20 o
     REQUIRE(sequence_generation->manifest.algorithm_identity ==
             sequence_options.algorithm_identity);
     require_complete_generation_rows(*sequence_generation, sequence_sink.rows);
+
+    // Packed reference lanes overlap even when the whole input is one core.
+    // Keep the raw multiset witness separate from the stored canonical set.
+    constexpr std::uint64_t overlap_length = 128u;
+    std::vector<seq::dna4> overlap_letters(overlap_length);
+    for (auto& letter : overlap_letters) letter.assign_rank(0u);
+    range_t overlap_range(overlap_letters);
+    auto overlap_owner = bioseq::storage::make_resident_lazy_sequence(overlap_range);
+    const auto overlap_view = bioseq::storage::make_lazy_sequence_view(overlap_owner);
+    REQUIRE(overlap_view.try_resident_packed(
+        0u, overlap_length, sizeof(std::uint64_t)).has_value());
+    auto overlap_options = test_grouped_soa_generation_options<::seq::dna4, std::uint64_t>(
+        overlap_length, 65'534u,
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        overlap_length, 15u, 10u);
+    const auto overlap_layout = bioseq::minimizers::select_minimizer_physical_layout<
+        ::seq::dna4, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+            overlap_length, 15u, 10u);
+    std::vector<canonical_minimizer_event> raw_events;
+    const auto raw_stats = bioseq::minimizers::visit_minimizer_physical_layout(
+        overlap_layout, [&raw_events, overlap_view]<class p_minimizer>() {
+            struct raw_collector {
+                std::vector<canonical_minimizer_event>& events;
+                /** Preserve each raw event for count and canonical-set checks. */
+                void collect(const p_minimizer& record) {
+                    events.push_back({record.kmer(), record.pos_strand_encoded()});
+                }
+            } collector{raw_events};
+            return collect_reference_simd_index_range_or_throw<p_minimizer>(
+                collector, overlap_view, fixed_alphabet_code<::seq::dna4>(),
+                0u, overlap_view.bp_size(), 10u, 15u, 64u,
+                fixed_minimizer_kernels(), "reference overlap admission regression");
+        });
+    REQUIRE(raw_stats.is_internally_consistent(true, sizeof(std::uint64_t)));
+    // This complete packed input has no tail padding; every callback visits
+    // every u64 lane. Derive the selected target width from its actual receipt.
+    REQUIRE(raw_stats.vector_callback_batches > 0u);
+    REQUIRE(raw_stats.vector_lane_visits % raw_stats.vector_callback_batches == 0u);
+    const std::uint64_t reference_lanes =
+        raw_stats.vector_lane_visits / raw_stats.vector_callback_batches;
+    REQUIRE(reference_lanes > 0u);
+    if (reference_lanes > 1u) {
+        REQUIRE(raw_events.size() > overlap_length);
+    } else {
+        REQUIRE(raw_events.size() == 113u);
+    }
+    std::sort(raw_events.begin(), raw_events.end(),
+        [](const auto& left, const auto& right) {
+            return std::tie(left.hash, left.encoded_position) <
+                   std::tie(right.hash, right.encoded_position);
+        });
+    raw_events.erase(std::unique(raw_events.begin(), raw_events.end()), raw_events.end());
+    std::vector<canonical_minimizer_event> overlap_expected;
+    for (std::uint64_t position = 14u; position < overlap_length; ++position) {
+        // The existing first-window rule omits the old rightmost endpoint 22.
+        if (position != 22u) overlap_expected.push_back({1'072'721'685u, position << 1u});
+    }
+    REQUIRE(raw_events == overlap_expected);
+
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t admission_before = admission.reserved_bytes();
+    struct restore_overlap_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        /** Restore the prior cap even when an assertion exits this test. */
+        ~restore_overlap_cap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore_cap{admission, previous_cap};
+    REQUIRE(admission_before <= (std::numeric_limits<std::uint64_t>::max)() - 32'768u);
+    const auto spill_overlap = [overlap_view, identity = overlap_options.algorithm_identity](
+            fake_fragment_storage<>& destination,
+            minimizer_sequence_generation_execution_receipt* receipt) {
+        return sequence_index_type::spill_generation_replay_runs_serial(
+            destination, overlap_view, minimizer_sketch_backend::exact_simd,
+            fixed_minimizer_kernels(), identity, overlap_view.bp_size(),
+            k_minimizer_preferred_segment_span_bp, receipt, fixed_alphabet_code<::seq::dna4>());
+    };
+
+    // A one-lane target has no cross-lane growth to refuse. Its complete
+    // canonical output and public-spill roundtrip are still required below.
+    if (reference_lanes > 1u) {
+        // Initial 128-pair preparation fits 8KiB; retained 128 plus replacement 256
+        // with the existing 2x allocation headroom does not. Refuse before append.
+        admission.set_index_memory_cap_bytes(admission_before + 8'192u);
+        fake_fragment_storage<> refused_storage;
+        minimizer_sequence_generation_execution_receipt refused_receipt{};
+        const auto refused = spill_overlap(refused_storage, &refused_receipt);
+        require_wire_error(refused, minimizer_generation_encoding_error::admission);
+        REQUIRE(refused_receipt.exact_simd_core_runs == 1u);
+        REQUIRE_FALSE(refused_receipt.spill_complete);
+        REQUIRE(refused_storage.segment_spill_run_count() == 0u);
+        REQUIRE(refused_storage.segment_spill_bytes() == 0u);
+        REQUIRE(admission.reserved_bytes() == admission_before);
+
+    }
+
+    admission.set_index_memory_cap_bytes(admission_before + 32'768u);
+    fake_fragment_storage<> recovered_storage;
+    auto recovered_spill = spill_overlap(recovered_storage, nullptr);
+    REQUIRE(recovered_spill.has_value());
+    REQUIRE(recovered_spill->execution_receipt().is_spill_valid());
+    REQUIRE(recovered_spill->execution_receipt().spilled_event_count == overlap_expected.size());
+    REQUIRE(recovered_spill->reference_simd_stats_available());
+    REQUIRE(recovered_spill->reference_simd_stats().is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    REQUIRE(admission.reserved_bytes() == admission_before);
+    admission.set_index_memory_cap_bytes(previous_cap);
+
+    auto recovered_producer = sequence_index_type::make_generation_replay_producer(
+        recovered_storage, overlap_length, std::move(*recovered_spill));
+    collecting_minimizer_row_sink recovered_sink;
+    const auto recovered_generation = encode_minimizer_generation(
+        recovered_producer, recovered_sink, overlap_options);
+    REQUIRE(recovered_generation.has_value());
+    REQUIRE(recovered_generation->manifest.algorithm_identity == overlap_options.algorithm_identity);
+    REQUIRE(decode_generation_events(*recovered_generation, recovered_sink.rows) == overlap_expected);
+    require_complete_generation_rows(*recovered_generation, recovered_sink.rows);
+    REQUIRE(admission.reserved_bytes() == admission_before);
 }
 
 TEST_CASE("DNA5 reference-labelled generation executes its generated native producer",
@@ -871,7 +1046,7 @@ TEST_CASE("inactive spill-run storage incarnation counters fail closed at wrap",
 }
 
 TEST_CASE("minimizer index facades preserve biological rejection precedence",
-          "[component:bioseq][layer:unit][feature:index]") {
+          "[component:bioseq][layer:unit][feature:index][resource:highway]") {
     using namespace bioseq::indexing;
     auto data = make_dna4(257u, 0x399500u);
     range_t range(data);
@@ -964,6 +1139,168 @@ TEST_CASE("minimizer index facades preserve biological rejection precedence",
             packed_bounded_nthash_index_status::invalid_range);
     REQUIRE(collect_packed_bounded_nthash_index_erased(bounded_request).status ==
             packed_bounded_nthash_index_status::invalid_state);
+
+    // These are real controller refusals after output preparation, not allocator
+    // exceptions or a kernel that fabricates an error status. The source remains
+    // a valid rank reader and is reused successfully after restoring headroom.
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto previous_cap = admission.index_memory_cap_bytes();
+    const auto baseline = admission.reserved_bytes();
+    constexpr std::uint64_t headroom = 1u << 20u;
+    REQUIRE(baseline <= (std::numeric_limits<std::uint64_t>::max)() - headroom);
+    struct restore_input_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        ~restore_input_cap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore_cap{admission, previous_cap};
+    materialization_admission_source source{view, admission};
+    const auto nonresident = source.view();
+    const auto arm_refusal = [&admission, baseline, headroom, &source] {
+        admission.set_index_memory_cap_bytes(baseline + headroom);
+        source.deny_at_probe = true;
+        source.reserved_at_probe = 0u;
+        source.probe_calls = 0u;
+        source.read_calls = 0u;
+    };
+    const auto require_no_reads = [&admission, baseline, &source] {
+        REQUIRE(source.probe_calls > 0u);
+        REQUIRE_FALSE(source.deny_at_probe);
+        REQUIRE(source.read_calls == 0u);
+        REQUIRE(admission.reserved_bytes() == baseline);
+    };
+
+    for (const auto algorithm : {bioseq::simd::minimizer_algorithm::two_stack_nthash,
+                                 bioseq::simd::minimizer_algorithm::simd_minimap2_reference}) {
+        const auto layout = bioseq::minimizers::select_minimizer_physical_layout<
+            ::seq::dna4, std::uint64_t>(algorithm, range.bp_size(), 15u, 10u);
+        const auto collect = [algorithm, layout](auto sequence) {
+            std::vector<canonical_minimizer_event> events;
+            bioseq::minimizers::visit_minimizer_physical_layout(
+                layout, [algorithm, sequence, &events]<class p_minimizer>() {
+                    struct event_collector {
+                        std::vector<canonical_minimizer_event>& events;
+                        void collect(const p_minimizer& record) {
+                            events.push_back({record.kmer(), record.pos_strand_encoded()});
+                        }
+                    } collector{events};
+                    if (algorithm == bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                        (void)collect_reference_simd_index_range_or_throw<p_minimizer>(
+                            collector, sequence, fixed_alphabet_code<::seq::dna4>(),
+                            0u, sequence.bp_size(), 10u, 15u, 64u,
+                            fixed_minimizer_kernels(), "input admission probe");
+                    } else if constexpr (
+                        bioseq::minimizers::two_stack_simd_minimizer_representation<p_minimizer>) {
+                        (void)collect_exact_simd_index_range_or_throw<p_minimizer>(
+                            collector, sequence, fixed_alphabet_code<::seq::dna4>(),
+                            0u, sequence.bp_size(), 10u, 15u, 0u,
+                            fixed_minimizer_kernels(), "input admission probe");
+                    } else {
+                        throw std::logic_error("input admission probe selected an invalid exact layout");
+                    }
+                });
+            std::ranges::sort(events, [](const auto& left, const auto& right) {
+                return std::tie(left.hash, left.encoded_position) <
+                       std::tie(right.hash, right.encoded_position);
+            });
+            events.erase(std::unique(events.begin(), events.end()), events.end());
+            return events;
+        };
+        arm_refusal();
+        try {
+            sketch_collector geometry_collector;
+            (void)collect_exact_simd_index_range_or_throw<bioseq::minimizers::minimap_sketch_data>(
+                geometry_collector, nonresident, fixed_alphabet_code<::seq::dna4>(),
+                2u, 1u, 10u, 15u, 0u, fixed_minimizer_kernels(), "geometry precedence probe");
+            FAIL("invalid geometry unexpectedly reached input admission");
+        } catch (const exact_simd_index_runtime_error& error) {
+            REQUIRE(error.status() == exact_simd_index_status::invalid_range);
+        }
+        REQUIRE(source.probe_calls == 0u);
+        REQUIRE(source.deny_at_probe);
+        try {
+            (void)collect(nonresident);
+            FAIL("nonresident input admission unexpectedly succeeded");
+        } catch (const exact_simd_index_runtime_error& error) {
+            REQUIRE(error.status() == exact_simd_index_status::admission_denied);
+        }
+        require_no_reads();
+        admission.set_index_memory_cap_bytes(baseline + headroom);
+        const auto expected = collect(view);
+        REQUIRE_FALSE(expected.empty());
+        REQUIRE(collect(nonresident) == expected);
+        REQUIRE(source.read_calls > 0u);
+        REQUIRE(admission.reserved_bytes() == baseline);
+
+        // Both public generation owners preserve the resource classification
+        // and refuse before a row or completed spill run reaches its sink.
+        arm_refusal();
+        {
+            const auto options = test_generation_options<::seq::dna4, std::uint64_t>(
+                range.bp_size(), algorithm, k_minimizer_fragment_algorithm_position_extent_bp);
+            auto producer = minimizers_per_fragment_index<fake_fragment_storage<>>::
+                make_generation_replay_producer(nonresident, minimizer_sketch_backend::exact_simd,
+                    fixed_minimizer_kernels(), options.algorithm_identity,
+                    options.window_size, options.kmer_size, fixed_alphabet_code<::seq::dna4>());
+            collecting_minimizer_row_sink sink;
+            require_wire_error(encode_minimizer_generation(producer, sink, options),
+                               minimizer_generation_encoding_error::admission);
+            REQUIRE(sink.rows.empty());
+        }
+        require_no_reads();
+        arm_refusal();
+        {
+            const auto options = test_grouped_soa_generation_options<::seq::dna4, std::uint64_t>(
+                range.bp_size(), 65'534u, algorithm, range.bp_size());
+            fake_fragment_storage<> spill_storage;
+            const auto spilled = direct_minimizer_bucket_index<fake_fragment_storage<>>::
+                spill_generation_replay_runs_serial(spill_storage, nonresident,
+                    minimizer_sketch_backend::exact_simd, fixed_minimizer_kernels(),
+                    options.algorithm_identity, range.bp_size(),
+                    k_minimizer_preferred_segment_span_bp, nullptr, fixed_alphabet_code<::seq::dna4>());
+            require_wire_error(spilled, minimizer_generation_encoding_error::admission);
+            REQUIRE(spill_storage.segment_runs_.empty());
+            REQUIRE(spill_storage.chunks_.empty());
+        }
+        require_no_reads();
+    }
+
+    // The ordinary builder must unwind its admitted wave instead of treating
+    // the same input refusal as corrupt core geometry and aborting the process.
+    arm_refusal();
+    fake_fragment_storage<> refused_storage;
+    try {
+        direct_minimizer_bucket_index<fake_fragment_storage<>>::build(
+            refused_storage, nonresident, minimizer_sketch_backend::exact_simd,
+            fixed_minimizer_kernels(), nullptr, fixed_alphabet_code<::seq::dna4>());
+        FAIL("ordinary input admission unexpectedly succeeded");
+    } catch (const std::bad_alloc& error) {
+        REQUIRE(std::string_view{error.what()} ==
+                "minimizers_per_sequence build: input materialization admission failed");
+    }
+    REQUIRE(source.reserved_at_probe > baseline);
+    REQUIRE(refused_storage.runs_.empty());
+    REQUIRE(refused_storage.chunks_.empty());
+    require_no_reads();
+    admission.set_index_memory_cap_bytes(baseline + headroom);
+    direct_minimizer_bucket_index<fake_fragment_storage<>>::build(
+        refused_storage, nonresident, minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(), nullptr, fixed_alphabet_code<::seq::dna4>());
+    REQUIRE(source.read_calls > 0u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+    fake_fragment_storage<> resident_storage;
+    direct_minimizer_bucket_index<fake_fragment_storage<>>::build(
+        resident_storage, view, minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(), nullptr, fixed_alphabet_code<::seq::dna4>());
+    REQUIRE_FALSE(resident_storage.chunks_.empty());
+    REQUIRE(refused_storage.chunks_.size() == resident_storage.chunks_.size());
+    for (const auto& [key, row] : resident_storage.chunks_) {
+        const auto found = refused_storage.chunks_.find(key);
+        REQUIRE(found != refused_storage.chunks_.end());
+        REQUIRE(found->second.blob == row.blob);
+        REQUIRE(found->second.checksum == row.checksum);
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+
 }
 
 TEST_CASE(

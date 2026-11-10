@@ -15,6 +15,10 @@ import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser;
 import bioseq.io.identifier_parser.canonical;
 import bioseq.io.identifier_parser.preservation;
+import bioseq.io.record_schema;
+import bioseq.io.alignment;
+import bioseq.io.sinks;
+import bioseq.parallelism.memory_admission;
 
 using namespace bioseq::io::identifier_parser;
 
@@ -503,4 +507,207 @@ TEST_CASE("identifier_parser: canonical envelope rejects contradictory visible f
     REQUIRE_FALSE(value_for_column(restored_null.map, restored_null.writer, 0).has_value());
     auto restored_empty = run_parse(header_format::automatic, header_format::plain, columns, empty_header);
     REQUIRE(value_for_column(restored_empty.map, restored_empty.writer, 0) == std::optional<std::string>{""});
+}
+
+TEST_CASE("preservation scalar ownership survives moves spill denial and parser errors",
+          "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline = admission.reserved_bytes();
+    struct restore_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        ~restore_cap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, admission.index_memory_cap_bytes()};
+
+    // These fixtures exist before the production admission ceiling is lowered.
+    const std::string large = "\"\\u0061" + std::string(1024u * 1024u, 'a') + "\"";
+    const std::string bad_tail = large.substr(0, large.size() - 1u) + "\\uD800\"";
+    admission.set_index_memory_cap_bytes(baseline + 16u * 1024u);
+    {
+        preservation_json_cursor cursor{large, large.size()};
+        auto decoded = cursor.string();
+        REQUIRE(decoded.has_value());
+        REQUIRE(cursor.finish().has_value());
+        REQUIRE(decoded->size() == 1024u * 1024u + 1u);
+        REQUIRE(decoded->text().find_first_not_of('a') == std::string_view::npos);
+        REQUIRE(admission.reserved_bytes() > baseline);
+        REQUIRE(admission.reserved_bytes() <= baseline + 16u * 1024u);
+        auto moved = std::move(*decoded);
+        REQUIRE(moved.text().size() == 1024u * 1024u + 1u);
+        REQUIRE(moved.text().back() == 'a');
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+    {
+        preservation_json_cursor cursor{bad_tail, bad_tail.size()};
+        const auto decoded = cursor.string();
+        REQUIRE_FALSE(decoded.has_value());
+        REQUIRE(decoded.error() == "JSON high surrogate lacks a low surrogate");
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(baseline, 1u));
+    {
+        preservation_json_cursor cursor{large, large.size()};
+        REQUIRE_FALSE(cursor.string().has_value());
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+    for (const auto json : {std::string_view{"\"plain\""}, std::string_view{"\"a\\tb\\u03BB\""}}) {
+        preservation_json_cursor cursor{json, 128u};
+        auto decoded = cursor.string();
+        REQUIRE(decoded.has_value());
+        auto moved = std::move(*decoded);
+        preservation_scalar assigned;
+        assigned = std::move(moved);
+        REQUIRE(assigned.text() == (json == "\"plain\"" ? "plain" : "a\tbλ"));
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+    // Crossing the scalar limit preserves the existing diagnostic byte position.
+    const std::string long_key = " \t\"" + std::string(129u, 'x') + "\"";
+    preservation_json_cursor too_long{long_key, 128u};
+    REQUIRE_FALSE(too_long.string().has_value());
+    REQUIRE(too_long.position() == 3u);
+    const std::string full_inline = "\"" + std::string(127u, 'x') + "\\u0078\"";
+    preservation_json_cursor at_limit{full_inline, 128u};
+    const auto exact = at_limit.string();
+    REQUIRE(exact.has_value());
+    REQUIRE(exact->text() == std::string(128u, 'x'));
+    const std::string escaped_overflow = "\"" + std::string(128u, 'x') + "\\u0078\"";
+    preservation_json_cursor over_limit{escaped_overflow, 128u};
+    REQUIRE_FALSE(over_limit.string().has_value());
+    REQUIRE(over_limit.position() == escaped_overflow.size() - 1u);
+    preservation_json_cursor duplicate{"{\"a\":null,\"\\u0061\":null}", 128u};
+    std::size_t callbacks{};
+    const auto repeated = duplicate.object(std::array<std::string_view, 1>{"a"},
+        [&duplicate, &callbacks](std::size_t) -> std::expected<void, std::string> {
+            ++callbacks;
+            return duplicate.literal("null") ? std::expected<void, std::string>{}
+                : std::unexpected(std::string{"expected null"});
+        });
+    REQUIRE_FALSE(repeated.has_value());
+    REQUIRE(repeated.error() == "duplicate preservation key: a");
+    REQUIRE(callbacks == 1u);
+    preservation_json_cursor null_value{"null", 0u};
+    const auto absent = null_value.optional_string();
+    REQUIRE(absent.has_value());
+    REQUIRE_FALSE(absent->has_value());
+    preservation_json_cursor empty_value{"\"\"", 0u};
+    const auto empty = empty_value.optional_string();
+    REQUIRE(empty.has_value());
+    REQUIRE(empty->has_value());
+    REQUIRE((*empty)->text().empty());
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("preservation metadata retains concurrent decoded owners through destination copies",
+          "[component:bioseq][layer:unit][feature:io]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline = admission.reserved_bytes();
+    struct restore_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        ~restore_cap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, admission.index_memory_cap_bytes()};
+    admission.set_index_memory_cap_bytes(baseline + 1024u * 1024u);
+    std::string scalar;
+    for (std::size_t index = 0; index < 4096u; ++index) scalar += "\\u0061";
+    const std::string payload = "[{\"name\":\"" + scalar + "\",\"type\":\"" + scalar
+        + "\",\"value\":\"" + scalar + "\"}]";
+    struct observed_record : bioseq::io::decoded_record {
+        std::size_t callbacks{};
+        std::uint64_t before_copy{}, after_copy{};
+        /** Observe actual simultaneous temporary and retained admission. */
+        std::expected<void, std::string> metadata(std::string_view name, std::string_view type,
+            std::optional<std::string_view> value, bool types_only) {
+            ++callbacks;
+            auto& controller = bioseq::parallelism::memory_admission_controller::instance();
+            before_copy = controller.reserved_bytes();
+            auto result = bioseq::io::decoded_record::metadata(name, type, value, types_only);
+            after_copy = controller.reserved_bytes();
+            return result;
+        }
+    };
+    for (const bool use_credit : {false, true}) {
+        bioseq::io::io_memory_credit credit;
+        if (use_credit) {
+            auto permit = admission.try_reserve(8192u);
+            REQUIRE(permit.has_value());
+            credit.reset(std::move(*permit)); // Exhaustion must release spare before exact fallback.
+        }
+        {
+            observed_record destination;
+            preservation_json_cursor cursor{payload, 4096u, use_credit ? &credit : nullptr};
+            REQUIRE(decode_preserved_metadata(cursor, destination, false).has_value());
+            REQUIRE(cursor.finish().has_value());
+            REQUIRE(destination.callbacks == 1u);
+            REQUIRE(destination.before_copy >= baseline + 3u * 4096u);
+            REQUIRE(destination.after_copy >= destination.before_copy + 3u * 4096u);
+            credit.release();
+            REQUIRE(admission.reserved_bytes() < destination.after_copy);
+            const auto row = destination.freeze();
+            REQUIRE(row.has_value());
+            REQUIRE(row->metadata.size() == 1u);
+            REQUIRE(row->metadata.front().name == std::string(4096u, 'a'));
+            REQUIRE(row->metadata.front().qualified_type == std::string(4096u, 'a'));
+            REQUIRE(row->metadata.front().bytes == std::string(4096u, 'a'));
+        }
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+}
+
+TEST_CASE("preservation manifests copy borrowed names and escaped attributes under admission",
+          "[component:bioseq][layer:unit][feature:io]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline = admission.reserved_bytes();
+    const std::string name(4096u, 'r');
+    std::string escaped;
+    for (std::size_t index = 0; index < 512u; ++index) escaped += "\\u0064";
+    const std::string payload = "{\"magic\":\"bioseq.io\",\"version\":1,\"record_payload\":\"bq\","
+        "\"sequence_alphabets\":[\"dna4\"],\"quality_alphabets\":[],\"replay_header_lines\":null,\"contexts\":[],\"references\":[{"
+        "\"wire_name\":\"" + name + "\",\"source_id\":\"1\",\"context\":null,\"original_name\":\""
+        + name + "\",\"alphabet\":\"dna4\",\"length\":\"100\",\"representation\":\"native\","
+        "\"topology\":\"linear\",\"attributes\":{\"DS\":\"" + escaped + "\"}}]}";
+    {
+        const auto decoded = bioseq::io::alignment::decode_alignment_manifest(payload, payload.size());
+        REQUIRE(decoded.has_value());
+        REQUIRE(decoded->source_metadata.references.size() == 1u);
+        REQUIRE(decoded->source_metadata.references.front().name == name);
+        REQUIRE(decoded->wire_references.front().name == name);
+        REQUIRE(decoded->source_metadata.references.front().attributes.front().value == std::string(512u, 'd'));
+        REQUIRE_FALSE(decoded->source_metadata.replay_header_lines.has_value());
+        REQUIRE(admission.reserved_bytes() > baseline);
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+    const auto replay_position = payload.find("\"replay_header_lines\":null");
+    REQUIRE(replay_position != std::string::npos);
+    auto with_replay = payload;
+    with_replay.replace(replay_position, std::string_view{"\"replay_header_lines\":null"}.size(),
+        "\"replay_header_lines\":[\"@CO\\t" + escaped + "\"]");
+    {
+        auto decoded = bioseq::io::alignment::decode_alignment_manifest(with_replay, with_replay.size());
+        REQUIRE(decoded.has_value());
+        REQUIRE(decoded->source_metadata.replay_header_lines.has_value());
+        REQUIRE(decoded->source_metadata.replay_header_lines->size() == 1u);
+        REQUIRE(decoded->source_metadata.replay_header_lines->front() == "@CO\t" + std::string(512u, 'd'));
+        const auto before_reset = admission.reserved_bytes();
+        REQUIRE(decoded->begin_replay_header(true).has_value());
+        REQUIRE(decoded->source_metadata.replay_header_lines->empty());
+        REQUIRE(admission.reserved_bytes() < before_reset);
+        REQUIRE(decoded->replay_header_line("@CO\tactual native comment").has_value());
+        REQUIRE_FALSE(decoded->replay_header_line("@SQ\tSN:ref\tLN:10").has_value());
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
+    {
+        bioseq::parallelism::memory_permit container_permit;
+        bioseq::parallelism::memory_permit text_permit;
+        std::vector<std::string> lines;
+        REQUIRE(bioseq::io::append_admitted_text(lines, container_permit, text_permit, "@CO\tx").has_value());
+        while (lines.size() < lines.capacity())
+            REQUIRE(bioseq::io::append_admitted_text(lines, container_permit, text_permit, "@CO\tx").has_value());
+        const std::string_view borrowed = lines.front();
+        const auto previous_count = lines.size();
+        REQUIRE(bioseq::io::append_admitted_text(lines, container_permit, text_permit, borrowed).has_value());
+        REQUIRE(lines.size() == previous_count + 1u);
+        REQUIRE(lines.back() == "@CO\tx");
+    }
+    REQUIRE(admission.reserved_bytes() == baseline);
 }

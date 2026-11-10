@@ -199,6 +199,8 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
                         minimizer_generation_schema_error_name(schema.error)));
     }
 
+    (void)lock_index_source_for_creation(
+        user_relid_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
     char* raw_tablespace_name = get_tablespace_name(tablespace_oid_);
     if (raw_tablespace_name == nullptr) {
         minimizer_generation_storage_error("resolved source tablespace no longer exists");
@@ -251,6 +253,8 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
                         minimizer_generation_schema_error_name(created_schema.error)));
     }
     relation_close(created, NoLock);
+    record_created_index_source_dependency(relation_oid, relation_name.c_str(), user_relid_,
+        db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
     CacheInvalidateRelcacheByRelid(relation_oid);
     CacheInvalidateRelcacheByRelid(created_schema.primary_index_oid);
     // Invalidate caches using the user table OID stored in their keys.
@@ -869,9 +873,8 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
     }
     index_relid_ = InvalidOid;
     if (!OidIsValid(rid) && create_if_missing) {
-        const Oid user_relid = user_relid_;
-        const char* persistence = bioseq::postgres::support::invoke_pg_as_cpp(
-            [user_relid] { return persistence_kw_for(user_relid); });
+        const char* persistence = lock_index_source_for_creation(
+            user_relid_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
         const char* quoted_name_pg = bioseq::postgres::support::invoke_pg_as_cpp(
             [relation_name] { return quote_identifier(relation_name); });
         const bool quoted_name_is_copy = quoted_name_pg != relation_name;
@@ -890,7 +893,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
                 [quoted_name_pg] { pfree(const_cast<char*>(quoted_name_pg)); });
         }
         const std::string create_ddl = fmt::format(
-            "CREATE {} TABLE IF NOT EXISTS bioseq_internal.{} ("
+            "CREATE {} TABLE bioseq_internal.{} ("
             "query_key BIGINT NOT NULL, sub_key BIGINT NOT NULL, chunk_no INT NOT NULL, "
             "chunk_bytes INT NOT NULL, blob BYTEA NOT NULL, "
             "PRIMARY KEY (query_key, sub_key, chunk_no)) USING heap;",
@@ -908,6 +911,8 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
             [relation_name, ns] { return get_relname_relid(relation_name, ns); });
         if (!OidIsValid(rid))
             index_error("failed to create seqidx table");
+        record_created_index_source_dependency(rid, relation_name, user_relid_,
+            db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
     }
     index_relid_ = rid;
     return rid;

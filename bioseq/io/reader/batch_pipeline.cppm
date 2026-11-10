@@ -55,7 +55,7 @@ run_sync_pipeline(p_source source,
     constexpr std::size_t bits_per_char = sequence_traits_type::bits_per_char;
     constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
 
-    buffer_slab slab(options.io.initial_buffer_size);
+    buffer_slab slab(options);
     batch_type batch;
     std::size_t records_emitted = 0;
     bool aborted = false;
@@ -70,6 +70,16 @@ run_sync_pipeline(p_source source,
         }
         aborted = true;
     };
+
+    // No refill, parser or output callback may observe an unallocated slab.
+    if (slab.raw() == nullptr) {
+        if (options.io.max_buffer_size == 0u)
+            emit_failure(failure_capture, "input buffer limit is zero");
+        else
+            emit_failure(failure_capture, "cannot allocate input buffer (initial={}, maximum={})",
+                options.io.initial_buffer_size, options.io.max_buffer_size);
+        return std::unexpected(std::move(captured_error));
+    }
 
     const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
                                                    ? options.concurrency.batch_target_record_count
@@ -465,60 +475,54 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     return view_size;
 }
 
-/// Finds a possible FASTQ header following a newline from `target` onward.
-/// It accepts an '@' line followed by one sequence line and a '+' line.
-/// Quality length is not checked, and this boundary test assumes single-line
-/// sequenc bodies. Zero selects the file start. `view_size` means no match.
-[[nodiscard]] inline std::size_t find_fastq_record_boundary(const std::uint8_t* base,
-                                                            std::size_t view_size,
-                                                            std::size_t target) noexcept {
-    if (target == 0)
-        return 0;
-    if (target >= view_size)
-        return view_size;
-    std::size_t cursor = target;
-    while (cursor < view_size) {
-        // Find next '\n' (a candidate record boundary lies just after).
-        const std::size_t remaining = view_size - cursor;
-        const std::size_t newline_offset = simd::scan_first_byte('\n', base + cursor, remaining);
-        if (newline_offset >= remaining)
-            return view_size;
-        const std::size_t at_header = cursor + newline_offset + 1;
-        if (at_header >= view_size)
-            return view_size;
-        if (base[at_header] != '@') {
-            cursor = at_header;
+/// Establish only the requested FASTQ shard starts using the shared structural parser.
+/// Counts include quality marker lines; no packed sequence/header/quality is retained.
+/// Every returned nonterminal offset follows a complete record, and storage is O(shards).
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::expected<std::vector<std::size_t>, std::string> find_fastq_record_boundaries(
+    const std::uint8_t* base, const std::size_t view_size, const std::size_t shard_count,
+    const bool strict_fastq) {
+    using traits = typename compact_sequence_range<sequence_custom_alphabet<Alphabet, std::uint64_t>>::traits;
+    fastq_parser_state<std::uint64_t, traits::bits_per_char, traits::letters_per_unit> state;
+    std::vector<char> unused_headers;
+    std::vector<std::uint64_t> unused_sequences;
+    std::vector<std::uint8_t> unused_qualities;
+    state.attach_to_batch(unused_headers, unused_sequences, unused_qualities);
+    std::string failure;
+    const auto capture_failure = [&failure](std::string&& message) { failure = std::move(message); };
+    const auto ignore_storage = [](std::size_t, std::size_t, std::size_t, std::size_t,
+                                   std::size_t, std::size_t, std::size_t) {};
+    std::vector<std::size_t> boundaries;
+    boundaries.reserve(shard_count + 1);
+    boundaries.push_back(0);
+    // Incremental quotient/remainder avoids overflowing view_size * shard_index.
+    const auto stride = view_size / shard_count;
+    const auto remainder = view_size % shard_count;
+    std::size_t target = stride, fraction = remainder, cursor{};
+    while (boundaries.size() < shard_count) {
+        if (cursor >= target || cursor == view_size) {
+            boundaries.push_back(cursor);
+            target += stride;
+            if (fraction >= shard_count - remainder) {
+                ++target;
+                fraction -= shard_count - remainder;
+            } else fraction += remainder;
             continue;
         }
-        // Check, for a header line, one sequence line, and then a separator.
-        const std::size_t hdr_remaining = view_size - at_header;
-        const std::size_t hdr_newline =
-            simd::scan_first_byte('\n', base + at_header, hdr_remaining);
-        if (hdr_newline >= hdr_remaining)
-            return view_size;
-        const std::size_t at_seq = at_header + hdr_newline + 1;
-        if (at_seq >= view_size)
-            return view_size;
-        const std::size_t seq_remaining = view_size - at_seq;
-        const std::size_t seq_newline = simd::scan_first_byte('\n', base + at_seq, seq_remaining);
-        if (seq_newline >= seq_remaining)
-            return view_size;
-        const std::size_t at_sep = at_seq + seq_newline + 1;
-        if (at_sep >= view_size)
-            return view_size;
-        if (base[at_sep] == '+') {
-            return at_header;
-        }
-        // This candidate lacks the expected separator. Continue  at its next line
-        cursor = at_header;
+        const auto step = parse_one_fastq_record<Alphabet, std::uint64_t, fastq_parse_mode::frame>(
+            state, base, view_size, true, cursor, 0, strict_fastq, ignore_storage, capture_failure);
+        if (step.outcome == parse_outcome::abort) return std::unexpected(std::move(failure));
+        if (step.outcome != parse_outcome::complete || step.cursor <= cursor)
+            return std::unexpected(std::string{"FASTQ framing did not complete a record"});
+        cursor = step.cursor;
     }
-    return view_size;
+    boundaries.push_back(view_size);
+    return boundaries;
 }
 
 /// Parses separate mapped regions in parallel, each with its own batch buffers.
-/// Region starts are adjusted by the format's boundary finder. FASTQ splitting
-/// uses the single-line sequence pattern documented by that helper. Handler
-/// calls are serialized, with records kept in order within each region.
+/// FASTA starts follow header sigils; FASTQ starts follow complete count-framed records.
+/// Handler calls are serialized, with records kept in order within each region.
 /// The order between regions is unspecified.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
@@ -562,21 +566,31 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
 
     // Determine shard boundaries. shard[i] = [boundary[i], boundary[i+1]).
     std::vector<std::size_t> boundaries;
-    boundaries.reserve(shard_count + 1);
-    boundaries.push_back(0);
-    for (std::size_t shard_index = 1; shard_index < shard_count; ++shard_index) {
-        const std::size_t target = (view_size * shard_index) / shard_count;
-        std::size_t actual = p_file_format == sequence_file_format::fasta
-                                 ? find_fasta_record_boundary(base_ptr, view_size, target)
-                                 : find_fastq_record_boundary(base_ptr, view_size, target);
-        // Keep boundaries ordered. Equal boundaries leave an empty region.
-        if (actual < boundaries.back())
-            actual = boundaries.back();
-        if (actual > view_size)
-            actual = view_size;
-        boundaries.push_back(actual);
+    if constexpr (is_fastq_format) {
+        auto framed = find_fastq_record_boundaries<p_alphabet>(base_ptr, view_size,
+            shard_count, options.encoder.strict_fastq);
+        if (!framed) {
+            failure_fn(std::string{framed.error()});
+            return std::unexpected(std::move(framed.error()));
+        }
+        boundaries = std::move(*framed);
+    } else {
+        boundaries.reserve(shard_count + 1);
+        boundaries.push_back(0);
+        const auto stride = view_size / shard_count;
+        const auto remainder = view_size % shard_count;
+        std::size_t target = stride, fraction = remainder;
+        for (std::size_t shard_index = 1; shard_index < shard_count; ++shard_index) {
+            const auto actual = find_fasta_record_boundary(base_ptr, view_size, target);
+            boundaries.push_back(std::clamp(actual, boundaries.back(), view_size));
+            target += stride;
+            if (fraction >= shard_count - remainder) {
+                ++target;
+                fraction -= shard_count - remainder;
+            } else fraction += remainder;
+        }
+        boundaries.push_back(view_size);
     }
-    boundaries.push_back(view_size);
 
     // Use the configured number of records per batch, or the default count.
     const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
@@ -610,7 +624,8 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
                       &handler_fn,
                       &is_fastq_format,
                       &options,
-                      &total_records](std::size_t shard_index) {
+                      &total_records,
+                      view_size](std::size_t shard_index) {
         const std::size_t shard_start = boundaries[shard_index];
         const std::size_t shard_end = boundaries[shard_index + 1];
         if (shard_start >= shard_end)
@@ -716,10 +731,13 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             while (cursor < shard_end && !aborted.load(std::memory_order_relaxed)) {
                 parser_state.attach_to_batch(
                     batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
+                // Lenient records without '+' finish by peeking the next '@'.
+                // Verified boundaries stop record starts, while the complete mapping
+                // keeps that non-consuming lookahead available at a shard end.
                 const auto step =
                     parse_one_fastq_record<p_alphabet, std::uint64_t>(parser_state,
                                                                       base_ptr,
-                                                                      shard_end,
+                                                                      view_size,
                                                                       /*is_eof=*/true,
                                                                       cursor,
                                                                       /*global_offset=*/0u,

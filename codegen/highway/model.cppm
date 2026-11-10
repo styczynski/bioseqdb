@@ -378,6 +378,41 @@ struct target_manifest {
     std::vector<domain_topology_expectation> domain_topologies;
 };
 
+/** Private source-local override, separately authenticated from ordinary target policy. */
+[[nodiscard]] inline std::string scalar_codec_override_fragment() {
+    return
+        "#if defined(HWY_TARGET) || defined(HWY_STATIC_TARGET) || defined(HWY_BASELINE_TARGETS) || defined(HWY_COMPILE_ONLY_SCALAR) || defined(HWY_COMPILE_ONLY_EMU128) || defined(HWY_COMPILE_ONLY_STATIC)\n"
+        "#error \"scalar codec role received an ambient target selector\"\n"
+        "#endif\n"
+        "#undef HWY_COMPILE_ALL_ATTAINABLE\n"
+        "#undef HWY_DISABLED_TARGETS\n"
+        "#define HWY_COMPILE_ONLY_SCALAR 1\n"
+        "#include <hwy/detect_targets.h>\n"
+        "#undef HWY_TARGET\n"
+        "#define HWY_TARGET HWY_SCALAR\n"
+        "#if HWY_STATIC_TARGET != HWY_SCALAR || HWY_TARGET != HWY_SCALAR || HWY_TARGETS != HWY_SCALAR\n"
+        "#error \"scalar codec role did not select literal HWY_SCALAR\"\n"
+        "#endif\n";
+}
+
+/** Match the independently depfile-authenticated CMake scalar include witness. */
+[[nodiscard]] inline std::string scalar_codec_policy_fragment(const target_manifest& targets) {
+    std::string result;
+    for (const auto& [name, value] : targets.policy_definitions)
+        result += "#define " + name + " " + value + "\n";
+    return result + scalar_codec_override_fragment();
+}
+
+/** Closed test-only source role; its target/header proof never salts native policy. */
+struct scalar_codec_spec {
+    std::filesystem::path sequence_source;
+    std::filesystem::path io_source;
+    std::string policy_digest;
+    std::string highway_digest;
+    std::filesystem::path header_manifest;
+    std::string header_manifest_sha256;
+};
+
 struct source_manifest {
     std::string contract_module;
     std::string dispatch_module;
@@ -386,6 +421,7 @@ struct source_manifest {
     std::vector<slot_spec> slots;
     std::vector<required_slot_spec> required_slots;
     std::vector<probe_spec> unit_probes;
+    std::optional<scalar_codec_spec> scalar_codec;
     std::optional<minimizer_registry_spec> minimizer_registry;
     std::filesystem::path minimizer_registry_manifest_path;
     std::vector<domain_topology_expectation> domain_topologies;
@@ -483,6 +519,9 @@ enum class artifact_kind : std::uint8_t {
     test_support,
     unit_probe_implementation,
     minimizer_representation_instantiation,
+    scalar_codec_primary,
+    scalar_codec_partition,
+    scalar_codec_implementation,
 };
 
 struct generated_artifact {
@@ -498,6 +537,7 @@ struct generation_plan {
     target_manifest target_inventory;
     source_manifest source_inventory;
     std::vector<extracted_source> extracted_sources;
+    std::vector<extracted_source> scalar_codec_sources;
     std::string clang_release;
     std::string compilation_signature;
     std::vector<domain_topology_provenance> domain_topologies;

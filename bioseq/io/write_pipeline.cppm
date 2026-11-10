@@ -613,7 +613,8 @@ template<class Sink, class Resolved>
         const auto tag = *auxiliary_tag_index(field.tag);
         if (occupied_tags[tag]) return std::unexpected(std::string{"alignment contains duplicate auxiliary tags"});
         occupied_tags.set(tag);
-        if (!retain_original_native_auxiliary(field, resolved.protein_triplets, !binary)) continue;
+        if (!retain_original_native_auxiliary(field, resolved.protein_triplets, !binary,
+                native.mate_projection_suppressed)) continue;
         if (derived.active() && derived_alignment_auxiliary_tag(field.tag)) {
             const auto& generated = derived_fields[field.tag[0] == 'N' ? 0u : 1u];
             if (!resolved.protein_triplets && !auxiliary_logically_equal(field, generated))
@@ -641,9 +642,8 @@ template<class Sink, class Resolved>
         .synthetic_codons = resolved.protein_triplets,
         .projected_flag = native.core.flags,
         .projected_qname = resolved.qname,
-        .original_flag = row.identity.classification == alignment_classification_source::scan_group
-            ? std::optional<std::uint16_t>{resolved.flags}
-            : row.alignment ? row.alignment->flags : std::optional<std::uint16_t>{},
+        // Preserve resolved Boolean mappings and group election before native mate projection.
+        .original_flag = resolved.flags,
         .sequence_storage = resolved.protein_triplets ? preservation_storage::rank_hex : preservation_storage::native,
         .quality_storage = preservation_storage::native,
         .absent_sequence_alphabet = resolved.sequence_alphabet,
@@ -1208,12 +1208,12 @@ public:
         if (header[0] != magic || header[1] < sizeof(header) || header[1] > file_.size_bytes() - cursor_
             || header[2] > header[1] - sizeof(header) || header[2] > std::numeric_limits<std::size_t>::max())
             return std::unexpected(std::string{"compact replay header geometry is invalid"});
-        auto scratch_permit = parallelism::memory_admission_controller::instance().try_reserve(header[2] + sizeof(replayed_record));
+        auto scratch_permit = parallelism::memory_admission_controller::instance().try_reserve(sizeof(replayed_record));
         if (!scratch_permit) return std::unexpected(std::string{"cannot admit compact replay metadata decoding"});
         const auto mapped = file_.map_read_at(cursor_ + sizeof(header), static_cast<std::size_t>(header[2]));
         if (!mapped) return std::unexpected(mapped.error());
         auto owner = std::make_unique<replayed_record>();
-        owner->backing_permit = scratch_permit->split_off(sizeof(replayed_record));
+        owner->backing_permit = std::move(*scratch_permit);
         const auto json_bytes = mapped->bytes();
         const auto decoded = identifier_parser::decode_preservation_record(
             {reinterpret_cast<const char*>(json_bytes.data()), json_bytes.size()}, owner->decoded, false, json_bytes.size());
@@ -1391,11 +1391,28 @@ template<export_record_source Source>
         typename Source::batch_type batch;
         std::size_t first_row{};
     };
-    std::deque<retained_batch> retained;
+    // Both lists release nodes on pop/clear; this shared permit outlives every node.
     parallelism::memory_permit queue_permit;
+    std::list<retained_batch> retained;
     std::optional<record_replay_file> replay;
     // Owners remain on the source thread; only detached immutable views enter task closures.
-    std::deque<typename Source::batch_type> formatting_batches;
+    std::list<typename Source::batch_type> formatting_batches;
+    /** Admit one node across both queues, including its aligned linked-node prefix. */
+    const auto admit_batch_queue_entry = [&retained, &formatting_batches, &queue_permit]()
+        -> std::expected<bool, std::string> {
+        const auto count = common::checked_add(retained.size(), formatting_batches.size());
+        const auto next_count = count ? common::checked_add(*count, std::size_t{1u}) : std::nullopt;
+        const auto overhead = std::max(std::size_t{128u}, alignof(retained_batch));
+        const auto entry_bytes = common::checked_add(sizeof(retained_batch), overhead);
+        const auto required = next_count && entry_bytes
+            ? common::checked_mul(*next_count, *entry_bytes) : std::nullopt;
+        if (!required) return std::unexpected(std::string{"writer batch queue capacity overflows"});
+        if (queue_permit) return queue_permit.grow_to(*required);
+        auto reservation = parallelism::memory_admission_controller::instance().try_reserve(*required);
+        if (!reservation) return false;
+        queue_permit = std::move(*reservation);
+        return true;
+    };
     std::vector<std::unique_ptr<replayed_record>> formatting_replay_rows;
     record_format_wave formatting{concurrency, format->format, options, transform,
         absent_sequence_alphabet, absent_quality_alphabet};
@@ -1406,6 +1423,7 @@ template<export_record_source Source>
         if (!drained) return drained;
         formatting_batches.clear();
         formatting_replay_rows.clear();
+        // Preserve peak queue admission while a popped retained batch may still be local.
         return {};
     };
     const auto schedule_row = [&formatting, &drain_formatting, &write_row, &alignment_context, &options, text, checkpoint](export_record_view row)
@@ -1446,7 +1464,8 @@ template<export_record_source Source>
         /** Join before a currently borrowed caller-owned batch leaves its scope. */
         ~batch_task_guard() { if (active) wave.wait(); }
     };
-    const auto spill_retained = [&retained, &queue_permit, &replay, path, checkpoint]() -> std::expected<void, std::string> {
+    const auto spill_retained = [&retained, &formatting_batches, &queue_permit, &replay, path, checkpoint]()
+        -> std::expected<void, std::string> {
         if (!replay) {
             auto opened_replay = record_replay_file::open(path);
             if (!opened_replay) return std::unexpected(opened_replay.error());
@@ -1461,7 +1480,7 @@ template<export_record_source Source>
             }
             retained.pop_front();
         }
-        queue_permit.release();
+        if (formatting_batches.empty()) queue_permit.release();
         return {};
     };
     for (;;) {
@@ -1517,15 +1536,9 @@ template<export_record_source Source>
             ++records;
         }
         if (!text && retained_begin < (**batch).size()) {
-            auto required = common::checked_mul(retained.size() + 1u,
-                sizeof(retained_batch) + std::size_t{128u});
-            if (!required) { source.cancel(); return std::unexpected(record_error{records, std::nullopt, "retained row queue capacity overflows"}); }
-            bool admitted = queue_permit && queue_permit.grow_to(*required);
-            if (!queue_permit) {
-                auto reservation = parallelism::memory_admission_controller::instance().try_reserve(*required);
-                if (reservation) { queue_permit = std::move(*reservation); admitted = true; }
-            }
-            if (!admitted) {
+            const auto admitted = admit_batch_queue_entry();
+            if (!admitted) { source.cancel(); return std::unexpected(record_error{records, std::nullopt, admitted.error()}); }
+            if (!*admitted) {
                 const auto spilled = spill_retained();
                 if (!spilled) { source.cancel(); return std::unexpected(record_error{records, std::nullopt, spilled.error()}); }
                 for (std::size_t index = retained_begin; index < (**batch).size(); ++index) {
@@ -1534,7 +1547,16 @@ template<export_record_source Source>
                     if (!stored) { source.cancel(); return std::unexpected(record_error{records, std::nullopt, stored.error()}); }
                 }
             } else retained.push_back({std::move(**batch), retained_begin});
-        } else if (batch_has_jobs && !formatting.empty()) formatting_batches.push_back(std::move(**batch));
+        } else if (batch_has_jobs && !formatting.empty()) {
+            const auto admitted = admit_batch_queue_entry();
+            if (!admitted) { source.cancel(); return std::unexpected(record_error{records, std::nullopt, admitted.error()}); }
+            if (*admitted) formatting_batches.push_back(std::move(**batch));
+            else {
+                // The current local batch and its guard retain borrowed data through this drain.
+                const auto drained = drain_formatting();
+                if (!drained) { source.cancel(); return std::unexpected(drained.error()); }
+            }
+        }
         guard.active = false;
     }
     if (const auto drained = drain_formatting(); !drained) return std::unexpected(drained.error());
@@ -1598,6 +1620,7 @@ template<export_record_source Source>
                 if (!scheduled) { formatting.wait(); return std::unexpected(scheduled.error()); }
                 has_jobs = has_jobs || *scheduled;
             }
+            // The removed retained node already admitted this smaller formatting node.
             if (has_jobs && !formatting.empty()) formatting_batches.push_back(std::move(current.batch));
             guard.active = false;
         }

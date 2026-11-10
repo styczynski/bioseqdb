@@ -725,12 +725,19 @@ export {
             RTEPermissionInfo* perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
             number_of_columns_read = bms_num_members(perminfo->selectedCols);
         } else {
-            /* An inheritance child uses its top parent's permission record. Map
-             * the selected columns to the child before estimating its read cost. */
-            Assert(rel->top_parent);
-            RangeTblEntry* parent_rte = rt_fetch(rel->top_parent->relid, root->parse->rtable);
+            /* A flattened UNION can be the top append parent without owning
+             * permissions. Find the queried table below that wrapper, then map
+             * its selected columns to this physical inheritance child. */
+            RangeTblEntry* permission_rte = rte;
+            for (const auto* parent = rel->parent; parent != nullptr; parent = parent->parent) {
+                auto* candidate = rt_fetch(parent->relid, root->parse->rtable);
+                if (candidate->perminfoindex == 0) continue;
+                permission_rte = candidate;
+                break;
+            }
+            /* Keep PostgreSQL's invalid-index error if no ancestor owns permissions. */
             RTEPermissionInfo* perminfo =
-                getRTEPermissionInfo(root->parse->rteperminfos, parent_rte);
+                getRTEPermissionInfo(root->parse->rteperminfos, permission_rte);
             number_of_columns_read = bms_num_members(
                 fixup_inherited_columns(perminfo->relid, rte->relid, perminfo->selectedCols));
         }

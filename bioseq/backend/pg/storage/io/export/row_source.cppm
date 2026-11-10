@@ -19,6 +19,7 @@ extern "C" {
 export module bioseq.postgres.storage.io.exporting.row_source;
 import std;
 import bioseq.io.options;
+import bioseq.io.sinks;
 import bioseq.io.record_schema;
 import bioseq.io.identifier_parser.preservation;
 import bioseq.io.alignment.record_codec;
@@ -238,7 +239,7 @@ template<class Value>
 
 /** Read an integral SQL field without floating-point or locale conversion. */
 [[nodiscard]] inline std::int64_t export_signed_integer(Datum value, Oid type) {
-    switch (getBaseType(type)) {
+    switch (invoke_pg_as_cpp([type] { return getBaseType(type); })) {
         case INT2OID: return DatumGetInt16(value);
         case INT4OID: return DatumGetInt32(value);
         case INT8OID: return DatumGetInt64(value);
@@ -268,8 +269,8 @@ inline void require_export_auxiliary(std::expected<void, std::string> result) {
 inline void append_export_auxiliary(pg_export_row_owner& owner, std::array<char, 2> tag,
     Datum value, Oid type, std::string_view text) {
     auto& output = owner.auxiliary;
-    const auto base = getBaseType(type);
-    const auto element_type = get_element_type(base);
+    const auto base = invoke_pg_as_cpp([type] { return getBaseType(type); });
+    const auto element_type = invoke_pg_as_cpp([base] { return get_element_type(base); });
     if (OidIsValid(element_type)) {
         auto* array = invoke_pg_as_cpp([&owner, value] {
             const auto previous = MemoryContextSwitchTo(owner.session->payload_context);
@@ -287,7 +288,7 @@ inline void append_export_auxiliary(pg_export_row_owner& owner, std::array<char,
             get_typlenbyvalalign(element_type, &length, &by_value, &alignment);
             deconstruct_array(array, element_type, length, by_value, alignment, &elements, &nulls, &count);
         });
-        const auto element_base = getBaseType(element_type);
+        const auto element_base = invoke_pg_as_cpp([element_type] { return getBaseType(element_type); });
         char subtype = element_base == INT2OID ? 's' : element_base == INT4OID ? 'i'
             : element_base == OIDOID ? 'I' : element_base == FLOAT4OID || element_base == FLOAT8OID ? 'f'
             : element_base == BOOLOID ? 'C' : 0;
@@ -409,6 +410,8 @@ class pg_export_source {
     MemoryContext context_{};
     std::vector<export_column_binding> bindings_;
     std::vector<bioseq::io::record_column> columns_;
+    bioseq::parallelism::memory_permit replay_vector_permit_;
+    bioseq::parallelism::memory_permit replay_text_permit_;
     bioseq::io::record_source_metadata metadata_;
     std::vector<bioseq::postgres::storage::io::loaded_io_import> provenance_;
     std::map<std::pair<Oid, std::uint64_t>, imported_context_binding> context_ids_;
@@ -417,6 +420,7 @@ class pg_export_source {
     std::uint64_t ordinal_{};
     bool cancelled_{};
     bool has_match_owner_{};
+    bool match_fields_required_{};
     bioseq::io::sequence_file_format format_{};
     bool native_mapq_supplied_{};
     bool supplied_header_{};
@@ -447,6 +451,22 @@ class pg_export_source {
             });
             if (sequence == bindings_.end()) continue;
             auto& source = imported.manifest.source_metadata;
+            if (!metadata_.replay_header_lines) metadata_.replay_header_lines.emplace();
+            const auto retain_header = [this](const std::string& line) {
+                if (std::string_view{line}.starts_with("@HD\t")
+                    || std::string_view{line}.starts_with("@SQ\t")) return;
+                if (!bioseq::io::is_sam_replay_header_line(line))
+                    export_binding_error("imported replay header line is invalid");
+                const auto retained = bioseq::io::append_admitted_text(*metadata_.replay_header_lines,
+                    replay_vector_permit_, replay_text_permit_, line);
+                if (!retained) export_binding_error(retained.error());
+            };
+            if (source.replay_header_lines) {
+                for (const auto& line : *source.replay_header_lines) retain_header(line);
+            } else {
+                for (const auto& context : source.header_contexts)
+                    for (const auto& line : context.original_header_lines) retain_header(line);
+            }
             const auto prefix = std::to_string(binding.source_relation) + ":";
             context_ids_.emplace(std::pair{binding.source_relation, imported.context_base},
                 imported_context_binding{std::nullopt, imported.id, std::nullopt});
@@ -680,29 +700,36 @@ class pg_export_source {
             return copied;
         };
         if (decoded.qname) owner.record.qname = text_view(decoded.qname);
-        const auto context_key = std::to_string(source_relation) + ":"
-            + std::to_string(original_context_id.value_or(0));
-        if (decoded.template_id) {
-            if (*decoded.template_id < 0) export_binding_error("negative imported template identity");
-            owner.record.identity.template_id = identities_.intern("it:" + context_key + ":"
-                + std::to_string(*decoded.template_id));
-        } else if (owner.record.qname && *owner.record.qname != "*") {
-            owner.record.identity.template_id = identities_.intern("iq:" + context_key + ":"
-                + std::string(*owner.record.qname));
-        }
-        if (decoded.segment_id) {
-            if (*decoded.segment_id < 0) export_binding_error("negative imported segment identity");
-            owner.record.identity.segment_id = identities_.intern("is:" + context_key + ":"
-                + std::to_string(*decoded.segment_id));
-        } else if (owner.record.identity.template_id) {
-            owner.record.identity.segment_id = identities_.intern("ie:"
-                + std::to_string(*owner.record.identity.template_id) + ":"
-                + std::to_string(alignment.flags.value_or(0) & (0x40u | 0x80u)));
+        const auto context = original_context_id
+            ? context_ids_.find({source_relation, *original_context_id}) : context_ids_.end();
+        if (decoded.template_id && *decoded.template_id < 0)
+            export_binding_error("negative imported template identity");
+        if (decoded.segment_id && *decoded.segment_id < 0)
+            export_binding_error("negative imported segment identity");
+        if (decoded.reference_id && *decoded.reference_id < 0)
+            export_binding_error("negative imported reference identity");
+        // A replacement header cannot validate IDs from a lost import namespace.
+        // Keep such rows anonymous; the neutral writer already assigns independent
+        // names by ordinal. Context-free explicit IDs remain caller declarations.
+        if (!original_context_id || context != context_ids_.end()) {
+            const auto context_key = std::to_string(source_relation) + ":"
+                + std::to_string(original_context_id.value_or(0));
+            if (decoded.template_id)
+                owner.record.identity.template_id = identities_.intern("it:" + context_key + ":"
+                    + std::to_string(*decoded.template_id));
+            if (decoded.segment_id)
+                owner.record.identity.segment_id = identities_.intern("is:" + context_key + ":"
+                    + std::to_string(*decoded.segment_id));
+            else if (owner.record.identity.template_id)
+                owner.record.identity.segment_id = identities_.intern("ie:"
+                    + std::to_string(*owner.record.identity.template_id) + ":"
+                    + std::to_string(alignment.flags.value_or(0) & (0x40u | 0x80u)));
+            // A canonical anonymous row remains anonymous on a later reload.
+            // QNAME alone cannot recreate a verified template or mate relationship.
         }
         alignment.reference_name = text_view(decoded.reference_name);
         alignment.mate_reference = text_view(decoded.mate_reference);
         if (original_context_id) {
-            const auto context = context_ids_.find({source_relation, *original_context_id});
             if (context == context_ids_.end()) {
                 if (!supplied_header_) export_binding_error(
                     "alignment IO provenance does not match the selected sequence/alignment columns; "
@@ -710,7 +737,6 @@ class pg_export_source {
                 alignment.header_context_id.reset();
             } else {
                 if (decoded.reference_id) {
-                    if (*decoded.reference_id < 0) export_binding_error("negative imported reference identity");
                     const auto reference = reference_positions_.find(std::tuple{source_relation,
                         context->second.import_id, static_cast<std::uint64_t>(*decoded.reference_id)});
                     if (reference == reference_positions_.end())
@@ -753,14 +779,40 @@ class pg_export_source {
         }
     }
 
+    /** Require actual supplied facts when an opaque match cannot be completed.
+     * Numeric FLAG takes precedence over Boolean constraints, as in the neutral
+     * resolver. Only explicit unmapped intent permits absent geometry; NULLs do
+     * not turn a reachable real match into the ordinary sequence-only default.
+     */
+    void validate_explicit_match_fields(const bioseq::io::export_record_view& row) const {
+        if (!match_fields_required_) return;
+        if (!row.alignment) missing_export_match_field("CIGAR");
+        const auto& alignment = *row.alignment;
+        constexpr auto unmapped_index = static_cast<std::size_t>(record_field_role::unmapped)
+            - static_cast<std::size_t>(record_field_role::paired);
+        constexpr auto reversed_index = static_cast<std::size_t>(record_field_role::reversed)
+            - static_cast<std::size_t>(record_field_role::paired);
+        const bool unmapped = alignment.flags ? ((*alignment.flags & 4u) != 0)
+            : alignment.flag_constraints[unmapped_index].value_or(false);
+        if (unmapped) return;
+        if (!alignment.cigar) missing_export_match_field("CIGAR");
+        if (!alignment.target_start) missing_export_match_field("target_start");
+        if (!row.reference_sequence && !row.identity.reference_id
+            && (alignment.reference_name.empty() || alignment.reference_name == "*"))
+            missing_export_match_field("reference_sequence or reference_name");
+        if (!alignment.flags && !alignment.flag_constraints[reversed_index])
+            missing_export_match_field("FLAG or reversed");
+    }
+
 public:
     using batch_type = pg_export_batch;
     /** Adopt immutable schema and attach the already initialized child plan. */
     pg_export_source(PlanState& child, MemoryContext context,
-        std::vector<export_column_binding> bindings, bool match_owner,
+        std::vector<export_column_binding> bindings, bool match_owner, bool match_fields_required,
         bioseq::io::sequence_file_format format, bool supplied_header)
         : child_{&child}, context_{context}, bindings_{std::move(bindings)},
-          has_match_owner_{match_owner}, format_{format}, supplied_header_{supplied_header} {
+          has_match_owner_{match_owner}, match_fields_required_{match_fields_required},
+          format_{format}, supplied_header_{supplied_header} {
         prepare_payload_families();
         native_mapq_supplied_ = export_has_native_mapping_quality(bindings_);
         columns_.reserve(bindings_.size());
@@ -958,7 +1010,7 @@ public:
                         append_export_auxiliary(*owner, *binding.auxiliary_tag, datum, type, text);
                         break;
                     }
-                    if (getBaseType(type) != JSONBOID) export_binding_error("auxiliary field must be typed JSONB");
+                    if (invoke_pg_as_cpp([type] { return getBaseType(type); }) != JSONBOID) export_binding_error("auxiliary field must be typed JSONB");
                     const auto json = bioseq::postgres::support::detail::decode_jsonb(datum);
                     auto parsed = bioseq::io::identifier_parser::decode_auxiliary_json(
                         json.encoded(), owner->auxiliary, static_cast<std::size_t>(owner->permit.bytes()));
@@ -988,7 +1040,7 @@ public:
                     const auto first = static_cast<unsigned>(record_field_role::paired);
                     const auto last = static_cast<unsigned>(record_field_role::supplementary);
                     if (role_number >= first && role_number <= last) {
-                        if (getBaseType(type) != BOOLOID) export_binding_error("alignment flag constraints must be Boolean");
+                        if (invoke_pg_as_cpp([type] { return getBaseType(type); }) != BOOLOID) export_binding_error("alignment flag constraints must be Boolean");
                         alignment.flag_constraints[role_number - first] = DatumGetBool(datum);
                     }
                 }
@@ -1019,7 +1071,20 @@ public:
                 const auto native_flags = static_cast<std::uint16_t>(*status & owner_flags);
                 if (alignment.flags && (*alignment.flags & owner_flags) != native_flags)
                     export_binding_error("explicit FLAG disagrees with the owning alignment classification");
-                alignment.flags = static_cast<std::uint16_t>(alignment.flags.value_or(0) | native_flags);
+                if (!alignment.flags) {
+                    // The owner supplies only these three bits, not a full numeric FLAG.
+                    // Keep other explicit Boolean mappings for neutral normalization.
+                    for (const auto role : {record_field_role::reversed,
+                            record_field_role::secondary, record_field_role::supplementary}) {
+                        const auto index = static_cast<std::size_t>(role)
+                            - static_cast<std::size_t>(record_field_role::paired);
+                        const bool inferred = (native_flags & (std::uint16_t{1u} << index)) != 0u;
+                        auto& constraint = alignment.flag_constraints[index];
+                        if (constraint && *constraint != inferred)
+                            export_binding_error("explicit Boolean FLAG disagrees with the owning alignment classification");
+                        constraint = inferred;
+                    }
+                }
                 if (owner->record.identity.classification != bioseq::io::alignment_classification_source::explicit_flags)
                     owner->record.identity.classification = bioseq::io::alignment_classification_source::scan_group;
             } else if (owner->record.identity.classification != bioseq::io::alignment_classification_source::explicit_flags)
@@ -1039,6 +1104,7 @@ public:
             owner->record.identity.match_group_id = identities_.intern("g:"
                 + std::to_string(*owner->record.identity.segment_id) + ":"
                 + std::to_string(*owner->record.identity.reference_id));
+        validate_explicit_match_fields(owner->record);
         if (owner->record.alignment) owner->record.alignment->auxiliary = owner->auxiliary.freeze();
         owner->record.metadata = owner->scalar_fields;
         ++ordinal_;

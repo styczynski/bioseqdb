@@ -13,6 +13,19 @@ import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
 export {
 
+    /**
+     * @brief Records one alternative row-producing branch during finalization.
+     *
+     * Nodes are immutable after construction, allocated in the planner memory
+     * context, and share their enclosing prefix. They are never serialized into
+     * a plan. Append and MergeAppend emit each row from exactly one child.
+     */
+    struct match_owner_append_branch {
+        const Plan* append_plan = nullptr;
+        std::size_t child_index = 0u;
+        const match_owner_append_branch* parent = nullptr;
+    };
+
     /** @brief Holds one match-producing scan and its saved planner expressions during finalization. */
     struct match_owner_finalization {
         CustomScan* scan = nullptr;
@@ -32,6 +45,9 @@ export {
          * bindings above, store their translated executor versions in this
          * tag's separate descriptor and site fields. */
         List* base_owner_tag = NIL;
+        /* Borrowed immutable branch choices for this finalization pass only.
+         * An ancestor without a choice remains compatible with every child. */
+        const match_owner_append_branch* append_branch = nullptr;
     };
 
 #ifdef BIOSEQ_TEST_INDEXES

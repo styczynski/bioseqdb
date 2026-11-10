@@ -11,6 +11,8 @@ extern "C" {
 export module bioseq.postgres.storage.io.scalar_codec;
 import std;
 import bioseq.io.simd;
+import bioseq.io.sinks;
+import bioseq.parallelism.memory_admission;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 
@@ -136,17 +138,38 @@ template<scalar_output_admitter Admit>
     }
 }
 
-/** Parse canonical metadata with the same stable settings and bytea convention. */
+/** Parse canonical metadata with the same stable settings and bytea convention.
+ * Type input requires writable, NUL-terminated storage. Small spellings stay on
+ * the stack; larger copies retain an independent admission owner through type IO.
+ */
 [[nodiscard]] inline Datum parse_io_scalar(std::string_view input, Oid type, Oid input_function,
         Oid io_parameter, std::int32_t typmod) {
     using bioseq::postgres::support::invoke_pg_as_cpp;
     const auto base = invoke_pg_as_cpp([type] { return getBaseType(type); });
-    std::string spelling;
-    if (base == BYTEAOID) spelling = "\\x";
-    spelling.append(input);
-    const auto convert = [&spelling, input_function, io_parameter, typmod] {
-        return invoke_pg_as_cpp([&spelling, input_function, io_parameter, typmod] {
-            return OidInputFunctionCall(input_function, spelling.data(), io_parameter, typmod);
+    const std::size_t prefix = base == BYTEAOID ? 2u : 0u;
+    if (input.size() > std::numeric_limits<std::size_t>::max() - prefix - 1u)
+        bioseq::postgres::support::raise_sql_error(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            {.message = "canonical scalar input size overflows address space"});
+    const auto required = input.size() + prefix + 1u;
+    std::array<char, 256u> inline_spelling;
+    // Destruction frees the writable backing before releasing its full capacity.
+    bioseq::parallelism::memory_permit spelling_permit;
+    std::vector<char> owned_spelling;
+    char* spelling = inline_spelling.data();
+    if (required > inline_spelling.size()) {
+        if (auto reserved = bioseq::io::reserve_io_vector_capacity(
+                owned_spelling, spelling_permit, required); !reserved)
+            bioseq::postgres::support::raise_sql_error(ERRCODE_OUT_OF_MEMORY,
+                {.message = "cannot admit canonical scalar input", .detail = std::move(reserved.error())});
+        owned_spelling.resize(required);
+        spelling = owned_spelling.data();
+    }
+    if (prefix != 0u) { spelling[0] = '\\'; spelling[1] = 'x'; }
+    if (!input.empty()) std::copy_n(input.data(), input.size(), spelling + prefix);
+    spelling[required - 1u] = '\0';
+    const auto convert = [spelling, input_function, io_parameter, typmod] {
+        return invoke_pg_as_cpp([spelling, input_function, io_parameter, typmod] {
+            return OidInputFunctionCall(input_function, spelling, io_parameter, typmod);
         });
     };
     switch (base) {

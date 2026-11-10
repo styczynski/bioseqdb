@@ -144,6 +144,26 @@ TEST_CASE("Transformed owner remains inside CTE and subquery fences",
         }
         const auto cte_plan = explain_text<false>(ctx, cte_sql);
         REQUIRE(plan_contains(cte_plan, "CTE Scan"));
+
+        // Flattened alternatives retain equal local target Vars, but every
+        // helper must resolve only against owners that can produce its row.
+        rowset_t doubled;
+        doubled.reserve(expected.size() * 2u);
+        for (const auto& row : expected) {
+            doubled.push_back(row);
+            doubled.push_back(row);
+        }
+        const auto union_body = owned_body + " UNION ALL " + owned_body;
+        for (const auto& sql : {
+                 union_body + " ORDER BY 1, 2, 3;",
+                 "WITH owned AS MATERIALIZED (" + union_body
+                     + ") SELECT pk, id, cigar FROM owned ORDER BY 1, 2, 3;"}) {
+            const auto plan = explain_text<false>(ctx, sql);
+            REQUIRE(plan_contains(plan, "Append"));
+            REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+            require_owned_qual_audit(plan);
+            REQUIRE(query_rows(ctx, sql) == doubled);
+        }
     }
 }
 

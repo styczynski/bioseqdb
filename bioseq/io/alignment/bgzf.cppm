@@ -85,6 +85,23 @@ inspect_bgzf_member(std::span<const std::uint8_t> bytes,
             && std::equal(member.begin(), member.end(), bgzf_eof_marker.begin())};
 }
 
+/** Select the BGZF-only fast path only for a complete exact member chain.
+ * This eligibility scan keeps no member index and does not validate DEFLATE/CRC;
+ * the selected decoder still validates payloads before delivery. Mixed ordinary
+ * gzip members remain eligible for the general gzip reader before callbacks start.
+ */
+[[nodiscard]] inline bool has_complete_bgzf_framing(std::span<const std::uint8_t> bytes) {
+    if (bytes.empty()) return false;
+    std::size_t offset{};
+    while (offset < bytes.size()) {
+        const auto member = inspect_bgzf_member(bytes.subspan(offset), offset);
+        if (!member) return false;
+        // Inspection proves a positive extent contained in the remaining input.
+        offset += member->member.size();
+    }
+    return true;
+}
+
 /** Validate independently decompressed member bytes before BAM framing.
  * The existing parallel decoder supplies exactly the member's output span.
  */

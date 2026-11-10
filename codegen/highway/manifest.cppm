@@ -247,6 +247,9 @@ inline void require_field_count(
         case artifact_kind::dispatch_inventory_implementation:
             return "dispatch_inventory_implementation";
         case artifact_kind::test_support: return "test_support";
+        case artifact_kind::scalar_codec_primary: return "scalar_codec_primary";
+        case artifact_kind::scalar_codec_partition: return "scalar_codec_partition";
+        case artifact_kind::scalar_codec_implementation: return "scalar_codec_implementation";
         case artifact_kind::unit_probe_implementation:
             return "unit_probe_implementation";
         case artifact_kind::minimizer_representation_instantiation:
@@ -587,6 +590,19 @@ inline void require_field_count(
                 .key = std::string{fields[1]},
                 .path = std::filesystem::path{fields[2]},
             });
+        } else if (fields.front() == "scalar-codec") {
+            detail::require_field_count(path, fields.front(), fields.size(), 7u);
+            if (result.scalar_codec) {
+                throw std::runtime_error(path.string() + ": duplicate scalar-codec role");
+            }
+            result.scalar_codec = scalar_codec_spec{
+                .sequence_source = std::filesystem::path{fields[1]},
+                .io_source = std::filesystem::path{fields[2]},
+                .policy_digest = std::string{fields[3]},
+                .highway_digest = std::string{fields[4]},
+                .header_manifest = std::filesystem::path{fields[5]},
+                .header_manifest_sha256 = std::string{fields[6]},
+            };
         } else if (fields.front() == "minimizer-registry") {
             detail::require_field_count(path, fields.front(), fields.size(), 3u);
             if (saw_minimizer_registry) {
@@ -661,7 +677,8 @@ inline void require_field_count(
                + (plan.source_inventory.minimizer_registry.has_value()
                       ? 1U
                       : 0U))
-        + 3U + plan.source_inventory.unit_probes.size();
+        + 3U + plan.source_inventory.unit_probes.size()
+        + (plan.source_inventory.scalar_codec ? 4U : 0U);
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count
         || plan.clang_release.empty()
@@ -798,6 +815,28 @@ inline void require_field_count(
     } else {
         output << "null,\n";
     }
+    output << "  \"scalar_codec\": ";
+    if (plan.source_inventory.scalar_codec) {
+        const auto& scalar = *plan.source_inventory.scalar_codec;
+        if (plan.scalar_codec_sources.size() != 2u)
+            throw std::runtime_error("scalar codec evidence requires both exact source owners");
+        output << "{\"target\":\"HWY_SCALAR\",\"policy_digest\":\""
+               << detail::json_escape(scalar.policy_digest)
+               << "\",\"highway_digest\":\""
+               << detail::json_escape(scalar.highway_digest)
+               << "\",\"header_manifest_sha256\":\"" << scalar.header_manifest_sha256
+               << "\",\"sources\":[";
+        for (std::size_t index{}; index < plan.scalar_codec_sources.size(); ++index) {
+            const auto& source = plan.scalar_codec_sources[index];
+            if (index != 0u) output << ',';
+            output << "{\"key\":\"" << detail::json_escape(source.source.key)
+                   << "\",\"source_sha256\":\"" << source.source_sha256
+                   << "\",\"selected_body_sha256\":\""
+                   << bioseq::common::sha256_hex(source.body)
+                   << "\",\"callables\":" << source.callables.size() << '}';
+        }
+        output << "]},\n";
+    } else output << "null,\n";
     output << "  \"artifacts\": [\n";
     for (std::size_t index = 0; index < ordered.size(); ++index) {
         const generated_artifact& artifact = *ordered[index];

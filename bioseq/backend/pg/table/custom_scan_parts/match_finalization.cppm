@@ -37,6 +37,7 @@ export import :custom_scan_match_finalization_contracts;
 using namespace bioseq::postgres::support;
 
 export {
+    static_assert(std::is_trivially_destructible_v<match_owner_append_branch>);
     static_assert(std::is_trivially_destructible_v<match_owner_finalization>);
     static_assert(std::is_trivially_destructible_v<std::array<match_owner_finalization, 4>>);
     static_assert(std::is_trivially_destructible_v<std::span<match_owner_finalization>>);
@@ -97,12 +98,37 @@ export {
         return reinterpret_cast<Integer*>(node);
     }
 
+    /**
+     * @brief Checks whether two owners can compete for a helper on the same row.
+     *
+     * Keep the existing query boundary and exclude only different children of
+     * the same Append or MergeAppend. Owners above an append, owners in one
+     * child, and owners below independent appends can still execute together.
+     */
+    [[nodiscard]] bool match_owners_share_binding_domain(
+        const match_owner_finalization& site_owner,
+        const match_owner_finalization& candidate) noexcept {
+        if (site_owner.query_scope_id == 0u ||
+            candidate.query_scope_id != site_owner.query_scope_id)
+            return false;
+        for (const auto* site_branch = site_owner.append_branch; site_branch != nullptr;
+             site_branch = site_branch->parent) {
+            for (const auto* candidate_branch = candidate.append_branch;
+                 candidate_branch != nullptr; candidate_branch = candidate_branch->parent) {
+                if (site_branch->append_plan == candidate_branch->append_plan &&
+                    site_branch->child_index != candidate_branch->child_index)
+                    return false;
+            }
+        }
+        return true;
+    }
+
     /** @brief Checks whether a helper names a  source column of an owner in the same query. */
     [[nodiscard]] bool match_owner_lineage_contains(const match_owner_finalization& site_owner,
                                                     const match_owner_finalization& owner,
                                                     Node* argument,
                                                     const bioseq_stub_oids& oids) noexcept {
-        if (site_owner.query_scope_id == 0u || owner.query_scope_id != site_owner.query_scope_id)
+        if (!match_owners_share_binding_domain(site_owner, owner))
             return false;
         Var* variable = try_cast_pg_node<Var>(argument);
         if (variable == nullptr || !bioseq_is_concrete_rte_varno(variable->varno) ||
@@ -142,10 +168,10 @@ export {
                               std::span<match_owner_finalization> owners,
                               const bioseq_stub_oids& oids) noexcept {
         match_site_resolution result{};
-        /* Check every owner in this query before choosing an exact expression
-         * match. Equal targets in two scans luave the helper ambiguous. */
+        /* Check every owner that can execute on the same row before choosing
+         * an exact expression. Equal targets in two such scans remain ambiguous. */
         for (match_owner_finalization& candidate : owners) {
-            if (candidate.query_scope_id != site_owner.query_scope_id)
+            if (!match_owners_share_binding_domain(site_owner, candidate))
                 continue;
             if (canonical_argument != nullptr && candidate.target_recipe != nullptr &&
                 equal(canonical_argument, candidate.target_recipe)) {
@@ -328,6 +354,74 @@ export {
                      errmsg("Bioseq match binding composite-lineage self-test failed"),
                      errdetail("secondary base lineage did not remain ambiguous")));
         }
+        /* Append alternatives must not compete, including flattened UNION
+         * arms whose private planner Vars retain equal query-local numbers.
+         * Physical inheritance and partitionwise joins have the same row
+         * alternatives. Ancestors and independent appends remain candidates. */
+        Plan outer_append{};
+        Plan nested_append{};
+        Plan independent_append{};
+        const match_owner_append_branch outer_left{&outer_append, 0u, nullptr};
+        const match_owner_append_branch outer_right{&outer_append, 1u, nullptr};
+        const match_owner_append_branch nested_left{&nested_append, 0u, &outer_left};
+        const match_owner_append_branch nested_right{&nested_append, 1u, &outer_left};
+        const match_owner_append_branch independent_left{&independent_append, 0u, nullptr};
+        const match_owner_append_branch independent_nested{&independent_append, 0u, &outer_left};
+        const auto verify_branch_pair = [first, same_scope, source, lineage_key, &oids](
+            const match_owner_append_branch* first_branch,
+            const match_owner_append_branch* second_branch,
+            const match_site_resolution_status expected_status,
+            const std::size_t expected_candidates,
+            const char* case_name) {
+            std::array<match_owner_finalization, 2> branch_owners{first, same_scope};
+            branch_owners[0].append_branch = first_branch;
+            branch_owners[1].append_branch = second_branch;
+            for (Node* argument : {reinterpret_cast<Node*>(source),
+                                   reinterpret_cast<Node*>(lineage_key)}) {
+                const auto resolution = resolve_match_helper_site(
+                    branch_owners[0], argument,
+                    std::span<match_owner_finalization>{branch_owners}, oids);
+                if (resolution.status != expected_status ||
+                    resolution.candidate_count != expected_candidates ||
+                    (expected_status == match_site_resolution_status::bound &&
+                     resolution.owner != &branch_owners[0])) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("Bioseq match binding append-branch self-test failed"),
+                             errdetail("case=%s", case_name)));
+                }
+            }
+        };
+        verify_branch_pair(&outer_left, &outer_right,
+                           match_site_resolution_status::bound, 1u, "sibling alternatives");
+        verify_branch_pair(&nested_left, &nested_right,
+                           match_site_resolution_status::bound, 1u, "nested alternatives");
+        verify_branch_pair(&nested_left, &outer_right,
+                           match_site_resolution_status::bound, 1u, "different outer alternatives");
+        verify_branch_pair(&outer_left, &outer_left,
+                           match_site_resolution_status::ambiguous, 2u, "same branch");
+        verify_branch_pair(nullptr, &outer_left,
+                           match_site_resolution_status::ambiguous, 2u, "ancestor owns helper");
+        verify_branch_pair(&nested_left, &outer_left,
+                           match_site_resolution_status::ambiguous, 2u, "descendant owns helper");
+        verify_branch_pair(&outer_left, &independent_left,
+                           match_site_resolution_status::ambiguous, 2u, "independent appends");
+        verify_branch_pair(&nested_left, &independent_nested,
+                           match_site_resolution_status::ambiguous, 2u, "independent nested appends");
+
+        std::array<match_owner_finalization, 2> isolated_owners{first, same_relation_alias};
+        isolated_owners[0].append_branch = &outer_left;
+        isolated_owners[1].append_branch = &outer_right;
+        const auto peer_only = resolve_match_helper_site(
+            isolated_owners[0], isolated_owners[1].target_recipe,
+            std::span<match_owner_finalization>{isolated_owners}, oids);
+        if (peer_only.status != match_site_resolution_status::invalid ||
+            peer_only.candidate_count != 0u || peer_only.owner != nullptr) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("Bioseq match binding append-branch self-test failed"),
+                     errdetail("an alternative branch supplied another owner's helper")));
+        }
         verified = true;
     }
 #endif
@@ -406,15 +500,18 @@ export {
      * @brief Collects match-producing scans and records the query each belongs to.
      *
      * Keep base-scan, batch-join, and per-row owners with their saved expressions.
-     * Give each SubqueryScan a fresh scope so identical  local column references
-     * cannot bind helpers across queries.
+     * Give each SubqueryScan a fresh scope so identical local column references
+     * cannot bind helpers across queries. Record immutable Append/MergeAppend
+     * choices without changing scope, so alternative children do not compete
+     * while same-query ancestors keep their existing helper-carrier contract.
      *
      * @throws PostgreSQL ERROR if a recognized owner record has invalid fields.
      */
     void collect_match_owner_plan(Plan* plan,
                                   std::vector<match_owner_finalization>& owners,
                                   const std::uint64_t query_scope_id,
-                                  std::uint64_t& next_scope_id) {
+                                  std::uint64_t& next_scope_id,
+                                  const match_owner_append_branch* append_branch) {
         if (plan == nullptr)
             return;
         if (query_scope_id == 0u) {
@@ -496,7 +593,8 @@ export {
                                                              "owner.target_relation_oid"))),
                             plan->plan_node_id,
                             query_scope_id,
-                            NIL});
+                            NIL,
+                            append_branch});
                     }
                 }
             }
@@ -537,37 +635,39 @@ export {
                                                                   "owner.target_relation_oid"))),
                     plan->plan_node_id,
                     query_scope_id,
-                    base_owner_tag});
+                    base_owner_tag,
+                    append_branch});
             }
             for (Plan* child : postgres_list<Plan>(custom->custom_plans)) {
-                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id);
+                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id, append_branch);
             }
             return;
         }
-        if (IsA(plan, Append)) {
-            for (Plan* child : postgres_list<Plan>(reinterpret_cast<Append*>(plan)->appendplans)) {
-                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id);
-            }
-            return;
-        }
-        if (IsA(plan, MergeAppend)) {
-            for (Plan* child :
-                 postgres_list<Plan>(reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
-                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id);
+        if (IsA(plan, Append) || IsA(plan, MergeAppend)) {
+            List* children = IsA(plan, Append)
+                                 ? reinterpret_cast<Append*>(plan)->appendplans
+                                 : reinterpret_cast<MergeAppend*>(plan)->mergeplans;
+            std::size_t child_index = 0u;
+            for (Plan* child : postgres_list<Plan>(children)) {
+                const auto* child_branch = std::construct_at(
+                    static_cast<match_owner_append_branch*>(palloc(sizeof(match_owner_append_branch))),
+                    match_owner_append_branch{plan, child_index, append_branch});
+                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id, child_branch);
+                ++child_index;
             }
             return;
         }
         if (IsA(plan, BitmapAnd)) {
             for (Plan* child :
                  postgres_list<Plan>(reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
-                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id);
+                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id, append_branch);
             }
             return;
         }
         if (IsA(plan, BitmapOr)) {
             for (Plan* child :
                  postgres_list<Plan>(reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
-                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id);
+                collect_match_owner_plan(child, owners, query_scope_id, next_scope_id, append_branch);
             }
             return;
         }
@@ -576,12 +676,13 @@ export {
             collect_match_owner_plan(reinterpret_cast<SubqueryScan*>(plan)->subplan,
                                      owners,
                                      subquery_scope,
-                                     next_scope_id);
+                                     next_scope_id,
+                                     nullptr);
             return;
         }
-        collect_match_owner_plan(outerPlan(plan), owners, query_scope_id, next_scope_id);
+        collect_match_owner_plan(outerPlan(plan), owners, query_scope_id, next_scope_id, append_branch);
         if (innerPlan(plan) != outerPlan(plan)) {
-            collect_match_owner_plan(innerPlan(plan), owners, query_scope_id, next_scope_id);
+            collect_match_owner_plan(innerPlan(plan), owners, query_scope_id, next_scope_id, append_branch);
         }
     }
 
@@ -1042,11 +1143,11 @@ export {
                     std::uint64_t next_scope_id = 1u;
                     const std::uint64_t statement_scope = allocate_match_owner_scope(next_scope_id);
                     collect_match_owner_plan(
-                        statement->planTree, owners, statement_scope, next_scope_id);
+                        statement->planTree, owners, statement_scope, next_scope_id, nullptr);
                     for (Plan* subplan : postgres_list<Plan>(statement->subplans)) {
                         const std::uint64_t subplan_scope =
                             allocate_match_owner_scope(next_scope_id);
-                        collect_match_owner_plan(subplan, owners, subplan_scope, next_scope_id);
+                        collect_match_owner_plan(subplan, owners, subplan_scope, next_scope_id, nullptr);
                     }
                     if (!owners.empty()) {
                         finalize_match_owner_bindings(std::span<match_owner_finalization>{owners});

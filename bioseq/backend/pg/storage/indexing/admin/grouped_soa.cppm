@@ -491,6 +491,14 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             state->sequence_spill_started = false;
         }
         if (state->encode_error) {
+            if (backend == bioseq::minimizers::minimizer_sketch_backend::exact_simd &&
+                *state->encode_error ==
+                    bioseq::indexing::minimizer_generation_encoding_error::admission) {
+                throw bioseq::indexing::exact_simd_index_runtime_error{
+                    bioseq::indexing::exact_simd_index_status::admission_denied,
+                    is_fragment_index ? "minimizer fragment generation encode"
+                                      : "minimizer sequence generation encode"};
+            }
             if (backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd &&
                 *state->encode_error ==
                     bioseq::indexing::minimizer_generation_encoding_error::admission) {

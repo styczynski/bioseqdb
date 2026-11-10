@@ -118,23 +118,37 @@ export {
             return per_row_descendant_owns_restriction(join->outerjoinpath, owned) ||
                    per_row_descendant_owns_restriction(join->innerjoinpath, owned);
         }
-        switch (path->pathtype) {
-        case T_Result:
+        // Result plans can use different Path allocations. Select a child
+        // member only after checking the actual path-node type.
+        switch (nodeTag(path)) {
+        case T_ProjectionPath:
             return per_row_descendant_owns_restriction(
                 reinterpret_cast<ProjectionPath const*>(path)->subpath, owned);
-        case T_Material:
+        case T_ProjectSetPath:
+            return per_row_descendant_owns_restriction(
+                reinterpret_cast<ProjectSetPath const*>(path)->subpath, owned);
+        case T_MaterialPath:
             return per_row_descendant_owns_restriction(
                 reinterpret_cast<MaterialPath const*>(path)->subpath, owned);
-        case T_Memoize:
+        case T_MemoizePath:
             return per_row_descendant_owns_restriction(
                 reinterpret_cast<MemoizePath const*>(path)->subpath, owned);
-        case T_Sort:
+        case T_SortPath:
             return per_row_descendant_owns_restriction(
                 reinterpret_cast<SortPath const*>(path)->subpath, owned);
-        case T_IncrementalSort:
+        case T_IncrementalSortPath:
             return per_row_descendant_owns_restriction(
                 reinterpret_cast<IncrementalSortPath const*>(path)->spath.subpath, owned);
-        case T_Append: {
+        case T_UniquePath:
+            return per_row_descendant_owns_restriction(
+                reinterpret_cast<UniquePath const*>(path)->subpath, owned);
+        case T_GatherPath:
+            return per_row_descendant_owns_restriction(
+                reinterpret_cast<GatherPath const*>(path)->subpath, owned);
+        case T_GatherMergePath:
+            return per_row_descendant_owns_restriction(
+                reinterpret_cast<GatherMergePath const*>(path)->subpath, owned);
+        case T_AppendPath: {
             auto const* append = reinterpret_cast<AppendPath const*>(path);
             for (Path* child : postgres_list<Path>(append->subpaths)) {
                 if (per_row_descendant_owns_restriction(child, owned))
@@ -142,7 +156,7 @@ export {
             }
             return false;
         }
-        case T_MergeAppend: {
+        case T_MergeAppendPath: {
             auto const* append = reinterpret_cast<MergeAppendPath const*>(path);
             for (Path* child : postgres_list<Path>(append->subpaths)) {
                 if (per_row_descendant_owns_restriction(child, owned))
@@ -150,6 +164,10 @@ export {
             }
             return false;
         }
+        case T_Path:
+        case T_GroupResultPath:
+            // GroupResultPath::quals contain Exprs, not RestrictInfo children.
+            return false;
         default:
             return false;
         }

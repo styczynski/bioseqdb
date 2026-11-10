@@ -539,6 +539,38 @@ function(_bioseq_highway_render_target_probe_source output policy_block)
   set(${output} "${_probe_contents}" PARENT_SCOPE)
 endfunction()
 
+# Closed test role: same inherited driver proof, separately hashed effective
+# source-local policy and actual scalar ops/header closure. Native probe bytes
+# and native target records are deliberately unaffected.
+function(_bioseq_highway_render_scalar_codec_override output)
+  string(CONCAT _override
+    "#if defined(HWY_TARGET) || defined(HWY_STATIC_TARGET) || defined(HWY_BASELINE_TARGETS) || defined(HWY_COMPILE_ONLY_SCALAR) || defined(HWY_COMPILE_ONLY_EMU128) || defined(HWY_COMPILE_ONLY_STATIC)\n"
+    "#error \"scalar codec role received an ambient target selector\"\n"
+    "#endif\n"
+    "#undef HWY_COMPILE_ALL_ATTAINABLE\n"
+    "#undef HWY_DISABLED_TARGETS\n"
+    "#define HWY_COMPILE_ONLY_SCALAR 1\n"
+    "#include <hwy/detect_targets.h>\n"
+    "#undef HWY_TARGET\n"
+    "#define HWY_TARGET HWY_SCALAR\n"
+    "#if HWY_STATIC_TARGET != HWY_SCALAR || HWY_TARGET != HWY_SCALAR || HWY_TARGETS != HWY_SCALAR\n"
+    "#error \"scalar codec role did not select literal HWY_SCALAR\"\n"
+    "#endif\n")
+  set(${output} "${_override}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_render_scalar_codec_probe_source output policy_block)
+  string(CONCAT _probe_contents
+    "// Generated scalar codec header include witness; no target-table registration.\n"
+    "${policy_block}"
+    "#include <array>\n#include <cstdint>\n#include <hwy/highway.h>\n"
+    "#define BIOSEQ_HIGHWAY_STRING_IMPL(value) #value\n"
+    "#define BIOSEQ_HIGHWAY_STRING(value) BIOSEQ_HIGHWAY_STRING_IMPL(value)\n"
+    "BIOSEQ_HIGHWAY_STATIC_RECORD(\"N_SCALAR\", BIOSEQ_HIGHWAY_STRING(HWY_STATIC_TARGET))\n"
+    "BIOSEQ_HIGHWAY_TARGET_RECORD(\"HWY_SCALAR\", \"N_SCALAR\", BIOSEQ_HIGHWAY_STRING(HWY_TARGET))\n")
+  set(${output} "${_probe_contents}" PARENT_SCOPE)
+endfunction()
+
 function(_bioseq_highway_configure_probe_policy
     output_definitions output_compile_options output_identity_flags
     output_identity_records output_identity_digest)
@@ -1118,7 +1150,7 @@ function(_bioseq_highway_probe_targets)
     OUTPUT_STATIC_RECORD
     OUTPUT_POLICY_DIGEST
     OUTPUT_HIGHWAY_DIGEST)
-  cmake_parse_arguments(PARSE_ARGV 0 ARG ""
+  cmake_parse_arguments(PARSE_ARGV 0 ARG "SCALAR_CODEC"
     "${_one_value_arguments}"
     "INCLUDE_DIRS;DEFINITIONS;COMPILE_OPTIONS;IDENTITY_FLAGS")
   foreach(_required IN ITEMS
@@ -1135,9 +1167,16 @@ function(_bioseq_highway_probe_targets)
   set(_probe_depfile "${ARG_PROBE_DIR}/target_inventory_probe.d")
   set(_probe_depfile_target bioseq_highway_target_inventory_probe)
   _bioseq_highway_render_policy_block(_policy_block ${ARG_DEFINITIONS})
+  if(ARG_SCALAR_CODEC)
+    _bioseq_highway_render_scalar_codec_override(_scalar_override)
+    string(APPEND _policy_block "${_scalar_override}")
+    _bioseq_highway_render_scalar_codec_probe_source(
+      _probe_contents "${_policy_block}")
+  else()
+    _bioseq_highway_render_target_probe_source(
+      _probe_contents "${_policy_block}")
+  endif()
   string(SHA256 _policy_digest "${_policy_block}")
-  _bioseq_highway_render_target_probe_source(
-    _probe_contents "${_policy_block}")
   _bioseq_highway_write_if_different("${_probe_source}" "${_probe_contents}")
 
   set(_compiler_command)
@@ -1204,6 +1243,27 @@ function(_bioseq_highway_probe_targets)
     _highway_header_paths _highway_header_records _highway_digest
     INCLUDE_DIRS ${ARG_INCLUDE_DIRS}
     DEPENDENCIES ${_probe_dependencies})
+
+  if(ARG_SCALAR_CODEC)
+    _bioseq_highway_find_header(_scalar_ops_path "${ARG_INCLUDE_DIRS}" "hwy/ops/scalar-inl.h")
+    file(REAL_PATH "${_scalar_ops_path}" _scalar_ops_path)
+    if(NOT _scalar_ops_path IN_LIST _highway_header_paths)
+      _bioseq_highway_fail("scalar codec depfile omits actual hwy/ops/scalar-inl.h")
+    endif()
+    set(_scalar_header_evidence "bioseq-highway-scalar-headers\nrevision\t1\npolicy\t${_policy_digest}\ndigest\t${_highway_digest}\n")
+    set(_header_ordinal 0)
+    foreach(_header_record IN LISTS _highway_header_records)
+      if(NOT _header_record MATCHES "^([^\t]+)\t([0-9a-f]+)$")
+        _bioseq_highway_fail("scalar codec header witness has malformed closure record")
+      endif()
+      set(_header_identity "${CMAKE_MATCH_1}")
+      set(_header_digest "${CMAKE_MATCH_2}")
+      list(GET _highway_header_paths ${_header_ordinal} _header_path)
+      string(APPEND _scalar_header_evidence "header\t${_header_identity}\t${_header_path}\t${_header_digest}\n")
+      math(EXPR _header_ordinal "${_header_ordinal} + 1")
+    endforeach()
+    _bioseq_highway_write_if_different("${ARG_PROBE_DIR}/header_closure.tsv" "${_scalar_header_evidence}")
+  endif()
 
   string(REGEX MATCHALL
     "BIOSEQ_HIGHWAY_TARGET_RECORD\\([ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"[ \\t]*\\)"
@@ -1519,6 +1579,8 @@ function(bioseq_add_highway_codegen)
     COMPILE_DATABASE
     SIGNATURE_SOURCE
     PCM_ROOT
+    SCALAR_CODEC_SEQUENCE_SOURCE
+    SCALAR_CODEC_IO_SOURCE
     MINIMIZER_PROFILE
     MINIMIZER_REGISTRY_MANIFEST
     OUTPUT_MODULES
@@ -1529,6 +1591,9 @@ function(bioseq_add_highway_codegen)
     OUTPUT_TEST_PRIMARY_MODULE
     OUTPUT_TEST_IMPLEMENTATIONS
     OUTPUT_TEST_SUPPORT
+    OUTPUT_SCALAR_CODEC_MODULES
+    OUTPUT_SCALAR_CODEC_IMPLEMENTATIONS
+    OUTPUT_SCALAR_CODEC_SCAN_INPUTS
     OUTPUT_UNIT_PROBE_IMPLEMENTATIONS
     OUTPUT_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS
     OUTPUT_POLICY_TARGET
@@ -1792,6 +1857,50 @@ function(bioseq_add_highway_codegen)
     OUTPUT_STATIC_RECORD _static_target_record
     OUTPUT_POLICY_DIGEST _policy_digest
     OUTPUT_HIGHWAY_DIGEST _highway_digest)
+
+  set(_scalar_source_paths)
+  if(ARG_SCALAR_CODEC_SEQUENCE_SOURCE OR ARG_SCALAR_CODEC_IO_SOURCE)
+    foreach(_scalar_input IN ITEMS SCALAR_CODEC_SEQUENCE_SOURCE SCALAR_CODEC_IO_SOURCE)
+      if(NOT ARG_${_scalar_input})
+        _bioseq_highway_fail("scalar codec role requires both exact source owners")
+      endif()
+      get_filename_component(_scalar_path "${ARG_${_scalar_input}}" ABSOLUTE)
+      if(NOT EXISTS "${_scalar_path}" OR IS_DIRECTORY "${_scalar_path}" OR IS_SYMLINK "${_scalar_path}")
+        _bioseq_highway_fail("scalar codec source must be a regular non-symlink file: ${_scalar_path}")
+      endif()
+      cmake_path(IS_PREFIX CMAKE_SOURCE_DIR "${_scalar_path}" NORMALIZE _scalar_in_repository)
+      if(NOT _scalar_in_repository OR NOT _scalar_path MATCHES "\\.cppm$")
+        _bioseq_highway_fail("scalar codec source must be a repository .cppm owner")
+      endif()
+      _bioseq_highway_reject_control_characters("scalar codec source" "${_scalar_path}")
+      if(_scalar_path MATCHES "[;|]")
+        _bioseq_highway_fail("scalar codec source contains a reserved separator")
+      endif()
+      list(APPEND _scalar_source_paths "${_scalar_path}")
+    endforeach()
+    list(GET _scalar_source_paths 0 _scalar_sequence_source)
+    list(GET _scalar_source_paths 1 _scalar_io_source)
+    if(_scalar_sequence_source STREQUAL _scalar_io_source)
+      _bioseq_highway_fail("scalar codec source owners must be distinct")
+    endif()
+    _bioseq_highway_probe_targets(
+      SCALAR_CODEC PROBE_DIR "${_metadata_dir}/scalar_probe"
+      PLATFORM "${_platform}"
+      INCLUDE_DIRS ${_highway_include_dirs}
+      DEFINITIONS ${_policy_definitions}
+      COMPILE_OPTIONS ${_policy_compile_options}
+      IDENTITY_FLAGS ${_probe_identity_flags}
+      OUTPUT_RECORDS _scalar_records OUTPUT_ORDER _scalar_order
+      OUTPUT_MASK _scalar_mask OUTPUT_STATIC_RECORD _scalar_static
+      OUTPUT_POLICY_DIGEST _scalar_policy_digest
+      OUTPUT_HIGHWAY_DIGEST _scalar_highway_digest)
+    set(_scalar_header_manifest "${_metadata_dir}/scalar_probe/header_closure.tsv")
+    file(SHA256 "${_scalar_header_manifest}" _scalar_header_manifest_sha256)
+    if(NOT _scalar_order STREQUAL "HWY_SCALAR"
+        OR NOT _scalar_static MATCHES "^[^|]+[|]scalar[|]HWY_SCALAR[|]N_SCALAR[|][0-9]+$")
+      _bioseq_highway_fail("scalar codec include witness did not select exactly HWY_SCALAR")
+    endif()
+  endif()
 
   set(_target_manifest_contents
     "bioseq-highway-targets\nrevision\t1\n")
@@ -2170,6 +2279,10 @@ function(bioseq_add_highway_codegen)
     string(REPLACE "|" "\t" _tsv_record "${_record}")
     string(APPEND _source_manifest_contents "unit-probe\t${_tsv_record}\n")
   endforeach()
+  if(_scalar_source_paths)
+    string(APPEND _source_manifest_contents
+      "scalar-codec\t${_scalar_sequence_source}\t${_scalar_io_source}\t${_scalar_policy_digest}\t${_scalar_highway_digest}\t${_scalar_header_manifest}\t${_scalar_header_manifest_sha256}\n")
+  endif()
   _bioseq_highway_write_if_different(
     "${_source_manifest}" "${_source_manifest_contents}")
 
@@ -2190,6 +2303,13 @@ function(bioseq_add_highway_codegen)
   # Keep the explicit custom-command dependencies so edits still regenerate
   # the affected Highway publication, whose writer preserves identical files.
 
+  set(_scalar_codec_modules)
+  set(_scalar_codec_implementations)
+  if(_scalar_source_paths)
+    set(_scalar_root "${_output_root}/tests/codec_scalar")
+    set(_scalar_codec_modules "${_scalar_root}/index.cppm" "${_scalar_root}/rank.cppm" "${_scalar_root}/bytes.cppm")
+    set(_scalar_codec_implementations "${_scalar_root}/probe.cppm")
+  endif()
   set(_generated_modules)
   set(_generated_primary_modules)
   set(_generated_target_implementations)
@@ -2256,6 +2376,8 @@ function(bioseq_add_highway_codegen)
       "could not derive the fixed-target test module closure")
   endif()
   list(APPEND _generated_modules
+    ${_scalar_codec_modules}
+    ${_scalar_codec_implementations}
     ${_generated_primary_modules}
     ${_generated_target_implementations}
     ${_generated_unit_probe_implementations}
@@ -2317,6 +2439,8 @@ function(bioseq_add_highway_codegen)
       "${_signature_source}"
       ${_domain_topology_paths}
       ${_source_paths}
+      ${_scalar_source_paths}
+      ${_scalar_header_manifest}
     DEPFILE "${_prepare_depfile}"
     COMMENT
       "Preparing isolated Clang PCM authority for Highway target templates"
@@ -2372,6 +2496,8 @@ function(bioseq_add_highway_codegen)
       "${_signature_source}"
       ${_domain_topology_paths}
       ${_source_paths}
+      ${_scalar_source_paths}
+      ${_scalar_header_manifest}
       ${_probe_template_paths}
     COMMENT "${_generation_comment}"
     VERBATIM)
@@ -2397,6 +2523,9 @@ function(bioseq_add_highway_codegen)
       "${ARG_OUTPUT_TEST_PRIMARY_MODULE}|${_generated_test_primary_module}"
       "${ARG_OUTPUT_TEST_IMPLEMENTATIONS}|${_generated_test_implementations}"
       "${ARG_OUTPUT_TEST_SUPPORT}|${_test_support}"
+      "${ARG_OUTPUT_SCALAR_CODEC_MODULES}|${_scalar_codec_modules}"
+      "${ARG_OUTPUT_SCALAR_CODEC_IMPLEMENTATIONS}|${_scalar_codec_implementations}"
+      "${ARG_OUTPUT_SCALAR_CODEC_SCAN_INPUTS}|${_scalar_source_paths}"
       "${ARG_OUTPUT_UNIT_PROBE_IMPLEMENTATIONS}|${_generated_unit_probe_implementations}"
       "${ARG_OUTPUT_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS}|${_generated_minimizer_representation_instance_implementations}"
       "${ARG_OUTPUT_POLICY_TARGET}|${ARG_POLICY_TARGET}"

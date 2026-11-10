@@ -761,6 +761,7 @@ constexpr inline bool is_index_chunked_storage_for_v<
         { s.clear_entity()                        } -> std::same_as<void>;
         { s.clear(std::string_view{})             } -> std::same_as<void>;
         // Sorted runs keep their memory reservations until they are merged or released.
+        { s.try_prepare_sorted_run_append(std::size_t{}) } -> std::same_as<bool>;
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned_admitted(
@@ -835,6 +836,7 @@ concept is_index_chunked_storage =
 template <class p_storage>
 concept is_external_sort_spill_storage =
     requires (p_storage& s) {
+        { s.try_prepare_sorted_run_append(std::size_t{}) } -> std::same_as<bool>;
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned_admitted(

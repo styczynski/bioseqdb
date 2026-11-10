@@ -257,9 +257,10 @@ struct sequence_index_storage {
         const Oid ns = bioseq_internal_ns();
         Oid rid = get_relname_relid(nm.c_str(), ns);
         if (!OidIsValid(rid) && create_if_missing) {
-            const char* pk = persistence_kw_for(user_relid_);
+            const char* pk = lock_index_source_for_creation(
+                user_relid_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
             std::string ddl = fmt::format(
-                "CREATE {} TABLE IF NOT EXISTS bioseq_internal.{} ("
+                "CREATE {} TABLE bioseq_internal.{} ("
                 "query_key BIGINT NOT NULL, chunk_bytes INT NOT NULL, blob BYTEA NOT NULL, "
                 "PRIMARY KEY (query_key)) USING heap;",
                 pk,
@@ -273,6 +274,8 @@ struct sequence_index_storage {
             rid = get_relname_relid(nm.c_str(), ns);
             if (!OidIsValid(rid))
                 index_error("failed to create inline seqidx table");
+            record_created_index_source_dependency(rid, nm.c_str(), user_relid_,
+                db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
         }
         index_relid_ = rid;
         return rid;
@@ -590,9 +593,10 @@ struct table_index_storage {
         const Oid ns = bioseq_internal_ns();
         Oid rid = get_relname_relid(nm.c_str(), ns);
         if (!OidIsValid(rid) && create) {
-            const char* pk = persistence_kw_for(user_relid_);
+            const char* pk = lock_index_source_for_creation(
+                user_relid_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
             std::string ddl = fmt::format(
-                "CREATE {} TABLE IF NOT EXISTS bioseq_internal.{} ("
+                "CREATE {} TABLE bioseq_internal.{} ("
                 "chunk_no BIGINT NOT NULL, chunk_bytes INT NOT NULL, blob BYTEA NOT NULL, "
                 "PRIMARY KEY (chunk_no)) USING heap;",
                 pk,
@@ -604,6 +608,8 @@ struct table_index_storage {
                     quote_identifier(nm.c_str()))
                     .c_str());
             rid = get_relname_relid(nm.c_str(), ns);
+            record_created_index_source_dependency(rid, nm.c_str(), user_relid_,
+                db_oid_, tablespace_oid_, main_relfilenode_, column_attno_);
         }
         index_relid_ = rid;
         return rid;

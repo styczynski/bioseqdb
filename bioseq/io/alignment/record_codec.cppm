@@ -1022,6 +1022,7 @@ struct native_reference_binding {
     std::optional<std::uint64_t> reference_length;
     std::optional<std::uint64_t> mate_reference_length;
     bool reference_is_circular{};
+    /** A bound mate descriptor must identify its actual projection domain. */
     bool mate_same_projection_domain{};
 };
 
@@ -1030,6 +1031,8 @@ struct native_alignment_plan {
     bam_core_fields core;
     cigar_wire_recipe cigar;
     cigar_wire_measurement cigar_size;
+    /** Original mate coordinates/sequence have no truthful native projection. */
+    bool mate_projection_suppressed{};
 };
 
 /** Validate original geometry and derive a complete native alignment projection.
@@ -1063,7 +1066,7 @@ struct native_alignment_plan {
     const bool mapped = (resolved_flags & 4u) == 0;
     if (mapped && (references.reference_id < 0 || !alignment.target_start || !alignment.cigar))
         return std::unexpected(std::string{"Mapped alignment needs reference, position and real CIGAR"});
-    if (references.reference_id >= 0 && alignment.target_start && reference_length
+    if (mapped && references.reference_id >= 0 && alignment.target_start && reference_length
         && *alignment.target_start >= *reference_length)
         return std::unexpected(std::string{"Alignment starts outside its reference"});
     const auto recipe = make_cigar_wire_recipe(alignment, protein_triplets, resolved_flags);
@@ -1095,7 +1098,7 @@ struct native_alignment_plan {
             || *alignment.target_end - *alignment.target_start != measured->geometry.reference_span / scale)
             return std::unexpected(std::string{"Alignment target span disagrees with CIGAR"});
     }
-    if (references.reference_id >= 0 && alignment.target_start && reference_length && !references.reference_is_circular
+    if (mapped && references.reference_id >= 0 && alignment.target_start && reference_length && !references.reference_is_circular
         && measured->geometry.reference_span > (*reference_length - *alignment.target_start) * scale)
         return std::unexpected(std::string{"Alignment extends beyond its linear reference"});
     native_alignment_plan plan;
@@ -1108,13 +1111,21 @@ struct native_alignment_plan {
         ? static_cast<std::int32_t>(*alignment.target_start * scale) : -1;
     plan.core.sequence_length = source_sequence_length
         ? static_cast<std::int32_t>(*source_sequence_length * scale) : 0;
-    if (references.mate_reference_id >= 0 && alignment.mate_start && references.mate_reference_length
+    const bool paired = (resolved_flags & 1u) != 0;
+    // Only a paired, mapped mate gives its retained coordinate mapped-reference semantics.
+    const bool mate_mapped = paired && (resolved_flags & 8u) == 0;
+    if (mate_mapped && references.mate_reference_id >= 0 && alignment.mate_start && references.mate_reference_length
         && *alignment.mate_start >= *references.mate_reference_length)
         return std::unexpected(std::string{"Alignment mate starts outside its reference"});
-    const bool paired = (resolved_flags & 1u) != 0;
-    const bool native_mate_known = !protein_triplets || references.mate_same_projection_domain;
-    if (protein_triplets && paired && !native_mate_known) {
-        plan.core.flags = static_cast<std::uint16_t>((plan.core.flags | 8u) & ~std::uint16_t{2u | 32u});
+    // A found descriptor proves its domain for nucleotide and protein queries alike.
+    // Absent nucleotide mate bindings keep their existing unknown-coordinate semantics.
+    const bool native_mate_known = references.mate_reference_id < 0
+        ? !protein_triplets : references.mate_same_projection_domain;
+    plan.mate_projection_suppressed = !native_mate_known
+        && (paired || references.mate_reference_id >= 0);
+    if (plan.mate_projection_suppressed) {
+        if (paired)
+            plan.core.flags = static_cast<std::uint16_t>((plan.core.flags | 8u) & ~std::uint16_t{2u | 32u});
     } else {
         if (alignment.mate_start && references.mate_reference_id >= 0
             && *alignment.mate_start > (coordinate_limit - 1) / scale)
@@ -1376,17 +1387,24 @@ inline void store_wire_integer(std::span<std::uint8_t> output, const Integer val
 class native_projection_comparison_sink {
     std::span<const std::uint8_t> expected_;
     std::size_t position_{};
+    std::uint8_t final_byte_mask_;
 public:
-    /** Borrow exactly the native field whose projection must be reproduced. */
-    explicit native_projection_comparison_sink(std::span<const std::uint8_t> expected)
-        : expected_(expected) {}
+    /** Borrow the native field; only its final byte may contain explicitly unused bits. */
+    explicit native_projection_comparison_sink(std::span<const std::uint8_t> expected,
+        const std::uint8_t final_byte_mask = 0xffu)
+        : expected_(expected), final_byte_mask_(final_byte_mask) {}
 
     /** Compare one bounded chunk; a mismatch never exposes restored original data. */
     [[nodiscard]] std::expected<void, std::string> append(std::span<const std::uint8_t> bytes) {
         if (bytes.size() > expected_.size() - position_)
             return std::unexpected(std::string{"Preserved projection exceeds native field length"});
+        if (bytes.empty()) return {};
+        const bool reaches_final_byte = bytes.size() == expected_.size() - position_;
+        const auto exact_bytes = bytes.size() - static_cast<std::size_t>(reaches_final_byte && final_byte_mask_ != 0xffu);
         if (bioseq::simd::first_unequal_sequence_rank(bytes.data(), expected_.data() + position_,
-                bytes.size()) != bytes.size())
+                exact_bytes) != exact_bytes
+            || (exact_bytes != bytes.size()
+                && ((bytes.back() ^ expected_.back()) & final_byte_mask_) != 0u))
             return std::unexpected(std::string{"Preserved projection differs from native field"});
         position_ += bytes.size();
         return {};
@@ -1528,10 +1546,16 @@ public:
 /** Decide which original fields may appear unchanged in the native projection.
  * Transport/envelope tags are regenerated, malformed summaries remain payload-only,
  * SAM cannot spell nonfinite floats, and protein projection keeps invariant metadata.
+ * A suppressed cross-domain mate retains MC/R2/Q2 only in the original payload:
+ * those tags carry its CIGAR, sequence and sequence-indexed quality. Numeric mate
+ * confidence and unrelated nucleotide summaries keep their existing policy.
  */
 [[nodiscard]] inline bool retain_original_native_auxiliary(
-    const auxiliary_field_view& field, const bool protein_triplets, const bool sam_text) {
+    const auxiliary_field_view& field, const bool protein_triplets, const bool sam_text,
+    const bool mate_projection_suppressed) {
     return field.tag != std::array{'b', 'q'} && field.tag != std::array{'C', 'G'}
+        && (!mate_projection_suppressed || (field.tag != std::array{'M', 'C'}
+            && field.tag != std::array{'R', '2'} && field.tag != std::array{'Q', '2'}))
         && valid_native_alignment_summary(field)
         && (!sam_text || !auxiliary_has_nonfinite_float(field))
         && (!protein_triplets || protein_auxiliary_is_projection_invariant(field));

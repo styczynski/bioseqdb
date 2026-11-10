@@ -198,17 +198,28 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
         bioseq::parallelism::memory_admission_failure admission_failure{};
         sorted_run_merge_admission_site admission_site =
             sorted_run_merge_admission_site::compaction_readers;
+        bool retry_after_demotion = false;
         for (;;) {
             const std::size_t next_output_runs =
                 bioseq::common::ceil_div(input_run_count, group_size);
-            if (!try_ensure_admitted_vector_capacity(admitted_next, next_output_runs)) {
+            if (memory_runs_.size() >
+                (std::numeric_limits<std::size_t>::max)() - next_output_runs) {
                 report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
             }
-            const std::size_t first_hi = std::min(input_run_count, group_size);
-            first_group = try_prepare_compaction_merge_(
-                std::span<buffer_file_run>(file_runs_.data(), first_hi),
-                admission_failure,
-                admission_site);
+            // Preserve one spare file slot per resident run after compaction;
+            // final merge preparation may still need to demote those runs.
+            const auto metadata_ready = try_ensure_admitted_vector_capacity(
+                admitted_next, next_output_runs + memory_runs_.size());
+            if (!metadata_ready) {
+                admission_failure = metadata_ready.error();
+            }
+            if (metadata_ready) {
+                const std::size_t first_hi = std::min(input_run_count, group_size);
+                first_group = try_prepare_compaction_merge_(
+                    std::span<buffer_file_run>(file_runs_.data(), first_hi),
+                    admission_failure,
+                    admission_site);
+            }
             if (first_group) {
                 break;
             }
@@ -216,7 +227,20 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
                 admission_failure.reason ==
                     bioseq::parallelism::memory_admission_failure_reason::budget_exhausted &&
                 group_size > 2u;
-            if (!can_reduce_fan_in) {
+            if (!can_reduce_fan_in || !metadata_ready) {
+                if (admission_failure.reason ==
+                        bioseq::parallelism::memory_admission_failure_reason::budget_exhausted &&
+                    !memory_runs_.empty()) {
+                    // No compaction output exists yet. Drop all provisional
+                    // owners before a demotion can grow/reallocate file_runs_.
+                    first_group.reset();
+                    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+                        admitted_next.values, admitted_next.permit);
+                    retry_after_demotion = demote_largest_resident_run_();
+                    if (retry_after_demotion) {
+                        break;
+                    }
+                }
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
                 if (admission_failure.has_failure()) {
                     emit_terminal_merge_admission_failure(admission_site, admission_failure);
@@ -226,6 +250,9 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
             }
             group_size = std::max<std::size_t>(
                 2, bioseq::common::ceil_div(group_size, std::size_t{2}));
+        }
+        if (retry_after_demotion) {
+            continue; // Recompute input counts, spans and next-output metadata.
         }
         std::vector<buffer_file_run>& next = admitted_next.values;
         try {
@@ -303,7 +330,6 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
  */
 void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
                                                     merge_resources& resources) {
-    compact_file_runs_until_bounded_();
     auto admitted_heap = open_file_readers_(resources);
     merge_head_queue& heap = admitted_heap.queue;
     for (std::size_t run_index = 0; run_index < memory_runs_.size(); ++run_index) {

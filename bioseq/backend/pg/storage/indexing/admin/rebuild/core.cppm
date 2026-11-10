@@ -1272,9 +1272,17 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name, bool f
     return written;
 }
 
-/// Report an unsupported Exact SIMD build as a PostgreSQL error.
-[[noreturn]] inline void raise_exact_simd_index_pg_error(const char* operation,
-                                                         const char* detail) {
+/// Report Exact SIMD admission refusal or the existing unsupported-build diagnostic.
+[[noreturn]] inline void raise_exact_simd_index_pg_error(
+    bioseq::indexing::exact_simd_index_status status,
+    const char* operation,
+    const char* detail) {
+    if (status == bioseq::indexing::exact_simd_index_status::admission_denied) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("Exact SIMD minimizer index build exceeded memory admission"),
+                 errdetail_internal("%s: %s", operation, detail)));
+    }
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("Exact SIMD minimizer index build is unsupported for this source"),
@@ -1374,6 +1382,7 @@ update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name
     std::array<char, 2048> detail{};
     auto packed_bounded_status =
         bioseq::indexing::packed_bounded_nthash_index_status::invalid_state;
+    auto exact_simd_status = bioseq::indexing::exact_simd_index_status::invalid_state;
     bool exact_simd_error = false;
     bool packed_bounded_error = false;
     bool cpp_error = false;
@@ -1397,6 +1406,7 @@ update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name
         strlcpy(detail.data(),
                 err.what() == nullptr ? "Exact SIMD error without detail" : err.what(),
                 detail.size());
+        exact_simd_status = err.status();
         exact_simd_error = true;
     } catch (const bioseq::indexing::packed_bounded_nthash_index_runtime_error& err) {
         strlcpy(detail.data(),
@@ -1417,7 +1427,7 @@ update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name
         ReThrowError(exact_error);
     }
     if (exact_simd_error) {
-        raise_exact_simd_index_pg_error("bioseq.update_index", detail.data());
+        raise_exact_simd_index_pg_error(exact_simd_status, "bioseq.update_index", detail.data());
     }
     if (packed_bounded_error) {
         raise_packed_bounded_nthash_index_pg_error(

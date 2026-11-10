@@ -25,6 +25,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_transformed_verif
 
 import std;
 import bioseq.postgres.support;
+import bioseq.postgres.configuration.core;
 import bioseq.postgres.column.table_access;
 import bioseq.indexing.type;
 import :custom_scan_oid_expression_support_oid_catalog;
@@ -411,6 +412,11 @@ export {
             right_input == nullptr || extra == nullptr || restriction == nullptr ||
             mmsearch == nullptr || list_length(mmsearch->args) < 2)
             return false;
+        if (!bioseq::settings::planner::custom_scan::enabled) {
+            if (audit != nullptr)
+                *audit = {};
+            return false;
+        }
         exact_parameterized_bmo_retainer_audit local_audit{};
         local_audit.joinrel_relids_low = exact_bmo_audit_relids_low(joinrel->relids);
         local_audit.left_relids_low = exact_bmo_audit_relids_low(left_input->relids);
@@ -422,17 +428,21 @@ export {
         postgres_list<Path> retained;
         for (Path* path : postgres_list<Path>(joinrel->pathlist)) {
             ++local_audit.candidates;
-            if (path == nullptr || !IsA(path, NestPath))
+            if (path == nullptr ||
+                (!IsA(path, NestPath) && !IsA(path, HashPath) && !IsA(path, MergePath)))
                 continue;
-            ++local_audit.nest_paths;
-            auto* nest = reinterpret_cast<NestPath*>(path);
-            if (nest->jpath.jointype != JOIN_INNER)
+            const bool is_nest = IsA(path, NestPath);
+            if (is_nest)
+                ++local_audit.nest_paths;
+            auto* join = reinterpret_cast<JoinPath*>(path);
+            if (join->jointype != JOIN_INNER)
                 continue;
-            ++local_audit.inner_nest_paths;
+            if (is_nest)
+                ++local_audit.inner_nest_paths;
             RelOptInfo* outer_parent =
-                nest->jpath.outerjoinpath == nullptr ? nullptr : nest->jpath.outerjoinpath->parent;
+                join->outerjoinpath == nullptr ? nullptr : join->outerjoinpath->parent;
             RelOptInfo* inner_parent =
-                nest->jpath.innerjoinpath == nullptr ? nullptr : nest->jpath.innerjoinpath->parent;
+                join->innerjoinpath == nullptr ? nullptr : join->innerjoinpath->parent;
             const bool current_direct = outer_parent != nullptr && inner_parent != nullptr &&
                                         bms_equal(outer_parent->relids, left_input->relids) &&
                                         bms_equal(inner_parent->relids, right_input->relids);
@@ -449,7 +459,7 @@ export {
             std::size_t exact_root_copies = 0u;
             bool foreign_root_mmsearch = false;
             for (RestrictInfo* root_clause :
-                 postgres_list<RestrictInfo>(nest->jpath.joinrestrictinfo)) {
+                 postgres_list<RestrictInfo>(join->joinrestrictinfo)) {
                 const std::size_t calls =
                     root_clause == nullptr
                         ? 0u
@@ -518,6 +528,12 @@ export {
                 continue;
             }
 
+            // Other decompositions may already own the search below a Hash or
+            // Merge join. Only a Nested Loop may bind or remove the current
+            // pair's parameterized inner-owner clause.
+            if (!is_nest)
+                continue;
+            auto* nest = reinterpret_cast<NestPath*>(path);
             exact_parameterized_bmo_ownership outer{};
             exact_parameterized_bmo_ownership inner{};
             count_exact_parameterized_bmo_owners(

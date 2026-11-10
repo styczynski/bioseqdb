@@ -66,6 +66,7 @@ export module bioseq.bench.e2e;
 
 import bioseq.common.logging;
 import bioseq.common.hashing;
+import bioseq.common.checked_arithmetic;
 import bioseq.bench.framework;
 import bioseq.instrumentation;
 import bioseq.tests.integration.support;
@@ -18607,6 +18608,615 @@ void finalize_random_generation_iteration(
         {"measured_region_ns", output.measured_region_ns}}.dump();
 }
 
+/** Execute untimed setup/check SQL using the existing deferred libpq result owner. */
+[[nodiscard]] captured_query_rows sequence_io_sql(
+    const it::connection_test_context& connection, const std::string& sql) {
+    auto result = materialize_captured_query_rows(
+        connection, execute_query_capturing_result(connection, sql));
+    if (result.status != captured_query_status::tuples_ok
+        && result.status != captured_query_status::command_ok)
+        throw std::runtime_error(fmt::format(
+            "[bench_sequence_io] SQL failed [{}]: {} {} {}; SQL: {}",
+            result.sqlstate, result.primary, result.detail, result.connection_diagnostic, sql));
+    return result;
+}
+
+/** Require one non-null textual result without swallowing a malformed SQL response. */
+[[nodiscard]] std::string sequence_io_scalar(
+    const it::connection_test_context& connection, const std::string& sql) {
+    const auto result = sequence_io_sql(connection, sql);
+    if (result.status != captured_query_status::tuples_ok || result.rows.size() != 1u
+        || result.rows.front().size() != 1u || !result.rows.front().front())
+        throw std::runtime_error("[bench_sequence_io] expected exactly one non-null result: " + sql);
+    return *result.rows.front().front();
+}
+
+/** Quote arbitrary paths/query strings with the connection's actual encoding rules. */
+[[nodiscard]] std::string sequence_io_literal(
+    const it::connection_test_context& connection, std::string_view value) {
+    const std::unique_ptr<char, decltype(&PQfreemem)> escaped{
+        PQescapeLiteral(connection.raw(), value.data(), value.size()), &PQfreemem};
+    if (!escaped) throw std::runtime_error("[bench_sequence_io] cannot quote SQL literal");
+    return std::string{escaped.get()};
+}
+
+/** Closed SQL IO tuple; biological values stay SQL-native and never use DNA-only dispatch. */
+struct sequence_io_profile {
+    std::string alphabet;
+    std::string format;
+    std::string mode;
+    /** Whether this format carries full mapped alignment records. */
+    [[nodiscard]] bool alignment() const noexcept { return format == "sam" || format == "bam"; }
+    /** Whether the original quality is representable by this format. */
+    [[nodiscard]] bool quality() const noexcept { return format != "fasta"; }
+    /** Stable tuple key keeps each operation's two warmups distinct. */
+    [[nodiscard]] std::string key(std::string_view operation) const {
+        return fmt::format("{}/{}/{}/{}", operation, alphabet, format, mode);
+    }
+};
+
+/** Resolve only supported operation/alphabet/format/scheduler values before any SQL. */
+[[nodiscard]] sequence_io_profile sequence_io_parameters(
+    std::string_view operation, const parameter_map& params) {
+    sequence_io_profile profile{
+        param_string(params, "alphabet", "dna4"),
+        param_string(params, "format", "fasta"),
+        param_string(params, "pipeline_mode", "task_parallel")};
+    if ((operation != "sql_write" && operation != "sql_load")
+        || !supported_biological_alphabets::try_index_of_name(profile.alphabet.c_str())
+        || (profile.format != "fasta" && profile.format != "fastq"
+            && profile.format != "sam" && profile.format != "bam")
+        || (profile.mode != "single_thread" && profile.mode != "parallel_dispatch"
+            && profile.mode != "task_parallel"))
+        throw std::invalid_argument("[bench_sequence_io] unsupported operation or tuple parameter");
+    return profile;
+}
+
+/** Own only this group's schema/files; cleanup survives an exceptional framework callback. */
+struct sequence_io_fixture {
+    it::connection_test_context connection;
+    std::string schema;
+    std::filesystem::path directory;
+    std::vector<std::filesystem::path> paths;
+    std::map<std::string, std::filesystem::path> seeds;
+    std::map<std::string, nlohmann::json> warmups;
+    std::map<std::string, std::string> fixture_sql;
+    nlohmann::json identity;
+    std::size_t rows{};
+    std::size_t length{};
+    std::int64_t seed{};
+    std::uint64_t path_number{};
+    bool schema_created{};
+
+    /** Open one private session without recreating extension state. */
+    sequence_io_fixture() = default;
+    sequence_io_fixture(const sequence_io_fixture&) = delete;
+    sequence_io_fixture& operator=(const sequence_io_fixture&) = delete;
+    /** Best effort only while unwinding; normal on_cleanup reports every error. */
+    ~sequence_io_fixture() {
+        try { cleanup(); }
+        catch (const std::exception& error) {
+            bioseq_log<logging_level::error>(
+                "[bench_sequence_io] cleanup failed for schema {} / {}: {}",
+                schema, directory.string(), error.what());
+        }
+        catch (...) {
+            bioseq_log<logging_level::error>("[bench_sequence_io] cleanup failed for owned schema {}", schema);
+        }
+    }
+    /** Drop only the freshly created schema and registered paths, never unrelated contents. */
+    void cleanup() {
+        if (schema_created) {
+            (void)sequence_io_sql(connection, "ROLLBACK; DROP SCHEMA " + schema + " CASCADE;");
+            schema_created = false;
+        }
+        for (const auto& path : paths) {
+            std::error_code error;
+            (void)std::filesystem::remove(path, error);
+            if (error) throw std::runtime_error("[bench_sequence_io] cannot remove owned file: " + path.string());
+        }
+        paths.clear();
+        if (!directory.empty()) {
+            std::error_code error;
+            (void)std::filesystem::remove(directory, error);
+            if (error) throw std::runtime_error("[bench_sequence_io] cannot remove owned directory: " + directory.string());
+            directory.clear();
+        }
+    }
+    /** Allocate a registered nonexistent filename; the production writer keeps overwrite=false. */
+    [[nodiscard]] std::filesystem::path next_path(std::string_view format) {
+        if (path_number == std::numeric_limits<std::uint64_t>::max())
+            throw std::runtime_error("[bench_sequence_io] output path counter overflow");
+        auto path = directory / fmt::format("record_{}.{}", path_number++, format);
+        if (std::filesystem::exists(path))
+            throw std::runtime_error("[bench_sequence_io] output path unexpectedly exists: " + path.string());
+        paths.push_back(path);
+        return path;
+    }
+};
+
+using sequence_io_input = std::shared_ptr<sequence_io_fixture>;
+
+/** Retain exact SQL/control evidence and resources outside the measured callback. */
+struct sequence_io_preparation {
+    sequence_io_profile profile;
+    std::string operation;
+    std::string execution_sql;
+    std::filesystem::path path;
+    std::vector<std::string> explain;
+    nlohmann::json controls;
+    nlohmann::json warmup_evidence;
+    std::unique_ptr<scoped_resource_monitor> resources;
+};
+
+/** Pending result ownership crosses the clock boundary; validation precedes publication. */
+struct sequence_io_output {
+    pending_captured_query_result pending;
+    std::uint64_t measured_region_ns{};
+    std::uint64_t file_bytes{};
+    std::uint64_t rows{};
+    std::uint64_t input_symbols{};
+    bool correctness_accepted{};
+    resource_sample resources;
+    std::string execution_sql;
+    std::vector<std::string> explain;
+    nlohmann::json controls;
+    nlohmann::json warmup_evidence;
+    nlohmann::json validation;
+};
+
+/** Capture session identity; a catalog version/path alone is never a binary receipt. */
+[[nodiscard]] nlohmann::json sequence_io_session_identity(
+    const it::connection_test_context& connection) {
+    return nlohmann::json::parse(sequence_io_scalar(connection,
+        "SELECT jsonb_build_object('backend_pid',pg_backend_pid(),"
+        "'backend_start',(SELECT backend_start::text FROM pg_stat_activity WHERE pid=pg_backend_pid()),"
+        "'postmaster_start',pg_postmaster_start_time()::text,'database',current_database(),"
+        "'database_oid',(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),"
+        "'server_version_num',current_setting('server_version_num'))::text"));
+}
+
+/** Fail closed when the current installed catalog cannot express the measured API. */
+void sequence_io_catalog_preflight(const it::connection_test_context& connection) {
+    const auto signatures = sequence_io_scalar(connection,
+        "SELECT (count(*)=3 AND bool_and(prorettype='bigint'::regtype))::text FROM pg_proc WHERE oid IN ("
+        "to_regprocedure('bioseq.write(text,text,bioseq.column_mapping[],jsonb)'),"
+        "to_regprocedure('bioseq.write(regclass,text,bioseq.column_mapping[],jsonb)'),"
+        "to_regprocedure('bioseq.load(regclass,text,bioseq.header_format,bioseq.column_mapping[],bioseq.load_options)'))");
+    if (signatures != "true")
+        throw std::runtime_error("[bench_sequence_io] installed write/load signatures do not match this benchmark");
+    const auto alignment = sequence_io_scalar(connection,
+        "WITH required(name,type) AS (VALUES ('flag','integer'::regtype),('mapq','integer'::regtype),"
+        "('reference_name','text'::regtype),('reference_length','bigint'::regtype),"
+        "('target_start','bigint'::regtype),('target_end','bigint'::regtype),"
+        "('query_length','bigint'::regtype),('query_start','bigint'::regtype),('query_end','bigint'::regtype),"
+        "('mate_reference','text'::regtype),('mate_start','bigint'::regtype),('template_length','bigint'::regtype),"
+        "('cigar','bioseq.seq'::regtype),('aux','jsonb'::regtype),('source_orientation','text'::regtype),"
+        "('cigar_form','text'::regtype),('header_context_id','bigint'::regtype),('qname','text'::regtype),"
+        "('template_id','bigint'::regtype),('segment_id','bigint'::regtype),('reference_id','bigint'::regtype)) "
+        "SELECT (count(*)=21 AND bool_and(a.atttypid IS NOT DISTINCT FROM required.type AND a.attisdropped IS FALSE))::text "
+        "FROM required LEFT JOIN pg_attribute a ON a.attrelid=(SELECT typrelid FROM pg_type "
+        "WHERE oid='bioseq.alignment'::regtype) AND a.attname=required.name AND a.attnum>0");
+    if (alignment != "true" || sequence_io_scalar(connection,
+        "SELECT (current_setting('server_encoding')='UTF8' AND current_setting('client_encoding')='UTF8')::text") != "true")
+        throw std::runtime_error("[bench_sequence_io] required alignment catalog or UTF8 encoding is unavailable");
+}
+
+/** Construct the text/native query; the reference is an actual native source for derived tags. */
+[[nodiscard]] std::string sequence_io_source_query(
+    const sequence_io_fixture& fixture, const sequence_io_profile& profile) {
+    std::string query = "SELECT q.header,q.seq,";
+    if (profile.quality()) query += "q.quality,";
+    query += "q.ordinal,q.note,q.score";
+    if (profile.alignment()) query += fmt::format(
+        ",'read_'||q.ordinal AS qname,r.seq AS reference_seq,r.header AS reference_name,"
+        "bioseq.len(r.seq)::bigint AS reference_length,q.target_offset AS target_start,"
+        "q.target_offset+{} AS target_end,{}::bigint AS query_length,0::bigint AS query_start,"
+        "{}::bigint AS query_end,'{}M'::bioseq.seq('cigar') AS cigar,0::integer AS flag,60::integer AS mapq,"
+        "jsonb_build_array(jsonb_build_object('tag','AS','type','i','value',q.ordinal::text)) AS aux",
+        fixture.length, fixture.length, fixture.length, fixture.length);
+    query += fmt::format(" FROM {}.reads_{} q", fixture.schema, profile.alphabet);
+    if (profile.alignment()) query += fmt::format(" CROSS JOIN {}.ref_{} r", fixture.schema, profile.alphabet);
+    query += " ORDER BY q.ordinal";
+    return query;
+}
+
+/** Build one exact write request before timing, preserving default no-clobber publication. */
+[[nodiscard]] std::string sequence_io_write_sql(
+    const sequence_io_fixture& fixture, const sequence_io_profile& profile,
+    const std::filesystem::path& path) {
+    nlohmann::json options{{"format",profile.format},
+        {"compression",profile.format == "bam" ? "bgzf" : "none"},{"compression_level",6}};
+    if (profile.alignment()) {
+        options["cigar_form"] = "alignment_core";
+        options["sequence_orientation"] = "original_query";
+    }
+    return "SELECT bioseq.write(" + sequence_io_literal(fixture.connection, sequence_io_source_query(fixture,profile))
+        + "::text," + sequence_io_literal(fixture.connection,path.string())
+        + (profile.alignment() ? ",columns=>ARRAY[ROW('seq','sequence')::bioseq.column_mapping,"
+            "ROW('reference_seq','reference_sequence')::bioseq.column_mapping]" : "")
+        + ",options=>" + sequence_io_literal(fixture.connection, options.dump()) + "::jsonb)";
+}
+
+/** Build one load request into the benchmark's freshly recreated destination. */
+[[nodiscard]] std::string sequence_io_load_sql(
+    const sequence_io_fixture& fixture, const std::filesystem::path& path) {
+    return "SELECT bioseq.load(" + sequence_io_literal(fixture.connection,fixture.schema + ".loaded")
+        + "::regclass," + sequence_io_literal(fixture.connection,path.string()) + ")";
+}
+
+/** Recreate all scalar/quality/alignment destinations untimed; no provenance accumulates. */
+void sequence_io_prepare_destination(
+    const sequence_io_fixture& fixture, const sequence_io_profile& profile) {
+    (void)sequence_io_sql(fixture.connection,fmt::format(
+        "DROP TABLE IF EXISTS {0}.loaded; CREATE TABLE {0}.loaded(ordinal bigint,header text,"
+        "seq bioseq.seq('{1}',64),note text,score bigint{2}{3}) USING bioseq",
+        fixture.schema, profile.alphabet,
+        profile.quality() ? ",quality bioseq.seq('phred63',64)" : "",
+        profile.alignment() ? ",alignment bioseq.alignment" : ""));
+}
+
+/** Require the actual returned bigint count; no malformed/error result can become zero. */
+void sequence_io_require_count(const captured_query_rows& result, std::size_t expected) {
+    if (result.status != captured_query_status::tuples_ok || result.rows.size() != 1u
+        || result.rows.front().size() != 1u || !result.rows.front().front()
+        || *result.rows.front().front() != std::to_string(expected))
+        throw std::runtime_error(fmt::format(
+            "[bench_sequence_io] operation count/result failed: expected {}; status {}; SQLSTATE {}; {} {} {}",
+            expected,result.result_status,result.sqlstate,result.primary,result.detail,result.connection_diagnostic));
+}
+
+/** Exact original rows and provided alignment facts; imported context IDs are relation-local. */
+[[nodiscard]] nlohmann::json sequence_io_validate(
+    const sequence_io_fixture& fixture, const sequence_io_profile& profile) {
+    const std::string sequence_projection = "ordinal,header,seq::text,"
+        + std::string{profile.quality() ? "quality::text," : ""} + "note,score";
+    const std::string difference_sql = fmt::format(
+        "WITH expected AS (SELECT {0} FROM {1}.reads_{2}),observed AS (SELECT {0} FROM {1}.loaded),"
+        "differences AS ((TABLE expected EXCEPT ALL TABLE observed) UNION ALL "
+        "(TABLE observed EXCEPT ALL TABLE expected)) SELECT count(*)::text FROM differences",
+        sequence_projection,fixture.schema,profile.alphabet);
+    const auto differences = sequence_io_scalar(fixture.connection,difference_sql);
+    const auto count = sequence_io_scalar(fixture.connection,fmt::format(
+        "SELECT (count(*)={0} AND count(DISTINCT ordinal)={0} AND "
+        "sum(bioseq.len(seq))={1})::text FROM {2}.loaded",
+        fixture.rows,fixture.rows*fixture.length,fixture.schema));
+    const auto types = sequence_io_scalar(fixture.connection,fmt::format(
+        "SELECT (count(*)={0} AND bool_and(source.atttypid=dest.atttypid AND source.atttypmod=dest.atttypmod))::text "
+        "FROM pg_attribute source JOIN pg_attribute dest ON source.attname=dest.attname "
+        "WHERE source.attrelid='{1}.reads_{2}'::regclass AND dest.attrelid='{1}.loaded'::regclass "
+        "AND source.attnum>0 AND dest.attnum>0 AND NOT source.attisdropped AND NOT dest.attisdropped "
+        "AND source.attname IN ('ordinal','header','seq','note','score'{3})",
+        profile.quality() ? 6u : 5u,fixture.schema,profile.alphabet,profile.quality() ? ",'quality'" : ""));
+    if (differences != "0" || count != "true" || types != "true") {
+        const auto mismatch = sequence_io_sql(fixture.connection,fmt::format(
+            "WITH expected AS (SELECT {0} FROM {1}.reads_{2}),observed AS (SELECT {0} FROM {1}.loaded) "
+            "SELECT row_to_json(d)::text FROM ((TABLE expected EXCEPT ALL TABLE observed) UNION ALL "
+            "(TABLE observed EXCEPT ALL TABLE expected)) d LIMIT 5",
+            sequence_projection,fixture.schema,profile.alphabet));
+        auto examples = nlohmann::json::array();
+        for (const auto& row : mismatch.rows) {
+            auto values = nlohmann::json::array();
+            for (const auto& value : row) values.push_back(value ? nlohmann::json(*value) : nlohmann::json(nullptr));
+            examples.push_back(std::move(values));
+        }
+        throw std::runtime_error(fmt::format(
+            "[bench_sequence_io] original roundtrip mismatch: differences={}, counts={}, types={}, examples={}",
+            differences,count,types,examples.dump()));
+    }
+    std::string alignment_ok = "not_applicable";
+    if (profile.alignment()) {
+        // Unspecified mate reference/position remain NULL; the existing neutral
+        // source represents unpaired template_length as the known integer zero.
+        alignment_ok = sequence_io_scalar(fixture.connection,fmt::format(
+            "SELECT (count(*)={0} AND bool_and(((d.alignment).flag IS NOT DISTINCT FROM 0) AND "
+            "((d.alignment).mapq IS NOT DISTINCT FROM 60) AND "
+            "((d.alignment).qname IS NOT DISTINCT FROM 'read_'||q.ordinal) AND "
+            "((d.alignment).reference_name IS NOT DISTINCT FROM r.header) AND "
+            "((d.alignment).reference_length IS NOT DISTINCT FROM bioseq.len(r.seq)::bigint) AND "
+            "((d.alignment).target_start IS NOT DISTINCT FROM q.target_offset) AND "
+            "((d.alignment).target_end IS NOT DISTINCT FROM q.target_offset+{1}) AND "
+            "((d.alignment).query_length IS NOT DISTINCT FROM {1}) AND "
+            "((d.alignment).query_start IS NOT DISTINCT FROM 0) AND "
+            "((d.alignment).query_end IS NOT DISTINCT FROM {1}) AND "
+            "((d.alignment).cigar::text IS NOT DISTINCT FROM '{1}M') AND "
+            "((d.alignment).source_orientation IS NOT DISTINCT FROM 'original_query') AND "
+            "((d.alignment).cigar_form IS NOT DISTINCT FROM 'alignment_core') AND "
+            "(d.alignment).mate_reference IS NULL AND (d.alignment).mate_start IS NULL AND "
+            "((d.alignment).template_length IS NOT DISTINCT FROM 0) AND (d.alignment).template_id IS NULL AND "
+            "(d.alignment).segment_id IS NULL AND "
+            "((d.alignment).aux IS NOT DISTINCT FROM "
+            "jsonb_build_array(jsonb_build_object('tag','AS','type','i','value',q.ordinal::text)))))::text "
+            "FROM {2}.loaded d JOIN {2}.reads_{3} q USING(ordinal) CROSS JOIN {2}.ref_{3} r",
+            fixture.rows,fixture.length,fixture.schema,profile.alphabet));
+        if (alignment_ok != "true")
+            throw std::runtime_error("[bench_sequence_io] restored mapped alignment differs from exact reference-slice fixture");
+    }
+    if (sequence_io_session_identity(fixture.connection) != fixture.identity)
+        throw std::runtime_error("[bench_sequence_io] backend/postmaster/database identity changed");
+    return {{"set_differences",0},{"row_count",fixture.rows},{"distinct_ordinals",fixture.rows},
+        {"input_symbols",fixture.rows*fixture.length},{"exact_source_typmods",true},
+        {"mapped_alignment",alignment_ok},{"file_emission_order_checked",false},
+        {"reference_slice_truth_checked_at_setup",true}};
+}
+
+/** Check one completed operation and validate originals; writes get an untimed opposite load. */
+[[nodiscard]] nlohmann::json sequence_io_finish_operation(
+    const sequence_io_fixture& fixture, const sequence_io_profile& profile,
+    std::string_view operation, const std::filesystem::path& path,
+    const captured_query_rows& result) {
+    sequence_io_require_count(result,fixture.rows);
+    if (operation == "sql_write")
+        sequence_io_require_count(sequence_io_sql(fixture.connection,sequence_io_load_sql(fixture,path)),fixture.rows);
+    return sequence_io_validate(fixture,profile);
+}
+
+/** Apply existing SQL policies; record configured participants separately from observed mode. */
+[[nodiscard]] nlohmann::json sequence_io_controls(
+    sequence_io_fixture& fixture, const sequence_io_profile& profile) {
+    configure_bioseq_scheduler_session(fixture.connection,profile.mode);
+    configure_no_index_storage_session(fixture.connection);
+    (void)sequence_io_sql(fixture.connection,
+        "SET bioseq.planner.custom_scan.enabled=on; SET bioseq.vectorization.enabled=on; "
+        "SET bioseq.column_cache.enabled=on; SET bioseq.load.write_overlap.enabled=on;");
+    const auto settings = nlohmann::json::parse(sequence_io_scalar(fixture.connection,
+        "SELECT jsonb_object_agg(name,setting)::text FROM pg_settings WHERE name IN ("
+        "'bioseq.scheduler.pipeline.mode','bioseq.scheduler.backend.max_concurrency',"
+        "'bioseq.vectorization.enabled','bioseq.column_cache.enabled','bioseq.load.write_overlap.enabled',"
+        "'bioseq.index.insert_maintenance.enabled','bioseq.index.sequence_read.enabled',"
+        "'bioseq.index.async_persistence.enabled','bioseq.index.recompute_async_persistence.enabled',"
+        "'max_parallel_workers_per_gather')"));
+    return {{"settings",settings},{"configured_max_threads",fair_scheduler_worker_count(fixture.connection)},
+        {"requested_scheduler_mode",profile.mode},
+        {"effective_scheduler_mode",sequence_io_scalar(fixture.connection,
+            "SELECT pipeline_concurrency_mode FROM bioseq.scheduler_stats()")},
+        {"actual_busy_threads_measured",false}};
+}
+
+/** Validate dimensions once and use shared checked arithmetic for this bounded scheduling estimate. */
+[[nodiscard]] run_constraints sequence_io_estimate(
+    std::string_view, std::string_view, simdjson::dom::element data) {
+    const auto rows_signed = jint(data,"row_count",4096);
+    const auto length_signed = jint(data,"sequence_length",150);
+    if (rows_signed < 1 || rows_signed > 100'000'000 || length_signed < 1
+        || length_signed > ((std::int64_t{1}<<28)-1)/3)
+        throw std::invalid_argument("[bench_sequence_io] dimensions exceed SQL/native CIGAR bounds");
+    const auto rows = static_cast<std::size_t>(rows_signed);
+    const auto length = static_cast<std::size_t>(length_signed);
+    const auto per_fixture = bioseq::common::checked_mul(rows,2u*length+256u);
+    const auto fixtures = per_fixture ? bioseq::common::checked_mul(*per_fixture,
+        static_cast<std::size_t>(supported_biological_alphabets::alphabet_count)) : std::nullopt;
+    const auto base = fixtures ? bioseq::common::checked_add(*fixtures,std::size_t{64u<<20u}) : std::nullopt;
+    const auto working = bioseq::common::checked_mul(rows,6u*length+512u);
+    const auto extra = working ? bioseq::common::checked_add(*working,std::size_t{64u<<20u}) : std::nullopt;
+    if (!base || !extra || !bioseq::common::checked_add(*base,*extra))
+        throw std::invalid_argument("[bench_sequence_io] resource estimate overflows");
+    return {.base_memory=*base,.extra_memory=*extra};
+}
+
+/** Prepare native references/read slices and only the load seeds selected by the managed matrix. */
+[[nodiscard]] sequence_io_input build_sequence_io_input(
+    std::string_view, std::string_view, simdjson::dom::element data, const run_constraints& constraints) {
+    (void)sequence_io_estimate({}, {},data);
+    auto fixture = std::make_shared<sequence_io_fixture>();
+    fixture->rows = static_cast<std::size_t>(jint(data,"row_count",4096));
+    fixture->length = static_cast<std::size_t>(jint(data,"sequence_length",150));
+    fixture->seed = jint(data,"seed",42);
+    sequence_io_catalog_preflight(fixture->connection);
+    fixture->identity = sequence_io_session_identity(fixture->connection);
+    const auto token = unpredictable_minimap2_run_token().substr(4u);
+    fixture->schema = "bench_sequence_io_" + token.substr(0u,24u);
+    std::string pattern = (std::filesystem::temp_directory_path()
+        / ("bioseq-sql-io-"+token.substr(0u,16u)+".XXXXXX")).string();
+    if (::mkdtemp(pattern.data()) == nullptr)
+        throw std::runtime_error("[bench_sequence_io] cannot create owned temporary directory");
+    fixture->directory = pattern;
+    // PostgreSQL may run under a different service UID. Permit creation/traversal
+    // without directory listing; sticky ownership protects completed server files.
+    constexpr auto server_access = std::filesystem::perms::owner_all
+        | std::filesystem::perms::group_write | std::filesystem::perms::group_exec
+        | std::filesystem::perms::others_write | std::filesystem::perms::others_exec
+        | std::filesystem::perms::sticky_bit;
+    std::error_code permission_error;
+    std::filesystem::permissions(fixture->directory,server_access,
+        std::filesystem::perm_options::replace,permission_error);
+    if (permission_error)
+        throw std::runtime_error("[bench_sequence_io] cannot grant server access to owned directory: "
+            + permission_error.message());
+    (void)sequence_io_sql(fixture->connection,"CREATE SCHEMA "+fixture->schema);
+    fixture->schema_created = true;
+    std::set<std::string> alphabets;
+    std::map<std::string,sequence_io_profile> seed_profiles;
+    for (const auto& tuple : constraints.execution_tuples) {
+        auto profile = sequence_io_parameters(tuple.algorithm_name,tuple.params);
+        alphabets.insert(profile.alphabet);
+        if (tuple.algorithm_name == "sql_load")
+            seed_profiles.try_emplace(profile.alphabet+"/"+profile.format,std::move(profile));
+    }
+    if (alphabets.empty()) throw std::invalid_argument("[bench_sequence_io] no selected tuples");
+    for (const auto& alphabet : alphabets) {
+        const sequence_io_profile profile{alphabet,"fasta","task_parallel"};
+        (void)sequence_io_controls(*fixture,profile);
+        const auto sql = fmt::format(
+            "CREATE TABLE {0}.ref_{1}(header text,seq bioseq.seq('{1}',64)) USING bioseq; "
+            "INSERT INTO {0}.ref_{1} VALUES('reference_{1}',bioseq.random_seq('{1}',64,min_length=>{2},seed=>{3})); "
+            "CREATE TABLE {0}.reads_{1}(ordinal bigint,header text,seq bioseq.seq('{1}',64),"
+            "quality bioseq.seq('phred63',64),note text,score bigint,target_offset bigint) USING bioseq; "
+            "INSERT INTO {0}.reads_{1} SELECT ordinal,'read_'||ordinal||' [sample]=% unicode_Ω',"
+            "r.seq[start_position:start_position+{4}],repeat('I',{4})::bioseq.seq('phred63',64),"
+            "CASE ordinal%3 WHEN 0 THEN NULL WHEN 1 THEN '' ELSE '[]=% Ω' END,ordinal*7,start_position "
+            "FROM (SELECT ordinal,((ordinal-1)*37)%{5} AS start_position "
+            "FROM generate_series(1::bigint,{6}::bigint) AS ordinal) positions CROSS JOIN {0}.ref_{1} r;",
+            fixture->schema,alphabet,4u*fixture->length,fixture->seed,fixture->length,
+            3u*fixture->length+1u,fixture->rows);
+        (void)sequence_io_sql(fixture->connection,sql);
+        fixture->fixture_sql.emplace(alphabet,sql);
+        const auto valid = sequence_io_scalar(fixture->connection,fmt::format(
+            "SELECT (count(*)={0} AND count(DISTINCT q.ordinal)={0} AND "
+            "bool_and(bioseq.len(r.seq)={1} AND bioseq.len(q.seq)={2} AND bioseq.len(q.quality)={2} "
+            "AND q.seq::text=r.seq[q.target_offset:q.target_offset+{2}]::text))::text "
+            "FROM {3}.reads_{4} q CROSS JOIN {3}.ref_{4} r",
+            fixture->rows,4u*fixture->length,fixture->length,fixture->schema,alphabet));
+        if (valid != "true") throw std::runtime_error("[bench_sequence_io] native reference-slice fixture is invalid");
+    }
+    for (const auto& [key,profile] : seed_profiles) {
+        (void)sequence_io_controls(*fixture,profile);
+        sequence_io_prepare_destination(*fixture,profile);
+        const auto path = fixture->next_path(profile.format);
+        const auto sql = sequence_io_write_sql(*fixture,profile,path);
+        const auto result = sequence_io_sql(fixture->connection,sql);
+        (void)sequence_io_finish_operation(*fixture,profile,"sql_write",path,result);
+        fixture->seeds.emplace(key,path);
+    }
+    return fixture;
+}
+
+/** Prepare each exact tuple, complete two validated warmups, then arm one measured statement. */
+[[nodiscard]] sequence_io_preparation prepare_sequence_io_iteration(
+    std::string_view operation, const parameter_map& params,
+    const sequence_io_input& input, std::size_t repeat) {
+    sequence_io_preparation preparation;
+    preparation.profile = sequence_io_parameters(operation,params);
+    preparation.operation = operation;
+    preparation.controls = sequence_io_controls(*input,preparation.profile);
+    const auto tuple_key = preparation.profile.key(operation);
+    if (repeat == 0u) {
+        if (input->warmups.contains(tuple_key))
+            throw std::runtime_error("[bench_sequence_io] duplicate first repeat for one exact tuple");
+        auto evidence = nlohmann::json::array();
+        for (std::size_t warmup{};warmup<2u;++warmup) {
+            sequence_io_prepare_destination(*input,preparation.profile);
+            const auto path = operation == "sql_write" ? input->next_path(preparation.profile.format)
+                : input->seeds.at(preparation.profile.alphabet+"/"+preparation.profile.format);
+            const auto sql = operation == "sql_write" ? sequence_io_write_sql(*input,preparation.profile,path)
+                : sequence_io_load_sql(*input,path);
+            const auto result = sequence_io_sql(input->connection,sql);
+            auto validation = sequence_io_finish_operation(*input,preparation.profile,operation,path,result);
+            evidence.push_back({{"number",warmup},{"execution_sql",sql},{"validation",std::move(validation)},
+                {"timed",false},{"returned_rows",input->rows}});
+            if (operation == "sql_write" && !std::filesystem::remove(path))
+                throw std::runtime_error("[bench_sequence_io] cannot remove completed warmup output");
+        }
+        input->warmups.emplace(tuple_key,std::move(evidence));
+    }
+    preparation.warmup_evidence = input->warmups.at(tuple_key);
+    if (preparation.warmup_evidence.size() != 2u)
+        throw std::runtime_error("[bench_sequence_io] exact tuple lacks two validated warmups");
+    sequence_io_prepare_destination(*input,preparation.profile);
+    preparation.path = operation == "sql_write" ? input->next_path(preparation.profile.format)
+        : input->seeds.at(preparation.profile.alphabet+"/"+preparation.profile.format);
+    preparation.execution_sql = operation == "sql_write" ? sequence_io_write_sql(*input,preparation.profile,preparation.path)
+        : sequence_io_load_sql(*input,preparation.path);
+    if (operation == "sql_write") {
+        const auto plan = sequence_io_sql(input->connection,"EXPLAIN (COSTS OFF) "+preparation.execution_sql);
+        bool owns_export = false;
+        for (const auto& row : plan.rows) {
+            if (row.size()!=1u || !row.front()) throw std::runtime_error("[bench_sequence_io] malformed EXPLAIN");
+            preparation.explain.push_back(*row.front());
+            owns_export = owns_export || row.front()->find("BioseqExport")!=std::string::npos;
+        }
+        if (!owns_export || std::filesystem::exists(preparation.path))
+            throw std::runtime_error("[bench_sequence_io] EXPLAIN lacks export ownership or published output");
+    }
+    preparation.resources = std::make_unique<scoped_resource_monitor>();
+    return preparation;
+}
+
+/** Measure exactly one libpq request, including the server IO statement and implicit commit. */
+[[nodiscard]] sequence_io_output measure_sequence_io_iteration(
+    std::string_view, const parameter_map&, const sequence_io_input& input,
+    sequence_io_preparation& preparation) {
+    auto measured_scope = bioseq::instrumentation::region(k_measured_region);
+    sequence_io_output output;
+    output.pending = execute_query_capturing_result(input->connection,preparation.execution_sql);
+    return output;
+}
+
+/** Stop monitoring before untimed opposite-direction load and full original-value validation. */
+void finalize_sequence_io_iteration(
+    std::string_view operation, const parameter_map&, const sequence_io_input& input,
+    sequence_io_preparation& preparation, sequence_io_output& output,
+    const bioseq::bench::framework::iteration_measurement_window& window) {
+    output.resources = preparation.resources->stop();
+    preparation.resources.reset();
+    output.measured_region_ns = window.elapsed_ns;
+    const auto result = materialize_captured_query_rows(input->connection,std::move(output.pending));
+    output.validation = sequence_io_finish_operation(*input,preparation.profile,operation,preparation.path,result);
+    output.file_bytes = std::filesystem::file_size(preparation.path);
+    output.rows = input->rows;
+    output.input_symbols = input->rows*input->length;
+    output.execution_sql = preparation.execution_sql;
+    output.explain = preparation.explain;
+    output.controls = preparation.controls;
+    output.warmup_evidence = preparation.warmup_evidence;
+    output.correctness_accepted = true;
+    if (operation == "sql_write" && !std::filesystem::remove(preparation.path))
+        throw std::runtime_error("[bench_sequence_io] cannot remove verified measured output");
+}
+
+/** Missing boundaries are a benchmark error, never an accepted empty result. */
+[[nodiscard]] sequence_io_output sequence_io_run(
+    std::string_view, const parameter_map&, const sequence_io_input&) {
+    throw std::runtime_error("[bench_sequence_io] required iteration boundaries were not installed");
+}
+
+/** Publish original biological units and honestly labelled sampled resource counters. */
+[[nodiscard]] std::map<std::string,double> sequence_io_evaluate(
+    std::string_view, const parameter_map&, const sequence_io_input&, const sequence_io_output& output) {
+    if (!output.correctness_accepted || output.measured_region_ns==0u)
+        throw std::runtime_error("[bench_sequence_io] invalid timing or semantic acceptance");
+    const auto seconds = static_cast<double>(output.measured_region_ns)/1e9;
+    return {{"row_count",static_cast<double>(output.rows)},
+        {"original_symbols",static_cast<double>(output.input_symbols)},
+        {"file_bytes",static_cast<double>(output.file_bytes)},
+        {"rows_per_second",static_cast<double>(output.rows)/seconds},
+        {"original_symbols_per_second",static_cast<double>(output.input_symbols)/seconds},
+        {"file_bytes_per_second",static_cast<double>(output.file_bytes)/seconds},
+        {"correctness_accepted",1.0},{"sampled_cluster_postgres_rss_mb",output.resources.postgres_rss_kb/1024.0},
+        {"sampled_bench_rss_mb",output.resources.bench_rss_kb/1024.0},
+        {"sampled_min_tmp_available_gib",output.resources.tmp_available_kb/(1024.0*1024.0)},
+        {"sampled_swap_used_mb",output.resources.swap_used_mb}};
+}
+
+/** Retain exact SQL/units/validation and the managed runner's distinct binary-authority contract. */
+[[nodiscard]] std::string serialize_sequence_io_raw_sample(
+    std::string_view operation, const parameter_map& params,
+    const sequence_io_input& input, const sequence_io_output& output) {
+    const auto profile = sequence_io_parameters(operation,params);
+    return nlohmann::json{
+        {"payload_schema","bioseq.postgres-sequence-io.raw-sample"},{"payload_schema_version",1},
+        {"layer","postgresql_end_to_end"},{"operation",operation},{"alphabet",profile.alphabet},
+        {"format",profile.format},{"compression",profile.format=="bam" ? "bgzf" : "none"},
+        {"compression_level",6},{"storage_bits",64},{"quality_alphabet",profile.quality() ? "phred63" : "absent"},
+        {"mapped_alignment",profile.alignment()},{"source_fixture_sql",input->fixture_sql.at(profile.alphabet)},
+        {"seed",input->seed},{"sequence_length",input->length},{"execution_sql",output.execution_sql},
+        {"controls",output.controls},{"session_identity",input->identity},
+        {"binary_authority","official MCP E2E build/run receipt and managed PostgreSQL installed-image verification"},
+        {"cache_state","prepared source and previously read input; residency not verified"},
+        {"timed_scope","one SQL write/load request including server execution, file finalization/storage and implicit commit; fixture DDL, warmups, EXPLAIN, verification and cleanup excluded"},
+        {"warmups_completed",output.warmup_evidence.size()},{"untimed_warmups",output.warmup_evidence},
+        {"explain_analyze",false},{"explain",output.explain},{"validation",output.validation},
+        {"correctness_accepted",output.correctness_accepted},{"row_count",output.rows},
+        {"original_symbols",output.input_symbols},{"file_bytes",output.file_bytes},
+        {"file_emission_order_acceptance","separate neutral/manual owner; SQL oracle compares full original rows"},
+        {"native_nm_md_oracle","normal reader validates projection; independent native wire oracle is separate"},
+        {"samtools_speed_ratio",nullptr},{"scratch_spool_bytes",nullptr},
+        {"resource_sampling","existing 500ms host PostgreSQL process RSS sampling; not exact per-backend peak"},
+        {"pmu_scope","framework client thread around libpq, not PostgreSQL backend work"},
+        {"sampled_cluster_postgres_rss_kb",output.resources.postgres_rss_kb},
+        {"sampled_bench_rss_kb",output.resources.bench_rss_kb},
+        {"sampled_min_tmp_available_kb",output.resources.tmp_available_kb},
+        {"sampled_swap_used_mb",output.resources.swap_used_mb},
+        {"index_and_map_ns",output.measured_region_ns},{"measured_region_ns",output.measured_region_ns}}.dump();
+}
+
+/** Explicit normal cleanup reports errors; the shared owner also protects exceptional exits. */
+void cleanup_sequence_io_input(
+    std::string_view, std::string_view, simdjson::dom::element, const sequence_io_input& input) {
+    input->cleanup();
+}
+
+
 }  // anonymous namespace
 
 #if defined(BIOSEQ_E2E_TESTING_API)
@@ -19528,6 +20138,19 @@ int run(int argc, char** argv) {
             .measured_iteration = measure_random_generation_iteration,
             .after_iteration = finalize_random_generation_iteration,
         };
+    auto sql_io_est = std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)>{sequence_io_estimate};
+    auto sql_io_inp = std::function<sequence_io_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>{build_sequence_io_input};
+    auto sql_io_run = std::function<sequence_io_output(std::string_view, const parameter_map&, const sequence_io_input&)>{sequence_io_run};
+    auto sql_io_evl = std::function<std::map<std::string,double>(std::string_view, const parameter_map&, const sequence_io_input&, const sequence_io_output&)>{sequence_io_evaluate};
+    auto sql_io_cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const sequence_io_input&)>{cleanup_sequence_io_input};
+    auto sql_io_raw = std::function<std::string(std::string_view, const parameter_map&, const sequence_io_input&, const sequence_io_output&)>{serialize_sequence_io_raw_sample};
+    bioseq::bench::framework::iteration_boundary_callbacks<
+        sequence_io_input, sequence_io_preparation, sequence_io_output> sql_io_boundaries{
+            .enabled = [](std::string_view, const parameter_map&, const sequence_io_input&) { return true; },
+            .before_iteration = prepare_sequence_io_iteration,
+            .measured_iteration = measure_sequence_io_iteration,
+            .after_iteration = finalize_sequence_io_iteration,
+        };
     return bioseq::bench::framework::run(argc, argv, rep, data,
         bioseq::bench::framework::create_benchmark_with_iteration_boundaries<
             e2e_input, e2e_iteration_preparation, e2e_output>(
@@ -19553,7 +20176,12 @@ int run(int argc, char** argv) {
             random_generation_input, random_generation_preparation, random_generation_output>(
             "Native random SQL generation vs sample helpers across all biological alphabets",
             "bench_random_generation", cfg, random_est, random_inp, random_run, random_evl,
-            random_boundaries, random_cln, random_raw, cfg_open));
+            random_boundaries, random_cln, random_raw, cfg_open),
+        bioseq::bench::framework::create_benchmark_with_iteration_boundaries<
+            sequence_io_input, sequence_io_preparation, sequence_io_output>(
+            "PostgreSQL sequence write/load with exact original semantic validation",
+            "bench_sequence_io", cfg, sql_io_est, sql_io_inp, sql_io_run, sql_io_evl,
+            sql_io_boundaries, sql_io_cln, sql_io_raw, cfg_open));
 }
 
 }  // namespace bioseq::bench::e2e

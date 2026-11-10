@@ -42,7 +42,11 @@ enum class fastq_parser_progress : std::uint8_t {
     finished_record,     ///< Ready to emit the completed record.
 };
 
-/// State for one FASTQ tecord, aligned to keep concurrent parser states apart.
+/// Structural framing shares record/line/count rules without allocating decoded fields.
+/// Alphabet and printable-quality validation remain the subsequent decoder's responsibility.
+enum class fastq_parse_mode : std::uint8_t { decode, frame };
+
+/// State for one FASTQ record, aligned to keep concurrent parser states apart.
 template <typename p_storage_unit, std::size_t p_bits_per_char, std::size_t p_letters_per_unit>
 struct alignas(64) fastq_parser_state {
     fastq_parser_progress progress = fastq_parser_progress::at_header_sigil;
@@ -124,9 +128,12 @@ struct alignas(64) fastq_parser_state {
 /// On completion, `emit_record` receives `(header_start, header_size, seq_start,
 /// seq_word_count, padding, qual_start, qual_size)` for the batch buffers.
 /// `qual_size` is zero when retention is disabled; length validation still uses
-/// the cumulative quality count for the entire record.
+/// the cumulative quality count for the entire record. Frame mode emits zero
+/// storage extents and retains only parser counters; it establishes complete
+/// record boundaries before a parallel decoder performs alphabet/quality checks.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit = std::uint64_t,
+          fastq_parse_mode Mode = fastq_parse_mode::decode,
           typename p_emit_record,
           typename p_failure>
 [[nodiscard]] record_parse_result parse_one_fastq_record(
@@ -196,10 +203,12 @@ template <sequence_alphabet p_alphabet,
         return parse_outcome::abort;
     };
 
-    const auto reject_quality_byte = [&](unsigned byte, std::size_t field_offset,
+    const auto reject_quality_byte = [&state, &failure_fn](unsigned byte, std::size_t field_offset,
                                          std::size_t failure_cursor,
                                          std::size_t file_position) -> record_parse_result {
-        const std::string header{state.header_view().substr(0u, 256u)};
+        std::string header;
+        if constexpr (Mode == fastq_parse_mode::decode)
+            header.assign(state.header_view().substr(0u, 256u));
         state.rollback_current_record();
         emit_failure(failure_fn, input_failure_kind::invalid_quality_byte,
             "invalid FASTQ quality byte {} at quality offset {} in record '{}' (file position {})",
@@ -233,11 +242,13 @@ template <sequence_alphabet p_alphabet,
         const std::size_t remaining_bytes = slab_size - parse_cursor;
         const std::size_t newline_offset =
             simd::scan_first_byte('\n', slab_data + parse_cursor, remaining_bytes);
-        const auto appended = state.append_header(
-            {reinterpret_cast<const char*>(slab_data + parse_cursor), newline_offset}, newline_offset != remaining_bytes);
-        if (!appended) {
-            emit_failure(failure_fn, "{}", appended.error());
-            return record_parse_result{parse_outcome::abort, parse_cursor};
+        if constexpr (Mode == fastq_parse_mode::decode) {
+            const auto appended = state.append_header(
+                {reinterpret_cast<const char*>(slab_data + parse_cursor), newline_offset}, newline_offset != remaining_bytes);
+            if (!appended) {
+                emit_failure(failure_fn, "{}", appended.error());
+                return record_parse_result{parse_outcome::abort, parse_cursor};
+            }
         }
         if (newline_offset == remaining_bytes) {
             parse_cursor = slab_size;
@@ -296,20 +307,24 @@ template <sequence_alphabet p_alphabet,
             else state.progress = fastq_parser_progress::at_body_line_start;
             continue;
         }
-        const auto encoded = bioseq::simd::active_target::encode_body_chunk<
-            p_alphabet,
-            bioseq::simd::active_target::unknown_byte_policy::reject,
-            p_storage_unit,
-            bits_per_char,
-            letters_per_unit>(state.body, slab_data + parse_cursor, line_size);
-        if (!encoded) {
-            const auto failure_position = global_offset + parse_cursor + encoded.consumed_bytes;
-            state.rollback_current_record();
-            emit_failure(failure_fn, "invalid sequence byte 0x{:02x} at file position {}",
-                static_cast<unsigned>(encoded.offending_byte), failure_position);
-            return record_parse_result{parse_outcome::abort, parse_cursor + encoded.consumed_bytes};
+        std::size_t emitted_symbols = line_size;
+        if constexpr (Mode == fastq_parse_mode::decode) {
+            const auto encoded = bioseq::simd::active_target::encode_body_chunk<
+                p_alphabet,
+                bioseq::simd::active_target::unknown_byte_policy::reject,
+                p_storage_unit,
+                bits_per_char,
+                letters_per_unit>(state.body, slab_data + parse_cursor, line_size);
+            if (!encoded) {
+                const auto failure_position = global_offset + parse_cursor + encoded.consumed_bytes;
+                state.rollback_current_record();
+                emit_failure(failure_fn, "invalid sequence byte 0x{:02x} at file position {}",
+                    static_cast<unsigned>(encoded.offending_byte), failure_position);
+                return record_parse_result{parse_outcome::abort, parse_cursor + encoded.consumed_bytes};
+            }
+            emitted_symbols = encoded.emitted_symbols;
         }
-        const auto next_count = bioseq::common::checked_add(state.sequence_byte_count, encoded.emitted_symbols);
+        const auto next_count = bioseq::common::checked_add(state.sequence_byte_count, emitted_symbols);
         if (!next_count) {
             state.rollback_current_record();
             emit_failure(failure_fn, "FASTQ sequence length overflow at file position {}",
@@ -350,15 +365,20 @@ template <sequence_alphabet p_alphabet,
         }
         // Consume bounded spans even when one quality line exceeds the refill buffer.
         std::size_t line_size = 0;
-        while (parse_cursor + line_size < slab_size && line_size < 65536
-            && slab_data[parse_cursor + line_size] != '\n'
-            && slab_data[parse_cursor + line_size] != '\r') {
-            const auto byte = slab_data[parse_cursor + line_size];
-            if (strict_fastq && (byte < 33 || byte > 126)) {
-                return reject_quality_byte(byte, state.quality_byte_count + line_size,
-                    parse_cursor + line_size, global_offset + parse_cursor + line_size);
+        if constexpr (Mode == fastq_parse_mode::frame) {
+            line_size = simd::scan_first_byte_pair('\n', '\r', slab_data + parse_cursor,
+                std::min<std::size_t>(slab_size - parse_cursor, 65536));
+        } else {
+            while (parse_cursor + line_size < slab_size && line_size < 65536
+                && slab_data[parse_cursor + line_size] != '\n'
+                && slab_data[parse_cursor + line_size] != '\r') {
+                const auto byte = slab_data[parse_cursor + line_size];
+                if (strict_fastq && (byte < 33 || byte > 126)) {
+                    return reject_quality_byte(byte, state.quality_byte_count + line_size,
+                        parse_cursor + line_size, global_offset + parse_cursor + line_size);
+                }
+                ++line_size;
             }
-            ++line_size;
         }
         const std::size_t next_cursor = parse_cursor + line_size;
         const auto next_quality_count =
@@ -375,16 +395,18 @@ template <sequence_alphabet p_alphabet,
             emit_failure(failure_fn, "FASTQ quality exceeds sequence length at file position {}", global_offset + next_cursor);
             return {parse_outcome::abort, next_cursor};
         }
-        if (line_size && state.quality_sink && !state.quality_sink(state.quality_sink_state,
-                {slab_data + parse_cursor, line_size}, state.quality_byte_count)) {
-            state.rollback_current_record();
-            emit_failure(failure_fn, "FASTQ quality sink rejected input at file position {}", global_offset + parse_cursor);
-            return {parse_outcome::abort, parse_cursor};
-        }
-        if (state.retain_quality) {
-            state.quality_storage->insert(state.quality_storage->end(),
-                                          slab_data + parse_cursor,
-                                          slab_data + parse_cursor + line_size);
+        if constexpr (Mode == fastq_parse_mode::decode) {
+            if (line_size && state.quality_sink && !state.quality_sink(state.quality_sink_state,
+                    {slab_data + parse_cursor, line_size}, state.quality_byte_count)) {
+                state.rollback_current_record();
+                emit_failure(failure_fn, "FASTQ quality sink rejected input at file position {}", global_offset + parse_cursor);
+                return {parse_outcome::abort, parse_cursor};
+            }
+            if (state.retain_quality) {
+                state.quality_storage->insert(state.quality_storage->end(),
+                                              slab_data + parse_cursor,
+                                              slab_data + parse_cursor + line_size);
+            }
         }
         state.quality_byte_count = *next_quality_count;
         parse_cursor = next_cursor;
@@ -407,8 +429,13 @@ template <sequence_alphabet p_alphabet,
     if (state.progress == fastq_parser_progress::finished_record) {
         const std::size_t header_size = state.header_size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
-        const auto [seq_word_count, padding] = bioseq::simd::active_target::
-            finalize_encode_state<p_storage_unit, bits_per_char, letters_per_unit>(state.body);
+        std::size_t seq_word_count{}, padding{};
+        if constexpr (Mode == fastq_parse_mode::decode) {
+            const auto finished = bioseq::simd::active_target::
+                finalize_encode_state<p_storage_unit, bits_per_char, letters_per_unit>(state.body);
+            seq_word_count = finished.first;
+            padding = finished.second;
+        }
         const std::size_t qual_size = state.quality_storage->size() - state.quality_start_offset;
         emit_record(state.header_start_offset,
                     header_size,

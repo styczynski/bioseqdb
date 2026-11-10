@@ -122,20 +122,36 @@ int run(int argc, char** argv) {
         std::string_view, std::string_view, simdjson::dom::element, const alignment_benchmark_input&)>;
 
     bioseq::bench::framework::iteration_boundary_callbacks<alignment_benchmark_input,
-        io_pool_scope, alignment_measurement> alignment_boundaries{
+        alignment_iteration_preparation, alignment_measurement> alignment_boundaries{
         .enabled = [](std::string_view, const parameter_map&, const alignment_benchmark_input&) { return true; },
         .before_iteration = [](std::string_view algorithm, const parameter_map& parameters,
-                const alignment_benchmark_input&, std::size_t repeat) {
-            return prepare_alignment_iteration(algorithm, parameters, repeat);
+                const alignment_benchmark_input& input, std::size_t repeat) {
+            return prepare_alignment_iteration(algorithm, parameters, input, repeat);
         },
         .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
-                const alignment_benchmark_input& input, io_pool_scope& preparation) {
-            if (!preparation.error.empty()) return alignment_measurement{.error = preparation.error};
-            return run_alignment(algorithm, parameters, input);
+                const alignment_benchmark_input& input, alignment_iteration_preparation& preparation) {
+            if (!preparation.error.empty()) return alignment_measurement{.cache = preparation.cache, .error = preparation.error};
+            return run_alignment(algorithm, parameters, input, &preparation);
         },
-        .after_iteration = [](std::string_view, const parameter_map&, const alignment_benchmark_input&,
-                io_pool_scope& preparation, alignment_measurement&,
-                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+        .after_iteration = [](std::string_view, const parameter_map& parameters, const alignment_benchmark_input& input,
+                alignment_iteration_preparation& preparation, alignment_measurement& output,
+                const bioseq::bench::framework::iteration_measurement_window& window) {
+            if (!preparation.finish_codec()) { output.valid = false; output.error = "native codec transport close failed"; }
+            output.measured_ns = window.elapsed_ns;
+            if (output.measured_ns == 0u) { output.valid = false; output.error = "alignment measurement has nonpositive elapsed time"; }
+            if (parameters.at("operation").as_string() == "read_cold") {
+                const auto& fixture = *input.fixtures.at(std::string{parameters.at("alphabet").as_string()});
+                const bool bam = parameters.at("format").as_string() == "bam";
+                const auto observed = alignment_file_identity::open(bam ? fixture.bam_path : fixture.sam_path);
+                if (!observed || *observed != (bam ? fixture.bam_identity : fixture.sam_identity)) {
+                    output.valid = false; output.error = "cold input identity changed during measurement";
+                }
+                if (preparation.cache.observed && window.begin_ns >= preparation.cache.observed_at_ns)
+                    output.observation_to_measurement_ns = static_cast<std::uint64_t>(window.begin_ns - preparation.cache.observed_at_ns);
+                else if (preparation.cache.observed) { output.valid = false; output.error = "cold observation clock order is invalid"; }
+            }
+            preparation.pool.restore_previous();
+        },
     };
 
     bioseq::bench::framework::iteration_boundary_callbacks<reader_input,
@@ -267,10 +283,11 @@ int run(int argc, char** argv) {
             cigar_evaluator{evaluate_cigar_benchmark},
             cigar_cleanup{cleanup_cigar_benchmark}),
         bioseq::bench::framework::create_benchmark_with_iteration_boundaries<alignment_benchmark_input,
-            io_pool_scope, alignment_measurement>(
+            alignment_iteration_preparation, alignment_measurement>(
             "SAM/BAM full records versus pinned samtools HTSlib", "bench_io_alignment", config_path,
             resource_estimator{estimate_alignment_resources}, alignment_builder{build_alignment_input},
-            alignment_runner{run_alignment}, alignment_evaluator{evaluate_alignment}, alignment_boundaries,
+            alignment_runner{[](std::string_view algorithm, const parameter_map& parameters,
+                    const alignment_benchmark_input& input) { return run_alignment(algorithm, parameters, input); }}, alignment_evaluator{evaluate_alignment}, alignment_boundaries,
             alignment_cleanup{cleanup_alignment}),
         create_benchmark<random_generation_input, random_generation_measurement>(
             "Native random generation: row scheduling versus batch scheduling",

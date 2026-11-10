@@ -81,6 +81,51 @@ import bioseq.instrumentation;
 
 export namespace bioseq::bench::framework {
 
+/// Exact, bounded observation of a measured stream against untimed fixture rows.
+/// The fixture owns the encodings; the observation retains only cursors/status.
+/// Explicit row boundaries prevent concatenation, duplicate and reorder aliases.
+class ordered_output_observation {
+    std::span<const std::string> expected_;
+    std::size_t position_{};
+    std::size_t offset_{};
+    bool active_{};
+    bool equal_{true};
+public:
+    explicit ordered_output_observation(std::span<const std::string> expected) noexcept
+        : expected_{expected} {}
+    [[nodiscard]] bool begin_record() noexcept {
+        equal_ = equal_ && !active_ && position_ < expected_.size();
+        active_ = true;
+        offset_ = 0;
+        return equal_;
+    }
+    [[nodiscard]] bool append(std::string_view bytes) noexcept {
+        if (!equal_ || !active_ || position_ >= expected_.size()) {
+            equal_ = false;
+            return false;
+        }
+        const std::string_view expected{expected_[position_]};
+        if (offset_ > expected.size() || bytes.size() > expected.size() - offset_
+            || expected.substr(offset_, bytes.size()) != bytes) {
+            equal_ = false;
+            return false;
+        }
+        offset_ += bytes.size();
+        return true;
+    }
+    [[nodiscard]] bool end_record() noexcept {
+        equal_ = equal_ && active_ && position_ < expected_.size()
+            && offset_ == expected_[position_].size();
+        active_ = false;
+        ++position_;
+        return equal_;
+    }
+    [[nodiscard]] std::size_t records() const noexcept { return position_; }
+    [[nodiscard]] bool complete() const noexcept {
+        return equal_ && !active_ && position_ == expected_.size();
+    }
+};
+
 /// Version of the raw E2E benchmark record format shared with the Python reader.
 inline constexpr std::uint64_t e2e_raw_payload_schema_version = 12;
 
@@ -707,6 +752,9 @@ struct rule_comparator {
     /// or exact finite values from each matching repeat. Exact comparisons
     /// preserve the IEEE-754 bit pattern, including the sign of zero.
     pairing_mode pairing = pairing_mode::independent_aggregates;
+    /// Preserve paired schedule authority while comparing the two measured medians.
+    /// False keeps the historical aggregate-of-repeat-ratios semantics unchanged.
+    bool ratio_of_medians = false;
     /// Expected ratio for a paired comparison. tolerance_pct allows relative
     /// variation around this value.
     double paired_baseline = 1.0;
@@ -2504,6 +2552,11 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
               "enum": ["independent", "by_iteration_ratio"],
               "default": "independent"
             },
+            "paired_reduction": {
+              "type": "string", "enum": ["repeat_ratios", "ratio_of_medians"],
+              "default": "repeat_ratios",
+              "description": "ratio_of_medians uses the two post-warmup p50 values, retaining exact paired schedule authority and every raw repeat."
+            },
             "paired_baseline": {
               "type": "number",
               "exclusiveMinimum": 0,
@@ -2547,6 +2600,10 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
               "enum": ["independent", "by_iteration_ratio", "by_iteration_exact"],
               "default": "independent",
               "description": "by_iteration_exact compares every aligned finite evaluation sample bit-for-bit and requires zero tolerance."
+            },
+            "paired_reduction": {
+              "type": "string", "enum": ["repeat_ratios", "ratio_of_medians"],
+              "default": "repeat_ratios"
             },
             "paired_baseline": {
               "type": "number",
@@ -2834,6 +2891,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
             "tolerance_pct": { "type": "number", "minimum": 0, "maximum": 100 },
             "aggregate": { "type": "string" },
             "paired_baseline": { "type": "number" },
+            "paired_reduction": { "type": "string", "enum": ["repeat_ratios", "ratio_of_medians"] },
             "warmup_repetitions": { "type": "integer", "minimum": 0 },
             "blocking": { "type": "boolean" }
           }
@@ -2853,7 +2911,24 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
         "repeats": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/paired_rule_repeat" } },
         "inputs_present": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "boolean" } },
         "observed_paired_ratio": { "type": ["number", "null"] },
+        "median_summary": {
+          "type": "object", "required": ["numerator", "denominator"],
+          "additionalProperties": false,
+          "properties": {
+            "numerator": { "$ref": "#/definitions/median_spread" },
+            "denominator": { "$ref": "#/definitions/median_spread" }
+          }
+        },
         "accepted": { "type": "boolean" }
+      }
+    },
+    "median_spread": {
+      "type": "object", "required": ["count", "min", "p50", "max", "mad"],
+      "additionalProperties": false,
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "min": { "type": "number" }, "p50": { "type": "number" },
+        "max": { "type": "number" }, "mad": { "type": "number" }
       }
     },
     "violation": {
@@ -3563,6 +3638,11 @@ parse_compare_and_tolerance(
         }
     }
     double paired_baseline = 1.0;
+    std::string_view paired_reduction;
+    if (cmp_obj["paired_reduction"].get(paired_reduction) == simdjson::SUCCESS) {
+        if (paired_reduction == "ratio_of_medians") out.ratio_of_medians = true;
+        else if (paired_reduction != "repeat_ratios") parse_ok = false;
+    }
     if (cmp_obj["paired_baseline"].get(paired_baseline)
         == simdjson::SUCCESS) {
         out.paired_baseline = paired_baseline;
@@ -4746,6 +4826,11 @@ struct config_parse_outcome {
             const std::string comparator_location = fmt::format(
                 "matrix.metrics.{}.rules.{}.comparator",
                 metric.name, rule.name);
+            if (rule.cmp.ratio_of_medians
+                && (!ratio_paired || rule.cmp.aggregate != sample_aggregate::p50)) {
+                error("median_ratio_requires_paired_p50", comparator_location,
+                      "ratio_of_medians requires by_iteration_ratio and aggregate=p50");
+            }
             if (!ratio_paired && rule.cmp.warmup_repetitions != 0) {
                 error("warmup_requires_paired_rule",
                       comparator_location + ".warmup_repetitions",
@@ -7153,6 +7238,21 @@ struct logical_iteration_series {
         return std::nullopt;
     }
     std::vector<double> ratios;
+    if (comparator.ratio_of_medians) {
+        std::vector<double> numerator, denominator;
+        for (std::size_t repeat = 0; repeat < lhs.values.size(); ++repeat) {
+            // Warmups remain correctness/authority inputs even though their
+            // durations do not contribute to steady-state medians.
+            if (!std::isfinite(lhs.values[repeat]) || !std::isfinite(rhs.values[repeat])
+                || lhs.values[repeat] <= 0.0 || rhs.values[repeat] <= 0.0) return std::nullopt;
+            if (repeat < comparator.warmup_repetitions) continue;
+            numerator.push_back(lhs.values[repeat]);
+            denominator.push_back(rhs.values[repeat]);
+        }
+        const double value = aggregate_samples(sample_aggregate::p50, numerator)
+            / aggregate_samples(sample_aggregate::p50, denominator);
+        return std::isfinite(value) ? std::optional{value} : std::nullopt;
+    }
     ratios.reserve(lhs.values.size() - comparator.warmup_repetitions);
     for (std::size_t repeat = comparator.warmup_repetitions;
          repeat < lhs.values.size(); ++repeat) {
@@ -7410,6 +7510,25 @@ inline void evaluate_rules(
                 for (const auto& tuple : state.execution_tuples) {
                     if (selector_matches(rule.lhs, tuple)) lhs_tuples.push_back(&tuple);
                     if (selector_matches(rule.rhs, tuple)) rhs_tuples.push_back(&tuple);
+                }
+                if (rule.cmp.ratio_of_medians
+                    && (lhs_tuples.size() != 1 || rhs_tuples.size() != 1)) {
+                    violation missing;
+                    missing.config_path = state.config.config_path;
+                    missing.benchmark_key = state.config.benchmark_key;
+                    missing.rule_name = rule.name;
+                    missing.test_case = test_case_name;
+                    missing.metric = rule.metric_name;
+                    missing.lhs_algorithm = rule.lhs.algorithm_key;
+                    missing.rhs_algorithm = rule.rhs.algorithm_key;
+                    missing.lhs_full_params = rule.lhs.match;
+                    missing.rhs_full_params = rule.rhs.match;
+                    missing.comparison_mode = rule.cmp.pairing;
+                    missing.warmup_repetitions = rule.cmp.warmup_repetitions;
+                    missing.blocking = rule.cmp.blocking;
+                    missing.args_present = {false, false};
+                    violations.push_back(std::move(missing));
+                    continue;
                 }
                 const std::string lhs_region = rule.lhs.region.empty()
                     ? std::string{"all_regions"}
@@ -9316,9 +9435,42 @@ inline void emit_paired_rule_evidence_record(
                             comparator.append_comma();
                             emit_key(comparator, "blocking");
                             comparator.append(evidence.comparator.blocking);
+                            if (evidence.comparator.ratio_of_medians) {
+                                comparator.append_comma();
+                                emit_kv_string(comparator, "paired_reduction", "ratio_of_medians");
+                            }
                         });
                 });
             inner.append_comma();
+            if (evidence.comparator.ratio_of_medians && evidence.observed_paired_ratio_present) {
+                emit_kv_with_body(inner, "median_summary", [&evidence](auto& summary_builder) {
+                    emit_object_with_body(summary_builder, [&evidence](auto& summary) {
+                        const auto side = [&evidence, &summary](std::string_view name, bool numerator) {
+                            std::vector<double> values;
+                            for (const auto& repeat : evidence.repeats) {
+                                if (repeat.included_after_warmup)
+                                    values.push_back(numerator ? repeat.numerator_value : repeat.denominator_value);
+                            }
+                            const double median = aggregate_samples(sample_aggregate::p50, values);
+                            std::vector<double> deviations;
+                            for (const auto value : values) deviations.push_back(std::abs(value - median));
+                            emit_kv_with_body(summary, name, [&values, median, &deviations](auto& body_builder) {
+                                emit_object_with_body(body_builder, [&values, median, &deviations](auto& body) {
+                                    emit_key(body, "count"); body.append(values.size()); body.append_comma();
+                                    emit_key(body, "min"); body.append(*std::min_element(values.begin(), values.end())); body.append_comma();
+                                    emit_key(body, "p50"); body.append(median); body.append_comma();
+                                    emit_key(body, "max"); body.append(*std::max_element(values.begin(), values.end())); body.append_comma();
+                                    emit_key(body, "mad"); body.append(aggregate_samples(sample_aggregate::p50, deviations));
+                                });
+                            });
+                        };
+                        side("numerator", true);
+                        summary.append_comma();
+                        side("denominator", false);
+                    });
+                });
+                inner.append_comma();
+            }
             emit_kv_with_body(
                 inner, "schedule_identity", [&evidence](auto& schedule_builder) {
                     emit_object_with_body(

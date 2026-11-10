@@ -13,10 +13,13 @@ extern "C" {
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "storage/lmgr.h"
 #include "parser/parse_func.h"
 #include "parser/parse_relation.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/typcache.h"
+#include "funcapi.h"
 #include "mb/pg_wchar.h"
 }
 export module bioseq.postgres.storage.io.exporting.query_binding;
@@ -33,6 +36,26 @@ import bioseq.sequences.compact_sequence_typmod;
 export namespace bioseq::postgres::storage::io::exporting {
 using bioseq::io::record_field_role;
 using bioseq::io::column_value_kind;
+
+/** Resolve invalidatable extension OIDs without longjmp across binding owners. */
+[[nodiscard]] inline const bioseq_stub_oids& export_stub_oids() {
+    return *bioseq::postgres::support::invoke_pg_as_cpp([] { return &get_cached_stub_oids(); });
+}
+
+/** Read a checked expression's SQL type through the shared PG error boundary. */
+[[nodiscard]] inline Oid export_expression_type(const Node* expression) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([expression] { return exprType(expression); });
+}
+
+/** Read an expression typmod without exposing C++ owners to PG catalog errors. */
+[[nodiscard]] inline int32 export_expression_typmod(const Node* expression) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([expression] { return exprTypmod(expression); });
+}
+
+/** Compare PG trees while converting recursion-limit errors before C++ unwinding. */
+[[nodiscard]] inline bool equal_export_expressions(const void* left, const void* right) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([left, right] { return equal(left, right); });
+}
 
 /** Query-local source identity: self-join aliases retain distinct range entries. */
 struct column_origin {
@@ -120,7 +143,10 @@ struct export_query_binding {
     bioseq::io::sequence_file_format format{bioseq::io::sequence_file_format::fasta};
     std::vector<export_query_frame> frames;
     std::vector<export_match_site> match_sites;
+    bool match_fields_required{};
     std::vector<export_column_binding> columns;
+    std::set<Oid> metadata_type_dependencies;
+    std::set<Oid> metadata_relation_dependencies;
     std::size_t visible_count{};
     export_expression_source query_row_source;
     std::size_t query_source_frame{};
@@ -213,7 +239,7 @@ struct export_query_binding {
     while (expression) {
         if (IsA(expression, RelabelType)) {
             auto* label = reinterpret_cast<RelabelType*>(expression);
-            if (exprType(reinterpret_cast<Node*>(label->arg)) != label->resulttype) break;
+            if (export_expression_type(reinterpret_cast<Node*>(label->arg)) != label->resulttype) break;
             expression = reinterpret_cast<Node*>(label->arg);
         } else if (IsA(expression, CollateExpr)) {
             expression = reinterpret_cast<Node*>(reinterpret_cast<CollateExpr*>(expression)->arg);
@@ -267,7 +293,9 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
                     children.push_back(*frame);
                 return false;
             }
-            return expression_tree_walker(expression, walk, opaque);
+            return bioseq::postgres::support::invoke_pg_as_cpp([expression, opaque] {
+                return expression_tree_walker(expression, walk, opaque);
+            });
         }
     } expressions{binding, current};
     bioseq::postgres::support::invoke_pg_as_cpp([query, &expressions] {
@@ -308,7 +336,7 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
 [[nodiscard]] inline std::pair<Node*, std::size_t> resolve_export_expression(
     const export_query_binding& binding, std::size_t frame, Node* expression,
     std::size_t depth = 0, bool preserve_materialized_output = false,
-    bool preserve_cte_output = false) {
+    bool preserve_cte_output = false, bool preserve_set_output = false) {
     if (depth > 128) return {nullptr, frame};
     expression = export_identity_expression(expression);
     if (!expression || !IsA(expression, Var)) return {expression, frame};
@@ -316,12 +344,16 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
     const auto owner = export_outer_frame(binding, frame, variable->varlevelsup);
     if (!owner || variable->varattno <= 0) return {expression, frame};
     auto* query = binding.frames[*owner].query;
+    // Set-operation output Vars name the leftmost arm only as parser placeholders.
+    // They cannot prove a row/match owner. The schema-only fold below explicitly
+    // requests this boundary and then inspects the matching output of every arm.
+    if (query->setOperations) return {preserve_set_output ? expression : nullptr, *owner};
     if (variable->varno <= 0 || variable->varno > list_length(query->rtable)) return {nullptr, *owner};
     auto* entry = static_cast<RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1));
     if (entry->rtekind == RTE_JOIN && variable->varattno <= list_length(entry->joinaliasvars))
         return resolve_export_expression(binding, *owner,
             static_cast<Node*>(list_nth(entry->joinaliasvars, variable->varattno - 1)), depth + 1,
-            preserve_materialized_output, preserve_cte_output);
+            preserve_materialized_output, preserve_cte_output, preserve_set_output);
     auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
         : entry->rtekind == RTE_CTE ? export_cte_query(binding, *owner, *entry) : nullptr;
     if (!inner) return {expression, *owner};
@@ -333,7 +365,92 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
         || (preserve_materialized_output && cte->ctematerialized == CTEMaterializeAlways)))
         return {expression, *owner};
     return resolve_export_expression(binding, *inner_frame,
-        reinterpret_cast<Node*>(target->expr), depth + 1, preserve_materialized_output, preserve_cte_output);
+        reinterpret_cast<Node*>(target->expr), depth + 1,
+        preserve_materialized_output, preserve_cte_output, preserve_set_output);
+}
+
+/** Fold projection alternatives without turning common schema facts into one row.
+ * Reuse ordinary identity resolution until a set-operation boundary, then inspect
+ * each output arm by ordinal. This stays planning-only and never evaluates rows.
+ */
+struct export_projection_sources {
+    const export_query_binding& binding;
+    std::vector<std::pair<Node*, std::size_t>> leaves;
+    std::set<std::pair<std::size_t, AttrNumber>> set_outputs;
+    bool complete{true};
+    bool crosses_set_operation{};
+
+    /** Resolve aliases/CTEs and retain each definite terminal projection. */
+    void resolve(std::size_t frame, Node* expression, std::size_t depth = 0) {
+        if (!complete) return;
+        if (depth > 128) { complete = false; return; }
+        const auto [resolved, owner] = resolve_export_expression(
+            binding, frame, expression, depth, false, false, true);
+        if (!resolved) { complete = false; return; }
+        if (IsA(resolved, Var) && binding.frames[owner].query->setOperations) {
+            crosses_set_operation = true;
+            const auto* variable = reinterpret_cast<const Var*>(resolved);
+            // Shared CTE definitions form a DAG: repeated alternatives do not
+            // change unanimous facts, and must not expand exponentially here.
+            if (!set_outputs.emplace(owner, variable->varattno).second) return;
+            resolve_set_operation(owner, binding.frames[owner].query->setOperations,
+                variable->varattno, depth + 1);
+            return;
+        }
+        leaves.emplace_back(resolved, owner);
+    }
+
+    /** Visit both arms of UNION/INTERSECT/EXCEPT, including nested set trees. */
+    void resolve_set_operation(std::size_t frame, Node* operation, AttrNumber result_number,
+        std::size_t depth) {
+        if (!complete) return;
+        if (!operation || depth > 128 || result_number <= 0) { complete = false; return; }
+        if (IsA(operation, SetOperationStmt)) {
+            const auto* set = reinterpret_cast<const SetOperationStmt*>(operation);
+            if (set->op != SETOP_UNION && set->op != SETOP_INTERSECT && set->op != SETOP_EXCEPT) {
+                complete = false;
+                return;
+            }
+            resolve_set_operation(frame, set->larg, result_number, depth + 1);
+            resolve_set_operation(frame, set->rarg, result_number, depth + 1);
+            return;
+        }
+        if (!IsA(operation, RangeTblRef)) { complete = false; return; }
+        const auto range_index = reinterpret_cast<const RangeTblRef*>(operation)->rtindex;
+        auto* query = binding.frames[frame].query;
+        if (range_index <= 0 || range_index > list_length(query->rtable)) { complete = false; return; }
+        auto* entry = static_cast<RangeTblEntry*>(list_nth(query->rtable, range_index - 1));
+        if (entry->rtekind != RTE_SUBQUERY || !entry->subquery) { complete = false; return; }
+        const auto child = export_frame_index(binding, entry->subquery);
+        auto* target = export_target_entry(*entry->subquery, result_number);
+        if (!child || !target || target->resjunk) { complete = false; return; }
+        resolve(*child, reinterpret_cast<Node*>(target->expr), depth + 1);
+    }
+};
+
+/** Prove one imported-ID namespace without asserting one lexical row identity.
+ * Every arm must expose the same physical table attribute. The resulting pair
+ * fills source_relation/source_attribute only, never column_origin or match data.
+ */
+[[nodiscard]] inline std::optional<std::pair<Oid, AttrNumber>> resolve_export_provenance_attribute(
+    const export_query_binding& binding, std::size_t frame, Node* expression) {
+    export_projection_sources sources{binding};
+    sources.resolve(frame, expression);
+    if (!sources.complete || sources.leaves.empty()) return std::nullopt;
+    std::optional<std::pair<Oid, AttrNumber>> common;
+    for (const auto& [leaf, owner] : sources.leaves) {
+        if (!IsA(leaf, Var)) return std::nullopt;
+        const auto* variable = reinterpret_cast<const Var*>(leaf);
+        const auto* query = binding.frames[owner].query;
+        if (variable->varno <= 0 || variable->varno > list_length(query->rtable)
+            || variable->varattno <= 0) return std::nullopt;
+        const auto* entry = static_cast<const RangeTblEntry*>(list_nth(query->rtable, variable->varno - 1));
+        if (entry->rtekind != RTE_RELATION) return std::nullopt;
+        const auto attribute = std::pair{entry->relid, variable->varattno};
+        if (common && *common != attribute) return std::nullopt;
+        common = attribute;
+    }
+    return common;
 }
 
 /** Proven direct base column; aliases retain the physical relation and lexical range. */
@@ -368,14 +485,26 @@ inline void index_export_queries(export_query_binding& binding, Query* query,
     return std::nullopt;
 }
 
-/** Follow identity projections to the actual helper OID without trusting aliases. */
+/** Infer a static helper role only when every arm has the same exact helper OID.
+ * Equal roles do not establish one match owner: exact expression resolution still
+ * rejects all set-operation boundaries. Different units or transformed arms do
+ * not inherit the leftmost helper's role, even when aliases happen to match.
+ */
 [[nodiscard]] inline FuncExpr* resolve_export_helper(const export_query_binding& binding,
     std::size_t frame, Node* expression) {
-    const auto [resolved, owner] = resolve_export_expression(binding, frame, expression);
-    static_cast<void>(owner);
-    if (!resolved || !IsA(resolved, FuncExpr)) return nullptr;
-    auto* call = reinterpret_cast<FuncExpr*>(resolved);
-    return export_helper_role(call->funcid, get_cached_stub_oids()) ? call : nullptr;
+    export_projection_sources sources{binding};
+    sources.resolve(frame, expression);
+    if (!sources.complete || sources.leaves.empty()) return nullptr;
+    FuncExpr* common = nullptr;
+    for (const auto& [leaf, owner] : sources.leaves) {
+        static_cast<void>(owner);
+        if (!IsA(leaf, FuncExpr)) return nullptr;
+        auto* call = reinterpret_cast<FuncExpr*>(leaf);
+        if (!export_helper_role(call->funcid, export_stub_oids())
+            || (common && common->funcid != call->funcid)) return nullptr;
+        common = call;
+    }
+    return common;
 }
 
 /** Scope-aware detection prevents an arithmetic helper expression regaining its alias role. */
@@ -392,8 +521,23 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
     if (!expression) return false;
     auto& context = *static_cast<export_helper_search*>(opaque);
     if (context.depth > 128) return true;
-    const auto [resolved, frame] = resolve_export_expression(*context.binding, context.frame, expression);
-    if (!resolved) return true;
+    export_projection_sources sources{*context.binding};
+    sources.resolve(context.frame, expression, context.depth);
+    if (!sources.complete || sources.leaves.empty()) return true;
+    if (sources.crosses_set_operation) {
+        for (const auto& [leaf, owner] : sources.leaves) {
+            export_helper_search child{context.binding, owner, context.depth + 1};
+            if (IsA(leaf, Var)) {
+                // Resolution already followed varlevelsup to owner. A local POD
+                // view prevents the helper rewalk from climbing that scope twice.
+                auto local = *reinterpret_cast<const Var*>(leaf);
+                local.varlevelsup = 0;
+                if (export_contains_helper(reinterpret_cast<Node*>(&local), &child)) return true;
+            } else if (export_contains_helper(leaf, &child)) return true;
+        }
+        return false;
+    }
+    const auto [resolved, frame] = sources.leaves.front();
     if (IsA(resolved, Var)) {
         const auto* variable = reinterpret_cast<const Var*>(resolved);
         const auto* query = context.binding->frames[frame].query;
@@ -414,9 +558,11 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         });
     }
     if (IsA(resolved, FuncExpr)
-        && export_helper_role(reinterpret_cast<FuncExpr*>(resolved)->funcid, get_cached_stub_oids())) return true;
+        && export_helper_role(reinterpret_cast<FuncExpr*>(resolved)->funcid, export_stub_oids())) return true;
     export_helper_search child{context.binding, frame, context.depth + 1};
-    return expression_tree_walker(resolved, export_contains_helper, &child);
+    return bioseq::postgres::support::invoke_pg_as_cpp([resolved, &child] {
+            return expression_tree_walker(resolved, export_contains_helper, &child);
+        });
 }
 
 /** Distinguish biological, quality and CIGAR payloads before type fallback. */
@@ -428,7 +574,7 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
     const auto base_type = bioseq::postgres::support::invoke_pg_as_cpp([type, &typmod] {
         return getBaseTypeAndTypmod(type, &typmod);
     });
-    if (base_type == get_cached_stub_oids().bioseq_seq_type_oid) {
+    if (base_type == export_stub_oids().bioseq_seq_type_oid) {
         if (typmod < 0) return column_value_kind::biological_sequence;
         const auto parameters = compact_sequence_stdc_type_params::decode(typmod);
         alphabet = parameters.alphabet_code;
@@ -436,14 +582,16 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         if (is_quality_alphabet_code(*alphabet)) return column_value_kind::quality_sequence;
         return column_value_kind::biological_sequence;
     }
-    const auto tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(base_type));
-    if (HeapTupleIsValid(tuple)) {
+    const bool alignment = bioseq::postgres::support::invoke_pg_as_cpp([base_type] {
+        const auto tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(base_type));
+        if (!HeapTupleIsValid(tuple)) return false;
         const auto* descriptor = reinterpret_cast<Form_pg_type>(GETSTRUCT(tuple));
-        const bool alignment = descriptor->typnamespace == get_namespace_oid("bioseq", true)
+        const bool matched = descriptor->typnamespace == get_namespace_oid("bioseq", true)
             && std::strcmp(NameStr(descriptor->typname), "alignment") == 0;
         ReleaseSysCache(tuple);
-        if (alignment) return column_value_kind::alignment_record;
-    }
+        return matched;
+    });
+    if (alignment) return column_value_kind::alignment_record;
     switch (base_type) {
         case TEXTOID: case VARCHAROID: case BPCHAROID: case NAMEOID:
             return column_value_kind::text;
@@ -456,6 +604,116 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
         case JSONOID: case JSONBOID: return column_value_kind::json;
         default: return column_value_kind::scalar_text;
     }
+}
+
+/** Catalog-only classification; unresolved anonymous records require an explicit choice. */
+enum class export_payload_containment : std::uint8_t { absent, present, unresolved, not_storable };
+
+/** Inspect nested SQL type edges once while binding, without invoking value output.
+ * Domain, array, range, multirange and composite edges share one visited set.
+ * Anonymous RowExprs retain their distinct
+ * static shapes; opaque RECORD results require a registered result descriptor. */
+[[nodiscard]] inline export_payload_containment inspect_export_payload_containment(
+    export_query_binding& binding, Node* expression) {
+    struct pending_type {
+        Oid type;
+        int32 typmod;
+        Node* expression;
+        std::size_t frame;
+    };
+    const auto sequence_type = export_stub_oids().bioseq_seq_type_oid;
+    const auto alignment_type = bioseq::postgres::support::invoke_pg_as_cpp([] {
+        const auto schema = get_namespace_oid("bioseq", true);
+        return OidIsValid(schema) ? GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+            CStringGetDatum("alignment"), ObjectIdGetDatum(schema)) : InvalidOid;
+    });
+    const auto root = bioseq::postgres::support::invoke_pg_as_cpp([expression] {
+        return pending_type{exprType(expression), exprTypmod(expression), expression, 0};
+    });
+    std::vector<pending_type> pending{root};
+    std::set<std::tuple<Oid, int32, std::uintptr_t>> visited;
+    bool unresolved = false;
+    while (!pending.empty()) {
+        auto current = pending.back();
+        pending.pop_back();
+        binding.metadata_type_dependencies.insert(current.type);
+        current.type = bioseq::postgres::support::invoke_pg_as_cpp([&current] {
+            return getBaseTypeAndTypmod(current.type, &current.typmod);
+        });
+        binding.metadata_type_dependencies.insert(current.type);
+        if (current.type == sequence_type || current.type == alignment_type)
+            return export_payload_containment::present;
+        if (current.type == RECORDOID && current.typmod < 0 && current.expression) {
+            std::tie(current.expression, current.frame) = resolve_export_expression(
+                binding, current.frame, current.expression);
+        }
+        const auto shape = current.type == RECORDOID && current.typmod < 0
+            ? current.expression : nullptr;
+        if (!visited.emplace(current.type, current.typmod, reinterpret_cast<std::uintptr_t>(shape)).second) continue;
+        if (shape && IsA(shape, RowExpr)) {
+            const auto* row = reinterpret_cast<const RowExpr*>(shape);
+            for (auto* cell = list_head(row->args); cell; cell = lnext(row->args, cell)) {
+                auto* field = static_cast<Node*>(lfirst(cell));
+                pending.push_back(bioseq::postgres::support::invoke_pg_as_cpp([field, frame = current.frame] {
+                    return pending_type{exprType(field), exprTypmod(field), field, frame};
+                }));
+            }
+            continue;
+        }
+        const auto element = bioseq::postgres::support::invoke_pg_as_cpp([type = current.type] {
+            return get_element_type(type);
+        });
+        if (OidIsValid(element)) {
+            pending.push_back({element, -1, nullptr, current.frame});
+            continue;
+        }
+        const auto category = bioseq::postgres::support::invoke_pg_as_cpp([type = current.type] {
+            return get_typtype(type);
+        });
+        if (category == TYPTYPE_RANGE || category == TYPTYPE_MULTIRANGE) {
+            const auto contained_type = bioseq::postgres::support::invoke_pg_as_cpp([type = current.type, category] {
+                return category == TYPTYPE_RANGE ? get_range_subtype(type) : get_multirange_range(type);
+            });
+            if (OidIsValid(contained_type)) pending.push_back({contained_type, -1, nullptr, current.frame});
+            else unresolved = true;
+            continue;
+        }
+        if (current.type != RECORDOID && category != TYPTYPE_COMPOSITE) continue;
+        if (category == TYPTYPE_COMPOSITE) {
+            const auto relation = bioseq::postgres::support::invoke_pg_as_cpp([type = current.type] {
+                const auto relation = get_typ_typrelid(type);
+                if (!OidIsValid(relation)) elog(ERROR, "composite export type has no catalog relation");
+                // Hold the inspected shape until transaction end. Cached plans
+                // carry the same lock as an unused relation RTE below.
+                LockRelationOid(relation, AccessShareLock);
+                return relation;
+            });
+            binding.metadata_relation_dependencies.insert(relation);
+        }
+        auto* descriptor = bioseq::postgres::support::invoke_pg_as_cpp([current]() -> TupleDesc {
+            if (current.type != RECORDOID || current.typmod >= 0)
+                return lookup_rowtype_tupdesc_copy(current.type, current.typmod);
+            if (!current.expression || (!IsA(current.expression, FuncExpr)
+                && !IsA(current.expression, OpExpr))) return nullptr;
+            TupleDesc result = nullptr;
+            const auto category = get_expr_result_type(current.expression, nullptr, &result);
+            if (category != TYPEFUNC_COMPOSITE && category != TYPEFUNC_COMPOSITE_DOMAIN) return nullptr;
+            return result;
+        });
+        if (!descriptor) { unresolved = true; continue; }
+        try {
+            for (int index = 0; index < descriptor->natts; ++index) {
+                const auto* field = TupleDescAttr(descriptor, index);
+                if (!field->attisdropped)
+                    pending.push_back({field->atttypid, field->atttypmod, nullptr, current.frame});
+            }
+        } catch (...) {
+            bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { FreeTupleDesc(descriptor); });
+            throw;
+        }
+        bioseq::postgres::support::invoke_pg_as_cpp([descriptor] { FreeTupleDesc(descriptor); });
+    }
+    return unresolved ? export_payload_containment::unresolved : export_payload_containment::absent;
 }
 
 /** Hidden companion Vars cannot omit PostgreSQL outer-join nulling metadata. */
@@ -489,7 +747,7 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
  * those scopes remain opaque to ownership and companion projection. */
 [[nodiscard]] inline bool export_query_contains_scope(const export_query_binding& binding,
     std::size_t start, std::size_t wanted, bool include_recursive_definitions = false,
-    bool include_expression_children = false) {
+    bool include_expression_children = false, bool cross_set_operations = true) {
     std::vector<std::size_t> pending{start};
     std::vector<bool> visited(binding.frames.size(), false);
     while (!pending.empty()) {
@@ -502,6 +760,9 @@ inline bool export_contains_helper(Node* expression, void* opaque) {
             pending.insert(pending.end(), binding.frames[frame].expression_children.begin(),
                 binding.frames[frame].expression_children.end());
         const auto* query = binding.frames[frame].query;
+        // Branch-local matches remain executable, but cannot own all rows above
+        // a set operation. Ordinary validation still traverses these scopes.
+        if (!cross_set_operations && query->setOperations) continue;
         for (auto* cell = list_head(query->rtable); cell; cell = lnext(query->rtable, cell)) {
             const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
             auto* inner = entry->rtekind == RTE_SUBQUERY ? entry->subquery
@@ -644,7 +905,9 @@ inline bool collect_export_row_source(Node* expression, void* opaque) {
     }
     export_row_source_walk child{context.binding, frame, context.match_frame,
         context.depth + 1, local_levels, context.consumers, context.result, context.dependencies};
-    return expression_tree_walker(resolved, collect_export_row_source, &child);
+    return bioseq::postgres::support::invoke_pg_as_cpp([resolved, &child] {
+            return expression_tree_walker(resolved, collect_export_row_source, &child);
+        });
 }
 
 /** Prove one underlying row plus its consumer path; ordinary constants are row-free. */
@@ -711,8 +974,9 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
         export_binding_error("CIGAR role requires a CIGAR sequence or explicitly mapped CIGAR text");
     if (role == record_field_role::alignment && kind != column_value_kind::alignment_record)
         export_binding_error("alignment role requires bioseq.alignment");
-    if (role == record_field_role::metadata && (scalar_sequence || kind == column_value_kind::alignment_record))
-        export_binding_error("biological, quality, CIGAR and alignment columns cannot become ordinary metadata");
+    if ((role == record_field_role::metadata || role == record_field_role::auxiliary)
+        && (scalar_sequence || kind == column_value_kind::alignment_record))
+        export_binding_error("biological, quality, CIGAR and alignment columns cannot become ordinary metadata or auxiliary tags");
     if ((role == record_field_role::header || role == record_field_role::qname
         || role == record_field_role::reference_name || role == record_field_role::mate_reference)
         && kind != column_value_kind::text) export_binding_error("header and reference-name roles require text columns");
@@ -742,6 +1006,7 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
     binding.query = query;
     binding.format = format;
     index_export_queries(binding, query);
+    std::vector<export_payload_containment> containment;
     for (auto* cell = list_head(query->targetList); cell; cell = lnext(query->targetList, cell)) {
         auto* target = static_cast<TargetEntry*>(lfirst(cell));
         if (target->resjunk) continue;
@@ -750,15 +1015,21 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
         column.column.ordinal = binding.columns.size();
         column.column.name = target->resname ? target->resname : "?column?";
         const auto* expression = reinterpret_cast<Node*>(target->expr);
-        const Oid type = exprType(expression);
-        column.column.kind = export_column_kind(type, exprTypmod(expression), column.column.alphabet_code);
-        column.column.qualified_type = format_type_be_qualified(type);
+        const Oid type = export_expression_type(expression);
+        column.column.kind = export_column_kind(type, export_expression_typmod(expression), column.column.alphabet_code);
+        column.column.qualified_type = bioseq::postgres::support::invoke_pg_as_cpp([type] {
+            return format_type_be_qualified(type);
+        });
         column.column.nullable = true;
         column.origin = resolve_export_origin(binding, 0, reinterpret_cast<Node*>(target->expr));
-        if (column.origin) { column.source_relation = column.origin->relation; column.source_attribute = column.origin->attribute; }
+        if (const auto provenance = resolve_export_provenance_attribute(
+                binding, 0, reinterpret_cast<Node*>(target->expr))) {
+            column.source_relation = provenance->first;
+            column.source_attribute = provenance->second;
+        }
         if (auto* helper = resolve_export_helper(binding, 0, reinterpret_cast<Node*>(target->expr))) {
             column.helper_function = helper->funcid;
-            if (helper->funcid == get_cached_stub_oids().cigar_oid) {
+            if (helper->funcid == export_stub_oids().cigar_oid) {
                 column.column.kind = column_value_kind::cigar_sequence;
                 column.column.alphabet_code = pgseq_cigar_alphabet_code;
             }
@@ -767,6 +1038,15 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
             export_helper_search search{&binding, 0};
             column.transformed_helper = export_contains_helper(reinterpret_cast<Node*>(target->expr), &search);
         }
+        auto contained = column.column.kind == column_value_kind::scalar_text
+            ? inspect_export_payload_containment(binding, reinterpret_cast<Node*>(target->expr))
+            : export_payload_containment::absent;
+        if (contained != export_payload_containment::present
+            && column.column.kind == column_value_kind::scalar_text
+            && bioseq::postgres::support::invoke_pg_as_cpp([type] {
+                return get_typtype(getBaseType(type)) == TYPTYPE_PSEUDO;
+            })) contained = export_payload_containment::not_storable;
+        containment.push_back(contained);
         binding.columns.push_back(std::move(column));
     }
     binding.visible_count = binding.columns.size();
@@ -795,9 +1075,25 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
         if (mapping.data_source == "pos" || mapping.data_source == "pnext")
             binding.columns[index].coordinate_basis = bioseq::io::coordinate_basis::sam_one_based;
     }
-    const auto& oids = get_cached_stub_oids();
+    const auto& oids = export_stub_oids();
     for (std::size_t index = 0; index < binding.columns.size(); ++index) {
         auto& column = binding.columns[index];
+        if (containment[index] != export_payload_containment::absent
+            && column.role != record_field_role::omit) {
+            if (containment[index] == export_payload_containment::not_storable)
+                export_binding_error("export column #" + std::to_string(index + 1)
+                    + " has SQL pseudo-type " + column.column.qualified_type
+                    + ", which bioseq.load cannot store as metadata; cast to a named composite or text, "
+                    "or map the column to omit");
+            if (containment[index] == export_payload_containment::unresolved)
+                export_binding_error("cannot determine payload containment of export column #"
+                    + std::to_string(index + 1) + " (" + column.column.name
+                    + "); cast the record to a named composite or text, or map it to omit");
+            if (column.role)
+                export_binding_error("typed payload containers cannot become export metadata or auxiliary tags; "
+                    "cast explicitly to text or map the column to omit");
+            column.role = record_field_role::omit;
+        }
         if (!column.role && column.helper_function != InvalidOid) {
             const auto role = *export_helper_role(column.helper_function, oids);
             if (export_uses_role(role, format)) bind_export_role(binding, index, role);
@@ -812,33 +1108,40 @@ struct export_expression_walk {
     export_query_binding* binding{};
     std::size_t frame{};
     bool has_helper{};
+    bool can_own{true};
 };
 
-/** Collect mmsearch calls in one lexical scope and detect nested helper arithmetic. */
+/** Collect owning calls; opaque set arms retain only an explicit-field obligation. */
 inline bool walk_export_expression(Node* expression, void* opaque) {
     if (!expression) return false;
     auto& context = *static_cast<export_expression_walk*>(opaque);
     if (IsA(expression, Query)) return false;
     if (IsA(expression, FuncExpr)) {
         auto* call = reinterpret_cast<FuncExpr*>(expression);
-        const auto& oids = get_cached_stub_oids();
+        const auto& oids = export_stub_oids();
         if (call->funcid == oids.mmsearch_oid || call->funcid == oids.mmsearch_with_opts_oid) {
+            if (!context.can_own) {
+                context.binding->match_fields_required = true;
+                return false;
+            }
             const bool duplicate = std::any_of(context.binding->match_sites.begin(), context.binding->match_sites.end(),
                 [frame = context.frame, call](const export_match_site& site) {
-                    return site.frame == frame && equal(site.expression, call);
+                    return site.frame == frame && equal_export_expressions(site.expression, call);
                 });
             if (!duplicate) context.binding->match_sites.push_back({context.frame, call});
         }
         if (export_helper_role(call->funcid, oids)) context.has_helper = true;
     }
-    return expression_tree_walker(expression, walk_export_expression, opaque);
+    return bioseq::postgres::support::invoke_pg_as_cpp([expression, opaque] {
+            return expression_tree_walker(expression, walk_export_expression, opaque);
+        });
 }
 
 /** Add one identity projection and record new base-column permission requirements. */
 [[nodiscard]] inline AttrNumber append_export_projection(Query& query, Expr* expression) {
     for (auto* cell = list_head(query.targetList); cell; cell = lnext(query.targetList, cell)) {
         auto* target = static_cast<TargetEntry*>(lfirst(cell));
-        if (!target->resjunk && equal(target->expr, expression)) return target->resno;
+        if (!target->resjunk && equal_export_expressions(target->expr, expression)) return target->resno;
     }
     if (export_completion_barrier(query)) export_binding_error(
         "export completion cannot cross outer joins, DISTINCT, grouping, windows, set operations or set-returning projections; select required fields explicitly");
@@ -853,8 +1156,10 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
     }
     const auto number = static_cast<AttrNumber>(visible_count + 1);
     const auto name = "__bioseq_export_" + std::to_string(number);
-    query.targetList = list_insert_nth(query.targetList, visible_count,
-        makeTargetEntry(expression, number, pstrdup(name.c_str()), false));
+    bioseq::postgres::support::invoke_pg_as_cpp([&query, visible_count, expression, number, &name] {
+        query.targetList = list_insert_nth(query.targetList, visible_count,
+            makeTargetEntry(expression, number, pstrdup(name.c_str()), false));
+    });
     auto* identity = export_identity_expression(reinterpret_cast<Node*>(expression));
     if (identity && IsA(identity, Var)) {
         auto* variable = reinterpret_cast<Var*>(identity);
@@ -871,8 +1176,10 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
                     list_nth(query.rteperminfos, entry->perminfoindex - 1));
                 if (OidIsValid(permission->checkAsUser)) export_binding_error(
                     "export completion cannot expose a hidden base column through a view or rule; project that field explicitly in the view");
-                permission->selectedCols = bms_add_member(permission->selectedCols,
-                    variable->varattno - FirstLowInvalidHeapAttributeNumber);
+                bioseq::postgres::support::invoke_pg_as_cpp([permission, variable] {
+                    permission->selectedCols = bms_add_member(permission->selectedCols,
+                        variable->varattno - FirstLowInvalidHeapAttributeNumber);
+                });
             }
         }
     }
@@ -896,10 +1203,12 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
                 const auto next = static_cast<AttrNumber>(list_length(cte->ctecoltypes) + 1);
                 auto* added = export_target_entry(*current.query, next);
                 if (!added || added->resjunk) export_binding_error("cannot append export data through this CTE shape");
-                cte->ctecolnames = lappend(cte->ctecolnames, makeString(pstrdup(added->resname)));
-                cte->ctecoltypes = lappend_oid(cte->ctecoltypes, exprType(reinterpret_cast<Node*>(added->expr)));
-                cte->ctecoltypmods = lappend_int(cte->ctecoltypmods, exprTypmod(reinterpret_cast<Node*>(added->expr)));
-                cte->ctecolcollations = lappend_oid(cte->ctecolcollations, exprCollation(reinterpret_cast<Node*>(added->expr)));
+                bioseq::postgres::support::invoke_pg_as_cpp([cte, added] {
+                    cte->ctecolnames = lappend(cte->ctecolnames, makeString(pstrdup(added->resname)));
+                    cte->ctecoltypes = lappend_oid(cte->ctecoltypes, exprType(reinterpret_cast<Node*>(added->expr)));
+                    cte->ctecoltypmods = lappend_int(cte->ctecoltypmods, exprTypmod(reinterpret_cast<Node*>(added->expr)));
+                    cte->ctecolcollations = lappend_oid(cte->ctecolcollations, exprCollation(reinterpret_cast<Node*>(added->expr)));
+                });
             }
             std::size_t references = 0;
             for (std::size_t candidate = 0; candidate < binding.frames.size(); ++candidate) {
@@ -918,10 +1227,12 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
                         parent = candidate_query;
                         range_number = index;
                     }
-                    entry->coltypes = static_cast<List*>(copyObject(cte->ctecoltypes));
-                    entry->coltypmods = static_cast<List*>(copyObject(cte->ctecoltypmods));
-                    entry->colcollations = static_cast<List*>(copyObject(cte->ctecolcollations));
-                    entry->eref->colnames = static_cast<List*>(copyObject(cte->ctecolnames));
+                    bioseq::postgres::support::invoke_pg_as_cpp([entry, cte] {
+                        entry->coltypes = static_cast<List*>(copyObject(cte->ctecoltypes));
+                        entry->coltypmods = static_cast<List*>(copyObject(cte->ctecoltypmods));
+                        entry->colcollations = static_cast<List*>(copyObject(cte->ctecolcollations));
+                        entry->eref->colnames = static_cast<List*>(copyObject(cte->ctecolnames));
+                    });
                 }
             }
             if (references != 1) export_binding_error(
@@ -936,12 +1247,12 @@ inline bool walk_export_expression(Node* expression, void* opaque) {
             && (OidIsValid(range->relid) || range->security_barrier);
         if (declared_view && number > list_length(range->eref->colnames)) export_binding_error(
             "export completion cannot expose a hidden column through a view; project it in the view explicitly");
-        while (list_length(range->eref->colnames) < number)
-            range->eref->colnames = lappend(range->eref->colnames, makeString(pstrdup(target->resname)));
-        auto* variable = makeVar(range_number, number,
-            exprType(reinterpret_cast<Node*>(target->expr)),
-            exprTypmod(reinterpret_cast<Node*>(target->expr)),
-            exprCollation(reinterpret_cast<Node*>(target->expr)), 0);
+        auto* variable = bioseq::postgres::support::invoke_pg_as_cpp([range, number, target, range_number] {
+            while (list_length(range->eref->colnames) < number)
+                range->eref->colnames = lappend(range->eref->colnames, makeString(pstrdup(target->resname)));
+            return makeVar(range_number, number, exprType(reinterpret_cast<Node*>(target->expr)),
+                exprTypmod(reinterpret_cast<Node*>(target->expr)), exprCollation(reinterpret_cast<Node*>(target->expr)), 0);
+        });
         number = append_export_projection(*parent, reinterpret_cast<Expr*>(variable));
         frame = parent_index;
     }
@@ -965,7 +1276,9 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
         }
     }
     const auto number = expose_export_projection(binding, frame,
-        reinterpret_cast<Expr*>(copyObject(expression)));
+        bioseq::postgres::support::invoke_pg_as_cpp([expression] {
+            return reinterpret_cast<Expr*>(copyObject(expression));
+        }));
     for (std::size_t index = 0; index < binding.columns.size(); ++index) {
         if (binding.columns[index].result_number == number) {
             if (binding.columns[index].role == record_field_role::omit) return;
@@ -978,9 +1291,11 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     column.result_number = number;
     column.column.ordinal = binding.columns.size();
     column.column.name = target->resname;
-    column.column.qualified_type = format_type_be_qualified(exprType(reinterpret_cast<Node*>(target->expr)));
-    column.column.kind = export_column_kind(exprType(reinterpret_cast<Node*>(target->expr)),
-        exprTypmod(reinterpret_cast<Node*>(target->expr)), column.column.alphabet_code);
+    column.column.qualified_type = bioseq::postgres::support::invoke_pg_as_cpp([target] {
+        return format_type_be_qualified(exprType(reinterpret_cast<Node*>(target->expr)));
+    });
+    column.column.kind = export_column_kind(export_expression_type(reinterpret_cast<Node*>(target->expr)),
+        export_expression_typmod(reinterpret_cast<Node*>(target->expr)), column.column.alphabet_code);
     column.column.nullable = true;
     column.role = role;
     column.origin = origin;
@@ -990,7 +1305,7 @@ inline void complete_export_role(export_query_binding& binding, std::size_t fram
     column.private_companion = true;
     if (auto* helper = resolve_export_helper(binding, 0, reinterpret_cast<Node*>(target->expr))) {
         column.helper_function = helper->funcid;
-        if (helper->funcid == get_cached_stub_oids().cigar_oid) {
+        if (helper->funcid == export_stub_oids().cigar_oid) {
             column.column.kind = column_value_kind::cigar_sequence;
             column.column.alphabet_code = pgseq_cigar_alphabet_code;
         }
@@ -1107,11 +1422,13 @@ inline void complete_source_companion(export_query_binding& binding,
     if (!attribute) return;
     const auto frame = export_frame_index(binding, origin.query);
     if (!frame) export_binding_error("source companion lost lexical origin");
-    Oid type = InvalidOid;
-    int32 typmod = -1;
-    Oid collation = InvalidOid;
-    get_atttypetypmodcoll(origin.relation, *attribute, &type, &typmod, &collation);
-    auto* variable = makeVar(origin.range_index, *attribute, type, typmod, collation, 0);
+    auto* variable = bioseq::postgres::support::invoke_pg_as_cpp([&origin, attribute] {
+        Oid type = InvalidOid;
+        int32 typmod = -1;
+        Oid collation = InvalidOid;
+        get_atttypetypmodcoll(origin.relation, *attribute, &type, &typmod, &collation);
+        return makeVar(origin.range_index, *attribute, type, typmod, collation, 0);
+    });
     complete_export_role(binding, *frame, reinterpret_cast<Expr*>(variable), role);
 }
 
@@ -1119,7 +1436,9 @@ inline void complete_source_companion(export_query_binding& binding,
 inline void complete_export_internal(export_query_binding& binding, std::size_t frame,
     Expr* expression, export_internal_field field) {
     const auto number = expose_export_projection(binding, frame,
-        reinterpret_cast<Expr*>(copyObject(expression)));
+        bioseq::postgres::support::invoke_pg_as_cpp([expression] {
+            return reinterpret_cast<Expr*>(copyObject(expression));
+        }));
     for (auto& column : binding.columns) if (column.result_number == number) {
         column.internal_fields |= std::uint32_t{1} << static_cast<unsigned>(field);
         if (!column.role && field != export_internal_field::query_operand_component
@@ -1132,9 +1451,11 @@ inline void complete_export_internal(export_query_binding& binding, std::size_t 
     column.result_number = number;
     column.column.ordinal = binding.columns.size();
     column.column.name = target->resname;
-    column.column.qualified_type = format_type_be_qualified(exprType(reinterpret_cast<Node*>(target->expr)));
-    column.column.kind = export_column_kind(exprType(reinterpret_cast<Node*>(target->expr)),
-        exprTypmod(reinterpret_cast<Node*>(target->expr)), column.column.alphabet_code);
+    column.column.qualified_type = bioseq::postgres::support::invoke_pg_as_cpp([target] {
+        return format_type_be_qualified(exprType(reinterpret_cast<Node*>(target->expr)));
+    });
+    column.column.kind = export_column_kind(export_expression_type(reinterpret_cast<Node*>(target->expr)),
+        export_expression_typmod(reinterpret_cast<Node*>(target->expr)), column.column.alphabet_code);
     column.column.nullable = true;
     column.private_companion = true;
     column.internal_fields |= std::uint32_t{1} << static_cast<unsigned>(field);
@@ -1147,8 +1468,11 @@ inline void complete_export_row_identity(export_query_binding& binding,
     const column_origin& origin, bool query) {
     const auto frame = export_frame_index(binding, origin.query);
     if (!frame) return;
-    auto* row = makeVar(origin.range_index, SelfItemPointerAttributeNumber, TIDOID, -1, InvalidOid, 0);
-    auto* relation = makeVar(origin.range_index, TableOidAttributeNumber, OIDOID, -1, InvalidOid, 0);
+    const auto [row, relation] = bioseq::postgres::support::invoke_pg_as_cpp([&origin] {
+        return std::pair{
+            makeVar(origin.range_index, SelfItemPointerAttributeNumber, TIDOID, -1, InvalidOid, 0),
+            makeVar(origin.range_index, TableOidAttributeNumber, OIDOID, -1, InvalidOid, 0)};
+    });
     complete_export_internal(binding, *frame, reinterpret_cast<Expr*>(row), query
         ? export_internal_field::query_row_identity : export_internal_field::reference_row_identity);
     complete_export_internal(binding, *frame, reinterpret_cast<Expr*>(relation), query
@@ -1257,7 +1581,9 @@ inline bool collect_export_operand_dependencies(Node* expression, void* opaque) 
         context.row_sources, context.scalar_inputs};
     if (resolved != expression || frame != context.frame)
         return collect_export_operand_dependencies(resolved, &child);
-    if (contain_volatile_functions(resolved)) export_binding_error(
+    if (bioseq::postgres::support::invoke_pg_as_cpp([resolved] {
+        return contain_volatile_functions(resolved);
+    })) export_binding_error(
         "export operand lineage contains a volatile expression; materialize that value before alignment");
     if (IsA(resolved, Var)) {
         auto* variable = reinterpret_cast<Var*>(resolved);
@@ -1292,10 +1618,10 @@ inline bool collect_export_operand_dependencies(Node* expression, void* opaque) 
             const auto base_type = bioseq::postgres::support::invoke_pg_as_cpp([variable] {
                 return getBaseType(variable->vartype);
             });
-            if (base_type == get_cached_stub_oids().bioseq_seq_type_oid) export_binding_error(
+            if (base_type == export_stub_oids().bioseq_seq_type_oid) export_binding_error(
                 "derived sequence operand lacks a stable source row identity; materialize it in a table before alignment");
             const auto previous = std::find_if(context.scalar_inputs->begin(), context.scalar_inputs->end(),
-                [frame, variable](const auto& candidate) { return candidate.first == frame && equal(candidate.second, variable); });
+                [frame, variable](const auto& candidate) { return candidate.first == frame && equal_export_expressions(candidate.second, variable); });
             if (previous == context.scalar_inputs->end()) context.scalar_inputs->emplace_back(frame, variable);
         }
         return false;
@@ -1304,12 +1630,14 @@ inline bool collect_export_operand_dependencies(Node* expression, void* opaque) 
     if (IsA(resolved, SubLink) || IsA(resolved, Aggref) || IsA(resolved, WindowFunc)
         || IsA(resolved, PlaceHolderVar)) export_binding_error(
             "export operand identity cannot cross a subquery, grouping or placeholder evaluation boundary");
-    const auto operation = slice_project_node_opcode(resolved, get_cached_stub_oids());
+    const auto operation = slice_project_node_opcode(resolved, export_stub_oids());
     if (operation && (*operation == slice_project_opcode::slice || *operation == slice_project_opcode::element)) {
         const auto* subscript = reinterpret_cast<SubscriptingRef*>(resolved);
         if (subscript->refassgnexpr) export_binding_error("assignment subscripts cannot identify an alignment operand");
     }
-    return expression_tree_walker(resolved, collect_export_operand_dependencies, &child);
+    return bioseq::postgres::support::invoke_pg_as_cpp([resolved, &child] {
+            return expression_tree_walker(resolved, collect_export_operand_dependencies, &child);
+        });
 }
 
 /** Compose exact dependency identities for sliced/reversed/derived operands.
@@ -1328,8 +1656,10 @@ inline void complete_export_operand_identity(export_query_binding& binding, std:
         complete_export_internal(binding, owner, reinterpret_cast<Expr*>(variable), query
             ? export_internal_field::query_operand_component : export_internal_field::reference_operand_component);
     if (row_sources.empty() && scalar_inputs.empty()) {
-        auto* identity = makeConst(INT8OID, -1, InvalidOid, sizeof(std::int64_t),
-            Int64GetDatum(query ? -1 : -2), false, true);
+        auto* identity = bioseq::postgres::support::invoke_pg_as_cpp([query] {
+            return makeConst(INT8OID, -1, InvalidOid, sizeof(std::int64_t),
+                Int64GetDatum(query ? -1 : -2), false, true);
+        });
         complete_export_internal(binding, frame, reinterpret_cast<Expr*>(identity), query
             ? export_internal_field::query_row_identity : export_internal_field::reference_row_identity);
     }
@@ -1351,12 +1681,14 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
         auto* target = export_target_entry(*binding.query, column.result_number);
         if (!target) continue;
         const auto [expression, frame] = resolve_export_expression(binding, 0, reinterpret_cast<Node*>(target->expr));
-        if (expression && resolved_operand && equal(expression, resolved_operand)
+        if (expression && resolved_operand && equal_export_expressions(expression, resolved_operand)
             && (frame == operand_frame || IsA(expression, Const))) { selected = index; break; }
     }
     auto* target_operand = static_cast<Node*>(linitial(site.expression->args));
-    auto* helper = makeFuncExpr(helper_oid, get_cached_stub_oids().bioseq_seq_type_oid,
-        list_make1(copyObject(target_operand)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    auto* helper = bioseq::postgres::support::invoke_pg_as_cpp([helper_oid, target_operand] {
+        return makeFuncExpr(helper_oid, get_cached_stub_oids().bioseq_seq_type_oid,
+            list_make1(copyObject(target_operand)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    });
     const auto number = expose_export_projection(binding, site.frame, reinterpret_cast<Expr*>(helper));
     auto* helper_target = export_target_entry(*binding.query, number);
     const auto origin = resolve_export_origin(binding, site.frame, reinterpret_cast<Node*>(operand));
@@ -1364,19 +1696,21 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
     value.result_number = number;
     value.column.ordinal = binding.columns.size();
     value.column.name = helper_target->resname;
-    value.column.qualified_type = format_type_be_qualified(get_cached_stub_oids().bioseq_seq_type_oid);
-    value.column.kind = export_column_kind(get_cached_stub_oids().bioseq_seq_type_oid,
-        exprTypmod(reinterpret_cast<Node*>(operand)), value.column.alphabet_code);
+    value.column.qualified_type = bioseq::postgres::support::invoke_pg_as_cpp([] {
+        return format_type_be_qualified(get_cached_stub_oids().bioseq_seq_type_oid);
+    });
+    value.column.kind = export_column_kind(export_stub_oids().bioseq_seq_type_oid,
+        export_expression_typmod(reinterpret_cast<Node*>(operand)), value.column.alphabet_code);
     if (!value.column.alphabet_code && resolved_operand) {
         const auto inferred = bioseq::postgres::support::invoke_pg_as_cpp([resolved_operand] {
-            return resolve_base_local_sequence_typmod(resolved_operand, get_cached_stub_oids());
+            return resolve_base_local_sequence_typmod(resolved_operand, export_stub_oids());
         });
         if (!inferred.invalid && inferred.typmod >= 0)
             value.column.alphabet_code = compact_sequence_stdc_type_params::decode(inferred.typmod).alphabet_code;
     }
     if (!value.column.alphabet_code && resolved_operand && IsA(resolved_operand, Const)) {
         const auto* constant = reinterpret_cast<const Const*>(resolved_operand);
-        if (!constant->constisnull && constant->consttype == get_cached_stub_oids().bioseq_seq_type_oid) {
+        if (!constant->constisnull && constant->consttype == export_stub_oids().bioseq_seq_type_oid) {
             const auto descriptor = bioseq::postgres::support::invoke_pg_as_cpp([constant] {
                 return classify_and_describe_sequence_header(constant->constvalue);
             });
@@ -1394,7 +1728,9 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
     if (selected) {
         auto& column = binding.columns[*selected];
         auto* projected = export_target_entry(*binding.query, column.result_number);
-        projected->expr = reinterpret_cast<Expr*>(copyObject(helper_target->expr));
+        projected->expr = bioseq::postgres::support::invoke_pg_as_cpp([helper_target] {
+            return reinterpret_cast<Expr*>(copyObject(helper_target->expr));
+        });
         column.role = role;
         column.helper_function = helper_oid;
         if (!column.column.alphabet_code) column.column.alphabet_code = value.column.alphabet_code;
@@ -1414,12 +1750,17 @@ inline void complete_export_operand_value(export_query_binding& binding, const e
 inline void complete_export_matches(export_query_binding& binding) {
     const bool alignments = export_uses_alignment(binding.format);
     for (std::size_t index = 0; index < binding.frames.size(); ++index) {
-        // Lexical indexing also retains unused CTE definitions. Only reachable
-        // source scopes can own the rows exported by this request.
-        if (!export_query_contains_scope(binding, 0, index, true)) continue;
-        export_expression_walk context{&binding, index};
-        query_tree_walker(binding.frames[index].query, walk_export_expression, &context,
-            QTW_IGNORE_RT_SUBQUERIES | QTW_IGNORE_CTE_SUBQUERIES);
+        // A set arm cannot own every exported row. Its executable matches still
+        // require explicit native fields; recursive UNION seeds must not vanish
+        // into the sequence-only/unmapped default. Unused CTEs and expression
+        // subqueries remain outside both ownership and this obligation.
+        const bool can_own = export_query_contains_scope(binding, 0, index, true, false, false);
+        if (!can_own && !export_query_contains_scope(binding, 0, index, true)) continue;
+        export_expression_walk context{.binding = &binding, .frame = index, .can_own = can_own};
+        bioseq::postgres::support::invoke_pg_as_cpp([query = binding.frames[index].query, &context] {
+            return query_tree_walker(query, walk_export_expression, &context,
+                QTW_IGNORE_RT_SUBQUERIES | QTW_IGNORE_CTE_SUBQUERIES);
+        });
     }
     if (binding.match_sites.empty()) return;
     std::vector<export_match_site> candidates;
@@ -1432,6 +1773,13 @@ inline void complete_export_matches(export_query_binding& binding) {
             if (!projected) continue;
             auto [expression, frame] = resolve_export_expression(binding, 0, reinterpret_cast<Node*>(projected->expr));
             Node* operand = nullptr;
+            // A common helper role across set arms is not evidence that its
+            // values belong to a different, outer match owner. Explicit metadata
+            // or omission was already excluded above; structural roles fail closed.
+            if (column.helper_function && (!expression || !IsA(expression, FuncExpr))) {
+                compatible = false;
+                continue;
+            }
             if (column.helper_function && expression && IsA(expression, FuncExpr)) {
                 auto* helper = reinterpret_cast<FuncExpr*>(expression);
                 if (helper->args == NIL) continue;
@@ -1444,7 +1792,7 @@ inline void complete_export_matches(export_query_binding& binding) {
                 operand = static_cast<Node*>(linitial(candidate.expression->args));
             if (!operand) continue;
             const auto [source, source_frame] = resolve_export_expression(binding, candidate.frame, operand);
-            if (!expression || !source || !equal(expression, source)
+            if (!expression || !source || !equal_export_expressions(expression, source)
                 || (frame != source_frame && !IsA(expression, Const))) compatible = false;
         }
         if (compatible) candidates.push_back(candidate);
@@ -1455,8 +1803,10 @@ inline void complete_export_matches(export_query_binding& binding) {
     if (list_length(site.expression->args) < 2) export_binding_error("invalid mmsearch source arity");
     auto* target = static_cast<Expr*>(linitial(site.expression->args));
     auto* query = static_cast<Expr*>(lsecond(site.expression->args));
-    if (contain_volatile_functions(reinterpret_cast<Node*>(target))
-        || contain_volatile_functions(reinterpret_cast<Node*>(query))) export_binding_error(
+    if (bioseq::postgres::support::invoke_pg_as_cpp([target, query] {
+        return contain_volatile_functions(reinterpret_cast<Node*>(target))
+            || contain_volatile_functions(reinterpret_cast<Node*>(query));
+    })) export_binding_error(
             "export requires stable mmsearch operand aliases; volatile operands cannot be evaluated twice");
     binding.query_source_frame = site.frame;
     binding.query_row_source = resolve_export_row_source(binding, site.frame,
@@ -1467,7 +1817,7 @@ inline void complete_export_matches(export_query_binding& binding) {
         column.row_source = resolve_export_row_source(binding, 0,
             reinterpret_cast<Node*>(projected->expr), site.frame);
     }
-    const auto& oids = get_cached_stub_oids();
+    const auto& oids = export_stub_oids();
     complete_export_operand_value(binding, site, query, record_field_role::sequence, oids.alignment_query_sequence_oid);
     const auto query_origin = resolve_export_origin(binding, site.frame, reinterpret_cast<Node*>(query));
     auto header_origin = query_origin;
@@ -1501,8 +1851,10 @@ inline void complete_export_matches(export_query_binding& binding) {
         std::pair{oids.is_reverse_oid, record_field_role::reversed}
     };
     for (const auto& [function, role] : helpers) {
-        auto* expression = makeFuncExpr(function, get_func_rettype(function),
-            list_make1(copyObject(target)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+        auto* expression = bioseq::postgres::support::invoke_pg_as_cpp([function, target] {
+            return makeFuncExpr(function, get_func_rettype(function),
+                list_make1(copyObject(target)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+        });
         complete_export_role(binding, site.frame, reinterpret_cast<Expr*>(expression), role);
     }
     const std::array private_helpers{
@@ -1513,8 +1865,10 @@ inline void complete_export_matches(export_query_binding& binding) {
         std::pair{oids.mapq_oid, export_internal_field::pair_mapping_quality}
     };
     for (const auto& [function, field] : private_helpers) {
-        auto* expression = makeFuncExpr(function, get_func_rettype(function),
-            list_make1(copyObject(target)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+        auto* expression = bioseq::postgres::support::invoke_pg_as_cpp([function, target] {
+            return makeFuncExpr(function, get_func_rettype(function),
+                list_make1(copyObject(target)), InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+        });
         complete_export_internal(binding, site.frame, reinterpret_cast<Expr*>(expression), field);
     }
 }
@@ -1650,7 +2004,11 @@ inline void finish_export_role_inference(export_query_binding& binding) {
     if (sequence_origin) {
         complete_source_companion(binding, *sequence_origin, record_field_role::header);
         if (export_uses_quality(binding.format)) complete_source_companion(binding, *sequence_origin, record_field_role::quality);
-        if (alignments && !has_match_owner) complete_source_companion(binding, *sequence_origin, record_field_role::alignment);
+        // A hidden old alignment cannot represent a different executable match
+        // whose owner was lost at a set boundary. Only visible supplied records
+        // may choose their existing nullable/unmapped semantics in that case.
+        if (alignments && !has_match_owner && !binding.match_fields_required)
+            complete_source_companion(binding, *sequence_origin, record_field_role::alignment);
     }
     bool header_bound = false;
     for (const auto& column : binding.columns)
@@ -1682,6 +2040,46 @@ inline void finish_export_role_inference(export_query_binding& binding) {
     if (!unresolved_role) for (auto& column : binding.columns)
         if (!column.role && unresolved_export_alphabet(column)) column.role = record_field_role::omit;
 }
+/** Report a missing explicit fact without changing a cardinality barrier. */
+[[noreturn]] inline void missing_export_match_field(std::string_view field) {
+    export_binding_error("export completion cannot cross set operations or recursive CTEs: missing "
+        + std::string{field} + "; select the owning sequence and alignment fields explicitly, "
+        "supply an alignment composite, or explicitly mark the row unmapped");
+}
+
+/** Reject provably absent fields; nullable FLAG/unmapped intent is checked per row.
+ * An explicitly selected alignment composite keeps its existing nullable record
+ * semantics. Native validators still own values, dictionaries and CIGAR geometry.
+ */
+inline void validate_export_match_barrier(export_query_binding& binding) {
+    if (!binding.match_fields_required) return;
+    const auto has = [&binding](record_field_role role) {
+        return std::any_of(binding.columns.begin(), binding.columns.end(),
+            [role](const auto& column) { return column.role == role; });
+    };
+    const bool supplied_alignment = std::any_of(binding.columns.begin(), binding.columns.end(),
+        [](const auto& column) {
+            return column.role == record_field_role::alignment && !column.private_companion;
+        });
+    if (!export_uses_alignment(binding.format) || supplied_alignment) {
+        binding.match_fields_required = false;
+        return;
+    }
+    // FLAG4 and unmapped=true intentionally need no mapped geometry. These
+    // columns can vary by row, so NULL/false/mapped values must be checked later.
+    if (has(record_field_role::flags) || has(record_field_role::unmapped)) return;
+    const bool unresolved_payload = std::any_of(binding.columns.begin(), binding.columns.end(),
+        unresolved_export_alphabet);
+    if (!has(record_field_role::cigar) && !unresolved_payload)
+        missing_export_match_field("CIGAR (project bioseq.cigar(target) AS cigar)");
+    if (!has(record_field_role::target_start))
+        missing_export_match_field("target_start (project bioseq.target_start(target) AS target_start)");
+    if (!has(record_field_role::reference_sequence) && !has(record_field_role::reference_name))
+        missing_export_match_field("reference_sequence or reference_name");
+    if (!has(record_field_role::reversed))
+        missing_export_match_field("FLAG or reversed (project bioseq.is_reverse(target) AS reversed)");
+}
+
 /** Qualify only duplicate unused scalar keys after all user selectors resolve.
  * Join-star queries retain both values as alias.name. Existing unique keys win;
  * repeated aliases/computed outputs use a deterministic result ordinal suffix.
@@ -1720,8 +2118,10 @@ inline void qualify_export_metadata_names(export_query_binding& binding) {
         while (name.size() >= NAMEDATALEN || reserved.contains(name)) {
             auto suffix = "#" + std::to_string(column.result_number);
             if (collision != 0) suffix += "." + std::to_string(collision);
-            const auto prefix = pg_mbcliplen(stem.data(), static_cast<int>(stem.size()),
-                static_cast<int>(NAMEDATALEN - 1u - suffix.size()));
+            const auto prefix = bioseq::postgres::support::invoke_pg_as_cpp([&stem, &suffix] {
+                return pg_mbcliplen(stem.data(), static_cast<int>(stem.size()),
+                    static_cast<int>(NAMEDATALEN - 1u - suffix.size()));
+            });
             name.assign(stem.data(), static_cast<std::size_t>(prefix));
             name += suffix;
             ++collision;

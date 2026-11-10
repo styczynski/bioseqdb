@@ -31,6 +31,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
 import bioseq.postgres.column.table_access;
+import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.sequences.compact_sequence_typmod;
 
@@ -215,6 +216,45 @@ export {
             if (retain_join_paths_with_custom_restriction_owner(
                     root, joinrel, outerrel, innerrel, extra, restriction, mmsearch, &owner_audit))
                 return;
+            const bool raw_operands_on_opposite_inputs =
+                bioseq::settings::planner::custom_scan::enabled &&
+                target_var != nullptr && query_var != nullptr &&
+                bioseq_is_concrete_rte_varno(target_var->varno) &&
+                bioseq_is_concrete_rte_varno(query_var->varno) &&
+                target_var->varlevelsup == 0 && query_var->varlevelsup == 0 &&
+                target_var->varattno > 0 && query_var->varattno > 0 &&
+                bms_is_empty(target_var->varnullingrels) &&
+                bms_is_empty(query_var->varnullingrels) &&
+                target_var->vartype == oids.bioseq_seq_type_oid &&
+                query_var->vartype == oids.bioseq_seq_type_oid &&
+                mmsearch_typmods_share_alphabet(target_var->vartypmod, query_var->vartypmod) &&
+                target_var->varcollid == query_var->varcollid &&
+                target_var->varno <= static_cast<Index>(list_length(root->parse->rtable)) &&
+                query_var->varno <= static_cast<Index>(list_length(root->parse->rtable)) &&
+                !bms_overlap(outerrel->relids, innerrel->relids) &&
+                ((is_join_input(outerrel) && innerrel->relid == query_var->varno &&
+                  bms_is_member(static_cast<int>(target_var->varno), outerrel->relids)) ||
+                 (is_join_input(innerrel) && outerrel->relid == query_var->varno &&
+                  bms_is_member(static_cast<int>(target_var->varno), innerrel->relids)));
+            if (raw_operands_on_opposite_inputs) {
+                RangeTblEntry* target_rte = rt_fetch(target_var->varno, root->parse->rtable);
+                RangeTblEntry* query_rte = rt_fetch(query_var->varno, root->parse->rtable);
+                if (target_rte != nullptr && query_rte != nullptr &&
+                    target_rte->rtekind == RTE_RELATION && query_rte->rtekind == RTE_RELATION &&
+                    target_rte->securityQuals == NIL && query_rte->securityQuals == NIL &&
+                    OidIsValid(target_rte->relid) && OidIsValid(query_rte->relid) &&
+                    relation_oid_uses_column_table_access_method(target_rte->relid)) {
+                    /* The target is buried in this decomposition's join input.
+                     * The retainer examined all accumulated paths and found no
+                     * exact owner, including owners in earlier decompositions.
+                     * Discard these SQL-stub alternatives while PostgreSQL tries
+                     * other join orders. No paths at the end still fails planning. */
+                    Assert(owner_audit.retained_paths == 0u);
+                    joinrel->pathlist = NIL;
+                    joinrel->partial_pathlist = NIL;
+                    return;
+                }
+            }
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("mmsearch join qualifier is not owned by a parameterized BioseqScan"),
@@ -435,16 +475,14 @@ export {
             (root->parse->hasRowSecurity && !plain_query_cte) ||
             target_rte->securityQuals != NIL ||
             query_rte->securityQuals != NIL || !OidIsValid(target_rte->relid) ||
-            !relation_oid_uses_column_table_access_method(target_rte->relid) ||
-            batch_join_target_expression_is_forbidden(
-                reinterpret_cast<Node*>(root->processed_tlist),
-                target_var,
-                /*allow_mmsearch_qualifier=*/false) ||
-            batch_join_target_restrictions_are_forbidden(target_rel->baserestrictinfo,
-                                                         target_var,
-                                                         /*allow_mmsearch_qualifier=*/true)) {
+            !relation_oid_uses_column_table_access_method(target_rte->relid)) {
             return;
         }
+        const bool needs_readable_target = batch_join_target_expression_is_forbidden(
+            reinterpret_cast<Node*>(root->processed_tlist), target_var,
+            /*allow_mmsearch_qualifier=*/false) ||
+            batch_join_target_restrictions_are_forbidden(target_rel->baserestrictinfo,
+                target_var, /*allow_mmsearch_qualifier=*/true);
         const auto target_qual_features =
             detect_restrictinfo_feature_flags(target_rel->baserestrictinfo, oids);
         const auto query_qual_features =
@@ -580,6 +618,25 @@ export {
                          owner_audit.foreign_owner_matches,
                          owner_audit.foreign_rejection_mask,
                          owner_audit.foreign_owner_rejection_mask)));
+        }
+        if (needs_readable_target) {
+            // The locator-only BatchJoin cannot expose the target to ordinary
+            // expressions. Keep a real parameterized scan owner instead of
+            // leaving an ordinary join filter to call the mmsearch SQL stub.
+            exact_parameterized_bmo_retainer_audit owner_audit{};
+            if (bioseq::settings::planner::custom_scan::enabled &&
+                !root->parse->hasRowSecurity &&
+                retain_join_paths_with_custom_restriction_owner(
+                    root, joinrel, outerrel, innerrel, extra, restriction, mmsearch, &owner_audit))
+                return;
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("readable mmsearch target requires a parameterized BioseqScan owner"),
+                     errdetail("candidates=%zu compatible_owners=%zu reconstructed_owners=%zu "
+                               "reconstruction_reject_mask=0x%x",
+                               owner_audit.candidates, owner_audit.compatible_bmo_paths,
+                               owner_audit.reconstructed_bmo_paths,
+                               owner_audit.reconstructed_bmo_rejection_mask)));
         }
         const batch_join_bioseq_path_candidate target_candidate =
             find_unparameterized_bioseq_custom_path(target_rel, target_var->varattno);

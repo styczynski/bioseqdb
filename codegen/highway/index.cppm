@@ -288,6 +288,15 @@ parse_minimizer_registry_command_line(
     for (const source_spec& source : sources.sources) {
         result.push_back(source.path);
     }
+    if (sources.scalar_codec) {
+        for (const auto& path : {sources.scalar_codec->sequence_source,
+                                sources.scalar_codec->io_source}) {
+            const auto identity = path_identity(path);
+            if (!std::ranges::any_of(result, [&identity](const auto& present) {
+                    return path_identity(present) == identity;
+                })) result.push_back(path);
+        }
+    }
     return result;
 }
 
@@ -346,6 +355,7 @@ parse_minimizer_registry_command_line(
             "production",
             "core");
     prepared.dependencies.push_back(command.source_manifest_path);
+    if (sources.scalar_codec) prepared.dependencies.push_back(sources.scalar_codec->header_manifest);
     prepared.dependencies.push_back(command.signature_source);
     if (!sources.minimizer_registry_manifest_path.empty()) {
         prepared.dependencies.push_back(
@@ -548,6 +558,8 @@ parse_minimizer_registry_command_line(
     };
     plan.extracted_sources =
         extract_sources(plan.source_inventory, structural, graph);
+    plan.scalar_codec_sources = extract_scalar_codec_sources(
+        plan.target_inventory, plan.source_inventory, structural, graph);
     validate_slot_callable_ownership(
         plan.source_inventory, plan.extracted_sources);
     namespace_materialization::recover_interrupted_publication(

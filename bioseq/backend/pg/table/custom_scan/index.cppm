@@ -442,6 +442,7 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
     bmo_restriction->clause = reinterpret_cast<Expr*>(bmo_mmsearch);
     bmo_restriction->rinfo_serial = 71;
     auto* bmo_param = makeNode(ParamPathInfo);
+    bmo_param->ppi_req_outer = bms_make_singleton(2);
     bmo_param->ppi_clauses = list_make1(bmo_restriction);
     auto* bmo_owner = makeNode(CustomPath);
     match_helper_wrapper_probe_init_path(
@@ -477,6 +478,255 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
         (group_result_analysis.rejection_mask &
          static_cast<std::uint32_t>(k_exact_bmo_nested_join_clause)) != 0u;
 
+    /* Keep an existing (T-Q owner) equality-join U path while considering
+     * (T-U)-Q, whose target is buried. Exercise both algorithms directly so
+     * planner costing cannot hide a missing top-level path-kind check. */
+    auto* retained_rel = match_helper_wrapper_probe_rel(
+        RELOPT_JOINREL, 0, bms_union(join_rel->relids, sibling_rel->relids));
+    auto* buried_rel = match_helper_wrapper_probe_rel(
+        RELOPT_JOINREL, 0, bms_union(left_rel->relids, sibling_rel->relids));
+    auto* owned_nested = makeNode(NestPath);
+    match_helper_wrapper_probe_init_path(
+        &owned_nested->jpath.path, T_NestLoop, join_rel, create_empty_pathtarget());
+    owned_nested->jpath.jointype = JOIN_INNER;
+    owned_nested->jpath.outerjoinpath = right;
+    owned_nested->jpath.innerjoinpath = &bmo_owner->path;
+    auto* unowned_nested = makeNode(NestPath);
+    *unowned_nested = *owned_nested;
+    unowned_nested->jpath.innerjoinpath = left;
+    auto* buried_nested = makeNode(NestPath);
+    match_helper_wrapper_probe_init_path(
+        &buried_nested->jpath.path, T_NestLoop, buried_rel, create_empty_pathtarget());
+    buried_nested->jpath.jointype = JOIN_INNER;
+    buried_nested->jpath.outerjoinpath = &bmo_owner->path;
+    buried_nested->jpath.innerjoinpath = sibling;
+    auto* unowned_buried = makeNode(NestPath);
+    *unowned_buried = *buried_nested;
+    unowned_buried->jpath.outerjoinpath = left;
+    auto* unowned_current = makeNode(NestPath);
+    match_helper_wrapper_probe_init_path(
+        &unowned_current->jpath.path, T_NestLoop, retained_rel, create_empty_pathtarget());
+    unowned_current->jpath.jointype = JOIN_INNER;
+    unowned_current->jpath.outerjoinpath = &unowned_buried->jpath.path;
+    unowned_current->jpath.innerjoinpath = right;
+    unowned_current->jpath.joinrestrictinfo = list_make1(bmo_restriction);
+
+    const Oid equality_oid = OpernameGetOprid(
+        list_make2(makeString(pstrdup("pg_catalog")), makeString(pstrdup("="))), INT4OID, INT4OID);
+    auto* equality = makeNode(RestrictInfo);
+    equality->clause = make_opclause(
+        equality_oid, BOOLOID, false,
+        reinterpret_cast<Expr*>(makeVar(1, 2, INT4OID, -1, InvalidOid, 0)),
+        reinterpret_cast<Expr*>(makeVar(3, 2, INT4OID, -1, InvalidOid, 0)),
+        InvalidOid, InvalidOid);
+    equality->rinfo_serial = 72;
+    auto make_foreign_join = [retained_rel, sibling](
+                                 bool hash, Path* child, List* clauses,
+                                 List* algorithm_clauses) -> JoinPath* {
+        JoinPath* join = nullptr;
+        if (hash) {
+            auto* path = makeNode(HashPath);
+            path->path_hashclauses = algorithm_clauses;
+            join = &path->jpath;
+        } else {
+            auto* path = makeNode(MergePath);
+            path->path_mergeclauses = algorithm_clauses;
+            join = &path->jpath;
+        }
+        match_helper_wrapper_probe_init_path(
+            &join->path, hash ? T_HashJoin : T_MergeJoin, retained_rel,
+            create_empty_pathtarget());
+        join->jointype = JOIN_INNER;
+        join->outerjoinpath = child;
+        join->innerjoinpath = sibling;
+        join->joinrestrictinfo = clauses;
+        return join;
+    };
+    auto retain_foreign = [planner_root, retained_rel, buried_rel, right_rel,
+                           bmo_restriction, bmo_mmsearch, unowned_current](
+                              JoinPath* path, exact_parameterized_bmo_retainer_audit& audit) {
+        retained_rel->pathlist = list_make2(path, unowned_current);
+        JoinPathExtraData extra{};
+        extra.restrictlist = list_make1(bmo_restriction);
+        return retain_join_paths_with_custom_restriction_owner(
+            planner_root, retained_rel, buried_rel, right_rel, &extra,
+            bmo_restriction, bmo_mmsearch, &audit);
+    };
+    // Result plan tags do not imply a ProjectionPath allocation. Keep the
+    // concrete leaf types safe even when GroupResultPath has a nonempty qual.
+    auto* bare_result = makeNode(Path);
+    match_helper_wrapper_probe_init_path(
+        bare_result, T_Result, sibling_rel, create_empty_pathtarget());
+    auto* group_result = makeNode(GroupResultPath);
+    match_helper_wrapper_probe_init_path(
+        &group_result->path, T_Result, sibling_rel, create_empty_pathtarget());
+    group_result->quals = list_make1(makeBoolConst(true, false));
+    auto* gather = makeNode(GatherPath);
+    match_helper_wrapper_probe_init_path(
+        &gather->path, T_Gather, sibling_rel, create_empty_pathtarget());
+    gather->subpath = sibling;
+    auto* gather_merge = makeNode(GatherMergePath);
+    match_helper_wrapper_probe_init_path(
+        &gather_merge->path, T_GatherMerge, sibling_rel, create_empty_pathtarget());
+    gather_merge->subpath = sibling;
+    auto* parallel_unique = makeNode(UniquePath);
+    *parallel_unique = *unique;
+    match_helper_wrapper_probe_init_path(
+        &parallel_unique->path, T_Unique, sibling_rel, create_empty_pathtarget());
+    parallel_unique->subpath = sibling;
+    auto* parallel_project_set = makeNode(ProjectSetPath);
+    match_helper_wrapper_probe_init_path(
+        &parallel_project_set->path, T_ProjectSet, sibling_rel, create_empty_pathtarget());
+    parallel_project_set->subpath = sibling;
+    bool foreign_hash_preserved = false;
+    bool foreign_merge_preserved = false;
+    bool foreign_root_mmsearch_rejected = true;
+    bool foreign_algorithm_mmsearch_rejected = true;
+    bool foreign_unowned_rejected = true;
+    bool non_nest_current_pair_rejected = true;
+    bool bare_result_preserved = true;
+    bool group_result_preserved = true;
+    bool unique_gather_rejected =
+        !batch_join_path_contains_parallel_execution(&parallel_unique->path);
+    bool project_set_gather_rejected =
+        !batch_join_path_contains_parallel_execution(&parallel_project_set->path);
+    for (const bool hash : {true, false}) {
+        JoinPath* preserved = make_foreign_join(
+            hash, &owned_nested->jpath.path, list_make1(equality), list_make1(equality));
+        exact_parameterized_bmo_retainer_audit positive{};
+        const bool kept = OidIsValid(equality_oid) && retain_foreign(preserved, positive) &&
+            positive.safe_foreign_paths == 1u && positive.retained_paths == 1u &&
+            positive.foreign_owner_matches == 1u && positive.nest_paths == 1u &&
+            positive.current_pair_paths == 1u && positive.foreign_decomposition_paths == 1u &&
+            positive.reconstructed_bmo_attempts == 0u &&
+            list_length(retained_rel->pathlist) == 1 &&
+            linitial(retained_rel->pathlist) == preserved &&
+            preserved->outerjoinpath == &owned_nested->jpath.path &&
+            preserved->innerjoinpath == sibling &&
+            preserved->path.startup_cost == 1.0 && preserved->path.total_cost == 2.0 &&
+            list_length(preserved->joinrestrictinfo) == 1 &&
+            linitial(preserved->joinrestrictinfo) == equality;
+        if (hash)
+            foreign_hash_preserved = kept;
+        else
+            foreign_merge_preserved = kept;
+
+        exact_parameterized_bmo_retainer_audit root_clause{};
+        const bool root_rejected = !retain_foreign(make_foreign_join(
+            hash, &owned_nested->jpath.path, list_make2(equality, bmo_restriction),
+            list_make1(equality)), root_clause);
+        foreign_root_mmsearch_rejected = foreign_root_mmsearch_rejected && root_rejected &&
+            root_clause.retained_paths == 0u && root_clause.root_owned_clause_paths == 2u &&
+            (root_clause.foreign_rejection_mask & (1u << 1)) != 0u;
+
+        exact_parameterized_bmo_retainer_audit algorithm_clause{};
+        const bool algorithm_rejected = !retain_foreign(make_foreign_join(
+            hash, &owned_nested->jpath.path, list_make1(equality),
+            list_make1(bmo_restriction)), algorithm_clause);
+        foreign_algorithm_mmsearch_rejected = foreign_algorithm_mmsearch_rejected &&
+            algorithm_rejected && algorithm_clause.retained_paths == 0u &&
+            (algorithm_clause.foreign_owner_rejection_mask &
+             static_cast<std::uint32_t>(k_exact_bmo_nested_join_clause)) != 0u;
+
+        exact_parameterized_bmo_retainer_audit no_owner{};
+        const bool unowned_rejected = !retain_foreign(make_foreign_join(
+            hash, &unowned_nested->jpath.path, list_make1(equality), list_make1(equality)),
+            no_owner);
+        foreign_unowned_rejected = foreign_unowned_rejected && unowned_rejected &&
+            no_owner.retained_paths == 0u && no_owner.foreign_owner_matches == 0u &&
+            (no_owner.foreign_rejection_mask & (1u << 4)) != 0u;
+
+        JoinPath* current_pair = make_foreign_join(
+            hash, &buried_nested->jpath.path, NIL, NIL);
+        current_pair->outerjoinpath = right;
+        current_pair->innerjoinpath = &buried_nested->jpath.path;
+        exact_parameterized_bmo_retainer_audit current{};
+        const bool current_rejected = !retain_foreign(current_pair, current);
+        non_nest_current_pair_rejected = non_nest_current_pair_rejected && current_rejected &&
+            current.current_pair_paths == 2u && current.retained_paths == 0u &&
+            current.foreign_decomposition_paths == 0u;
+
+        for (Path* result_leaf : {bare_result, &group_result->path}) {
+            JoinPath* result_join = make_foreign_join(
+                hash, &owned_nested->jpath.path, list_make1(equality), list_make1(equality));
+            result_join->innerjoinpath = result_leaf;
+            exact_parameterized_bmo_retainer_audit result_audit{};
+            const bool result_kept = !batch_join_path_contains_parallel_execution(result_leaf) &&
+                retain_foreign(result_join, result_audit) &&
+                result_audit.safe_foreign_paths == 1u && result_audit.retained_paths == 1u &&
+                list_length(retained_rel->pathlist) == 1 &&
+                linitial(retained_rel->pathlist) == result_join;
+            if (result_leaf == bare_result)
+                bare_result_preserved = bare_result_preserved && result_kept;
+            else
+                group_result_preserved = group_result_preserved && result_kept;
+        }
+        for (Path* parallel_child : {&gather->path, &gather_merge->path}) {
+            parallel_unique->subpath = parallel_child;
+            parallel_project_set->subpath = parallel_child;
+            for (Path* wrapper : {&parallel_unique->path, &parallel_project_set->path}) {
+                JoinPath* parallel_join = make_foreign_join(
+                    hash, &owned_nested->jpath.path, list_make1(equality), list_make1(equality));
+                parallel_join->innerjoinpath = wrapper;
+                exact_parameterized_bmo_retainer_audit parallel_audit{};
+                const bool parallel_rejected = batch_join_path_contains_parallel_execution(wrapper) &&
+                    !retain_foreign(parallel_join, parallel_audit) &&
+                    parallel_audit.retained_paths == 0u &&
+                    (parallel_audit.foreign_rejection_mask & (1u << 2)) != 0u;
+                if (wrapper == &parallel_unique->path)
+                    unique_gather_rejected = unique_gather_rejected && parallel_rejected;
+                else
+                    project_set_gather_rejected = project_set_gather_rejected && parallel_rejected;
+            }
+        }
+    }
+
+    // Restriction lookup follows wrappers independently of execution admission.
+    // Gather remains forbidden by the parallel guard tested above.
+    const bool descendant_result_leaves_safe =
+        !per_row_descendant_owns_restriction(bare_result, bmo_restriction) &&
+        !per_row_descendant_owns_restriction(&group_result->path, bmo_restriction);
+    auto* copied_restriction = makeNode(RestrictInfo);
+    *copied_restriction = *bmo_restriction;
+    auto* ppi_only_result = makeNode(Path);
+    *ppi_only_result = *bare_result;
+    ppi_only_result->param_info = bmo_param;
+    auto* custom_only_owner = makeNode(CustomPath);
+    *custom_only_owner = *bmo_owner;
+    custom_only_owner->path.param_info = nullptr;
+    bool descendant_restriction_identity_preserved =
+        per_row_descendant_owns_restriction(ppi_only_result, bmo_restriction) &&
+        per_row_descendant_owns_restriction(&custom_only_owner->path, bmo_restriction) &&
+        per_row_descendant_owns_restriction(&unowned_current->jpath.path, bmo_restriction) &&
+        !per_row_descendant_owns_restriction(ppi_only_result, copied_restriction) &&
+        !per_row_descendant_owns_restriction(&custom_only_owner->path, copied_restriction) &&
+        !per_row_descendant_owns_restriction(&unowned_current->jpath.path, copied_restriction);
+    auto* restriction_unique = makeNode(UniquePath);
+    *restriction_unique = *unique;
+    match_helper_wrapper_probe_init_path(
+        &restriction_unique->path, T_Unique, left_rel, create_empty_pathtarget());
+    restriction_unique->subpath = &bmo_owner->path;
+    auto* restriction_project_set = makeNode(ProjectSetPath);
+    match_helper_wrapper_probe_init_path(
+        &restriction_project_set->path, T_ProjectSet, left_rel, create_empty_pathtarget());
+    restriction_project_set->subpath = &restriction_unique->path;
+    auto* restriction_gather = makeNode(GatherPath);
+    match_helper_wrapper_probe_init_path(
+        &restriction_gather->path, T_Gather, left_rel, create_empty_pathtarget());
+    restriction_gather->subpath = &restriction_project_set->path;
+    auto* restriction_gather_merge = makeNode(GatherMergePath);
+    match_helper_wrapper_probe_init_path(
+        &restriction_gather_merge->path, T_GatherMerge, left_rel, create_empty_pathtarget());
+    restriction_gather_merge->subpath = &restriction_gather->path;
+    bool descendant_wrapped_owner_found = true;
+    for (Path* wrapper : {&restriction_unique->path, &restriction_project_set->path,
+                         &restriction_gather->path, &restriction_gather_merge->path}) {
+        descendant_wrapped_owner_found = descendant_wrapped_owner_found &&
+            per_row_descendant_owns_restriction(wrapper, bmo_restriction);
+        descendant_restriction_identity_preserved = descendant_restriction_identity_preserved &&
+            !per_row_descendant_owns_restriction(wrapper, copied_restriction);
+    }
+
     return bioseq::postgres::support::named_output{
         bioseq::table::match_helper_wrapper_propagation_probe_row{
             .exact_owner_found = exact_owner_found,
@@ -498,6 +748,19 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
             .duplicate_owner_rejected = duplicate_owner_rejected,
             .unknown_wrapper_rejected = unknown_wrapper_rejected,
             .group_result_qual_rejected = group_result_qual_rejected,
+            .foreign_hash_preserved = foreign_hash_preserved,
+            .foreign_merge_preserved = foreign_merge_preserved,
+            .foreign_root_mmsearch_rejected = foreign_root_mmsearch_rejected,
+            .foreign_algorithm_mmsearch_rejected = foreign_algorithm_mmsearch_rejected,
+            .foreign_unowned_rejected = foreign_unowned_rejected,
+            .non_nest_current_pair_rejected = non_nest_current_pair_rejected,
+            .bare_result_preserved = bare_result_preserved,
+            .group_result_preserved = group_result_preserved,
+            .unique_gather_rejected = unique_gather_rejected,
+            .project_set_gather_rejected = project_set_gather_rejected,
+            .descendant_result_leaves_safe = descendant_result_leaves_safe,
+            .descendant_wrapped_owner_found = descendant_wrapped_owner_found,
+            .descendant_restriction_identity_preserved = descendant_restriction_identity_preserved,
         }};
 }
 

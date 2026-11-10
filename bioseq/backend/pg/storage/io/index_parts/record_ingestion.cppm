@@ -28,6 +28,7 @@ module;
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 extern "C" {
 #include "postgres.h"
@@ -42,6 +43,11 @@ extern "C" {
 #include "executor/spi.h"
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
 #include "executor/tuptable.h"   // TupleTableSlot, MakeTupleTableSlot, TTSOpsVirtual, Exec*Tuple
+#include "tcop/pquery.h"
+#include "tcop/tcopprot.h"
+#include "tcop/utility.h"
+#include "utils/portal.h"
+#include "nodes/params.h"
 #include "nodes/makefuncs.h"     // makeNode (ResultRelInfo)
 #include "optimizer/optimizer.h" // expression_planner
 #include "utils/array.h"         // deconstruct_array, ARR_ELEMTYPE
@@ -495,12 +501,52 @@ public:
             if (SPI_connect() != SPI_OK_CONNECT) ereport(ERROR, (errmsg("cannot open reference lookup SPI context")));
         });
         std::optional<bioseq::storage::borrowed_rank_window_source> result;
+        Portal portal = nullptr;
         try {
-            const auto value = bioseq::postgres::support::invoke_pg_as_cpp([this, name]() -> std::optional<Datum> {
-                Oid type = TEXTOID;
-                Datum parameter = PointerGetDatum(cstring_to_text_with_len(name.data(), static_cast<int>(name.size())));
-                const auto status = SPI_execute_with_args(query_.c_str(), 1, &type, &parameter, nullptr, true, 2);
-                if (status != SPI_OK_SELECT) ereport(ERROR, (errmsg("reference lookup SELECT failed")));
+            bioseq::postgres::support::invoke_pg_as_cpp([this, name, &portal] {
+                // Own every analyzed/planned node and parameter in the portal.
+                // No saved plan may reparse the name after this identity check.
+                portal = CreateNewPortal();
+                const auto previous = MemoryContextSwitchTo(portal->portalContext);
+                const auto* query_text = pstrdup(query_.c_str());
+                auto* parsed = pg_parse_query(query_text);
+                if (list_length(parsed) != 1)
+                    elog(ERROR, "reference lookup requires exactly one SELECT");
+                const Oid parameter_type = TEXTOID;
+                auto* rewritten = pg_analyze_and_rewrite_fixedparams(
+                    static_cast<RawStmt*>(linitial(parsed)), query_text, &parameter_type, 1, nullptr);
+                if (list_length(rewritten) != 1)
+                    elog(ERROR, "reference lookup must rewrite to one SELECT");
+                auto* query = static_cast<Query*>(linitial(rewritten));
+                if (query->commandType != CMD_SELECT || query->hasModifyingCTE
+                    || query->utilityStmt || query->rowMarks != NIL)
+                    elog(ERROR, "reference lookup must be a read-only SELECT");
+                if (!bioseq::postgres::support::query_has_single_from_relation(*query, *relation_))
+                    ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                        errmsg("bioseq.load could not preserve the reference_table relation identity"),
+                        errhint("Retry the same regclass request after concurrent schema changes finish.")));
+                auto* statement = pg_plan_query(query, query_text, CURSOR_OPT_NO_SCROLL, nullptr
+#if PG_VERSION_NUM >= 190000
+                    , nullptr
+#endif
+                );
+                if (!CommandIsReadOnly(statement))
+                    elog(ERROR, "reference lookup planned a non-read-only command");
+                auto* parameters = makeParamList(1);
+                parameters->params[0].value = PointerGetDatum(cstring_to_text_with_len(
+                    name.data(), static_cast<int>(name.size())));
+                parameters->params[0].isnull = false;
+                parameters->params[0].pflags = PARAM_FLAG_CONST;
+                parameters->params[0].ptype = TEXTOID;
+                PortalDefineQuery(portal, nullptr, query_text, CMDTAG_SELECT, list_make1(statement), nullptr);
+                portal->cursorOptions = CURSOR_OPT_NO_SCROLL;
+                MemoryContextSwitchTo(previous);
+                // ExecutorStart performs normal caller ACL checks; the verified
+                // rewritten Query retains the caller's row-security policies.
+                PortalStart(portal, parameters, 0, GetActiveSnapshot());
+            });
+            const auto value = bioseq::postgres::support::invoke_pg_as_cpp([portal]() -> std::optional<Datum> {
+                SPI_cursor_fetch(portal, true, 2);
                 if (SPI_processed > 1) ereport(ERROR, (errcode(ERRCODE_CARDINALITY_VIOLATION),
                     errmsg("reference_table has more than one row for requested reference")));
                 if (SPI_processed == 0) return std::nullopt;
@@ -524,8 +570,16 @@ public:
                     raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit reference read owner");
                 result = retain_pg_rank_source(*session_, *value);
             }
+            // Drop the exact executor before SPI frees its fetched tuple table.
+            // Clear our pointer first: an error during PortalDrop remains owned
+            // by PostgreSQL's resource cleanup and must not be closed twice.
+            const auto completed = std::exchange(portal, nullptr);
+            bioseq::postgres::support::invoke_pg_as_cpp([completed] { SPI_cursor_close(completed); });
         } catch (...) {
             const auto failure = std::current_exception();
+            if (portal) {
+                try { bioseq::postgres::support::invoke_pg_as_cpp([portal] { SPI_cursor_close(portal); }); } catch (...) {}
+            }
             try { bioseq::postgres::support::invoke_pg_as_cpp([] { SPI_finish(); }); } catch (...) {}
             std::rethrow_exception(failure);
         }

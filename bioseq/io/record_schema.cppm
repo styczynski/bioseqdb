@@ -192,7 +192,21 @@ struct record_source_metadata {
     std::vector<std::uint8_t> declared_alphabet_codes;
     std::vector<std::uint8_t> declared_quality_alphabet_codes;
     bool reference_dictionary_complete{};
+    /** Actual selected RG/PG/CO defaults, independent of original context identity.
+     * Engaged empty suppresses original header defaults. HD/SQ and the Bioseq
+     * manifest are excluded: reference geometry is always projected separately. */
+    std::optional<std::vector<std::string>> replay_header_lines;
 };
+
+/** Whether a native header line can be retained as non-geometric replay defaults.
+ * Full SAM field/link validation remains in the shared alignment header parser.
+ */
+[[nodiscard]] inline bool is_sam_replay_header_line(const std::string_view line) noexcept {
+    return (line.starts_with("@RG\t") || line.starts_with("@PG\t") || line.starts_with("@CO\t"))
+        && !line.starts_with("@CO\tbioseq.io:")
+        && line.find_first_of("\r\n") == std::string_view::npos
+        && line.find('\0') == std::string_view::npos;
+}
 
 /** Immutable row access after the owner freezes every backing allocation. */
 template<class Batch>
@@ -617,6 +631,11 @@ class decoded_record {
     std::array<std::byte, sizeof(cigar_run) * simd::sequence_rank_io_chunk_capacity> cigar_staging_;
     std::size_t cigar_staging_size_{};
     bool cigar_finished_{true};
+    // Each vector permit owns only its capacity and outlives its allocation.
+    parallelism::memory_permit auxiliary_permit_;
+    parallelism::memory_permit projected_auxiliary_permit_;
+    parallelism::memory_permit auxiliary_views_permit_;
+    parallelism::memory_permit projected_views_permit_;
     std::vector<owned_auxiliary_field> auxiliary_;
     std::vector<owned_auxiliary_field> projected_auxiliary_;
     std::vector<auxiliary_field_view> auxiliary_views_;
@@ -966,8 +985,12 @@ public:
     [[nodiscard]] std::expected<void, std::string> begin_auxiliary(bool projected,
             std::array<char, 2> tag, char type, char subtype) {
         if (active_auxiliary_projected_) return std::unexpected(std::string{"nested auxiliary payload"});
-        if (const auto admitted = charge(2u * sizeof(owned_auxiliary_field) + 2u * sizeof(auxiliary_field_view) + 8u); !admitted) return admitted;
         auto& fields = projected ? projected_auxiliary_ : auxiliary_;
+        auto& permit = projected ? projected_auxiliary_permit_ : auxiliary_permit_;
+        if (fields.size() == std::numeric_limits<std::size_t>::max())
+            return std::unexpected("auxiliary descriptor count overflows");
+        if (auto admitted = reserve_io_vector_capacity(fields, permit, fields.size() + 1u, credit_); !admitted)
+            return admitted;
         for (const auto& field : fields)
             if (field.tag == tag) return std::unexpected(std::string{"duplicate preserved auxiliary tag"});
         fields.emplace_back(tag, type, subtype, credit_);
@@ -1040,6 +1063,10 @@ public:
         if (sequences_[1]) record.quality = sequences_[1]->source();
         if (sequences_[2]) record.reference_sequence = sequences_[2]->source();
         record.metadata = metadata_;
+        if (auto admitted = reserve_io_vector_capacity(auxiliary_views_, auxiliary_views_permit_,
+                auxiliary_.size(), credit_); !admitted) return std::unexpected(admitted.error());
+        if (auto admitted = reserve_io_vector_capacity(projected_views_, projected_views_permit_,
+                projected_auxiliary_.size(), credit_); !admitted) return std::unexpected(admitted.error());
         auxiliary_views_.clear();
         projected_views_.clear();
         for (const auto& field : auxiliary_) auxiliary_views_.push_back(field.view());

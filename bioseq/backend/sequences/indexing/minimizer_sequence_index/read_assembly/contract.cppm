@@ -105,6 +105,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
             algorithm_identity,
             collector,
             output,
+            nullptr,
             execution_receipt,
             allow_packed_bounded,
             scalar_build_stats);

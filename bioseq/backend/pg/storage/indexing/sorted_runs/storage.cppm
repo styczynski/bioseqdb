@@ -20,6 +20,7 @@ extern "C" {
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -349,18 +350,24 @@ template <class p_value> struct admitted_owned_vector {
     std::vector<p_value> values;
 };
 
-/// Reserve the peak memory needed before growing a vector.
+/// Reserve the peak memory needed before growing a vector. Structural failures
+/// carry no retryable budget reason; allocator and PostgreSQL errors propagate.
 template <class p_value>
-[[nodiscard]] bool try_ensure_admitted_vector_capacity(std::vector<p_value>& values,
-                                                       bioseq::parallelism::memory_permit& permit,
-                                                       std::size_t required_capacity) {
+[[nodiscard]] std::expected<void, bioseq::parallelism::memory_admission_failure>
+try_ensure_admitted_vector_capacity(std::vector<p_value>& values,
+                                    bioseq::parallelism::memory_permit& permit,
+                                    std::size_t required_capacity) {
+    bioseq::parallelism::memory_admission_failure failure{};
     const std::uint64_t existing_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(values.capacity()), static_cast<std::uint64_t>(sizeof(p_value)));
     if (existing_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
-        return false;
+        return std::unexpected{failure};
     }
     if (values.capacity() >= required_capacity) {
-        return existing_bytes == 0u || (permit && permit.bytes() >= existing_bytes);
+        if (existing_bytes == 0u || (permit && permit.bytes() >= existing_bytes)) {
+            return {};
+        }
+        return std::unexpected{failure};
     }
     const std::uint64_t logical_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(required_capacity), static_cast<std::uint64_t>(sizeof(p_value)));
@@ -371,20 +378,20 @@ template <class p_value>
     if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
         admitted_headroom == (std::numeric_limits<std::uint64_t>::max)() ||
         allocation_peak == (std::numeric_limits<std::uint64_t>::max)()) {
-        return false;
+        return std::unexpected{failure};
     }
     if (permit) {
-        if (permit.bytes() < existing_bytes || !permit.grow_to(allocation_peak)) {
-            return false;
+        if (permit.bytes() < existing_bytes || !permit.grow_to(allocation_peak, &failure)) {
+            return std::unexpected{failure};
         }
     } else {
         if (existing_bytes != 0u) {
-            return false;
+            return std::unexpected{failure};
         }
         auto acquired = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-            allocation_peak);
+            allocation_peak, &failure);
         if (!acquired) {
-            return false;
+            return std::unexpected{failure};
         }
         permit = std::move(*acquired);
     }
@@ -396,13 +403,14 @@ template <class p_value>
         report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
     }
     permit.shrink_to(exact_bytes);
-    return true;
+    return {};
 }
 
-/// Grow a vector together with the reservation that covers its capacimy.
+/// Grow a vector together with the reservation that covers its capacity.
 template <class p_value>
-[[nodiscard]] bool try_ensure_admitted_vector_capacity(admitted_owned_vector<p_value>& owned,
-                                                       std::size_t required_capacity) {
+[[nodiscard]] std::expected<void, bioseq::parallelism::memory_admission_failure>
+try_ensure_admitted_vector_capacity(admitted_owned_vector<p_value>& owned,
+                                    std::size_t required_capacity) {
     return try_ensure_admitted_vector_capacity(owned.values, owned.permit, required_capacity);
 }
 
@@ -459,9 +467,11 @@ struct position_accumulator {
     }
 
     /// Reserve memory for the collection and read buffers before allocating them.
-    void ensure_resident_batch() {
+    [[nodiscard]] std::expected<void, bioseq::parallelism::memory_admission_failure>
+    try_ensure_resident_batch() {
+        bioseq::parallelism::memory_admission_failure failure{};
         if (resident_batch_ready) {
-            return;
+            return {};
         }
         auto& admission = bioseq::parallelism::memory_admission_controller::instance();
         std::uint64_t per_buffer_bytes = target_position_batch_bytes;
@@ -472,9 +482,7 @@ struct position_accumulator {
             per_buffer_bytes = std::min(per_buffer_bytes, available / total_headroom_factor);
         }
         per_buffer_bytes -= per_buffer_bytes % sizeof(std::uint64_t);
-        if (per_buffer_bytes < minimum_position_batch_bytes) {
-            report_sorted_run_error(sorted_run_error::position_buffer_admission_failed);
-        }
+        per_buffer_bytes = std::max(per_buffer_bytes, minimum_position_batch_bytes);
         for (;;) {
             constexpr std::uint64_t total_headroom_factor =
                 2u * bioseq::parallelism::k_vector_preallocation_headroom_factor;
@@ -485,7 +493,7 @@ struct position_accumulator {
             // Reserve space for both buffers, including possible extra vector capacity,
             // before either allocation starts.
             const std::uint64_t requested_total_bytes = per_buffer_bytes * total_headroom_factor;
-            if (auto permit = admission.try_reserve(requested_total_bytes)) {
+            if (auto permit = admission.try_reserve(requested_total_bytes, &failure)) {
                 struct candidate_buffers {
                     bioseq::parallelism::memory_permit permit;
                     std::vector<std::uint64_t> resident;
@@ -527,15 +535,24 @@ struct position_accumulator {
                 read_buffer = std::move(candidate.read);
                 resident_permit = std::move(candidate.permit);
                 resident_batch_ready = true;
-                return;
+                return {};
             }
-            if (per_buffer_bytes == minimum_position_batch_bytes) {
+            if (failure.reason !=
+                    bioseq::parallelism::memory_admission_failure_reason::budget_exhausted ||
+                per_buffer_bytes == minimum_position_batch_bytes) {
                 break;
             }
             per_buffer_bytes = std::max(per_buffer_bytes / 2u, minimum_position_batch_bytes);
             per_buffer_bytes -= per_buffer_bytes % sizeof(std::uint64_t);
         }
-        report_sorted_run_error(sorted_run_error::position_buffer_admission_failed);
+        return std::unexpected{failure};
+    }
+
+    /// Ensure the reusable position buffers exist before accepting a value.
+    void ensure_resident_batch() {
+        if (!try_ensure_resident_batch()) {
+            report_sorted_run_error(sorted_run_error::position_buffer_admission_failed);
+        }
     }
 
     /// Append an encoded position, spilling the preceding batch when it is full
@@ -909,6 +926,54 @@ class sorted_pair_run_store {
         out.resident_peak_bytes = memory_run_peak_bytes_;
         out.spilled_bytes = spilled_run_bytes_;
         return out;
+    }
+
+    /// Prepare append and demotion metadata before incoming run payloads are admitted.
+    /// A successful call leaves a file slot for every resident and incoming run.
+    [[nodiscard]] bool try_prepare_sorted_run_append(std::size_t incoming_count) {
+        if (poisoned_) {
+            report_sorted_run_error(sorted_run_error::poisoned_store_reused);
+        }
+        if (finalized_) {
+            report_sorted_run_error(sorted_run_error::finalized_store_reused);
+        }
+        poisoned_ = true;
+        for (;;) {
+            constexpr auto maximum = (std::numeric_limits<std::size_t>::max)();
+            if (incoming_count > maximum - memory_runs_.size() ||
+                file_runs_.size() > maximum - memory_runs_.size() - incoming_count) {
+                report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            }
+            const auto memory_slots = memory_runs_.size() + incoming_count;
+            const auto file_slots = file_runs_.size() + memory_slots;
+            auto prepared = try_ensure_admitted_vector_capacity(
+                file_runs_, file_runs_metadata_permit_, file_slots);
+            if (prepared) {
+                prepared = try_ensure_admitted_vector_capacity(
+                    memory_runs_, memory_runs_metadata_permit_, memory_slots);
+            }
+            if (prepared) {
+                poisoned_ = false;
+                return true;
+            }
+            const auto failure = prepared.error();
+            if (failure.reason !=
+                bioseq::parallelism::memory_admission_failure_reason::budget_exhausted) {
+                report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            }
+            // The prior successful preparation guarantees these slots for an
+            // ordinary build. Other callers may have unprepared resident runs;
+            // refuse rather than allocate a demotion entry under their payload.
+            if (memory_runs_.empty() ||
+                file_runs_.capacity() - file_runs_.size() < memory_runs_.size()) {
+                poisoned_ = false;
+                return false;
+            }
+            if (!demote_largest_resident_run_()) {
+                poisoned_ = false;
+                return false;
+            }
+        }
     }
 
     /// Copy a borrowed sorted run to a temporary file and return its run index.
@@ -1366,9 +1431,6 @@ bool sorted_pair_run_store::try_open_file_readers_(
     resources.readers.reserve(file_runs_.size());
 
     for (buffer_file_run& run : file_runs_) {
-        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
-            report_sorted_run_error(sorted_run_error::run_rewind_failed);
-        }
         file_reader reader{};
         reader.file = run.file;
         reader.remaining = run.pair_count;
@@ -1390,33 +1452,58 @@ admitted_merge_head_queue
 sorted_pair_run_store::open_file_readers_(merge_resources& resources) {
     bioseq::parallelism::memory_admission_failure terminal_admission_failure{};
     for (;;) {
+        // Preserve the configured reader-budget fan-in before final preparation.
+        // No heap run indices or file readers survive a demotion/compaction retry.
+        compact_file_runs_until_bounded_();
+        auto terminal_site = sorted_run_merge_admission_site::merge_head_queue;
+        bool position_failure = false;
         {
             if (file_runs_.size() >
                 (std::numeric_limits<std::size_t>::max)() - memory_runs_.size()) {
                 report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
             }
-            auto admitted_heap = make_admitted_merge_head_queue(
+            auto attempt = try_make_admitted_merge_head_queue(
                 memory_runs_.size() + file_runs_.size());
-            if (try_open_file_readers_(resources, terminal_admission_failure)) {
-                return admitted_heap;
+            terminal_admission_failure = attempt.failure;
+            if (attempt.admitted.has_value()) {
+                terminal_site = sorted_run_merge_admission_site::final_readers;
+                if (try_open_file_readers_(resources, terminal_admission_failure)) {
+                    // Keep reader pressure diagnostics before position preparation.
+                    // An empty store needs neither reusable position buffer.
+                    if (run_count() != 0u) {
+                        const auto positions = resources.positions.try_ensure_resident_batch();
+                        position_failure = !positions;
+                        if (position_failure) {
+                            terminal_admission_failure = positions.error();
+                        }
+                    }
+                    if (!position_failure) {
+                        for (buffer_file_run& run : file_runs_) {
+                            if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
+                                report_sorted_run_error(sorted_run_error::run_rewind_failed);
+                            }
+                        }
+                        return std::move(*attempt.admitted);
+                    }
+                }
             }
         }
-        // Free the final merge queue before reserving memory for compaction.
-        const bool may_compact =
-            terminal_admission_failure.reason ==
-                bioseq::parallelism::memory_admission_failure_reason::budget_exhausted;
         resources.finish_success();
-        if (!may_compact || file_runs_.size() <= 1) {
+        const bool budget_refusal = terminal_admission_failure.reason ==
+            bioseq::parallelism::memory_admission_failure_reason::budget_exhausted;
+        if (budget_refusal && !memory_runs_.empty() && demote_largest_resident_run_()) {
+            continue;
+        }
+        if (!budget_refusal || file_runs_.size() <= 1u) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-            if (terminal_admission_failure.has_failure()) {
-                emit_terminal_merge_admission_failure(
-                    sorted_run_merge_admission_site::final_readers,
-                    terminal_admission_failure);
+            if (!position_failure && terminal_admission_failure.has_failure()) {
+                emit_terminal_merge_admission_failure(terminal_site, terminal_admission_failure);
             }
 #endif
-            report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            report_sorted_run_error(position_failure ? sorted_run_error::position_buffer_admission_failed
+                                                     : sorted_run_error::merge_reader_admission_failed);
         }
-        compact_file_runs_to_output_count_(std::max<std::size_t>(1, file_runs_.size() / 2));
+        compact_file_runs_to_output_count_(std::max<std::size_t>(1u, file_runs_.size() / 2u));
     }
 }
 

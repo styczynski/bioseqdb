@@ -242,16 +242,15 @@ struct alignment_input_header {
     if (!parsed) return std::unexpected(parsed.error());
     reference_descriptor reference;
     reference.identity = header.native.source_metadata.references.size();
-    reference.name = parsed->name;
     reference.length = parsed->length;
     reference.alphabet_code = supported_storage_alphabets::index_of<seq::dna15>();
     reference.context_id = 0;
     reference.circular = parsed->circular;
-    if (auto begun = header.native.begin_reference(reference, parsed->name, false); !begun) return begun;
+    if (auto begun = header.native.begin_reference(reference, parsed->name, parsed->name, false); !begun) return begun;
     const auto attributes = alignment::visit_sam_header_fields(line,
         [&header](const std::array<char, 2> tag, std::string_view value) -> std::expected<void, std::string> {
             if (tag == std::array<char, 2>{'S', 'N'} || tag == std::array<char, 2>{'L', 'N'}) return {};
-            return header.native.reference_attribute({tag, std::string{value}});
+            return header.native.reference_attribute(tag, value);
         });
     if (!attributes) return attributes;
     return header.native.end_reference();
@@ -310,6 +309,16 @@ struct alignment_input_header {
                 [tag = field.tag](const sam_header_field& candidate) { return candidate.tag == tag; });
             if (found == source.attributes.end() || (synthetic && field.tag != std::array<char, 2>{'S', 'P'}))
                 return std::unexpected(std::string{"Native reference has an unexpected canonical attribute"});
+        }
+    }
+    // Downstream tools may add PG or update RG/CO while preserving canonical
+    // records. Native validation above is authoritative for replay defaults;
+    // original contexts and original reference geometry remain untouched.
+    if (auto begun = header.preserved->begin_replay_header(true); !begun) return begun;
+    for (const auto& context : header.native.source_metadata.header_contexts) {
+        for (const auto& line : context.original_header_lines) {
+            if (!is_sam_replay_header_line(line)) continue;
+            if (auto retained = header.preserved->replay_header_line(line); !retained) return retained;
         }
     }
     return {};
@@ -405,9 +414,9 @@ template<io_source Source>
                 if (declared.name != parsed->name || declared.length != static_cast<std::uint64_t>(parsed->length))
                     return std::unexpected(std::string{"BAM text and binary dictionaries disagree"});
             } else {
-                reference_descriptor reference{index, std::string{parsed->name},
+                reference_descriptor reference{index, {},
                     static_cast<std::uint64_t>(parsed->length), supported_storage_alphabets::index_of<seq::dna15>(), 0, false, {}};
-                if (auto begun = header.native.begin_reference(reference, parsed->name, false); !begun)
+                if (auto begun = header.native.begin_reference(reference, parsed->name, parsed->name, false); !begun)
                     return std::unexpected(begun.error());
                 if (auto ended = header.native.end_reference(); !ended) return std::unexpected(ended.error());
             }
@@ -435,6 +444,8 @@ struct alignment_decoded_slot {
     alignment::bam_core_fields core;
     bioseq::borrowed_cigar_run_source cigar;
     std::string_view qname;
+    parallelism::memory_permit auxiliary_permit;
+    parallelism::memory_permit auxiliary_views_permit;
     std::vector<owned_auxiliary_field> auxiliary;
     std::vector<auxiliary_field_view> auxiliary_views;
     bool sequence_present{}, quality_present{}, needs_reference{};
@@ -471,14 +482,25 @@ struct alignment_decoded_slot {
         return {};
     }
 
+    /** Admit descriptor growth independently of the decoded record and payloads. */
+    [[nodiscard]] std::expected<void, std::string> reserve_auxiliary(const bool owns_payload) {
+        if (auxiliary_views.size() == std::numeric_limits<std::size_t>::max()
+            || (owns_payload && auxiliary.size() == std::numeric_limits<std::size_t>::max()))
+            return std::unexpected("Native auxiliary descriptor count overflows");
+        if (auto admitted = reserve_io_vector_capacity(auxiliary_views, auxiliary_views_permit,
+                auxiliary_views.size() + 1u, memory_credit); !admitted) return admitted;
+        if (owns_payload)
+            return reserve_io_vector_capacity(auxiliary, auxiliary_permit, auxiliary.size() + 1u, memory_credit);
+        return {};
+    }
+
     /** Copy a validated auxiliary field into stable caller-owned payload storage. */
     [[nodiscard]] std::expected<void, std::string> retain_auxiliary(const auxiliary_field_view& field, const bool copy_payload) {
+        if (auto admitted = reserve_auxiliary(copy_payload); !admitted) return admitted;
         if (!copy_payload) {
-            if (auto admitted = charge(2u * sizeof(auxiliary_field_view)); !admitted) return admitted;
             auxiliary_views.push_back(field);
             return {};
         }
-        if (auto admitted = charge(2u * sizeof(owned_auxiliary_field) + 2u * sizeof(auxiliary_field_view)); !admitted) return admitted;
         owned_auxiliary_field owner{field.tag, field.type, field.array_element_type, memory_credit};
         if (auto appended = owner.payload.append(field.payload); !appended) return appended;
         const auto count = field.type == 'B' ? alignment::read_wire_unsigned<std::uint32_t>(
@@ -647,7 +669,7 @@ struct alignment_dictionary_index {
             const auto text = tail.substr(0, length);
             auxiliary_field_view field;
             if (text.size() >= 4 && text[3] == 'B') {
-                if (auto admitted = slot.charge(2u * sizeof(owned_auxiliary_field) + 2u * sizeof(auxiliary_field_view)); !admitted)
+                if (auto admitted = slot.reserve_auxiliary(true); !admitted)
                     return admitted;
                 auto array = alignment::parse_sam_auxiliary_array(text, slot.memory_credit);
                 if (!array) return std::unexpected(array.error());
@@ -732,7 +754,7 @@ struct alignment_dictionary_index {
         const std::string_view text{reinterpret_cast<const char*>(field.payload.data()), field.payload.size()};
         if (!identifier_parser::has_preservation_magic(text)) continue;
         if (!header.preserved) return std::unexpected(std::string{"Canonical alignment record lacks its file manifest"});
-        const auto decoded = identifier_parser::decode_preservation_record(text, *slot.decoded, false, options.io.max_buffer_size);
+        const auto decoded = identifier_parser::decode_preservation_record(text, *slot.decoded, false, options.io.max_buffer_size, slot.memory_credit);
         if (!decoded) return decoded;
         if (!slot.decoded->projected_flag)
             return std::unexpected(std::string{"Canonical alignment payload lacks projected FLAG"});
@@ -955,7 +977,9 @@ template<bool Packed>
     std::span<const std::uint8_t> expected;
     if constexpr (Packed) expected = slot.bam->sequence_nibbles;
     else if (slot.sam->sequence) expected = {reinterpret_cast<const std::uint8_t*>(slot.sam->sequence->data()), slot.sam->sequence->size()};
-    alignment::native_projection_comparison_sink sink{expected};
+    const auto final_byte_mask = Packed && (slot.core.sequence_length & 1) != 0
+        ? std::uint8_t{0xf0u} : std::uint8_t{0xffu};
+    alignment::native_projection_comparison_sink sink{expected, final_byte_mask};
     if (!row.sequence || row.sequence->symbol_count == 0) return sink.finish();
     if (row.sequence->alphabet_code >= supported_biological_alphabets::alphabet_count)
         return std::unexpected(std::string{"Original sequence alphabet is not biological"});
@@ -1004,12 +1028,12 @@ template<bool Packed>
 }
 
 /** Validate unchanged original tags and allowed derivations before comparing native aux.
- * Protein source tags share the writer's conservative invariant policy. Only the
+ * Source and mate tags share the writer's checked projection policy. Only the
  * checked NM/MD pair may be newly derived; original payload-only fields cannot be
  * smuggled into the native domain by changing the redundant projected snapshot.
  */
 [[nodiscard]] inline std::expected<void, std::string> validate_original_auxiliary_projection(
-    const alignment_decoded_slot& slot) {
+    const alignment_decoded_slot& slot, const bool mate_projection_suppressed) {
     const auto expected = slot.decoded->projected_auxiliary();
     const auto& row = slot.decoded->record;
     const auto original = row.alignment ? row.alignment->auxiliary : std::span<const auxiliary_field_view>{};
@@ -1019,7 +1043,7 @@ template<bool Packed>
             [tag](const auxiliary_field_view& field) { return field.tag == tag; });
     };
     for (const auto& field : original) {
-        if (!alignment::retain_original_native_auxiliary(field, protein, !slot.bam)) continue;
+        if (!alignment::retain_original_native_auxiliary(field, protein, !slot.bam, mate_projection_suppressed)) continue;
         const auto projected = find_tag(expected, field.tag);
         if (projected == expected.end() || !alignment::auxiliary_logically_equal(field, *projected))
             return std::unexpected(std::string{"Canonical native tag differs from its unchanged original value"});
@@ -1032,7 +1056,7 @@ template<bool Packed>
             return std::unexpected(std::string{"Canonical projected tag has no valid native representation"});
         const auto source = find_tag(original, field.tag);
         const bool retained_source = source != original.end()
-            && alignment::retain_original_native_auxiliary(*source, protein, !slot.bam);
+            && alignment::retain_original_native_auxiliary(*source, protein, !slot.bam, mate_projection_suppressed);
         if (retained_source && alignment::auxiliary_logically_equal(*source, field)) continue;
         if (!alignment::derived_alignment_auxiliary_tag(field.tag)
             || retained_source || !row.sequence
@@ -1135,8 +1159,10 @@ template<bool Packed>
         binding.mate_reference_length = descriptor.length;
         const auto query_code = row.sequence ? std::optional{row.sequence->alphabet_code}
             : slot.decoded->sequence_descriptor(record_field_role::sequence).alphabet_code;
-        binding.mate_same_projection_domain = !slot.decoded->synthetic_codons
-            || (query_code && descriptor.alphabet_code == query_code);
+        const bool mate_synthetic_codons = header.preserved
+            && header.preserved->wire_references[static_cast<std::size_t>(*mate)].synthetic_codons;
+        binding.mate_same_projection_domain = mate_synthetic_codons == slot.decoded->synthetic_codons
+            && (!mate_synthetic_codons || (query_code && descriptor.alphabet_code == query_code));
     }
     return binding;
 }
@@ -1209,7 +1235,7 @@ template<bool Packed>
     const auto quality = slot.bam ? validate_original_quality_projection<true>(slot, reverse)
         : validate_original_quality_projection<false>(slot, reverse);
     if (!quality) return quality;
-    return validate_original_auxiliary_projection(slot);
+    return validate_original_auxiliary_projection(slot, projected->mate_projection_suppressed);
 }
 
 /** Caller-thread '=' resolver advances the existing CIGAR cursor and reads bounded reference tiles. */
@@ -1563,7 +1589,8 @@ template<class Consumer>
         if (!mapping->is_gzipped) return detail::read_alignment_source(mapping->source, format, consumer, options);
         const auto direct = mapping->source.direct_view();
         const auto first = alignment::inspect_bgzf_member({direct.first, direct.second});
-        if (first) {
+        if (first && (format == sequence_file_format::bam
+            || alignment::has_complete_bgzf_framing({direct.first, direct.second}))) {
             auto source = alignment::bgzf_source::try_open_from_mmap(std::move(mapping->source), options);
             if (!source) return std::unexpected(source.error());
             return detail::read_alignment_source(*source, format, consumer, options);

@@ -13,6 +13,7 @@ using namespace bioseq_int_tests;
 namespace {
 
 constexpr std::string_view k_table = "row_mask_write_state";
+constexpr std::string_view k_drop_frame_table = "row_mask_drop_frame";
 
 /** Create a small Bioseq relation with one initialized row-mask catalog entry. */
 void create_row_mask_table(const connection_test_context& ctx) {
@@ -33,7 +34,7 @@ void create_row_mask_table(const connection_test_context& ctx) {
 
 TEST_CASE("row-mask writes survive explicit same-transaction flush",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
-    auto ctx = fresh_context({k_table});
+    auto ctx = fresh_context({k_table, k_drop_frame_table});
     create_row_mask_table(ctx);
 
     // Leave the first rows unmasked, but enlarge the value to exercise
@@ -78,6 +79,67 @@ TEST_CASE("row-mask writes survive explicit same-transaction flush",
 
     exec_sql(ctx, "COMMIT;");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    // A DROP marker must not keep the completing savepoint's aborted writes
+    // above the parent frame. Exercise column buffers and deletion masks in
+    // the same backend, including RELEASE followed by an ancestor rollback.
+    exec_sqlf(ctx,
+              "CREATE TABLE \"{}\" (id int NOT NULL, payload int NOT NULL) USING bioseq;"
+              "INSERT INTO \"{}\" VALUES (1,10),(2,20),(3,30),(4,40);",
+              k_drop_frame_table, k_drop_frame_table);
+    const std::string restored_rows_sql =
+        fmt::format("SELECT id,payload FROM \"{}\" ORDER BY id;", k_drop_frame_table);
+    const rowset_t original_rows{{"1", "10"}, {"2", "20"}, {"3", "30"}, {"4", "40"}};
+    REQUIRE(query_rows(ctx, restored_rows_sql) == original_rows);
+    for (const bool insert_child : {true, false}) {
+        for (const bool release_child : {false, true}) {
+            INFO("insert_child=" << insert_child << " release_child=" << release_child);
+            exec_sql(ctx, "BEGIN; SAVEPOINT outer_drop_frame; SAVEPOINT child_drop_frame;");
+            if (insert_child) {
+                exec_sqlf(ctx, "INSERT INTO \"{}\" VALUES (5,50);", k_drop_frame_table);
+            } else {
+                exec_sqlf(ctx, "DELETE FROM \"{}\" WHERE id=1;", k_drop_frame_table);
+            }
+            exec_sqlf(ctx, "DROP TABLE \"{}\";", k_drop_frame_table);
+            if (release_child) {
+                exec_sql(ctx,
+                         "RELEASE SAVEPOINT child_drop_frame;"
+                         "ROLLBACK TO SAVEPOINT outer_drop_frame;");
+            } else {
+                exec_sql(ctx, "ROLLBACK TO SAVEPOINT child_drop_frame;");
+            }
+            // A stale child frame used to make this fail with pending data in
+            // upper transactions, although its savepoint had been rolled back.
+            REQUIRE(query_rows(ctx, restored_rows_sql) == original_rows);
+            exec_sql(ctx, "COMMIT;");
+            REQUIRE(query_rows(ctx, restored_rows_sql) == original_rows);
+        }
+    }
+
+    // Preserve an older buffered INSERT while removing the dropped child frame;
+    // otherwise the stale child head hides the parent writer at top-level commit.
+    exec_sqlf(ctx,
+              "BEGIN; INSERT INTO \"{}\" VALUES (5,50);"
+              "SAVEPOINT outer_drop_frame; SAVEPOINT child_drop_frame;"
+              "INSERT INTO \"{}\" VALUES (6,60); DROP TABLE \"{}\";"
+              "RELEASE SAVEPOINT child_drop_frame;"
+              "ROLLBACK TO SAVEPOINT outer_drop_frame;"
+              "RELEASE SAVEPOINT outer_drop_frame; COMMIT;",
+              k_drop_frame_table, k_drop_frame_table, k_drop_frame_table);
+    const rowset_t parent_insert_rows{
+        {"1", "10"}, {"2", "20"}, {"3", "30"}, {"4", "40"}, {"5", "50"}};
+    REQUIRE(query_rows(ctx, restored_rows_sql) == parent_insert_rows);
+
+    // The ancestor deletion mask must likewise survive the child's aborted DROP.
+    exec_sqlf(ctx,
+              "BEGIN; DELETE FROM \"{}\" WHERE id=1; SAVEPOINT child_drop_frame;"
+              "INSERT INTO \"{}\" VALUES (6,60); DROP TABLE \"{}\";"
+              "ROLLBACK TO SAVEPOINT child_drop_frame;"
+              "RELEASE SAVEPOINT child_drop_frame; COMMIT;",
+              k_drop_frame_table, k_drop_frame_table, k_drop_frame_table);
+    const rowset_t parent_delete_rows{{"2", "20"}, {"3", "30"}, {"4", "40"}, {"5", "50"}};
+    REQUIRE(query_rows(ctx, restored_rows_sql) == parent_delete_rows);
+    exec_sqlf(ctx, "DROP TABLE \"{}\";", k_drop_frame_table);
 
     exec_sql(ctx, "UPDATE bioseq_internal.row_mask SET mask = NULL;");
     const auto null_mask_error =

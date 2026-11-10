@@ -131,6 +131,7 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
 
     /* Check that match-result bindings survive each supported plan wrapper.
      * The SQL cases below also check that helpers return alignment results. */
+    guc_scope custom_scans_enabled(ctx, "bioseq.planner.custom_scan.enabled", "on");
     const auto wrapper_receipt = query_one(
         ctx,
         "SELECT exact_owner_found::text, clone_applied::text, "
@@ -143,13 +144,33 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         "originals_unchanged::text, sibling_unchanged::text, "
         "duplicate_owner_rejected::text, "
         "unknown_wrapper_rejected::text, "
-        "group_result_qual_rejected::text "
+        "group_result_qual_rejected::text, "
+        "foreign_hash_preserved::text, foreign_merge_preserved::text, "
+        "foreign_root_mmsearch_rejected::text, "
+        "foreign_algorithm_mmsearch_rejected::text, "
+        "foreign_unowned_rejected::text, non_nest_current_pair_rejected::text, "
+        "bare_result_preserved::text, group_result_preserved::text, "
+        "unique_gather_rejected::text, project_set_gather_rejected::text, "
+        "descendant_result_leaves_safe::text, descendant_wrapped_owner_found::text, "
+        "descendant_restriction_identity_preserved::text "
         "FROM bioseq_internal."
         "match_helper_wrapper_propagation_probe();");
-    REQUIRE(wrapper_receipt.size() == 19u);
+    REQUIRE(wrapper_receipt.size() == 32u);
     for (const auto& field : wrapper_receipt) {
         REQUIRE(field.has_value());
         REQUIRE(*field == "true");
+    }
+    {
+        guc_scope custom_scans_disabled(ctx, "bioseq.planner.custom_scan.enabled", "off");
+        const auto disabled_receipt = query_one(ctx,
+            "SELECT (NOT foreign_hash_preserved)::text, "
+            "(NOT foreign_merge_preserved)::text "
+            "FROM bioseq_internal.match_helper_wrapper_propagation_probe();");
+        REQUIRE(disabled_receipt.size() == 2u);
+        for (const auto& field : disabled_receipt) {
+            REQUIRE(field.has_value());
+            REQUIRE(*field == "true");
+        }
     }
     const auto executor_translation_receipt = query_one(
         ctx,

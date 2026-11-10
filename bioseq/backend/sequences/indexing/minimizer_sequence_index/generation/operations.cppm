@@ -186,6 +186,95 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
     using generation_spill_result =
         typename generation_detail::generation_spill_result_for<p_storage, p_result_owner>::type;
 
+    /** Own both replay vectors and their shared allocation-peak reservation. */
+    struct replay_buffers {
+        // Free both collection buffers before releasing their memory reservation.
+        bioseq::parallelism::memory_permit permit;
+        std::vector<detail::sorted_pair_t> run;
+        sketch_collector collector;
+        bool append_admission_failed = false;
+
+        /** Reserve memory for collection buffers before growing them. */
+        [[nodiscard]] bool ensure_replay_capacity(
+                std::uint64_t expected_run, std::uint64_t expected_sketches) {
+            constexpr std::uint64_t max = (std::numeric_limits<std::uint64_t>::max)();
+            if (expected_run >
+                    static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) ||
+                expected_sketches >
+                    static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+                return false;
+            }
+            const std::uint64_t run_bytes = bioseq::common::saturating_mul(
+                static_cast<std::uint64_t>(run.capacity()),
+                static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t)));
+            const std::uint64_t sketch_bytes = bioseq::common::saturating_mul(
+                static_cast<std::uint64_t>(
+                    collector.extract_sketches_data().capacity()),
+                static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
+            const std::uint64_t retained_bytes =
+                bioseq::common::saturating_add(run_bytes, sketch_bytes);
+            const std::uint64_t run_headroom =
+                run.capacity() < expected_run
+                    ? bioseq::common::saturating_mul(
+                          bioseq::common::saturating_mul(
+                              expected_run,
+                              static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t))),
+                          bioseq::parallelism::k_vector_preallocation_headroom_factor)
+                    : 0u;
+            const std::uint64_t sketch_headroom =
+                collector.extract_sketches_data().capacity() < expected_sketches
+                    ? bioseq::common::saturating_mul(
+                          bioseq::common::saturating_mul(
+                              expected_sketches,
+                              static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
+                          bioseq::parallelism::k_vector_preallocation_headroom_factor)
+                    : 0u;
+            const std::uint64_t allocation_peak = bioseq::common::saturating_add(
+                retained_bytes, bioseq::common::saturating_add(run_headroom, sketch_headroom));
+            if (run_bytes == max || sketch_bytes == max || retained_bytes == max ||
+                run_headroom == max || sketch_headroom == max || allocation_peak == max) {
+                return false;
+            }
+            if (permit) {
+                if (permit.bytes() < retained_bytes ||
+                    !permit.grow_to(allocation_peak)) {
+                    return false;
+                }
+            } else {
+                if (retained_bytes != 0u) {
+                    return false;
+                }
+                auto candidate_permit =
+                    bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+                        allocation_peak);
+                if (!candidate_permit) {
+                    return false;
+                }
+                permit = std::move(*candidate_permit);
+            }
+            if (run.capacity() < expected_run) {
+                run.reserve(static_cast<std::size_t>(expected_run));
+            }
+            if (collector.extract_sketches_data().capacity() < expected_sketches) {
+                collector.reserve(static_cast<std::size_t>(expected_sketches));
+            }
+            const std::uint64_t exact_run = bioseq::common::saturating_mul(
+                static_cast<std::uint64_t>(run.capacity()),
+                static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t)));
+            const std::uint64_t exact_sketch = bioseq::common::saturating_mul(
+                static_cast<std::uint64_t>(
+                    collector.extract_sketches_data().capacity()),
+                static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
+            const std::uint64_t exact = bioseq::common::saturating_add(exact_run, exact_sketch);
+            if (exact_run == max || exact_sketch == max || exact == max ||
+                exact > permit.bytes()) {
+                return false;
+            }
+            permit.shrink_to(exact);
+            return true;
+        }
+    };
+
     /**
      * Expand a core by the k-mer/window overlap needed on each side, clipping at
      * the sequence ends. Only positions inside the original core may be emitted.
@@ -240,6 +329,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
         const minimizer_generation_algorithm_identity* algorithm_identity,
         sketch_collector& collector,
         std::vector<detail::sorted_pair_t>& output,
+        replay_buffers* replay_owner,
         minimizer_sequence_generation_execution_receipt* execution_receipt = nullptr,
         bool allow_packed_bounded = false,
         direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr) {
@@ -365,6 +455,14 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
             }
+            const bool reference = selected_identity->effective_algorithm ==
+                bioseq::simd::minimizer_algorithm::simd_minimap2_reference;
+            if (reference && (replay_owner == nullptr ||
+                              std::addressof(replay_owner->run) != std::addressof(output) ||
+                              std::addressof(replay_owner->collector) != std::addressof(collector))) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
+            }
             const bool scalar = backend == minimizer_sketch_backend::scalar;
             add_route(scalar
                 ? &minimizer_sequence_generation_execution_receipt::scalar_core_runs
@@ -374,22 +472,44 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                     *selected_layout,
                     [&sequence, alphabet_code, range, emit_base, window_size, kmer_size,
                      packed_storage_bits, kernels, &output, execution_receipt,
+                     replay_owner = reference ? replay_owner : nullptr,
                      effective_algorithm = selected_identity->effective_algorithm]<class p_minimizer>() {
                         struct canonical_pair_collector {
                             std::vector<detail::sorted_pair_t>* output = nullptr;
                             std::uint64_t emit_base = 0u;
                             std::uint64_t core_lo = 0u;
                             std::uint64_t core_hi = 0u;
+                            replay_buffers* replay_owner = nullptr;
+
+                            /** Allow the existing typed sink to stop after admission refusal. */
+                            [[nodiscard]] bool is_ok() const noexcept {
+                                return replay_owner == nullptr || !replay_owner->append_admission_failed;
+                            }
 
                             /** Append full-width hashes with global positions inside this core. */
                             void collect(const p_minimizer& minimizer) {
                                 const std::uint64_t position = emit_base + minimizer.last_pos();
                                 if (position >= core_lo && position < core_hi) {
+                                    if (!is_ok()) return;
+                                    if (replay_owner != nullptr && output->size() == output->capacity()) {
+                                        // Reference lanes overlap. Admit retained and replacement
+                                        // storage before an append can grow the raw-pair vector.
+                                        const std::uint64_t required = bioseq::common::saturating_add(
+                                            static_cast<std::uint64_t>(output->size()), 1u);
+                                        const std::uint64_t grown = std::max(required,
+                                            bioseq::common::saturating_mul(
+                                                static_cast<std::uint64_t>(output->capacity()), 2u));
+                                        if (!replay_owner->ensure_replay_capacity(grown, 0u)) {
+                                            replay_owner->append_admission_failed = true;
+                                            return;
+                                        }
+                                    }
                                     output->emplace_back(minimizer.kmer(),
                                         (position << 1u) | minimizer.strand());
                                 }
                             }
-                        } direct_collector{&output, emit_base, range.core_lo_bp, range.core_hi_bp};
+                        } direct_collector{&output, emit_base, range.core_lo_bp, range.core_hi_bp,
+                                           replay_owner};
                         if (effective_algorithm == bioseq::simd::minimizer_algorithm::scalar) {
                             bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
                                 direct_collector, sequence, range.cs_u, range.ce_u,
@@ -423,7 +543,14 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                             return exact_simd_index_execution_stats{};
                         }
                     });
-            } catch (const exact_simd_index_runtime_error&) {
+            } catch (const exact_simd_index_runtime_error& error) {
+                if (error.status() == exact_simd_index_status::admission_denied) {
+                    return std::unexpected(minimizer_generation_encoding_error::admission);
+                }
+                if (reference && replay_owner->append_admission_failed &&
+                    error.status() == exact_simd_index_status::collector_overflow) {
+                    return std::unexpected(minimizer_generation_encoding_error::admission);
+                }
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
             } catch (const std::invalid_argument&) {
@@ -605,91 +732,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
         std::uint64_t segment_lo = 0;
         std::uint64_t segment_ordinal = 0;
         {
-            struct replay_buffers {
-                // Free both collection buffers before releasing their memory reservation.
-                bioseq::parallelism::memory_permit permit;
-                std::vector<detail::sorted_pair_t> run;
-                sketch_collector collector;
-            } buffers;
-            /** Reserve memory for collection buffers before growing them. */
-            const auto ensure_replay_capacity =
-                [&buffers](std::uint64_t expected_run, std::uint64_t expected_sketches) -> bool {
-                constexpr std::uint64_t max = (std::numeric_limits<std::uint64_t>::max)();
-                if (expected_run >
-                        static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) ||
-                    expected_sketches >
-                        static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
-                    return false;
-                }
-                const std::uint64_t run_bytes = bioseq::common::saturating_mul(
-                    static_cast<std::uint64_t>(buffers.run.capacity()),
-                    static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t)));
-                const std::uint64_t sketch_bytes = bioseq::common::saturating_mul(
-                    static_cast<std::uint64_t>(
-                        buffers.collector.extract_sketches_data().capacity()),
-                    static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
-                const std::uint64_t retained_bytes =
-                    bioseq::common::saturating_add(run_bytes, sketch_bytes);
-                const std::uint64_t run_headroom =
-                    buffers.run.capacity() < expected_run
-                        ? bioseq::common::saturating_mul(
-                              bioseq::common::saturating_mul(
-                                  expected_run,
-                                  static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t))),
-                              bioseq::parallelism::k_vector_preallocation_headroom_factor)
-                        : 0u;
-                const std::uint64_t sketch_headroom =
-                    buffers.collector.extract_sketches_data().capacity() < expected_sketches
-                        ? bioseq::common::saturating_mul(
-                              bioseq::common::saturating_mul(
-                                  expected_sketches,
-                                  static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
-                              bioseq::parallelism::k_vector_preallocation_headroom_factor)
-                        : 0u;
-                const std::uint64_t allocation_peak = bioseq::common::saturating_add(
-                    retained_bytes, bioseq::common::saturating_add(run_headroom, sketch_headroom));
-                if (run_bytes == max || sketch_bytes == max || retained_bytes == max ||
-                    run_headroom == max || sketch_headroom == max || allocation_peak == max) {
-                    return false;
-                }
-                if (buffers.permit) {
-                    if (buffers.permit.bytes() < retained_bytes ||
-                        !buffers.permit.grow_to(allocation_peak)) {
-                        return false;
-                    }
-                } else {
-                    if (retained_bytes != 0u) {
-                        return false;
-                    }
-                    auto permit =
-                        bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-                            allocation_peak);
-                    if (!permit) {
-                        return false;
-                    }
-                    buffers.permit = std::move(*permit);
-                }
-                if (buffers.run.capacity() < expected_run) {
-                    buffers.run.reserve(static_cast<std::size_t>(expected_run));
-                }
-                if (buffers.collector.extract_sketches_data().capacity() < expected_sketches) {
-                    buffers.collector.reserve(static_cast<std::size_t>(expected_sketches));
-                }
-                const std::uint64_t exact_run = bioseq::common::saturating_mul(
-                    static_cast<std::uint64_t>(buffers.run.capacity()),
-                    static_cast<std::uint64_t>(sizeof(detail::sorted_pair_t)));
-                const std::uint64_t exact_sketch = bioseq::common::saturating_mul(
-                    static_cast<std::uint64_t>(
-                        buffers.collector.extract_sketches_data().capacity()),
-                    static_cast<std::uint64_t>(sizeof(minimap_sketch_data)));
-                const std::uint64_t exact = bioseq::common::saturating_add(exact_run, exact_sketch);
-                if (exact_run == max || exact_sketch == max || exact == max ||
-                    exact > buffers.permit.bytes()) {
-                    return false;
-                }
-                buffers.permit.shrink_to(exact);
-                return true;
-            };
+            replay_buffers buffers;
 
             /** Sort, a completed run, remove duplicates, apply the query  filter and spill it. */
             const auto spill_completed_core =
@@ -784,7 +827,6 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                  &algorithm_identity,
                  &buffers,
                  &receipt,
-                 &ensure_replay_capacity,
                  &spill_completed_core](std::uint64_t completed_segment_ordinal,
                                         std::uint64_t core_lo,
                                         std::uint64_t core_hi)
@@ -800,6 +842,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                 receipt.peak_core_span_bp =
                     std::max(receipt.peak_core_span_bp, core_hi - core_lo);
                 buffers.run.clear();
+                buffers.append_admission_failed = false;
                 const std::uint64_t collection_units =
                     static_cast<std::uint64_t>(range->ce_u - range->cs_u);
                 const std::uint64_t maximum_new_sketches =
@@ -807,7 +850,8 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                 // Bounded ntHash can emit a selected  minmum and up to a window of tied
                 // records for each candidate. Reserve that raw output before
                 // collection. Sorting and deduplication reduce it before storage
-                // The other CPU paths reserve at most one record per input base.
+                // Scalar and two-stack exact output fit the collection span.
+                // Reference lanes can overlap; their owner admits growth before append.
                 const std::uint64_t maximum_bounded_records_per_candidate =
                     static_cast<std::uint64_t>(receipt.window_size) + 1u;
                 const bool direct_canonical_output =
@@ -827,7 +871,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                         ? core_hi - core_lo
                         : (direct_canonical_output ? maximum_new_sketches
                                                    : expected_sketches);
-                if (!ensure_replay_capacity(expected_run, expected_sketches)) {
+                if (!buffers.ensure_replay_capacity(expected_run, expected_sketches)) {
                     return std::unexpected(minimizer_generation_encoding_error::admission);
                 }
                 auto collected = collect_generation_core_run(sequence,
@@ -840,6 +884,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                                              &algorithm_identity,
                                                              buffers.collector,
                                                              buffers.run,
+                                                             &buffers,
                                                              &receipt,
                                                              true);
                 if (!collected) {
@@ -872,7 +917,6 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                          &receipt,
                          &segment_lo,
                          &segment_ordinal,
-                         &ensure_replay_capacity,
                          &collect_and_spill_core,
                          &spill_completed_core]<class p_minimizer_type>()
                             -> std::expected<void, minimizer_generation_encoding_error> {
@@ -968,7 +1012,7 @@ template <class p_storage, class p_result_owner> struct direct_minimizer_generat
                                             receipt.peak_core_span_bp = std::max(
                                                 receipt.peak_core_span_bp,
                                                 candidate_core_hi - candidate_core_lo);
-                                            if (!ensure_replay_capacity(
+                                            if (!buffers.ensure_replay_capacity(
                                                     candidate_core_hi - candidate_core_lo, 0u)) {
                                                 return std::unexpected(
                                                     minimizer_generation_encoding_error::

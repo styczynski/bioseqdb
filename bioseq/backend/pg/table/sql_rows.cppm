@@ -229,6 +229,19 @@ struct match_helper_wrapper_propagation_probe_row {
     bool duplicate_owner_rejected;
     bool unknown_wrapper_rejected;
     bool group_result_qual_rejected;
+    bool foreign_hash_preserved;
+    bool foreign_merge_preserved;
+    bool foreign_root_mmsearch_rejected;
+    bool foreign_algorithm_mmsearch_rejected;
+    bool foreign_unowned_rejected;
+    bool non_nest_current_pair_rejected;
+    bool bare_result_preserved;
+    bool group_result_preserved;
+    bool unique_gather_rejected;
+    bool project_set_gather_rejected;
+    bool descendant_result_leaves_safe;
+    bool descendant_wrapped_owner_found;
+    bool descendant_restriction_identity_preserved;
 };
 
 static_assert(std::is_aggregate_v<match_helper_wrapper_propagation_probe_row>);

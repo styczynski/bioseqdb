@@ -57,20 +57,10 @@ struct canonical_header {
 
     /** Grow only the scalar descriptor array, admitting the simultaneous old/new capacity. */
     [[nodiscard]] std::expected<void, std::string> append_field(canonical_field field) {
-        if (fields.size() == fields.capacity()) {
-            if (fields.capacity() > std::numeric_limits<std::size_t>::max() / 3u / sizeof(canonical_field))
-                return std::unexpected("canonical field descriptor capacity overflows");
-            const auto capacity = fields.capacity() == 0u ? 4u : fields.capacity() * 2u;
-            const auto peak = (capacity + fields.capacity()) * sizeof(canonical_field);
-            bool admitted = fields_permit && fields_permit.grow_to(peak);
-            if (!fields_permit) {
-                auto permit = parallelism::memory_admission_controller::instance().try_reserve(peak);
-                if (permit) { fields_permit = std::move(*permit); admitted = true; }
-            }
-            if (!admitted) return std::unexpected("cannot admit canonical metadata descriptors");
-            fields.reserve(capacity);
-            fields_permit.shrink_to(fields.capacity() * sizeof(canonical_field));
-        }
+        if (fields.size() == std::numeric_limits<std::size_t>::max())
+            return std::unexpected("canonical field descriptor count overflows");
+        if (auto admitted = reserve_io_vector_capacity(fields, fields_permit, fields.size() + 1u); !admitted)
+            return admitted;
         fields.push_back(std::move(field));
         return {};
     }

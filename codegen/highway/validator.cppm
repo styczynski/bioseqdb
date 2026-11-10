@@ -8,6 +8,7 @@ module;
 #include <functional>
 #include <map>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -19,6 +20,7 @@ module;
 export module bioseq.codegen.highway:validator;
 
 import :model;
+import :manifest;
 import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
@@ -1697,6 +1699,405 @@ inline void validate_slot_callable_ownership(
                 + "' (available: " + available + ")");
         }
     }
+}
+
+/** Closed declaration heads; bodies remain owned by the two authored modules. */
+struct scalar_codec_declaration_spec {
+    std::string_view name;
+    std::size_t parameter_count{};
+    bool is_template{};
+    std::string_view head;
+};
+
+/** Return the fixed callable closure without enrolling either owner as a new runtime target. */
+[[nodiscard]] inline std::span<const scalar_codec_declaration_spec>
+scalar_codec_declarations(const bool ranks) {
+    static constexpr auto rank_names = std::to_array<scalar_codec_declaration_spec>({
+        {"transform_sequence_rank_chunk_for", 5u, true, R"HEAD(template<class D, sequence_rank_transform Operation>
+[[nodiscard]] HWY_INLINE bool transform_sequence_rank_chunk_for(D tag,
+    std::span<const std::uint8_t> input, std::size_t cardinality,
+    std::span<const std::uint32_t> table, std::span<std::uint8_t> output))HEAD"},
+        {"lookup_u8_table16", 3u, true, R"HEAD(template<class D>
+    requires std::same_as<hn::TFromD<D>, std::uint8_t>
+[[nodiscard]] HWY_INLINE hn::Vec<D> lookup_u8_table16(D tag, hn::Vec<D> indexes,
+        const std::array<std::uint8_t, 16>& table))HEAD"},
+        {"map_small_sequence_bytes_for", 5u, true, R"HEAD(template<class D>
+[[nodiscard]] HWY_INLINE bool map_small_sequence_bytes_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> mapping, std::span<std::uint8_t> output))HEAD"},
+        {"synthesize_paired_nibbles_for", 5u, true, R"HEAD(template<class D>
+[[nodiscard]] HWY_INLINE bool synthesize_paired_nibbles_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> table, std::span<std::uint8_t> output))HEAD"},
+        {"map_sequence_bytes_for", 5u, true, R"HEAD(template<class D>
+[[nodiscard]] HWY_INLINE bool map_sequence_bytes_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> table, std::span<std::uint8_t> output))HEAD"},
+        {"transform_sequence_nibbles_for", 5u, true, R"HEAD(template<class D, bool Encode>
+[[nodiscard]] HWY_INLINE bool transform_sequence_nibbles_for(D tag,
+        std::span<const std::uint8_t> input, std::size_t cardinality,
+        std::span<const std::uint32_t> mapping, std::span<std::uint8_t> output))HEAD"},
+        {"transform_sequence_byte_range_for", 3u, true, R"HEAD(template<class D, sequence_rank_transform Operation>
+[[nodiscard]] HWY_INLINE bool transform_sequence_byte_range_for(D tag,
+        std::span<const std::uint8_t> input, std::span<std::uint8_t> output))HEAD"},
+        {"transform_sequence_rank_chunk", 5u, false, R"HEAD([[nodiscard, gnu::noinline]] bool transform_sequence_rank_chunk(sequence_rank_transform operation,
+    std::span<const std::uint8_t> input, std::size_t source_cardinality,
+    std::span<const std::uint32_t> table, std::span<std::uint8_t> output))HEAD"},
+    });
+    static constexpr auto byte_names = std::to_array<scalar_codec_declaration_spec>({
+        {"any_needle_match", 3u, true, R"HEAD(template <std::size_t p_needle_count, class p_descriptor>
+    HWY_INLINE hn::Mask<p_descriptor>
+    any_needle_match(p_descriptor simd_tag,
+                     const std::array<std::uint8_t, p_needle_count>& needles,
+                     hn::Vec<p_descriptor> chunk_bytes) noexcept)HEAD"}, {"scan_unroll_factor", 0u, true, R"HEAD(template <class p_descriptor> constexpr std::size_t scan_unroll_factor() noexcept)HEAD"},
+        {"valid_upper_hex", 2u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE hn::Mask<D> valid_upper_hex(D tag, hn::Vec<D> bytes))HEAD"}, {"valid_upper_hex_byte", 1u, false, R"HEAD([[nodiscard]] constexpr bool valid_upper_hex_byte(const std::uint8_t value))HEAD"},
+        {"byte_scan_kind", 0u, false, R"HEAD(enum class byte_scan_kind : std::uint8_t)HEAD"}, {"scan_match", 3u, true, R"HEAD(template<byte_scan_kind Kind, std::size_t Count, class D>
+    [[nodiscard]] HWY_INLINE hn::Mask<D> scan_match(D tag,
+            const std::array<std::uint8_t, Count>& needles, hn::Vec<D> bytes))HEAD"},
+        {"scan_match_byte", 2u, true, R"HEAD(template<byte_scan_kind Kind, std::size_t Count>
+    [[nodiscard]] constexpr bool scan_match_byte(std::uint8_t byte,
+            const std::array<std::uint8_t, Count>& needles))HEAD"}, {"scan_for_first", 4u, true, R"HEAD(template <std::size_t p_needle_count, class p_descriptor,
+              byte_scan_kind Kind = byte_scan_kind::needles>
+    [[nodiscard]] HWY_INLINE std::size_t
+    scan_for_first(p_descriptor simd_tag,
+                   const std::array<std::uint8_t, p_needle_count>& needles,
+                   const std::uint8_t* HWY_RESTRICT data,
+                   std::size_t size) noexcept)HEAD"},
+        {"scan_for_each", 5u, true, R"HEAD(template <std::size_t p_needle_count, class p_descriptor, typename p_visit>
+    HWY_INLINE void scan_for_each(p_descriptor simd_tag,
+                                  const std::array<std::uint8_t, p_needle_count>& needles,
+                                  const std::uint8_t* HWY_RESTRICT data,
+                                  std::size_t size,
+                                  p_visit&& visit) noexcept)HEAD"}, {"upper_hex_values", 2u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE hn::Vec<D> upper_hex_values(D tag, hn::Vec<D> bytes))HEAD"},
+        {"upper_hex_characters", 2u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE hn::Vec<D> upper_hex_characters(D tag, hn::Vec<D> nibbles))HEAD"}, {"decode_upper_hex_pairs_for", 4u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE bool decode_upper_hex_pairs_for(D tag, std::span<const std::uint8_t> input,
+            std::span<std::uint8_t> output, const std::size_t alphabet_size))HEAD"},
+        {"encode_upper_hex_bytes_for", 4u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE bool encode_upper_hex_bytes_for(D tag, std::span<const std::uint8_t> input,
+            std::span<std::uint8_t> output, const std::size_t alphabet_size))HEAD"}, {"finite_float_bytes_for", 2u, true, R"HEAD(template<class D>
+    [[nodiscard]] HWY_INLINE bool finite_float_bytes_for(D tag, std::span<const std::uint8_t> bytes))HEAD"},
+        {"crc32_z_scalar", 3u, false, R"HEAD([[nodiscard]] HWY_INLINE std::uint32_t
+    crc32_z_scalar(std::uint32_t running, const std::uint8_t* data, std::size_t size) noexcept)HEAD"},
+    });
+    if (ranks) return rank_names;
+    return byte_names;
+}
+
+/** Select exact raw declarations after matching authenticated AST names and bodies.
+ * The closed body-token proof intentionally rejects ambiguous local shadows of
+ * unselected owner names; it is not a general C++ semantic resolver. */
+[[nodiscard]] inline extracted_source extract_scalar_codec_source(
+        const source_spec& source, const bool ranks,
+        const std::string_view native_namespace,
+        const structural_analysis::translation_unit& semantic,
+        const structural_analysis::module_graph_unit& graph) {
+    using namespace structural_analysis;
+    const std::string content = read_artifact_bytes(source.path);
+    const auto raw = scan_token_slice(source.path, content);
+    if (raw.source_sha256 != bioseq::common::sha256_hex(content)
+        || semantic.source_sha256 != raw.source_sha256
+        || raw.module_name != source.module_name || semantic.module_name != source.module_name
+        || graph.provided_module != source.module_name)
+        throw std::runtime_error("scalar codec source/module/hash authority mismatch: " + source.path.string());
+    const std::string lexical_namespace = ranks
+        ? "bioseq::simd::target" : "bioseq::io::simd::HWY_NAMESPACE";
+    const std::string semantic_namespace = ranks
+        ? lexical_namespace : "bioseq::io::simd::" + std::string{native_namespace};
+    const auto specifications = scalar_codec_declarations(ranks);
+    std::set<std::string_view, std::less<>> source_macros;
+    for (const auto& directive : raw.preprocessor_directives) {
+        if (directive.kind != preprocessor_directive_kind::define
+            && directive.kind != preprocessor_directive_kind::undef) continue;
+        const auto name = std::ranges::find_if(raw.tokens, [&directive](const auto& token) {
+            return token.range.begin.byte_offset >= directive.argument_range.begin.byte_offset
+                && token.range.end.byte_offset <= directive.argument_range.end.byte_offset;
+        });
+        if (name == raw.tokens.end() || !detail::identifier(name->spelling))
+            throw std::runtime_error("scalar codec source has unproven macro declaration geometry");
+        source_macros.insert(name->spelling);
+    }
+    std::set<std::string_view, std::less<>> selected_names;
+    for (const auto& specification : specifications) selected_names.insert(specification.name);
+    std::vector<const declaration_record*> selected;
+    selected.reserve(specifications.size());
+    for (const auto& specification : specifications) {
+        const bool enumeration = specification.name == "byte_scan_kind";
+        const declaration_record* declaration = nullptr;
+        for (const auto& candidate : raw.declarations) {
+            if (candidate.name != specification.name
+                || candidate.enclosing_qualified_name != lexical_namespace) continue;
+            if (declaration != nullptr)
+                throw std::runtime_error("scalar codec selector has duplicate declaration: " + std::string{specification.name});
+            declaration = &candidate;
+        }
+        if (declaration == nullptr
+            || declaration->kind != (enumeration ? declaration_kind::enumeration : declaration_kind::function)
+            || (!enumeration && (declaration->parameters.size() != specification.parameter_count
+                || declaration->specifiers.is_template != specification.is_template
+                || declaration->payload_kind != declaration_payload_kind::function_body)))
+            throw std::runtime_error("scalar codec required declaration head changed: " + std::string{specification.name});
+        const auto& range = declaration->declaration_range;
+        const auto& body = declaration->body_or_initializer_range;
+        if (range.begin.byte_offset >= range.end.byte_offset || range.end.byte_offset > content.size()
+            || declaration->name_range.begin.byte_offset < range.begin.byte_offset
+            || declaration->name_range.end.byte_offset > range.end.byte_offset
+            || (!enumeration && (body.begin.byte_offset >= body.end.byte_offset
+                || body.begin.byte_offset < range.begin.byte_offset || body.end.byte_offset > range.end.byte_offset)))
+            throw std::runtime_error("scalar codec declaration has invalid source geometry");
+        const auto compact_head = [](std::string_view value) {
+            std::string compact;
+            for (const unsigned char byte : value)
+                if (byte != ' ' && byte != '\t' && byte != '\r' && byte != '\n' && byte != '\f' && byte != '\v')
+                    compact += static_cast<char>(byte);
+            return compact;
+        };
+        const auto head_end = enumeration ? content.find('{', declaration->name_range.end.byte_offset)
+                                          : body.begin.byte_offset;
+        if (head_end == std::string::npos || head_end > range.end.byte_offset
+            || compact_head(std::string_view{content}.substr(range.begin.byte_offset, head_end - range.begin.byte_offset))
+                != compact_head(specification.head))
+            throw std::runtime_error("scalar codec reviewed signature changed: " + std::string{specification.name});
+        if (enumeration && compact_head(std::string_view{content}.substr(range.begin.byte_offset,
+                range.end.byte_offset - range.begin.byte_offset))
+            != "enumclassbyte_scan_kind:std::uint8_t{needles,json_escape,printable_ascii,upper_hex,header_unreserved};")
+            throw std::runtime_error("scalar codec predicate enumeration changed");
+        const declaration_record* authenticated = nullptr;
+        for (const auto& candidate : semantic.declarations) {
+            if (candidate.name_range.begin.byte_offset != declaration->name_range.begin.byte_offset
+                || candidate.name != declaration->name) continue;
+            if (authenticated != nullptr)
+                throw std::runtime_error("scalar codec declaration has ambiguous AST correspondence");
+            authenticated = &candidate;
+        }
+        if (authenticated == nullptr || authenticated->stable_usr.empty()
+            || authenticated->kind != declaration->kind
+            || authenticated->enclosing_qualified_name != semantic_namespace
+            || authenticated->attachment != module_attachment::named_module
+            || authenticated->owning_module != source.module_name
+            || (!enumeration && (authenticated->parameters.size() != specification.parameter_count
+                || authenticated->body_or_initializer_range.begin.byte_offset != body.begin.byte_offset
+                || authenticated->body_or_initializer_range.end.byte_offset != body.end.byte_offset)))
+            throw std::runtime_error("scalar codec raw declaration lacks exact authenticated AST body: " + std::string{specification.name});
+        // Clang spells a macro-headed FunctionDecl begin in the defining header.
+        // Only the reviewed HWY_INLINE head may use that foreign begin offset;
+        // its main-file name/body and the complete raw template head remain exact.
+        const bool reviewed_macro_head = !enumeration
+            && authenticated->specifiers.range_contains_macro_expansion
+            && std::ranges::any_of(raw.tokens, [&declaration, &range](const auto& token) {
+                return token.spelling == "HWY_INLINE"
+                    && token.range.begin.byte_offset >= range.begin.byte_offset
+                    && token.range.end.byte_offset <= declaration->name_range.begin.byte_offset;
+            });
+        if ((!reviewed_macro_head && authenticated->range.begin.byte_offset < range.begin.byte_offset)
+            || authenticated->range.end.byte_offset > range.end.byte_offset
+            || authenticated->name_range.end.byte_offset != declaration->name_range.end.byte_offset)
+            throw std::runtime_error("scalar codec AST range escapes its complete token declaration");
+        for (const auto& directive : raw.preprocessor_directives)
+            if (directive.complete_range.begin.byte_offset < range.end.byte_offset
+                && directive.complete_range.end.byte_offset > range.begin.byte_offset)
+                throw std::runtime_error("scalar codec declaration crosses a preprocessor boundary");
+        for (std::size_t token_index{}; token_index < raw.tokens.size(); ++token_index) {
+            const auto& token = raw.tokens[token_index];
+            if (token.range.begin.byte_offset < range.begin.byte_offset
+                || token.range.end.byte_offset > range.end.byte_offset) continue;
+            // Even a permitted Highway spelling cannot be redefined by this owner.
+            // Header-origin infrastructure is bound by the separate scalar ops closure.
+            if (source_macros.contains(token.spelling))
+                throw std::runtime_error("scalar codec declaration references a source-local macro: " + token.spelling);
+            if ((token.spelling.starts_with("HWY_") && token.spelling != "HWY_INLINE"
+                    && token.spelling != "HWY_RESTRICT") || token.spelling == "#")
+                throw std::runtime_error("scalar codec declaration contains unsupported macro infrastructure");
+            if (enumeration || token.range.begin.byte_offset < body.begin.byte_offset) continue;
+            if (token.spelling == "::") {
+                const std::string_view previous = token_index == 0u ? std::string_view{} : raw.tokens[token_index - 1u].spelling;
+                const std::string_view next = token_index + 1u == raw.tokens.size() ? std::string_view{} : raw.tokens[token_index + 1u].spelling;
+                const bool reviewed_prefix = previous == "std" || previous == "hn"
+                    || previous == "sequence_rank_transform" || previous == "byte_scan_kind";
+                const bool reviewed_crc = specification.name == "crc32_z_scalar" && next == "crc32_z"
+                    && !detail::identifier(previous);
+                // A template type's ::max/::value is not a namespace escape.
+                const bool template_member = previous == ">" || previous == ">>";
+                if (!reviewed_prefix && !reviewed_crc && !template_member)
+                    throw std::runtime_error("scalar codec body escapes its reviewed namespace closure");
+            }
+            if (token.spelling == "[") {
+                const std::string_view previous = token_index == 0u ? std::string_view{} : raw.tokens[token_index - 1u].spelling;
+                const std::string_view next = token_index + 1u == raw.tokens.size() ? std::string_view{} : raw.tokens[token_index + 1u].spelling;
+                const bool attribute = previous == "[" || next == "[";
+                const bool indexed_expression = (detail::identifier(previous)
+                        && previous != "return" && previous != "co_return" && previous != "co_await"
+                        && previous != "throw" && previous != "new" && previous != "delete")
+                    || previous == "]" || previous == ")" || previous == ">";
+                if (!attribute && !indexed_expression)
+                    throw std::runtime_error("scalar codec body introduces an unreviewed lambda capture");
+            }
+            if (token.spelling == "namespace" || token.spelling == "using"
+                || token.spelling == "class" || token.spelling == "struct")
+                throw std::runtime_error("scalar codec body introduces unreviewed name/callable scope");
+            // The raw namespace census can classify static_assert as a function.
+            // This reserved token is syntax; its argument tokens are still checked
+            // individually, after the source-local macro guard above.
+            if (token.spelling == "static_assert") continue;
+            for (const auto& owner : raw.declarations) {
+                if (owner.enclosing_qualified_name != lexical_namespace
+                    || owner.name != token.spelling || selected_names.contains(owner.name)) continue;
+                if (owner.kind == declaration_kind::function || owner.kind == declaration_kind::enumeration
+                    || owner.kind == declaration_kind::variable || owner.kind == declaration_kind::alias
+                    || owner.kind == declaration_kind::record || owner.kind == declaration_kind::concept_declaration)
+                    throw std::runtime_error("scalar codec body references an unselected owner declaration: " + owner.name);
+            }
+        }
+        selected.push_back(declaration);
+    }
+    std::ranges::sort(selected, {}, [](const auto* declaration) {
+        return declaration->declaration_range.begin.byte_offset;
+    });
+    extracted_source extracted{
+        .source = source,
+        .enclosing_namespace = "bioseq::highway::codec_scalar::" + source.partition,
+        .source_sha256 = raw.source_sha256,
+        .neutral_imports = {"std", "bioseq.simd.utils"},
+    };
+    std::size_t previous_end{};
+    for (const auto* declaration : selected) {
+        const auto begin = declaration->declaration_range.begin.byte_offset;
+        const auto end = declaration->declaration_range.end.byte_offset;
+        if (begin < previous_end) throw std::runtime_error("scalar codec declarations overlap");
+        previous_end = end;
+        const auto destination = extracted.body.size();
+        extracted.body.append(content, begin, end - begin);
+        extracted.body += '\n';
+        if (declaration->kind != declaration_kind::function) continue;
+        const auto head_end = declaration->name_range.begin.byte_offset;
+        const lexical_token* anchor = nullptr;
+        for (const auto& token : raw.tokens) {
+            if (token.range.begin.byte_offset < begin || token.range.end.byte_offset > head_end) continue;
+            const bool entry = declaration->name == "transform_sequence_rank_chunk";
+            if (token.spelling != "HWY_INLINE" && token.spelling != "constexpr"
+                && !(entry && token.spelling == "bool")) continue;
+            if (anchor != nullptr)
+                throw std::runtime_error("scalar codec attribute insertion is ambiguous");
+            anchor = &token;
+        }
+        if (anchor == nullptr)
+            throw std::runtime_error("scalar codec callable lacks its reviewed attribute anchor");
+        extracted.callables.push_back(callable_insertion{
+            .body_relative_offset = destination + anchor->range.begin.byte_offset - begin,
+            .qualified_name = declaration->qualified_name,
+            .kind = "function",
+        });
+    }
+    return extracted;
+}
+
+
+/** Rehash the depfile-derived scalar ops closure instead of trusting labelled digests. */
+inline void validate_scalar_codec_header_evidence(const target_manifest& targets,
+        const scalar_codec_spec& scalar) {
+    if (scalar.policy_digest != bioseq::common::sha256_hex(scalar_codec_policy_fragment(targets))
+        || !detail::lowercase_hex_digest(scalar.header_manifest_sha256))
+        throw std::runtime_error("scalar codec effective policy identity is invalid");
+    detail::require_regular_file(scalar.header_manifest, "scalar codec header evidence");
+    if (bioseq::common::sha256_hex(read_artifact_bytes(scalar.header_manifest))
+            != scalar.header_manifest_sha256)
+        throw std::runtime_error("scalar codec header manifest changed after configuration");
+    bool revision{}, policy{}, digest{};
+    std::string material{"bioseq-highway-header-closure\nrevision=1\n"};
+    std::string previous_identity;
+    std::set<std::filesystem::path> physical_headers;
+    std::set<std::string, std::less<>> logical_headers;
+    for (const auto& fields : detail::manifest_lines(scalar.header_manifest,
+            "bioseq-highway-scalar-headers")) {
+        if (!revision && fields.front() != "revision")
+            throw std::runtime_error("scalar codec header evidence must begin with revision");
+        if (fields.front() == "revision") {
+            detail::require_field_count(scalar.header_manifest, fields.front(), fields.size(), 2u);
+            if (revision || fields[1] != "1") throw std::runtime_error("invalid scalar header evidence revision");
+            revision = true;
+        } else if (fields.front() == "policy") {
+            detail::require_field_count(scalar.header_manifest, fields.front(), fields.size(), 2u);
+            if (policy || fields[1] != scalar.policy_digest) throw std::runtime_error("scalar header evidence policy differs");
+            policy = true;
+        } else if (fields.front() == "digest") {
+            detail::require_field_count(scalar.header_manifest, fields.front(), fields.size(), 2u);
+            if (digest || fields[1] != scalar.highway_digest) throw std::runtime_error("scalar header evidence closure differs");
+            digest = true;
+        } else if (fields.front() == "header") {
+            detail::require_field_count(scalar.header_manifest, fields.front(), fields.size(), 4u);
+            const auto separator = fields[1].find('/');
+            if (!policy || !digest || separator == std::string::npos || separator == 0u
+                || !std::ranges::all_of(std::string_view{fields[1]}.substr(0u, separator),
+                    [](const char value) { return value >= '0' && value <= '9'; })
+                || (!previous_identity.empty() && fields[1] <= previous_identity)
+                || !detail::lowercase_hex_digest(fields[3]))
+                throw std::runtime_error("scalar header evidence has unordered or malformed identity");
+            const std::filesystem::path relative{fields[1].substr(separator + 1u)};
+            const std::filesystem::path actual{fields[2]};
+            if (relative.empty() || relative.is_absolute() || relative.lexically_normal() != relative
+                || std::ranges::any_of(relative, [](const auto& part) { return part == ".."; })
+                || !actual.is_absolute() || !actual.generic_string().ends_with('/' + relative.generic_string())
+                || !physical_headers.insert(detail::path_identity(actual)).second)
+                throw std::runtime_error("scalar header evidence path escapes or duplicates its configured owner");
+            detail::require_regular_file(actual, "scalar codec included header");
+            if (bioseq::common::sha256_hex(read_artifact_bytes(actual)) != fields[3])
+                throw std::runtime_error("scalar codec included header changed: " + actual.string());
+            logical_headers.insert(relative.generic_string());
+            material += fields[1] + '\t' + fields[3] + '\n';
+            previous_identity = fields[1];
+        } else throw std::runtime_error("unknown scalar codec header evidence record");
+    }
+    if (!revision || !policy || !digest || physical_headers.empty()
+        || bioseq::common::sha256_hex(material) != scalar.highway_digest)
+        throw std::runtime_error("scalar codec included-header closure digest is incomplete");
+    for (const std::string_view required : {"hwy/highway.h", "hwy/detect_targets.h",
+            "hwy/targets.h", "hwy/ops/scalar-inl.h"})
+        if (!logical_headers.contains(required))
+            throw std::runtime_error("scalar codec evidence omits required actual header: " + std::string{required});
+}
+
+/** Extract only the two scalar test closures; ordinary marked-source extraction is unchanged. */
+[[nodiscard]] inline std::vector<extracted_source> extract_scalar_codec_sources(
+        const target_manifest& targets, const source_manifest& inventory,
+        const structural_analysis::structural_index& structural,
+        const structural_analysis::module_graph& graph) {
+    if (!inventory.scalar_codec) return {};
+    const auto& scalar = *inventory.scalar_codec;
+    if (!detail::lowercase_hex_digest(scalar.policy_digest)
+        || !detail::lowercase_hex_digest(scalar.highway_digest)
+        || scalar.sequence_source == scalar.io_source)
+        throw std::runtime_error("scalar codec role has invalid private policy/source identity");
+    validate_scalar_codec_header_evidence(targets, scalar);
+    const auto native = std::ranges::find_if(targets.targets, [&targets](const auto& target) {
+        return target.token == targets.static_target_token;
+    });
+    if (native == targets.targets.end()) throw std::runtime_error("scalar codec scan lacks native AST namespace authority");
+    const std::array sources{
+        source_spec{.key = "codec_scalar_rank", .path = scalar.sequence_source,
+            .module_name = "bioseq.highway.sources.sequence_ops", .partition = "rank", .family = "codec_scalar"},
+        source_spec{.key = "codec_scalar_bytes", .path = scalar.io_source,
+            .module_name = "bioseq.io.simd", .partition = "bytes", .family = "codec_scalar"},
+    };
+    std::vector<extracted_source> result;
+    result.reserve(sources.size());
+    for (std::size_t index{}; index < sources.size(); ++index) {
+        const auto& source = sources[index];
+        detail::require_regular_file(source.path, "scalar codec source");
+        const auto identity = detail::path_identity(source.path);
+        const auto unit = std::ranges::find_if(structural.translation_units, [&identity](const auto& candidate) {
+            return detail::path_identity(candidate.source_path) == identity;
+        });
+        const auto source_identity = structural_analysis::repository_source_identity(source.path);
+        const auto provider = std::ranges::find_if(graph.units, [&source_identity](const auto& candidate) {
+            return candidate.source_identity == source_identity;
+        });
+        if (unit == structural.translation_units.end() || provider == graph.units.end())
+            throw std::runtime_error("scalar codec source is absent from authenticated scan union");
+        result.push_back(extract_scalar_codec_source(source, index == 0u, native->target_namespace, *unit, *provider));
+    }
+    return result;
 }
 
 }  // namespace bioseq::codegen::highway

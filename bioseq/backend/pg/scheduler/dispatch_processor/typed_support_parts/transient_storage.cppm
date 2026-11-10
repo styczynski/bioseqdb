@@ -23,6 +23,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
 import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.pipeline.pipe;
@@ -581,6 +582,11 @@ struct opportunistic_fragment_index_storage {
                      chunks.end());
     }
 
+    /** Rejects external-sort preparation because this store cannot spill runs. */
+    [[nodiscard]] bool try_prepare_sorted_run_append(std::size_t) {
+        index_error("external sort spill is not supported by opportunistic storage");
+    }
+
     /** Rejects sorted-run spilling, which, this in-memory chunk store does not support. */
     [[nodiscard]] std::size_t
     spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>>) {
@@ -794,6 +800,11 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
+    /** Prepare the file store before incoming collection payloads are admitted. */
+    [[nodiscard]] bool try_prepare_sorted_run_append(std::size_t incoming_count) {
+        return sorted_runs.try_prepare_sorted_run_append(incoming_count);
+    }
+
     /** Spills a sorted key/value span and returns the run index. */
     [[nodiscard]] std::size_t spill_sorted_run(std::span<const sorted_pair_t> sorted) {
         return sorted_runs.spill_sorted_run(sorted);
@@ -811,10 +822,13 @@ struct opportunistic_sequence_index_storage {
     spill_sorted_run_owned_admitted(std::vector<sorted_pair_t> sorted,
                                     std::uint64_t admitted_bytes,
                                     bioseq::parallelism::memory_permit permit) {
-        (void)admitted_bytes;
+        bioseq::indexing::detail::admitted_pair_run owned;
+        owned.pairs.swap(sorted);
+        owned.admitted_bytes = admitted_bytes;
+        owned.permit = std::move(permit);
         const std::size_t run_index = sorted_runs.spill_sorted_run(
-            std::span<const sorted_pair_t>(sorted.data(), sorted.size()));
-        permit.release();
+            std::span<const sorted_pair_t>(owned.pairs.data(), owned.pairs.size()));
+        owned.release_capacity_before_permit();
         return run_index;
     }
 

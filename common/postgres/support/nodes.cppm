@@ -45,6 +45,20 @@ static_assert(PG_VERSION_NUM >= 160000,
 
 export namespace bioseq::postgres::support {
 
+/** Check the sole original FROM entry after normal analysis/rewrite has locked it.
+ * Rewritten views retain their original relation OID in the subquery RTE.
+ * Planning/execution must consume this same Query, without another name parse. */
+[[nodiscard]] inline bool query_has_single_from_relation(const Query& query, Oid expected_relation) {
+    const auto* source_node = query.jointree && list_length(query.jointree->fromlist) == 1
+        ? static_cast<const Node*>(linitial(query.jointree->fromlist)) : nullptr;
+    const auto range_index = source_node && IsA(source_node, RangeTblRef)
+        ? reinterpret_cast<const RangeTblRef*>(source_node)->rtindex : 0;
+    const auto* source = range_index > 0 && range_index <= list_length(query.rtable)
+        ? static_cast<const RangeTblEntry*>(list_nth(query.rtable, range_index - 1)) : nullptr;
+    return source && (source->rtekind == RTE_RELATION || source->rtekind == RTE_SUBQUERY)
+        && source->relid == expected_relation;
+}
+
 /** PostgreSQL's enumeration of node types. */
 using pg_node_tag = ::NodeTag;
 

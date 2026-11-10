@@ -286,31 +286,35 @@ struct load_request_options {
 void prepare_load_destination(Oid relid, const std::string& name, const std::string& type_sql) {
     if (name.empty() || name.size() >= NAMEDATALEN || name.find('\0') != std::string::npos)
         raise_load_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE, "invalid IO destination name");
-    bioseq::postgres::support::invoke_pg_as_cpp([relid, &name, &type_sql] {
+    const bool missing = bioseq::postgres::support::invoke_pg_as_cpp([relid, &name] {
         Relation relation = table_open(relid, RowExclusiveLock);
-        if (get_attnum(relid, name.c_str()) == InvalidAttrNumber) {
-            table_close(relation, RowExclusiveLock);
-            relation = table_open(relid, AccessExclusiveLock);
-            if (get_attnum(relid, name.c_str()) == InvalidAttrNumber) {
-                if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
-                    ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                        errmsg("must be owner of table %s", RelationGetRelationName(relation)),
-                        errhint("Ask the table owner to predeclare IO destination column \"%s\".", name.c_str())));
-                const auto* qualified = quote_qualified_identifier(
-                    get_namespace_name(RelationGetNamespace(relation)), RelationGetRelationName(relation));
-                const auto* quoted = quote_identifier(name.c_str());
-                char* command = psprintf("ALTER TABLE %s ADD COLUMN %s %s", qualified, quoted, type_sql.c_str());
-                table_close(relation, NoLock);
-                relation = nullptr;
-                if (SPI_connect() != SPI_OK_CONNECT) elog(ERROR, "cannot connect SPI for IO destination DDL");
-                if (SPI_execute(command, false, 0) != SPI_OK_UTILITY) elog(ERROR, "IO destination DDL failed");
-                SPI_finish();
-                CommandCounterIncrement();
-                relation = table_open(relid, NoLock);
-            }
-        }
-        table_close(relation, NoLock);
+        const bool result = get_attnum(relid, name.c_str()) == InvalidAttrNumber;
+        table_close(relation, result ? RowExclusiveLock : NoLock);
+        return result;
     });
+    if (!missing) return;
+    // This owner must be above the PG error bridge, including event-trigger
+    // callbacks. It stabilizes the OID's name while preserving normal SPI DDL.
+    const bioseq::postgres::support::scoped_relation_identity identity(relid);
+    const bool still_missing = bioseq::postgres::support::invoke_pg_as_cpp([relid, &name] {
+        if (get_attnum(relid, name.c_str()) != InvalidAttrNumber) return false;
+        if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
+            ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                errmsg("must be owner of table %s", get_rel_name(relid)),
+                errhint("Ask the table owner to predeclare IO destination column \"%s\".", name.c_str())));
+        return true;
+    });
+    if (!still_missing) return;
+    const auto* qualified = identity.qualified_name();
+    bioseq::postgres::support::scoped_spi_connection connection;
+    bioseq::postgres::support::invoke_pg_as_cpp([qualified, &name, &type_sql] {
+        const auto* quoted = quote_identifier(name.c_str());
+        const auto* command = psprintf("ALTER TABLE %s ADD COLUMN %s %s", qualified, quoted, type_sql.c_str());
+        if (SPI_execute(command, false, 0) != SPI_OK_UTILITY)
+            elog(ERROR, "IO destination DDL failed");
+        CommandCounterIncrement();
+    });
+    static_cast<void>(connection.finish());
 }
 
 /** Reuse the unique declared quality column unless the caller explicitly maps it. */
@@ -343,10 +347,8 @@ void prepare_load_destination(Oid relid, const std::string& name, const std::str
     const auto canonical = idp::parse_canonical_header((**raw).text(), idp::canonical_parse_mode::shape);
     if (!canonical) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, canonical.error());
     if (!*canonical) return std::nullopt;
-    // Only SQL identifiers/type names and decimal descriptors allocate strings here.
+    // Scalar limits are validation bounds; the decoder owns actual scratch admission.
     constexpr std::size_t scalar_capacity = 4096u;
-    auto scalar_permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(scalar_capacity * 4u);
-    if (!scalar_permit) raise_load_error_as_cpp(ERRCODE_OUT_OF_MEMORY, "cannot admit canonical descriptor scratch");
     idp::text_record_shape shape{**canonical};
     const auto decoded = idp::decode_preservation_record((**canonical).payload, shape, true, scalar_capacity);
     if (!decoded) raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, decoded.error());
@@ -405,6 +407,9 @@ void prepare_quality_destination(Oid relid, const std::string& name,
     bioseq::postgres::support::invoke_pg_as_cpp([relid, &name] {
         Relation relation = table_open(relid, RowExclusiveLock);
         const auto attno = get_attnum(relid, name.c_str());
+        if (attno <= 0)
+            ereport(ERROR, (errcode(ERRCODE_UNDEFINED_COLUMN),
+                errmsg("alignment destination \"%s\" does not exist", name.c_str())));
         const auto* attribute = TupleDescAttr(RelationGetDescr(relation), attno - 1);
         if (attribute->atttypid != bioseq_type_oid_missing_ok("alignment") || attribute->attidentity || attribute->attgenerated)
             ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH), errmsg("alignment destination must be a writable bioseq.alignment column")));

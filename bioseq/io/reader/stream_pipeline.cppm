@@ -53,7 +53,7 @@ template <sequence_alphabet p_alphabet,
     constexpr std::size_t bits_per_char = stream_traits_type::bits_per_char;
     constexpr std::size_t letters_per_unit = stream_traits_type::letters_per_unit;
 
-    buffer_slab slab(options.io.initial_buffer_size);
+    buffer_slab slab(options);
     std::size_t records_emitted = 0;
     bool aborted = false;
     std::string captured_error;
@@ -68,6 +68,16 @@ template <sequence_alphabet p_alphabet,
         }
         aborted = true;
     };
+
+    // No refill, parser or output callback may observe an unallocated slab.
+    if (slab.raw() == nullptr) {
+        if (options.io.max_buffer_size == 0u)
+            emit_failure(failure_capture, "input buffer limit is zero");
+        else
+            emit_failure(failure_capture, "cannot allocate input buffer (initial={}, maximum={})",
+                options.io.initial_buffer_size, options.io.max_buffer_size);
+        return std::unexpected(std::move(captured_error));
+    }
 
     // Sequence words are drained between parser calls. Headers remain until
     // completion; the shared FASTQ parser counts qualities without retaining them.
@@ -102,7 +112,7 @@ template <sequence_alphabet p_alphabet,
     };
 
     // Give the sink the packed words, then prepare empty scratch for further input.
-    auto emit_stream_chunk = [&options, &seq_scratch, &sink](
+    auto emit_stream_chunk = [&seq_scratch, &sink, initial_capacity = slab.capacity](
                                  std::uint64_t chunk_bp, bool end_of_record) {
         if constexpr (requires(p_sink& sink_ref,
                                std::vector<p_storage_unit>&& owned_words,
@@ -113,7 +123,7 @@ template <sequence_alphabet p_alphabet,
             sink.chunk_owned(std::move(seq_scratch), chunk_bp, end_of_record);
             seq_scratch = {};
             seq_scratch.reserve(std::max<std::size_t>(
-                options.io.initial_buffer_size / sizeof(p_storage_unit), 1024));
+                initial_capacity / sizeof(p_storage_unit), 1024));
         } else {
             sink.chunk(packed_sequence_chunk<p_storage_unit>{
                 std::span<const p_storage_unit>(seq_scratch.data(), seq_scratch.size()),

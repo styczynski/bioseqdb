@@ -1,5 +1,85 @@
 {
   "params": {
+    "sql_write": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Managed PostgreSQL IO statement; setup and validation excluded"
+      },
+      "alphabet": {
+        "type": "string",
+        "default": "dna4",
+        "enum": [
+          "dna4",
+          "dna5",
+          "dna15",
+          "aa10li",
+          "aa10murphy",
+          "aa20",
+          "aa27"
+        ]
+      },
+      "format": {
+        "type": "string",
+        "default": "fasta",
+        "enum": [
+          "fasta",
+          "fastq",
+          "sam",
+          "bam"
+        ]
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": [
+          "single_thread",
+          "parallel_dispatch",
+          "task_parallel"
+        ],
+        "description": "Existing scheduler dispatch policy; actual configured worker limit is recorded separately"
+      }
+    },
+    "sql_load": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Managed PostgreSQL IO statement; setup and validation excluded"
+      },
+      "alphabet": {
+        "type": "string",
+        "default": "dna4",
+        "enum": [
+          "dna4",
+          "dna5",
+          "dna15",
+          "aa10li",
+          "aa10murphy",
+          "aa20",
+          "aa27"
+        ]
+      },
+      "format": {
+        "type": "string",
+        "default": "fasta",
+        "enum": [
+          "fasta",
+          "fastq",
+          "sam",
+          "bam"
+        ]
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": [
+          "single_thread",
+          "parallel_dispatch",
+          "task_parallel"
+        ],
+        "description": "Existing scheduler dispatch policy; actual configured worker limit is recorded separately"
+      }
+    },
     "sample_table": {
       "_": {
         "type": "integer",
@@ -117,6 +197,15 @@
   },
 
   "test_cases": {
+    "SQL_SEQUENCE_IO_SHORT": {
+      "concurrency": 1,
+      "data": {
+        "row_count": 4096,
+        "sequence_length": 150,
+        "seed": 42
+      },
+      "description": "Prepared native reference slices across all seven alphabets; exact original roundtrip validated outside each write/load timing"
+    },
     "RANDOM_DNA4_STARTUP": {"concurrency": 1,"data": {"alphabet": "dna4","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation dna4: 32 rows of 150 symbols, including DDL and commit"},
     "RANDOM_DNA4_LONG": {"concurrency": 1,"data": {"alphabet": "dna4","row_count": 16,"sequence_length": 100000,"seed": 42},"description": "Random generation dna4: 16 rows of 100000 symbols, including DDL and commit"},
     "RANDOM_DNA5_STARTUP": {"concurrency": 1,"data": {"alphabet": "dna5","row_count": 32,"sequence_length": 150,"seed": 42},"description": "Random generation dna5: 32 rows of 150 symbols, including DDL and commit"},
@@ -1305,6 +1394,128 @@
           "rules": []
         },
         "measured_region_ns_manual": {
+          "type": "evaluation",
+          "rules": []
+        }
+      }
+    }
+  },
+
+  "bench_sequence_io": {
+    "tags": [
+      "e2e",
+      "sequence-io"
+    ],
+    "description": "One PostgreSQL write/load request with commit and IO finalization, excluding fixture setup, two fully validated untimed warmups per exact tuple, EXPLAIN and semantic verification. All seven biological alphabets; real mapped SAM/BAM reference-slice records. Prepared/previously-read inputs, no verified cache residency or samtools ratio. Scheduler mode is policy, not worker count.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 42
+    },
+    "matrix": {
+      "for": {
+        "SQL_SEQUENCE_IO_SHORT": 7
+      },
+      "over": {
+        "sql_write": {
+          "alphabet": [
+            "dna4",
+            "dna5",
+            "dna15",
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27"
+          ],
+          "format": [
+            "fasta",
+            "fastq",
+            "sam",
+            "bam"
+          ],
+          "pipeline_mode": [
+            "single_thread",
+            "parallel_dispatch",
+            "task_parallel"
+          ]
+        },
+        "sql_load": {
+          "alphabet": [
+            "dna4",
+            "dna5",
+            "dna15",
+            "aa10li",
+            "aa10murphy",
+            "aa20",
+            "aa27"
+          ],
+          "format": [
+            "fasta",
+            "fastq",
+            "sam",
+            "bam"
+          ],
+          "pipeline_mode": [
+            "single_thread",
+            "parallel_dispatch",
+            "task_parallel"
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "row_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "original_symbols": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "file_bytes": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "rows_per_second": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "original_symbols_per_second": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "file_bytes_per_second": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "correctness_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "sampled_cluster_postgres_rss_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "sampled_bench_rss_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "sampled_min_tmp_available_gib": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "sampled_swap_used_mb": {
           "type": "evaluation",
           "rules": []
         }

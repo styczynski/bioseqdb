@@ -18,6 +18,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -51,7 +52,7 @@ export namespace bioseq::indexing {
  * Build a saved minimizer index with the alphabet-derived ordinary exact profile.
  * Collect global hash/position pairs into sorted runs, merge them into buckets,
  * then write the directory  after all buckets are stored. Memory pressure can
- * split collection ranges or defer them to the calling thread
+ * split collection cores and transfer completed waves on the calling thread.
  * kernels supplies the selected SIMD functions. scalar_build_stats_out optionally
  * receives collection counts. alphabet_code identifies the input alphabet.
  */
@@ -95,7 +96,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     }
 
     const sequence_size_t total_bp = seq.bp_size();
-    const std::size_t nfrag = static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
+    const std::size_t nfrag = static_cast<std::size_t>(total_bp / frag_bp + (total_bp % frag_bp != 0u));
 
     // Collect minimizers as global hash/position pairs and spill sorted runs.
     const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
@@ -109,318 +110,329 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
         return *range;
     };
-    /** One worker's collected runs, deferred ranges, statistics and saved error. */
+    // Complete and transfer only one admitted wave at a time. Store metadata is
+    // prepared before payload permits, including slots to spill every resident
+    // run without allocating another file-run entry under a full budget.
+    struct collection_admission_error final : std::bad_alloc {
+        const char* stage;
+        explicit collection_admission_error(const char* value) noexcept : stage(value) {}
+        const char* what() const noexcept override { return stage; }
+    };
     struct worker_range_result {
-        detail::admitted_vector_run<admitted_pair_run> runs;
-        detail::admitted_vector_run<segment_unit_range> deferred_for_backend_spill;
+        admitted_pair_run run;
+        segment_unit_range range{};
         direct_minimizer_bucket_build_stats scalar_build_stats{};
         std::exception_ptr error;
-        segment_unit_range error_range{};
+        std::uint64_t distinct_hashes = 0u;
     };
 
-    /** Free untransferred worker buffers before releasing their memory permits. */
-    auto release_untransferred_results_noexcept =
-        [](std::vector<worker_range_result>& results) noexcept {
-            for (worker_range_result& result : results) {
-                for (admitted_pair_run& run : result.runs.pairs) {
-                    run.release_capacity_before_permit();
-                }
-                result.runs.release_capacity_before_permit();
-                result.deferred_for_backend_spill.release_capacity_before_permit();
-            }
-        };
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto demote_for_budget_refusal = [&storage](
+        const bioseq::parallelism::memory_admission_failure& failure,
+        std::uint64_t bytes) {
+        if (failure.reason !=
+            bioseq::parallelism::memory_admission_failure_reason::budget_exhausted) {
+            return false;
+        }
+        if constexpr (requires(p_storage& s, std::uint64_t needed) {
+                          s.demote_resident_runs_until_available(needed);
+                      }) {
+            storage.demote_resident_runs_until_available(bytes);
+        }
+        return true;
+    };
 
     /** Collect global hash/position pairs whose positions fall inside this core. */
     auto collect_core_range_pairs =
-        [&seq, backend, kernels, alphabet_code](sequence_size_t core_lo,
-                                                sequence_size_t core_hi,
+        [&seq, backend, kernels, alphabet_code](segment_unit_range range,
                                                 std::vector<pair_t>& out,
                                                 direct_minimizer_bucket_build_stats* scalar_stats) {
-            if (core_hi <= core_lo) {
-                return;
-            }
             // Ordinary backends emit pairs directly; the bounded-only collector stays empty.
             sketch_collector collector;
-            auto range = make_generation_collection_range(seq, core_lo, core_hi, w, k);
-            if (!range || !collect_generation_core_run(seq,
-                                                       alphabet_code,
-                                                       backend,
-                                                       kernels,
-                                                       *range,
-                                                       w,
-                                                       k,
-                                                       nullptr,
-                                                       collector,
-                                                       out,
-                                                       nullptr,
-                                                       true,
-                                                       scalar_stats)) {
+            const auto collected = collect_generation_core_run(seq,
+                                             alphabet_code,
+                                             backend,
+                                             kernels,
+                                             range,
+                                             w,
+                                             k,
+                                             nullptr,
+                                             collector,
+                                             out,
+                                             nullptr,
+                                             true,
+                                             scalar_stats);
+            if (!collected) {
+                if (collected.error() == minimizer_generation_encoding_error::admission) {
+                    throw collection_admission_error{
+                        "minimizers_per_sequence build: input materialization admission failed"};
+                }
                 index_corruption_panic(
                     "minimizers_per_sequence build: collection/core geometry failed");
             }
         };
 
-    /** Reserve scratch memory, collect a deferred range, then sort and spill its pairs. */
-    auto collect_sort_and_spill_backend_scratch =
-        [backend,
-         &storage,
-         &make_core_range,
-         &collect_core_range_pairs,
-         &capture_scalar_build_stats,
-         &scalar_build_stats](auto& self, segment_unit_range range) -> void {
-        const std::uint64_t bp = static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
-        const std::uint64_t maximum_output_pairs = bp;
-        const std::uint64_t admission_bytes =
-            detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-        auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-            admission_bytes);
-        if (!permit) {
-            if constexpr (requires(p_storage& s, std::uint64_t bytes) {
-                              s.demote_resident_runs_until_available(bytes);
-                          }) {
-                storage.demote_resident_runs_until_available(admission_bytes);
-                permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-                    admission_bytes);
-            }
-        }
-        if (!permit) {
-            constexpr sequence_size_t min_core_bp = 4096;
-            if (range.core_hi_bp - range.core_lo_bp > min_core_bp) {
-                const sequence_size_t mid =
-                    range.core_lo_bp + (range.core_hi_bp - range.core_lo_bp) / 2;
-                self(self, make_core_range(range.core_lo_bp, mid));
-                self(self, make_core_range(mid, range.core_hi_bp));
-                return;
-            }
-            // Stop when even the minimum core cannot fit the memory budget.
-            throw std::bad_alloc{};
-        }
-        admitted_pair_run scratch;
-        scratch.permit = std::move(*permit);
-        if (!detail::reserve_admitted_vector_run_capacity(
-                scratch,
-                maximum_output_pairs)) {
-            index_corruption_panic(
-                "minimizers_per_sequence build: scratch pair capacity exceeded admission");
-        }
-        collect_core_range_pairs(range.core_lo_bp,
-                                 range.core_hi_bp,
-                                 scratch.pairs,
-                                 capture_scalar_build_stats ? &scalar_build_stats : nullptr);
-        if (!detail::finish_admitted_vector_run_transient(scratch)) {
-            index_corruption_panic(
-                "minimizers_per_sequence build: scratch pair collection exceeded admission");
-        }
-        // The Vulkan segment producer already sorts and deduplicates this single core.
-        if (backend != minimizer_sketch_backend::vulkan_segment) {
-            detail::sort_pair_run(scratch.pairs);
-        }
-        storage.spill_sorted_run(
-            std::span<const pair_t>(scratch.pairs.data(), scratch.pairs.size()));
-        scratch.release_capacity_before_permit();
-    };
-
-    /** Move worker runs into spill storage and collect ranges deferred by memory pressure. */
-    auto transfer_result_runs = [&capture_scalar_build_stats,
-                                 &scalar_build_stats,
-                                 &storage,
-                                 &collect_sort_and_spill_backend_scratch,
-                                 &release_untransferred_results_noexcept](
-                                    std::vector<worker_range_result>& results) {
-        for (worker_range_result& result : results) {
-            if (result.error) {
-                try {
-                    std::rethrow_exception(result.error);
-                } catch (const exact_simd_index_runtime_error&) {
-                    // Let the PostgreSQL error handler report the unsupported SIMD request
-                    // using the original status.
-                    throw;
-                } catch (const std::exception& e) {
-                    const std::string message =
-                        "bioseq minimizers_per_sequence worker failed for core=[" +
-                        std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo_bp)) +
-                        "," +
-                        std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi_bp)) +
-                        "): " + e.what();
-                    index_corruption_panic(message);
-                } catch (...) {
-                    const std::string message =
-                        "bioseq minimizers_per_sequence worker failed for core=[" +
-                        std::to_string(static_cast<std::uint64_t>(result.error_range.core_lo_bp)) +
-                        "," +
-                        std::to_string(static_cast<std::uint64_t>(result.error_range.core_hi_bp)) +
-                        "): non-std exception";
-                    index_corruption_panic(message);
-                }
-            }
-            if (capture_scalar_build_stats) {
-                scalar_build_stats.merge(result.scalar_build_stats);
-            }
-            for (admitted_pair_run& run : result.runs.pairs) {
-                if (!run.pairs.empty()) {
-                    storage.spill_sorted_run_owned_admitted(
-                        std::move(run.pairs), run.admitted_bytes, std::move(run.permit));
-                    run.admitted_bytes = 0;
-                }
-            }
-            for (segment_unit_range range : result.deferred_for_backend_spill.pairs) {
-                collect_sort_and_spill_backend_scratch(collect_sort_and_spill_backend_scratch,
-                                                       range);
-            }
-        }
-        release_untransferred_results_noexcept(results);
-    };
-
-    /** Collect a range, within its memory reservation, splitting or deferring it when space is short */
-    auto collect_range_admitted =
-        [backend,
-         &storage,
-         &make_core_range,
-         &collect_core_range_pairs,
-         &capture_scalar_build_stats](
-            auto& self, segment_unit_range range, worker_range_result& result) -> void {
-        if (result.error) {
-            return;
-        }
-        try {
-            const std::uint64_t bp =
-                static_cast<std::uint64_t>(range.core_hi_bp - range.core_lo_bp);
-            const std::uint64_t maximum_output_pairs = bp;
-            const std::uint64_t admission_bytes =
-                detail::admitted_vector_preallocation_bytes<pair_t>(maximum_output_pairs);
-            auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-                admission_bytes);
-            if (!permit) {
-                constexpr sequence_size_t min_core_bp = 4096;
-                if (range.core_hi_bp - range.core_lo_bp <= min_core_bp) {
-                    if (!detail::ensure_admitted_vector_run_capacity(
-                            result.deferred_for_backend_spill,
-                            result.deferred_for_backend_spill.pairs.size() + 1u)) {
-                        throw std::bad_alloc{};
-                    }
-                    result.deferred_for_backend_spill.pairs.push_back(range);
-                    return;
-                }
-                const sequence_size_t mid =
-                    range.core_lo_bp + (range.core_hi_bp - range.core_lo_bp) / 2;
-                self(self, make_core_range(range.core_lo_bp, mid), result);
-                self(self, make_core_range(mid, range.core_hi_bp), result);
-                return;
-            }
-
-            admitted_pair_run run{};
-            run.permit = std::move(*permit);
-            if (!detail::reserve_admitted_vector_run_capacity(
-                    run,
-                    maximum_output_pairs)) {
-                index_corruption_panic(
-                    "minimizers_per_sequence build: worker pair capacity exceeded admission");
-            }
-            collect_core_range_pairs(range.core_lo_bp,
-                                     range.core_hi_bp,
-                                     run.pairs,
-                                     capture_scalar_build_stats ? &result.scalar_build_stats
-                                                                : nullptr);
-            if (!detail::finish_admitted_vector_run_transient(run)) {
-                index_corruption_panic(
-                    "minimizers_per_sequence build: worker pair collection exceeded admission");
-            }
-            // The Vulkan segment producer already sorts and deduplicates this single core.
-            if (backend != minimizer_sketch_backend::vulkan_segment) {
-                detail::sort_pair_run(run.pairs);
-            }
-            detail::compact_admitted_pair_run_after_sort(run);
-            if (!detail::ensure_admitted_vector_run_capacity(result.runs,
-                                                             result.runs.pairs.size() + 1u)) {
-                throw std::bad_alloc{};
-            }
-            result.runs.pairs.push_back(std::move(run));
-        } catch (...) {
-            result.error = std::current_exception();
-            result.error_range = range;
-        }
-    };
-
-    const std::uint64_t peak_bytes_per_fragment = bioseq::common::saturating_mul(
-        static_cast<std::uint64_t>(frag_bp), static_cast<std::uint64_t>(sizeof(pair_t)));
-    const std::size_t scalar_fragments_per_block = std::max<std::size_t>(
-        1, run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
-    const std::size_t fragments_per_block = scalar_fragments_per_block;
-    detail::admitted_vector_run<segment_unit_range> admitted_window_ranges;
-    const std::size_t maximum_window_ranges =
-        nfrag == 0u ? 0u : (nfrag + fragments_per_block - 1u) / fragments_per_block;
-    if (!detail::ensure_admitted_vector_run_capacity(admitted_window_ranges,
-                                                     maximum_window_ranges)) {
-        index_corruption_panic("minimizers_per_sequence build: window metadata admission failed");
-    }
-    std::vector<segment_unit_range>& window_ranges = admitted_window_ranges.pairs;
-    for (std::size_t frag_lo = 0; frag_lo < nfrag; frag_lo += fragments_per_block) {
-        const std::size_t frag_hi = std::min(nfrag, frag_lo + fragments_per_block);
-        const sequence_size_t core_lo = static_cast<sequence_size_t>(frag_lo) * frag_bp;
-        const sequence_size_t core_hi =
-            std::min(static_cast<sequence_size_t>(frag_hi) * frag_bp, total_bp);
-        if (core_hi > core_lo) {
-            window_ranges.push_back(make_core_range(core_lo, core_hi));
-        }
-    }
-
-    /** Collect ranges on the calling thread, transferring each result to storage immediately. */
-    auto collect_serial = [&window_ranges, &collect_range_admitted, &transfer_result_runs]() {
+    std::uint64_t collected_pair_count = 0u;
+    std::uint64_t collected_distinct_upper = 0u;
+    {
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        const bool may_parallel_collect =
+            bioseq::parallelism::has_parallel_tasks(pool.get_mode()) &&
+            pool.maximum_concurrency() > 1 && bioseq::storage::is_worker_shareable(seq) &&
+            nfrag >= bioseq::parallelism::task_parallel_minimums::k_fragment_count;
+        unsigned maximum_fanout = may_parallel_collect
+            ? static_cast<unsigned>(std::max(1u, pool.maximum_concurrency())) : 1u;
+        maximum_fanout = static_cast<unsigned>(std::min<std::uint64_t>(
+            maximum_fanout, std::max<std::uint64_t>(1u, nfrag)));
         detail::admitted_vector_run<worker_range_result> admitted_results;
-        if (!detail::ensure_admitted_vector_run_capacity(admitted_results, 1u)) {
-            throw std::bad_alloc{};
-        }
-        admitted_results.pairs.resize(1u);
-        std::vector<worker_range_result>& results = admitted_results.pairs;
-        for (segment_unit_range range : window_ranges) {
-            results[0] = worker_range_result{};
-            collect_range_admitted(collect_range_admitted, range, results[0]);
-            transfer_result_runs(results);
-        }
-    };
-
-    auto& pool = bioseq::parallelism::global_pool::instance();
-    // Exact CPU ranges run in parallel when the source supports worker sharing.
-    const bool may_parallel_collect =
-        bioseq::parallelism::has_parallel_tasks(pool.get_mode()) &&
-        pool.maximum_concurrency() > 1 && bioseq::storage::is_worker_shareable(seq) &&
-        nfrag >= bioseq::parallelism::task_parallel_minimums::k_fragment_count;
-
-    if (!may_parallel_collect) {
-        collect_serial();
-    } else {
-        detail::admitted_vector_run<worker_range_result> admitted_local_results;
-        if (!detail::ensure_admitted_vector_run_capacity(admitted_local_results,
-                                                         window_ranges.size())) {
-            throw std::bad_alloc{};
-        }
-        admitted_local_results.pairs.resize(window_ranges.size());
-        std::vector<worker_range_result>& local_results = admitted_local_results.pairs;
-        try {
-            bioseq::parallelism::parallel_for_pipeline(
-                0,
-                local_results.size(),
-                1,
-                bioseq::parallelism::task_parallel_minimums::k_fragment_count,
-                bioseq::parallelism::task_parallel_region::fragment_build,
-                [&collect_range_admitted, &local_results, &window_ranges](std::size_t lo,
-                                                                          std::size_t hi) {
-                    for (std::size_t rel = lo; rel < hi; ++rel) {
-                        collect_range_admitted(
-                            collect_range_admitted, window_ranges[rel], local_results[rel]);
+        if (total_bp != 0u) {
+            for (;;) {
+                const auto bytes =
+                    detail::admitted_vector_preallocation_bytes<worker_range_result>(maximum_fanout);
+                bioseq::parallelism::memory_admission_failure failure{};
+                auto permit = admission.try_reserve(bytes, &failure);
+                if (permit) {
+                    admitted_results.permit = std::move(*permit);
+                    if (!detail::reserve_admitted_vector_run_capacity(
+                            admitted_results, maximum_fanout)) {
+                        index_corruption_panic(
+                            "minimizers_per_sequence build: wave metadata exceeded admission");
                     }
-                });
-            transfer_result_runs(local_results);
-        } catch (...) {
-            release_untransferred_results_noexcept(local_results);
-            throw;
+                    break;
+                }
+                if (failure.reason !=
+                        bioseq::parallelism::memory_admission_failure_reason::budget_exhausted ||
+                    maximum_fanout == 1u) {
+                    throw collection_admission_error{
+                        "minimizers_per_sequence build: wave metadata admission failed"};
+                }
+                maximum_fanout = std::max(1u, maximum_fanout / 2u);
+            }
         }
-    }
+
+        const std::uint64_t bytes_per_fragment = bioseq::common::saturating_mul(
+            static_cast<std::uint64_t>(frag_bp), static_cast<std::uint64_t>(sizeof(pair_t)));
+        const std::uint64_t fragments_per_block = std::max<std::uint64_t>(
+            1u, run_buffer_bytes / std::max<std::uint64_t>(1u, bytes_per_fragment));
+        sequence_size_t core_limit = std::min<std::uint64_t>(
+            total_bp, bioseq::common::saturating_mul(fragments_per_block, frag_bp));
+        constexpr sequence_size_t minimum_core_bp = 4096u;
+        sequence_size_t next_core = 0u;
+        while (next_core < total_bp) {
+            const std::uint64_t remaining = total_bp - next_core;
+            core_limit = std::min<sequence_size_t>(core_limit, remaining);
+            const auto requested = static_cast<unsigned>(std::min<std::uint64_t>(
+                maximum_fanout, remaining / core_limit + (remaining % core_limit != 0u)));
+            unsigned prepared_fanout = requested;
+            while (!storage.try_prepare_sorted_run_append(prepared_fanout)) {
+                if (prepared_fanout == 1u) {
+                    throw collection_admission_error{
+                        "minimizers_per_sequence build: spill metadata admission failed"};
+                }
+                prepared_fanout = std::max(1u, prepared_fanout / 2u);
+            }
+            // First-window ties can repeat a core endpoint before deduplication.
+            // Ordinary scalar/two-stack raw output is bounded by the complete
+            // collection span, including the context on both sides of the core.
+            constexpr std::uint64_t collection_halo_bp = w + k - 2u;
+            const std::uint64_t maximum_collection_bp = std::min<std::uint64_t>(
+                total_bp, bioseq::common::saturating_add(
+                    core_limit, 2u * collection_halo_bp));
+            const std::uint64_t per_task_bytes =
+                detail::admitted_vector_preallocation_bytes<pair_t>(maximum_collection_bp);
+            auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
+                prepared_fanout, per_task_bytes);
+            if (!wave.is_admitted) {
+                // The wave API does not expose a refusal reason. A one-item
+                // attempt identifies budget pressure without retrying PG/IO or
+                // allocator exceptions as if they were admission refusals.
+                bioseq::parallelism::memory_admission_failure failure{};
+                auto single = admission.try_reserve(per_task_bytes, &failure);
+                if (single) {
+                    wave = {1u, std::move(*single), true};
+                } else {
+                    if (!demote_for_budget_refusal(failure, per_task_bytes)) {
+                        throw collection_admission_error{
+                            "minimizers_per_sequence build: collection memory pressure"};
+                    }
+                    wave = bioseq::parallelism::try_reserve_budgeted_wave(
+                        prepared_fanout, per_task_bytes);
+                    if (!wave.is_admitted) {
+                        single = admission.try_reserve(per_task_bytes, &failure);
+                        if (single) {
+                            wave = {1u, std::move(*single), true};
+                        } else if (failure.reason !=
+                                   bioseq::parallelism::memory_admission_failure_reason::budget_exhausted) {
+                            throw collection_admission_error{
+                                "minimizers_per_sequence build: collection memory pressure"};
+                        }
+                    }
+                    if (!wave.is_admitted) {
+                        if (core_limit <= minimum_core_bp) {
+                            throw collection_admission_error{
+                                "minimizers_per_sequence build: minimum core admission failed"};
+                        }
+                        core_limit = std::max(minimum_core_bp, core_limit / 2u);
+                        continue;
+                    }
+                }
+            }
+
+            auto& results = admitted_results.pairs;
+            results.resize(wave.fanout);
+            for (auto& result : results) {
+                const sequence_size_t core_end = next_core +
+                    std::min<sequence_size_t>(core_limit, total_bp - next_core);
+                result.range = make_core_range(next_core, core_end);
+                result.run.permit = wave.permit.split_off(per_task_bytes);
+                if (!detail::reserve_admitted_vector_run_capacity(
+                        result.run, result.range.ce_u - result.range.cs_u)) {
+                    index_corruption_panic(
+                        "minimizers_per_sequence build: wave pair capacity exceeded admission");
+                }
+                next_core = core_end;
+            }
+            const auto collect_wave = [&results, &collect_core_range_pairs,
+                                       capture_scalar_build_stats, backend](std::size_t lo,
+                                                                           std::size_t hi) {
+                for (std::size_t index = lo; index < hi; ++index) {
+                    auto& result = results[index];
+                    try {
+                        collect_core_range_pairs(result.range, result.run.pairs,
+                            capture_scalar_build_stats ? &result.scalar_build_stats : nullptr);
+                        if (!detail::finish_admitted_vector_run_transient(result.run)) {
+                            index_corruption_panic(
+                                "minimizers_per_sequence build: wave collection exceeded admission");
+                        }
+                        if (backend != minimizer_sketch_backend::vulkan_segment) {
+                            detail::sort_pair_run(result.run.pairs);
+                        }
+                        detail::compact_admitted_pair_run_after_sort(result.run);
+                        // The sum of per-run distinct counts bounds global
+                        // distinct hashes without retaining another key set.
+                        for (std::size_t pair_index = 0u; pair_index < result.run.pairs.size(); ++pair_index) {
+                            if (pair_index == 0u || result.run.pairs[pair_index - 1u].first !=
+                                                       result.run.pairs[pair_index].first) {
+                                ++result.distinct_hashes;
+                            }
+                        }
+                    } catch (...) {
+                        result.error = std::current_exception();
+                    }
+                }
+            };
+            if (may_parallel_collect) {
+                // The whole input already passed the fragment-count threshold.
+                // Two- and three-item admitted waves retain parallel execution.
+                bioseq::parallelism::parallel_for_pipeline(
+                    0u, results.size(), 1u, 1u,
+                    bioseq::parallelism::task_parallel_region::fragment_build, collect_wave);
+            } else {
+                collect_wave(0u, results.size());
+            }
+            for (const auto& result : results) {
+                if (result.error) {
+                    std::rethrow_exception(result.error);
+                }
+            }
+            for (auto& result : results) {
+                if (capture_scalar_build_stats) {
+                    scalar_build_stats.merge(result.scalar_build_stats);
+                }
+                if (result.run.pairs.size() >
+                    (std::numeric_limits<std::uint64_t>::max)() - collected_pair_count) {
+                    index_corruption_panic(
+                        "minimizers_per_sequence build: collected pair count overflow");
+                }
+                collected_pair_count += result.run.pairs.size();
+                if (result.distinct_hashes >
+                    (std::numeric_limits<std::uint64_t>::max)() - collected_distinct_upper) {
+                    index_corruption_panic(
+                        "minimizers_per_sequence build: distinct hash bound overflow");
+                }
+                collected_distinct_upper += result.distinct_hashes;
+                if (!result.run.pairs.empty()) {
+                    storage.spill_sorted_run_owned_admitted(
+                        std::move(result.run.pairs), result.run.admitted_bytes,
+                        std::move(result.run.permit));
+                    result.run.admitted_bytes = 0u;
+                }
+            }
+            results.clear();
+        }
+    } // Release wave metadata before preparing merge/output owners.
 
     // Merge sorted runs into hash-range buckets and build their directory.
     detail::admitted_vector_run<direct_minimizer_bucket_directory_entry> admitted_dir;
     detail::admitted_vector_run<encoded_bucket_record> admitted_ob_buckets;
     detail::admitted_vector_run<std::uint64_t> admitted_ob_positions;
+    // Admit the complete output preparation before allocating any array. Reduce
+    // only the aggregation frame under budget pressure; a large single hash can
+    // stream directly into a storage chunk. All demotions precede merge readers.
+    const auto prepare_output = [](auto& owner, std::uint64_t count,
+                                   bioseq::parallelism::memory_permit& combined_permit) {
+        if (count == 0u) {
+            return;
+        }
+        using value_type = typename std::remove_reference_t<decltype(owner.pairs)>::value_type;
+        const auto bytes = detail::admitted_vector_preallocation_bytes<value_type>(count);
+        owner.permit = combined_permit.split_off(bytes);
+        if (!detail::reserve_admitted_vector_run_capacity(owner, count)) {
+            index_corruption_panic(
+                "minimizers_per_sequence build: output capacity exceeded admission");
+        }
+    };
+    constexpr std::uint64_t body_per_position = k_encoded_bucket_bytes + sizeof(std::uint64_t);
+    const auto body_bound = bioseq::common::saturating_add(
+        bioseq::common::saturating_mul(collected_distinct_upper, k_encoded_bucket_bytes),
+        bioseq::common::saturating_mul(collected_pair_count, sizeof(std::uint64_t)));
+    if (body_bound == (std::numeric_limits<std::uint64_t>::max)()) {
+        throw collection_admission_error{
+            "minimizers_per_sequence build: output size bound overflow"};
+    }
+    std::uint64_t bucket_body_capacity = k_bucket_target_bytes - k_encoded_header_bytes;
+    while (body_bound != 0u) {
+        const auto body_frames = body_bound / bucket_body_capacity +
+            (body_bound % bucket_body_capacity != 0u);
+        // Adjacent normal entries together exceed one frame; a streamed or
+        // heavy singleton exceeds one alone. This also bounds their boundaries.
+        const auto directory_bound = std::min(collected_distinct_upper,
+            bioseq::common::saturating_add(bioseq::common::saturating_mul(body_frames, 2u), 1u));
+        const auto position_bound = std::min(
+            collected_pair_count, bucket_body_capacity / sizeof(std::uint64_t));
+        const auto record_bound = std::min(
+            collected_distinct_upper, bucket_body_capacity / body_per_position);
+        const auto preparation_bytes = bioseq::common::saturating_add(
+            detail::admitted_vector_preallocation_bytes<direct_minimizer_bucket_directory_entry>(
+                directory_bound),
+            bioseq::common::saturating_add(
+                detail::admitted_vector_preallocation_bytes<std::uint64_t>(position_bound),
+                detail::admitted_vector_preallocation_bytes<encoded_bucket_record>(record_bound)));
+        if (preparation_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
+            throw collection_admission_error{
+                "minimizers_per_sequence build: output preparation size overflow"};
+        }
+        bioseq::parallelism::memory_admission_failure failure{};
+        auto permit = admission.try_reserve(preparation_bytes, &failure);
+        if (!permit && demote_for_budget_refusal(failure, preparation_bytes)) {
+            permit = admission.try_reserve(preparation_bytes, &failure);
+        }
+        if (permit) {
+            prepare_output(admitted_dir, directory_bound, *permit);
+            prepare_output(admitted_ob_positions, position_bound, *permit);
+            prepare_output(admitted_ob_buckets, record_bound, *permit);
+            break;
+        }
+        if (failure.reason !=
+                bioseq::parallelism::memory_admission_failure_reason::budget_exhausted ||
+            bucket_body_capacity == body_per_position) {
+            throw collection_admission_error{
+                "minimizers_per_sequence build: output preparation admission failed"};
+        }
+        bucket_body_capacity = std::max(body_per_position, bucket_body_capacity / 2u);
+    }
+    const std::size_t normal_bucket_target_bytes =
+        k_encoded_header_bytes + static_cast<std::size_t>(bucket_body_capacity);
     std::vector<direct_minimizer_bucket_directory_entry>& dir = admitted_dir.pairs;
     std::vector<encoded_bucket_record>& ob_buckets = admitted_ob_buckets.pairs;
     std::vector<std::uint64_t>& ob_positions = admitted_ob_positions.pairs;
@@ -483,7 +495,8 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                         &ob_buckets,
                         &ob_body_bytes,
                         &ob_lo,
-                        &ob_hi](std::uint64_t kmer_key, auto&& positions) {
+                        &ob_hi,
+                        normal_bucket_target_bytes](std::uint64_t kmer_key, auto&& positions) {
         const std::uint64_t pcount = positions.total_count();
         if (pcount > std::numeric_limits<std::uint32_t>::max())
             index_corruption_panic("merge_runs: kmer count > u32 (encoded_bucket.pos_count)");
@@ -495,6 +508,11 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             // Store this frequent hash across several chunks under one bucket  key.
             if (!ob_buckets.empty())
                 flush_bucket();
+            // A heavy hash owns its existing full position vector. Do not
+            // retain idle conservative normal-bucket scratch beside it. Later
+            // normal hashes use the existing actual-needed growth below.
+            admitted_ob_positions.release_capacity_before_permit();
+            admitted_ob_buckets.release_capacity_before_permit();
             const index_sub_key_t sk = next_bucket_id++;
             if (sk >= k_temporary_run_sub_key_base)
                 index_corruption_panic(
@@ -548,9 +566,59 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                 index_corruption_panic("minimizers_per_sequence: directory admission failed");
             }
             dir.push_back({kmer_key, kmer_key, sk});
+        } else if (kmer_framed > normal_bucket_target_bytes) {
+            // One hash exceeds the admitted aggregation frame but still fits
+            // the existing storage chunk limit. Stream it once into that chunk
+            // while preserving normal scratch for subsequent smaller hashes.
+            if (!ob_buckets.empty()) {
+                flush_bucket();
+            }
+            const index_sub_key_t sk = next_bucket_id++;
+            if (sk >= k_temporary_run_sub_key_base) {
+                index_corruption_panic(
+                    "minimizers_per_sequence: bucket id collided with reserved range");
+            }
+            const std::array<std::size_t, 1> plan{kmer_framed};
+            storage.resize_chunks(sk, std::span<const std::size_t>(plan));
+            storage.template write_to_each<char>(sk,
+                [&positions, total_bp, kmer_key, pcount, kmer_framed](
+                    std::size_t chunk_no, char* output, std::size_t capacity) {
+                    if (chunk_no != 0u || capacity < kmer_framed) {
+                        index_corruption_panic(
+                            "minimizers_per_sequence: singleton chunk geometry mismatch");
+                    }
+                    const std::array<encoded_bucket_record, 1> records{
+                        encoded_bucket_record{kmer_key, 0u, static_cast<std::uint32_t>(pcount)}};
+                    char* position_destination = detail::serialize_direct_minimizer_bucket_prefix(
+                        output, total_bp, records, pcount);
+                    std::uint64_t written = 0u;
+                    positions.for_each_batch([position_destination, pcount, &written](
+                        std::span<const std::uint64_t> batch) {
+                        if (batch.size() > pcount - written) {
+                            index_corruption_panic(
+                                "minimizers_per_sequence: singleton positions exceed count");
+                        }
+                        if (!batch.empty()) {
+                            std::memcpy(position_destination + written * sizeof(std::uint64_t),
+                                        batch.data(), batch.size_bytes());
+                        }
+                        written += batch.size();
+                    });
+                    if (written != pcount) {
+                        index_corruption_panic(
+                            "minimizers_per_sequence: singleton positions are incomplete");
+                    }
+                    return chunk_no;
+                });
+            DEBUG_ASSERT(dir.empty() || dir.back().hi_kmer < kmer_key,
+                         "directory not strictly ascending (streamed singleton)");
+            if (!detail::ensure_admitted_vector_run_capacity(admitted_dir, dir.size() + 1u)) {
+                index_corruption_panic("minimizers_per_sequence: directory admission failed");
+            }
+            dir.push_back({kmer_key, kmer_key, sk});
         } else {
             const std::size_t add = k_encoded_bucket_bytes + sizeof(std::uint64_t) * pcount;
-            if (k_encoded_header_bytes + ob_body_bytes + add > k_bucket_target_bytes &&
+            if (k_encoded_header_bytes + ob_body_bytes + add > normal_bucket_target_bytes &&
                 !ob_buckets.empty())
                 flush_bucket();
             if (!detail::ensure_admitted_vector_run_capacity(

@@ -750,6 +750,10 @@ struct fragment_index_storage {
     // Sorted runs kept in memory or PostgreSQL temporary files.
     /// Return the general sorted-run store, creating it on first use.
     [[nodiscard]] sorted_pair_run_store& sorted_runs_ensure_();
+    /// Reserve run metadata before collection acquires incoming pair buffers.
+    [[nodiscard]] bool try_prepare_sorted_run_append(std::size_t incoming_count) {
+        return sorted_runs_ensure_().try_prepare_sorted_run_append(incoming_count);
+    }
     /// Add a borrowed sorted run to temporary storage.
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted);
     /// Transfer a sorted vector to the run store, spilling it if memory cannot  be reserved.

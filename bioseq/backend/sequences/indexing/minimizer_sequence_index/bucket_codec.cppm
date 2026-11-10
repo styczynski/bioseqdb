@@ -296,32 +296,39 @@ constexpr std::size_t k_encoded_header_bytes = minimizer_hashmap_fragment_index:
 constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index::k_encoded_bucket_bytes;     // Bytes per hash record
 
 /**
- * Write the header, hash records and encoded positions into one bucket image.
- * The caller supplies a buffer large enough for all three parts.
+ * Write a bucket header and its hash records, returning the position destination.
+ * The caller supplies enough storage for the prefix and position_count positions.
  * @param out Destination buffer.
  * @param target_len_val Target length stored in the header.
- * @param bkts Hash records with offsets into poss.
- * @param poss Encoded positions.
+ * @param bkts Hash records with offsets into the following position array.
+ * @param position_count Number of positions the caller will write after the prefix.
  */
-inline void serialize_direct_minimizer_bucket_image(char* out,
-                                                    sequence_size_t target_len_val,
-                                                    std::span<const encoded_bucket_record> bkts,
-                                                    std::span<const std::uint64_t> poss) {
+[[nodiscard]] inline char* serialize_direct_minimizer_bucket_prefix(
+    char* out, sequence_size_t target_len_val,
+    std::span<const encoded_bucket_record> bkts, std::uint64_t position_count) {
     const encoded_bucket_header header{minimizer_hashmap_fragment_index::k_encoded_magic,
                                        minimizer_hashmap_fragment_index::k_encoded_layout_revision,
                                        static_cast<std::uint64_t>(target_len_val),
                                        static_cast<std::uint32_t>(bkts.size()),
                                        0u,
-                                       static_cast<std::uint64_t>(poss.size())};
+                                       position_count};
     std::memcpy(out, &header, k_encoded_header_bytes);
     if (!bkts.empty()) {
         std::memcpy(
             out + k_encoded_header_bytes, bkts.data(), k_encoded_bucket_bytes * bkts.size());
     }
+    return out + k_encoded_header_bytes + k_encoded_bucket_bytes * bkts.size();
+}
+
+/** Write a complete bucket image into caller-owned storage from contiguous positions. */
+inline void serialize_direct_minimizer_bucket_image(char* out,
+                                                    sequence_size_t target_len_val,
+                                                    std::span<const encoded_bucket_record> bkts,
+                                                    std::span<const std::uint64_t> poss) {
+    char* position_destination = serialize_direct_minimizer_bucket_prefix(
+        out, target_len_val, bkts, static_cast<std::uint64_t>(poss.size()));
     if (!poss.empty()) {
-        std::memcpy(out + k_encoded_header_bytes + k_encoded_bucket_bytes * bkts.size(),
-                    poss.data(),
-                    sizeof(std::uint64_t) * poss.size());
+        std::memcpy(position_destination, poss.data(), sizeof(std::uint64_t) * poss.size());
     }
 }
 

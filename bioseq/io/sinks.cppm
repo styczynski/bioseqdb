@@ -22,11 +22,13 @@ module;
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <type_traits>
 #include <oneapi/tbb/spin_mutex.h>
 
 export module bioseq.io.sinks;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::io {
@@ -99,6 +101,92 @@ public:
         if (auto extra = credit->take(wanted - owner.bytes(), *owner.controller()); extra)
             return owner.absorb(std::move(*extra));
     return owner.grow_to(wanted);
+}
+
+/** Grow one vector whose independent permit owns only its retained capacity.
+ * The old allocation and permit survive until the replacement is admitted and
+ * populated. Use the established vector headroom, check the actual capacity,
+ * and destroy the retired allocation before releasing its permit. Denial leaves
+ * the original vector unchanged; allocation unwinding also retains both owners.
+ */
+template<class Value>
+    requires std::is_nothrow_move_constructible_v<Value>
+[[nodiscard]] std::expected<void, std::string> reserve_io_vector_capacity(
+    std::vector<Value>& values, parallelism::memory_permit& retained_permit,
+    const std::size_t wanted, io_memory_credit* credit = nullptr) {
+    const auto retained = common::checked_mul(static_cast<std::uint64_t>(values.capacity()),
+        static_cast<std::uint64_t>(sizeof(Value)));
+    if (!retained || retained_permit.bytes() != *retained)
+        return std::unexpected("IO vector capacity lacks its independent admission owner");
+    if (wanted <= values.capacity()) return {};
+    if (wanted > values.max_size()) return std::unexpected("IO vector capacity exceeds its size limit");
+    const auto doubled = values.capacity() <= values.max_size() / 2u
+        ? values.capacity() * 2u : wanted;
+    const auto initial = std::min(std::size_t{4u}, values.max_size());
+    const auto capacity = std::max(std::max(wanted, doubled), initial);
+    const auto bytes = common::checked_mul(static_cast<std::uint64_t>(capacity),
+        static_cast<std::uint64_t>(sizeof(Value)));
+    const auto bound = bytes ? common::checked_mul(*bytes,
+        parallelism::k_vector_preallocation_headroom_factor) : std::nullopt;
+    if (!bound) return std::unexpected("IO vector growth admission overflows");
+    auto pending_permit = reserve_io_memory(*bound, credit);
+    if (!pending_permit) return std::unexpected("Cannot admit IO vector growth peak");
+    std::uint64_t actual{};
+    {
+        // This owner is destroyed before pending_permit on every error path.
+        std::vector<Value> pending;
+        pending.reserve(capacity);
+        const auto allocated = common::checked_mul(static_cast<std::uint64_t>(pending.capacity()),
+            static_cast<std::uint64_t>(sizeof(Value)));
+        if (!allocated || *allocated > pending_permit->bytes())
+            return std::unexpected("IO vector allocation exceeds admitted capacity");
+        actual = *allocated;
+        for (auto& value : values) pending.emplace_back(std::move(value));
+        values.swap(pending);
+    }
+    retained_permit.release();
+    pending_permit->shrink_to(actual);
+    retained_permit = std::move(*pending_permit);
+    return {};
+}
+
+/** Append owned text after admitting its vector growth and simultaneous string copy.
+ * The caller retains separate container/payload permits until the text is destroyed.
+ * Reuse vector headroom and check actual string capacity before committing the copy.
+ */
+[[nodiscard]] inline std::expected<void, std::string> append_admitted_text(
+    std::vector<std::string>& values, parallelism::memory_permit& vector_permit,
+    parallelism::memory_permit& text_permit, const std::string_view text) {
+    if (text.size() > std::string{}.max_size())
+        return std::unexpected("IO owned text exceeds its size limit");
+    const auto count = common::checked_add(values.size(), std::size_t{1});
+    const auto logical = common::checked_add(static_cast<std::uint64_t>(text.size()),
+        static_cast<std::uint64_t>(sizeof(std::string)) + 1u);
+    const auto bound = logical ? common::checked_mul(*logical,
+        parallelism::k_vector_preallocation_headroom_factor) : std::nullopt;
+    const auto before = text_permit.bytes();
+    const auto wanted = bound ? common::checked_add(before, *bound) : std::nullopt;
+    if (!count || !wanted) return std::unexpected("IO owned text admission overflows");
+    if (!grow_io_memory(text_permit, *wanted))
+        return std::unexpected("Cannot admit IO owned text copy");
+    std::expected<void, std::string> result;
+    {
+        // Copy before vector replacement: text may borrow an existing SSO string.
+        std::string owned{text};
+        const auto actual = common::checked_add(static_cast<std::uint64_t>(owned.capacity()), std::uint64_t{1});
+        if (!actual || *actual > *bound) {
+            result = std::unexpected("IO text allocation exceeds admitted capacity");
+        } else if (auto reserved = reserve_io_vector_capacity(values, vector_permit, *count); !reserved) {
+            result = std::unexpected(reserved.error());
+        } else {
+            values.emplace_back(std::move(owned));
+            text_permit.shrink_to(before + *actual);
+            return {};
+        }
+    }
+    // The uncommitted allocation is dead before its admission is returned.
+    text_permit.shrink_to(before);
+    return result;
 }
 
 /** Optional caller-thread cancellation checkpoint; never copied into worker jobs.

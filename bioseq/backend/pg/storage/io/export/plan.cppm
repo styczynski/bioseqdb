@@ -9,7 +9,9 @@ extern "C" {
 #include "executor/execdesc.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/pathnodes.h"
 #include "optimizer/tlist.h"
+#include "optimizer/planmain.h"
 #include "utils/datum.h"
 #include "parser/parse_func.h"
 #include "tcop/dest.h"
@@ -86,6 +88,34 @@ struct export_request {
         is_null ? Datum{0} : datumCopy(value, by_value, length), is_null, by_value);
 }
 
+/** Remove table-local import provenance when the final plan expands that table.
+ * An inherited/partitioned parent's analyzed Var can yield physical child rows
+ * with independent import IDs. Use PostgreSQL's finalized append relationships,
+ * rather than a pre-planning catalog lookup that could disagree with the plan.
+ * ONLY and unexpanded tables keep their provenance. A second expanded alias of
+ * the same OID conservatively makes it unknown; explicit SAM headers still work.
+ * Keep lexical origins and match ownership intact: only import namespaces change.
+ */
+inline void finalize_export_source_provenance(const PlannedStmt& statement,
+    export_query_binding& binding) {
+    for (const auto* cell = list_head(statement.appendRelations); cell;
+            cell = lnext(statement.appendRelations, cell)) {
+        const auto* append = static_cast<const AppendRelInfo*>(lfirst(cell));
+        if (!OidIsValid(append->parent_reloid)) continue; // UNION ALL has no physical parent.
+        // PostgreSQL also expands the physical parent as its own append child.
+        // After NO INHERIT, a stale relhassubclass hint can leave only this self
+        // edge. Equal valid relation rowtypes identify the same physical table;
+        // another child's edge still invalidates the parent's import namespace.
+        if (OidIsValid(append->parent_reltype)
+            && append->parent_reltype == append->child_reltype) continue;
+        for (auto& column : binding.columns) {
+            if (column.source_relation != append->parent_reloid) continue;
+            column.source_relation = InvalidOid;
+            column.source_attribute = InvalidAttrNumber;
+        }
+    }
+}
+
 /** Attach the explicit side-effect root after child setrefs and owner finalization. */
 [[nodiscard]] inline PlannedStmt* attach_export_root(PlannedStmt* statement,
     const export_request& request, const export_query_binding& binding, const char* result_name) {
@@ -116,6 +146,7 @@ struct export_request {
     fields = lappend(fields, encode_export_columns(binding.columns));
     fields = lappend(fields, makeInteger(static_cast<int>(binding.visible_count)));
     fields = lappend(fields, makeInteger(!binding.match_sites.empty()));
+    fields = lappend(fields, makeInteger(binding.match_fields_required));
     scan->custom_private = fields;
     scan->scan.plan.plan_node_id = maximum + 1;
     scan->scan.plan.plan_rows = 1;
@@ -160,9 +191,8 @@ inline bool contains_export_call(Node* expression, void*) {
         if (!namespace_name) ereport(ERROR, (errcode(ERRCODE_UNDEFINED_SCHEMA),
             errmsg("export relation namespace no longer exists")));
         const char* qualified = quote_qualified_identifier(namespace_name, RelationGetRelationName(source));
-        const auto query_text = std::string{"SELECT * FROM "} + qualified;
         table_close(source, NoLock); // Keep the source lock until transaction end.
-        return query_text;
+        return std::string{"SELECT * FROM "} + qualified;
     });
     const auto options = decode_export_options(request.options, request.destination);
     auto* rewritten = invoke_pg_as_cpp([&request] {
@@ -180,19 +210,14 @@ inline bool contains_export_call(Node* expression, void*) {
         // A relation lock does not stabilize its schema's name. Verify the one
         // generated FROM entry after normal analysis/rewrite has locked it.
         // PostgreSQL 17+ retains a rewritten view's original OID in this RTE.
-        const auto* source_node = query->jointree && list_length(query->jointree->fromlist) == 1
-            ? static_cast<const Node*>(linitial(query->jointree->fromlist)) : nullptr;
-        const auto range_index = source_node && IsA(source_node, RangeTblRef)
-            ? reinterpret_cast<const RangeTblRef*>(source_node)->rtindex : 0;
-        const auto* source = range_index > 0 && range_index <= list_length(query->rtable)
-            ? static_cast<const RangeTblEntry*>(list_nth(query->rtable, range_index - 1)) : nullptr;
-        if (!source || (source->rtekind != RTE_RELATION && source->rtekind != RTE_SUBQUERY)
-            || source->relid != *request.relation)
+        if (!bioseq::postgres::support::query_has_single_from_relation(*query, *request.relation))
             bioseq::postgres::support::raise_sql_error(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
                 {.message = "bioseq.write could not preserve the requested relation identity",
                  .hint = "Retry the same regclass request after concurrent schema changes finish."});
     }
-    if (contains_export_call(reinterpret_cast<Node*>(query), nullptr))
+    if (invoke_pg_as_cpp([query] {
+        return contains_export_call(reinterpret_cast<Node*>(query), nullptr);
+    }))
         export_binding_error("bioseq.write source cannot recursively export another file");
     auto mappings = request.mappings ? bioseq::postgres::storage::io::parse_column_mapping_array(*request.mappings)
         : std::vector<bioseq::io::identifier_parser::user_column_mapping>{};
@@ -205,6 +230,7 @@ inline bool contains_export_call(Node* expression, void*) {
     }
     complete_export_matches(binding);
     finish_export_role_inference(binding);
+    validate_export_match_barrier(binding);
     qualify_export_metadata_names(binding);
     auto* statement = invoke_pg_as_cpp([query, &request] {
         return pg_plan_query(query, request.query.c_str(), CURSOR_OPT_PARALLEL_OK, nullptr
@@ -213,6 +239,7 @@ inline bool contains_export_call(Node* expression, void*) {
 #endif
         );
     });
+    finalize_export_source_provenance(*statement, binding);
     // Output slots must retain the completed root schema. A planner rewrite may
     // change source Vars but cannot silently drop required visible/companion data.
     for (const auto& column : binding.columns) {
@@ -220,6 +247,44 @@ inline bool contains_export_call(Node* expression, void*) {
         if (!target || target->resjunk) export_binding_error("planner removed an export result column");
     }
     return invoke_pg_as_cpp([statement, &request, &binding, result_name] {
+        // Classification reads catalog types that need not occur in the SQL
+        // expression tree (for example a field of a NULL nested composite).
+        // Reuse PostgreSQL's normal generic-plan invalidation representation.
+        PlannerGlobal dependencies{};
+        dependencies.type = T_PlannerGlobal;
+        dependencies.invalItems = statement->invalItems;
+        PlannerInfo planner{};
+        planner.type = T_PlannerInfo;
+        planner.glob = &dependencies;
+        for (const auto type : binding.metadata_type_dependencies)
+            record_plan_type_dependency(&planner, type);
+        statement->invalItems = dependencies.invalItems;
+        for (const auto relation : binding.metadata_relation_dependencies) {
+            statement->relationOids = list_append_unique_oid(statement->relationOids, relation);
+            bool already_locked = false;
+            for (const auto* cell = list_head(statement->rtable); cell; cell = lnext(statement->rtable, cell)) {
+                const auto* entry = static_cast<const RangeTblEntry*>(lfirst(cell));
+                if ((entry->rtekind == RTE_RELATION || entry->rtekind == RTE_SUBQUERY)
+                    && entry->relid == relation && entry->rellockmode >= AccessShareLock) {
+                    already_locked = true;
+                    break;
+                }
+            }
+            if (already_locked) continue;
+            // AcquireExecutorLocks locks only RTEs, not relationOids. An unused
+            // appended RTE pins this inspected row type before generic-plan
+            // validity is rechecked; it adds no scan or permission request.
+            const auto* relation_name = get_rel_name(relation);
+            if (!relation_name) ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                errmsg("export metadata row type changed during planning")));
+            auto* entry = makeNode(RangeTblEntry);
+            entry->rtekind = RTE_RELATION;
+            entry->relid = relation;
+            entry->relkind = get_rel_relkind(relation);
+            entry->rellockmode = AccessShareLock;
+            entry->eref = makeAlias(relation_name, NIL);
+            statement->rtable = lappend(statement->rtable, entry);
+        }
         return attach_export_root(statement, request, binding, result_name);
     });
 }
@@ -325,10 +390,12 @@ inline void finish_export_receiver(DestReceiver*) {}
     auto* target = static_cast<TargetEntry*>(linitial(result->plan.targetlist));
     if (target->resjunk || !IsA(target->expr, FuncExpr)) return statement;
     auto* call = reinterpret_cast<FuncExpr*>(target->expr);
-    const auto* name = get_func_name(call->funcid);
-    if (!name || std::strcmp(name, "write") != 0
-        || get_func_namespace(call->funcid) != get_namespace_oid("bioseq", true)
-        || list_length(call->args) != 4) return statement;
+    const bool writer = bioseq::postgres::support::invoke_pg_as_cpp([call] {
+        const auto* name = get_func_name(call->funcid);
+        return name && std::strcmp(name, "write") == 0
+            && get_func_namespace(call->funcid) == get_namespace_oid("bioseq", true);
+    });
+    if (!writer || list_length(call->args) != 4) return statement;
     std::array<const Const*, 4> arguments{};
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         auto* expression = static_cast<Node*>(list_nth(call->args, static_cast<int>(index)));
@@ -343,13 +410,20 @@ inline void finish_export_receiver(DestReceiver*) {}
     export_request request;
     request.function_oid = call->funcid;
     if (arguments[0]->consttype == REGCLASSOID) request.relation = DatumGetObjectId(arguments[0]->constvalue);
-    else request.query = TextDatumGetCString(arguments[0]->constvalue);
-    request.destination = TextDatumGetCString(arguments[1]->constvalue);
-    if (!arguments[2]->constisnull) request.mappings = DatumGetArrayTypeP(arguments[2]->constvalue);
+    else request.query = bioseq::postgres::support::invoke_pg_as_cpp([value = arguments[0]->constvalue] {
+        return TextDatumGetCString(value);
+    });
+    request.destination = bioseq::postgres::support::invoke_pg_as_cpp([value = arguments[1]->constvalue] {
+        return TextDatumGetCString(value);
+    });
+    if (!arguments[2]->constisnull) request.mappings = bioseq::postgres::support::invoke_pg_as_cpp(
+        [value = arguments[2]->constvalue] { return DatumGetArrayTypeP(value); });
     if (!arguments[3]->constisnull) request.options = arguments[3]->constvalue;
     auto* replacement = plan_export_select(request, target->resname ? target->resname : "write");
-    replacement->invalItems = list_concat(replacement->invalItems, static_cast<List*>(copyObject(statement->invalItems)));
-    replacement->relationOids = list_concat(replacement->relationOids, static_cast<List*>(copyObject(statement->relationOids)));
+    bioseq::postgres::support::invoke_pg_as_cpp([replacement, statement] {
+        replacement->invalItems = list_concat(replacement->invalItems, static_cast<List*>(copyObject(statement->invalItems)));
+        replacement->relationOids = list_concat(replacement->relationOids, static_cast<List*>(copyObject(statement->relationOids)));
+    });
     replacement->dependsOnRole = replacement->dependsOnRole || statement->dependsOnRole;
     replacement->transientPlan = replacement->transientPlan || statement->transientPlan;
     replacement->queryId = statement->queryId;

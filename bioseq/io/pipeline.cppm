@@ -91,7 +91,7 @@ run_async_pipeline(p_source source,
     std::size_t submitted_batches = 0;
 
     // Read and parse on the calling thread.
-    buffer_slab slab(options.io.initial_buffer_size);
+    buffer_slab slab(options);
     p_batch current_batch;
     std::size_t records_emitted = 0;
     bool aborted = false;
@@ -106,6 +106,16 @@ run_async_pipeline(p_source source,
         }
         aborted = true;
     };
+
+    // No refill, parser or output callback may observe an unallocated slab.
+    if (slab.raw() == nullptr) {
+        if (options.io.max_buffer_size == 0u)
+            emit_failure(failure_capture, "input buffer limit is zero");
+        else
+            emit_failure(failure_capture, "cannot allocate input buffer (initial={}, maximum={})",
+                options.io.initial_buffer_size, options.io.max_buffer_size);
+        return std::unexpected(std::move(captured_error));
+    }
 
     const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
                                                    ? options.concurrency.batch_target_record_count

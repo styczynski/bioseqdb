@@ -1272,6 +1272,160 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
+/** Scalar providers share no vector-bearing exported ABI with their native imports. */
+[[nodiscard]] inline std::string scalar_codec_fragment(const target_manifest& targets,
+        const bool zlib) {
+    std::string result = "module;\n\n" + scalar_codec_policy_fragment(targets)
+        + "#include <array>\n#include <cstdint>\n#include <hwy/highway.h>\n";
+    if (zlib) result += "#include <zlib.h>\n";
+    return result + '\n';
+}
+
+/** Distinct neutral ABI; existing native test_support/probe-contract bytes remain unchanged. */
+[[nodiscard]] inline std::string render_scalar_codec_primary() {
+    return R"CPP(// Generated scalar codec test ABI; not a runtime dispatch provider.
+export module bioseq.highway.codec_scalar_probe;
+import std;
+import bioseq.simd.utils;
+export namespace bioseq::highway::codec_scalar {
+enum class crc_path : std::uint8_t { existing_zlib_fallback };
+struct codec_binding {
+    std::int64_t target{};
+    std::size_t byte_lanes{}, rank_lanes{};
+    bioseq::simd::sequence_rank_transform_kernel transform{};
+    std::size_t (*first_byte)(std::uint8_t, const std::uint8_t*, std::size_t) noexcept = nullptr;
+    std::size_t (*first_pair)(std::uint8_t, std::uint8_t, const std::uint8_t*, std::size_t) noexcept = nullptr;
+    std::size_t (*first_triple)(std::uint8_t, std::uint8_t, std::uint8_t, const std::uint8_t*, std::size_t) noexcept = nullptr;
+    void (*each_delim4)(std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t,
+        const std::uint8_t*, std::size_t, void*, void (*)(void*, std::size_t)) noexcept = nullptr;
+    std::size_t (*json_prefix)(const char*, std::size_t) noexcept = nullptr;
+    std::size_t (*sam_aux_prefix)(const std::uint8_t*, std::size_t, bool) noexcept = nullptr;
+    std::size_t (*header_prefix)(const char*, std::size_t) noexcept = nullptr;
+    bool (*decode_hex)(std::span<const std::uint8_t>, std::span<std::uint8_t>, std::size_t) noexcept = nullptr;
+    bool (*encode_hex)(std::span<const std::uint8_t>, std::span<std::uint8_t>, std::size_t) noexcept = nullptr;
+    bool (*finite_f32)(std::span<const std::uint8_t>) noexcept = nullptr;
+    std::uint32_t (*crc32)(std::uint32_t, const std::uint8_t*, std::size_t) noexcept = nullptr;
+    crc_path crc_implementation{crc_path::existing_zlib_fallback};
+};
+/** Return actual scalar-owned entries and lane observations; no target override state. */
+[[nodiscard]] codec_binding codec_kernels();
+}
+)CPP";
+}
+
+/** Preserve complete authored declarations; only namespace and proven attributes change. */
+[[nodiscard]] inline std::string render_scalar_codec_partition(
+        const target_manifest& targets, const extracted_source& source) {
+    std::ostringstream output;
+    output << scalar_codec_fragment(targets, source.source.partition == "bytes")
+           << "module bioseq.highway.codec_scalar_probe:" << source.source.partition << ";\n"
+           << "import std;\nimport bioseq.simd.utils;\n"
+           << "namespace " << source.enclosing_namespace << " {\n"
+           << "namespace hn = hwy::N_SCALAR;\n"
+           << "using bioseq::simd::sequence_rank_transform;\n"
+           << "static_assert(HWY_TARGET == HWY_SCALAR && HWY_STATIC_TARGET == HWY_SCALAR);\n"
+           << "static_assert(hn::MaxLanes(hn::ScalableTag<std::uint8_t>{}) == 1u);\n"
+           << "static_assert(hn::MaxLanes(hn::ScalableTag<std::uint32_t>{}) == 1u);\n"
+           << body_with_highway_attributes(source)
+           << "}\n";
+    return output.str();
+}
+
+/** Ordinary implementation owns only tag/ABI adapters and the exact target receipt. */
+[[nodiscard]] inline std::string render_scalar_codec_implementation(const target_manifest& targets) {
+    return scalar_codec_fragment(targets, false) + R"CPP(module bioseq.highway.codec_scalar_probe;
+import :rank;
+import :bytes;
+import std;
+import bioseq.simd.utils;
+namespace bioseq::highway::codec_scalar {
+namespace hn = hwy::N_SCALAR;
+static_assert(HWY_TARGET == HWY_SCALAR && HWY_STATIC_TARGET == HWY_SCALAR);
+static_assert(hn::MaxLanes(hn::ScalableTag<std::uint8_t>{}) == 1u);
+static_assert(hn::MaxLanes(hn::ScalableTag<std::uint32_t>{}) == 1u);
+namespace adapters {
+/** Supply one scalar tag without reimplementing any scan loop. */
+HWY_ATTR std::size_t first_byte(std::uint8_t needle, const std::uint8_t* input, std::size_t size) noexcept {
+    return bytes::scan_for_first<1>(hn::ScalableTag<std::uint8_t>{}, std::array{needle}, input, size);
+}
+/** Exercise the existing two-needle specialization. */
+HWY_ATTR std::size_t first_pair(std::uint8_t first, std::uint8_t second,
+        const std::uint8_t* input, std::size_t size) noexcept {
+    return bytes::scan_for_first<2>(hn::ScalableTag<std::uint8_t>{}, std::array{first, second}, input, size);
+}
+/** Exercise the existing three-needle specialization. */
+HWY_ATTR std::size_t first_triple(std::uint8_t first, std::uint8_t second, std::uint8_t third,
+        const std::uint8_t* input, std::size_t size) noexcept {
+    return bytes::scan_for_first<3>(hn::ScalableTag<std::uint8_t>{}, std::array{first, second, third}, input, size);
+}
+/** Plain callback forwarding retains the scanner's noexcept contract without a lambda. */
+struct offset_visitor {
+    void* context;
+    void (*visit)(void*, std::size_t);
+    HWY_ATTR void operator()(std::size_t offset) const noexcept { visit(context, offset); }
+};
+/** Callback storage is caller-owned; the scanner retains its existing noexcept contract. */
+HWY_ATTR void each_delim4(std::uint8_t first, std::uint8_t second, std::uint8_t third,
+        std::uint8_t fourth, const std::uint8_t* input, std::size_t size,
+        void* context, void (*visit)(void*, std::size_t)) noexcept {
+    bytes::scan_for_each<4>(hn::ScalableTag<std::uint8_t>{},
+        std::array{first, second, third, fourth}, input, size, offset_visitor{context, visit});
+}
+/** Use the canonical JSON predicate in its actual shared scan. */
+HWY_ATTR std::size_t json_prefix(const char* input, std::size_t size) noexcept {
+    return bytes::scan_for_first<1, hn::ScalableTag<std::uint8_t>, bytes::byte_scan_kind::json_escape>(
+        hn::ScalableTag<std::uint8_t>{}, std::array<std::uint8_t, 1>{},
+        reinterpret_cast<const std::uint8_t*>(input), size);
+}
+/** Preserve SAM Z versus H validation using the shared predicates. */
+HWY_ATTR std::size_t sam_aux_prefix(const std::uint8_t* input, std::size_t size, bool hexadecimal) noexcept {
+    if (hexadecimal)
+        return bytes::scan_for_first<1, hn::ScalableTag<std::uint8_t>, bytes::byte_scan_kind::upper_hex>(
+            hn::ScalableTag<std::uint8_t>{}, std::array<std::uint8_t, 1>{}, input, size);
+    return bytes::scan_for_first<1, hn::ScalableTag<std::uint8_t>, bytes::byte_scan_kind::printable_ascii>(
+        hn::ScalableTag<std::uint8_t>{}, std::array<std::uint8_t, 1>{}, input, size);
+}
+/** Preserve the canonical header URI-unreserved predicate. */
+HWY_ATTR std::size_t header_prefix(const char* input, std::size_t size) noexcept {
+    return bytes::scan_for_first<1, hn::ScalableTag<std::uint8_t>, bytes::byte_scan_kind::header_unreserved>(
+        hn::ScalableTag<std::uint8_t>{}, std::array<std::uint8_t, 1>{},
+        reinterpret_cast<const std::uint8_t*>(input), size);
+}
+/** Decode exact uppercase hexadecimal pairs with the actual scalar byte tag. */
+HWY_ATTR bool decode_hex(std::span<const std::uint8_t> input,
+        std::span<std::uint8_t> output, std::size_t cardinality) noexcept {
+    return bytes::decode_upper_hex_pairs_for(hn::ScalableTag<std::uint8_t>{}, input, output, cardinality);
+}
+/** Encode exact uppercase hexadecimal pairs with the actual scalar byte tag. */
+HWY_ATTR bool encode_hex(std::span<const std::uint8_t> input,
+        std::span<std::uint8_t> output, std::size_t cardinality) noexcept {
+    return bytes::encode_upper_hex_bytes_for(hn::ScalableTag<std::uint8_t>{}, input, output, cardinality);
+}
+/** Check little-endian float bytes through the existing interleaved scalar path. */
+HWY_ATTR bool finite_f32(std::span<const std::uint8_t> input) noexcept {
+    return bytes::finite_float_bytes_for(hn::ScalableTag<std::uint8_t>{}, input);
+}
+}
+/** Report the executed scalar target and return real shared-code function pointers. */
+HWY_ATTR codec_binding codec_kernels() {
+    return {
+        .target = static_cast<std::int64_t>(HWY_TARGET),
+        .byte_lanes = hn::Lanes(hn::ScalableTag<std::uint8_t>{}),
+        .rank_lanes = hn::Lanes(hn::ScalableTag<std::uint32_t>{}),
+        .transform = &rank::transform_sequence_rank_chunk,
+        .first_byte = &adapters::first_byte, .first_pair = &adapters::first_pair,
+        .first_triple = &adapters::first_triple, .each_delim4 = &adapters::each_delim4,
+        .json_prefix = &adapters::json_prefix, .sam_aux_prefix = &adapters::sam_aux_prefix,
+        .header_prefix = &adapters::header_prefix, .decode_hex = &adapters::decode_hex,
+        .encode_hex = &adapters::encode_hex, .finite_f32 = &adapters::finite_f32,
+        .crc32 = &bytes::crc32_z_scalar,
+        .crc_implementation = crc_path::existing_zlib_fallback,
+    };
+}
+}
+)CPP";
+}
+
 [[nodiscard]] inline std::string render_kernel_instantiation(
     const generation_plan& plan,
     const target_spec& target,
@@ -1761,6 +1915,42 @@ inline void validate_rendered_artifact(
                 + ": generated artifact contains forbidden '"
                 + std::string{spelling} + "'");
         }
+    }
+    const bool scalar_primary = artifact.kind == artifact_kind::scalar_codec_primary;
+    const bool scalar_partition = artifact.kind == artifact_kind::scalar_codec_partition;
+    const bool scalar_implementation = artifact.kind == artifact_kind::scalar_codec_implementation;
+    if (scalar_primary || scalar_partition || scalar_implementation) {
+        if (!plan.source_inventory.scalar_codec || artifact.target_token != "HWY_SCALAR")
+            throw std::runtime_error("scalar codec artifact lacks its separate target role");
+        const std::filesystem::path root{"tests/codec_scalar"};
+        constexpr std::string_view primary = "bioseq.highway.codec_scalar_probe";
+        std::string expected;
+        if (scalar_primary) {
+            if (artifact.relative_path != root / "index.cppm" || artifact.module_name != primary
+                || !artifact.source_key.empty())
+                throw std::runtime_error("scalar codec neutral primary has an unexpected identity");
+            expected = render_scalar_codec_primary();
+        } else if (scalar_implementation) {
+            if (artifact.relative_path != root / "probe.cppm" || artifact.module_name != primary
+                || !artifact.source_key.empty())
+                throw std::runtime_error("scalar codec implementation has an unexpected identity");
+            expected = render_scalar_codec_implementation(plan.target_inventory);
+        } else {
+            const auto source = std::ranges::find_if(plan.scalar_codec_sources, [&artifact](const auto& candidate) {
+                return candidate.source.key == artifact.source_key;
+            });
+            if (source == plan.scalar_codec_sources.end()
+                || (source->source.partition != "rank" && source->source.partition != "bytes")
+                || artifact.relative_path != root / (source->source.partition + ".cppm")
+                || artifact.module_name != std::string{primary} + ":" + source->source.partition)
+                throw std::runtime_error("scalar codec private provider escaped its exact owner");
+            expected = render_scalar_codec_partition(plan.target_inventory, *source);
+            if (count_text(expected, "HWY_ATTR ") != source->callables.size())
+                throw std::runtime_error("scalar codec callable attribution is incomplete");
+        }
+        if (artifact.content != expected)
+            throw std::runtime_error("scalar codec artifact differs from its exact reviewed role rendering");
+        return;
     }
     if (artifact.kind == artifact_kind::dispatch_registry_partition) {
         if (count_text(artifact.content, "HWY_EXPORT(") != 1
@@ -2356,6 +2546,33 @@ inline void validate_rendered_artifact(
         .kind = artifact_kind::test_support,
         .content = detail::render_test_support(plan, coordinates),
     });
+    if (plan.source_inventory.scalar_codec) {
+        if (plan.scalar_codec_sources.size() != 2u
+            || plan.source_inventory.scalar_codec->policy_digest != bioseq::common::sha256_hex(
+                scalar_codec_policy_fragment(plan.target_inventory)))
+            throw std::runtime_error("scalar codec source/policy closure is incomplete");
+        constexpr std::string_view primary = "bioseq.highway.codec_scalar_probe";
+        const std::filesystem::path root{"tests/codec_scalar"};
+        result.artifacts.push_back(generated_artifact{
+            .relative_path = root / "index.cppm", .module_name = std::string{primary},
+            .target_token = "HWY_SCALAR", .kind = artifact_kind::scalar_codec_primary,
+            .content = detail::render_scalar_codec_primary(),
+        });
+        for (const auto& source : plan.scalar_codec_sources) {
+            result.artifacts.push_back(generated_artifact{
+                .relative_path = root / (source.source.partition + ".cppm"),
+                .module_name = std::string{primary} + ":" + source.source.partition,
+                .target_token = "HWY_SCALAR", .source_key = source.source.key,
+                .kind = artifact_kind::scalar_codec_partition,
+                .content = detail::render_scalar_codec_partition(plan.target_inventory, source),
+            });
+        }
+        result.artifacts.push_back(generated_artifact{
+            .relative_path = root / "probe.cppm", .module_name = std::string{primary},
+            .target_token = "HWY_SCALAR", .kind = artifact_kind::scalar_codec_implementation,
+            .content = detail::render_scalar_codec_implementation(plan.target_inventory),
+        });
+    }
     std::ranges::sort(
         result.artifacts,
         {},
@@ -2374,7 +2591,9 @@ inline void validate_rendered_artifact(
             || artifact.kind == artifact_kind::partition
             || artifact.kind
                 == artifact_kind::dispatch_registry_partition
-            || artifact.kind == artifact_kind::test_support) {
+            || artifact.kind == artifact_kind::test_support
+            || artifact.kind == artifact_kind::scalar_codec_primary
+            || artifact.kind == artifact_kind::scalar_codec_partition) {
             if (!providers.insert(artifact.module_name).second) {
                 throw std::runtime_error(
                     "duplicate generated Highway module provider: "

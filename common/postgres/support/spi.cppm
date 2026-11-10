@@ -7,16 +7,28 @@ module;
 extern "C" {
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "catalog/objectaccess.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_extension.h"
 #include "commands/extension.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
+#include "storage/lmgr.h"
+#include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/errcodes.h"
 }
 
+#include <cstring>
 #include <functional>
 #include <type_traits>
 #include <utility>
@@ -26,6 +38,131 @@ export module bioseq.postgres.support:spi;
 import :error_boundary;
 
 export namespace bioseq::postgres::support {
+
+/** Stabilize one table's qualified name while ordinary utility hooks execute.
+ * The table lock lasts until transaction end; the namespace-catalog ShareLock
+ * lasts only for this scope. PostgreSQL namespace DDL takes RowExclusiveLock,
+ * so another backend cannot replace the schema name during the operation.
+ * Our permanent object-access hook also rejects same-backend rename/move/drop
+ * before the nested DDL can return to the outer lookup. Other utility/event
+ * hooks still run normally. Intentional command rewriting by a trusted utility
+ * hook is outside this name-stability contract.
+ *
+ * Construct outside invoke_pg_as_cpp and bridge every PG operation while this
+ * owner is live. The scope stack belongs only to the object-access hook; SQL
+ * functions never inspect it or switch their behavior based on it.
+ */
+class scoped_relation_identity final {
+  public:
+    /** Lock the OID, then capture names under both locks. */
+    explicit scoped_relation_identity(Oid relation_id) : relation_id_(relation_id) {
+        try {
+            invoke_pg_as_cpp([this] {
+                LockRelationOid(relation_id_, AccessExclusiveLock);
+                LockRelationOid(NamespaceRelationId, ShareLock);
+                namespace_locked_ = true;
+                namespace_id_ = get_rel_namespace(relation_id_);
+                const auto* relation_name = get_rel_name(relation_id_);
+                const auto* namespace_name = get_namespace_name(namespace_id_);
+                if (relation_name == nullptr || namespace_name == nullptr)
+                    ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE),
+                        errmsg("table %u disappeared before automatic column creation", relation_id_)));
+                namestrcpy(&relation_name_, relation_name);
+                namestrcpy(&namespace_name_, namespace_name);
+            });
+        } catch (...) {
+            release_namespace_lock();
+            throw;
+        }
+        previous_ = active_;
+        active_ = this;
+    }
+
+    /** Restore the outer guard and release only this namespace lock acquisition. */
+    ~scoped_relation_identity() noexcept {
+        active_ = previous_;
+        release_namespace_lock();
+    }
+
+    scoped_relation_identity(const scoped_relation_identity&) = delete;
+    scoped_relation_identity& operator=(const scoped_relation_identity&) = delete;
+    scoped_relation_identity(scoped_relation_identity&&) = delete;
+    scoped_relation_identity& operator=(scoped_relation_identity&&) = delete;
+
+    /** Quote the stabilized name in PostgreSQL's current memory context. */
+    [[nodiscard]] const char* qualified_name() const {
+        return invoke_pg_as_cpp([this] {
+            return quote_qualified_identifier(NameStr(namespace_name_), NameStr(relation_name_));
+        });
+    }
+
+    /** PG-leaf object-hook check, called on both sides of the previous hook.
+     * SnapshotSelf sees the catalog tuple just changed by the current command;
+     * a syscache lookup could still see the pre-command identity here.
+     */
+    static void validate_object_access(ObjectAccessType access, Oid class_id,
+                                      Oid object_id, int sub_id) {
+        if (access != OAT_DROP && access != OAT_POST_ALTER) return;
+        for (const auto* guard = active_; guard != nullptr; guard = guard->previous_) {
+            const bool target_relation = class_id == RelationRelationId && object_id == guard->relation_id_;
+            const bool target_namespace = class_id == NamespaceRelationId && object_id == guard->namespace_id_;
+            if (!target_relation && !target_namespace) continue;
+            if ((access == OAT_DROP && sub_id == 0)
+                || (access == OAT_POST_ALTER && !guard->identity_matches(class_id)))
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("table or schema identity changed during automatic column creation"),
+                    errhint("Complete table and schema renames before loading, or predeclare the destination columns.")));
+        }
+    }
+
+  private:
+    /** Compare one just-altered catalog tuple with the captured identity. */
+    [[nodiscard]] bool identity_matches(Oid class_id) const {
+        const bool is_relation = class_id == RelationRelationId;
+        const auto catalog = table_open(class_id, AccessShareLock);
+        ScanKeyData key{};
+        ScanKeyInit(&key, is_relation ? Anum_pg_class_oid : Anum_pg_namespace_oid,
+            BTEqualStrategyNumber, F_OIDEQ,
+            ObjectIdGetDatum(is_relation ? relation_id_ : namespace_id_));
+        const auto scan = systable_beginscan(catalog,
+            is_relation ? ClassOidIndexId : NamespaceOidIndexId,
+            true, SnapshotSelf, 1, &key);
+        const auto tuple = systable_getnext(scan);
+        bool matches = false;
+        if (HeapTupleIsValid(tuple)) {
+            if (is_relation) {
+                const auto* value = reinterpret_cast<Form_pg_class>(GETSTRUCT(tuple));
+                matches = value->relnamespace == namespace_id_
+                    && std::strcmp(NameStr(value->relname), NameStr(relation_name_)) == 0;
+            } else {
+                const auto* value = reinterpret_cast<Form_pg_namespace>(GETSTRUCT(tuple));
+                matches = std::strcmp(NameStr(value->nspname), NameStr(namespace_name_)) == 0;
+            }
+        }
+        systable_endscan(scan);
+        table_close(catalog, AccessShareLock);
+        return matches;
+    }
+
+    /** Release our catalog lock after success or error without hiding the error. */
+    void release_namespace_lock() noexcept {
+        if (!namespace_locked_) return;
+        namespace_locked_ = false;
+        try {
+            invoke_pg_as_cpp([] { UnlockRelationOid(NamespaceRelationId, ShareLock); });
+        } catch (...) {
+            // Transaction abort owns any lock left after a cleanup failure.
+        }
+    }
+
+    inline static scoped_relation_identity* active_ = nullptr;
+    scoped_relation_identity* previous_ = nullptr;
+    Oid relation_id_ = InvalidOid;
+    Oid namespace_id_ = InvalidOid;
+    NameData relation_name_{};
+    NameData namespace_name_{};
+    bool namespace_locked_ = false;
+};
 
 /** Execute trusted internal SQL with its installed extension owner's privileges.
  * This C++ boundary accepts only repository-generated private catalog/storage

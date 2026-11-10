@@ -117,34 +117,43 @@ export {
         if (path == nullptr) {
             return false;
         }
-        if (path->pathtype == T_Gather || path->pathtype == T_GatherMerge || path->parallel_aware ||
+        if (IsA(path, GatherPath) || IsA(path, GatherMergePath) ||
+            path->pathtype == T_Gather || path->pathtype == T_GatherMerge || path->parallel_aware ||
             path->parallel_workers > 0) {
             return true;
         }
-        switch (path->pathtype) {
-        case T_Result:
+        // The plan tag does not identify the allocated Path structure: Result
+        // plans may come from a bare Path, GroupResultPath or ProjectionPath.
+        switch (nodeTag(path)) {
+        case T_ProjectionPath:
             return batch_join_path_contains_parallel_execution(
                 reinterpret_cast<const ProjectionPath*>(path)->subpath);
-        case T_Material:
+        case T_ProjectSetPath:
+            return batch_join_path_contains_parallel_execution(
+                reinterpret_cast<const ProjectSetPath*>(path)->subpath);
+        case T_MaterialPath:
             return batch_join_path_contains_parallel_execution(
                 reinterpret_cast<const MaterialPath*>(path)->subpath);
-        case T_Memoize:
+        case T_MemoizePath:
             return batch_join_path_contains_parallel_execution(
                 reinterpret_cast<const MemoizePath*>(path)->subpath);
-        case T_Sort:
+        case T_SortPath:
             return batch_join_path_contains_parallel_execution(
                 reinterpret_cast<const SortPath*>(path)->subpath);
-        case T_IncrementalSort:
+        case T_IncrementalSortPath:
             return batch_join_path_contains_parallel_execution(
                 reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath);
-        case T_NestLoop:
-        case T_MergeJoin:
-        case T_HashJoin: {
+        case T_UniquePath:
+            return batch_join_path_contains_parallel_execution(
+                reinterpret_cast<const UniquePath*>(path)->subpath);
+        case T_NestPath:
+        case T_MergePath:
+        case T_HashPath: {
             auto const* join = reinterpret_cast<JoinPath const*>(path);
             return batch_join_path_contains_parallel_execution(join->outerjoinpath) ||
                    batch_join_path_contains_parallel_execution(join->innerjoinpath);
         }
-        case T_CustomScan: {
+        case T_CustomPath: {
             auto const* custom = reinterpret_cast<CustomPath const*>(path);
             for (Path* child : postgres_list<Path>(custom->custom_paths)) {
                 if (batch_join_path_contains_parallel_execution(child)) {
@@ -153,7 +162,7 @@ export {
             }
             return false;
         }
-        case T_Append: {
+        case T_AppendPath: {
             auto const* append = reinterpret_cast<AppendPath const*>(path);
             for (Path* child : postgres_list<Path>(append->subpaths)) {
                 if (batch_join_path_contains_parallel_execution(child)) {
@@ -162,7 +171,7 @@ export {
             }
             return false;
         }
-        case T_MergeAppend: {
+        case T_MergeAppendPath: {
             auto const* append = reinterpret_cast<MergeAppendPath const*>(path);
             for (Path* child : postgres_list<Path>(append->subpaths)) {
                 if (batch_join_path_contains_parallel_execution(child)) {
@@ -171,6 +180,10 @@ export {
             }
             return false;
         }
+        case T_Path:
+        case T_GroupResultPath:
+            // These paths have no child. GroupResultPath::quals are expressions.
+            return false;
         default:
             return false;
         }

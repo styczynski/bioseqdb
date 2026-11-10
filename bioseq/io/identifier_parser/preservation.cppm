@@ -27,6 +27,7 @@ import bioseq.sequences.cigar;
 import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
 import bioseq.io.record_schema;
+import bioseq.io.sinks;
 import bioseq.io.alignment.record_codec;
 import bioseq.io.simd;
 import bioseq.simd.utils;
@@ -55,6 +56,92 @@ struct preservation_reference_view {
     bool synthetic_codons{};
 };
 
+/** A decoded scalar keeps borrowed input or admitted decoded bytes alive.
+ * Small escaped keys/numbers use inline scratch; larger escaped text reuses the
+ * shared spill-capable byte owner. text() is computed after moves, so an inline
+ * value never leaves a self-referential view pointing into a moved-from object.
+ */
+class preservation_scalar {
+    admitted_byte_buffer storage_;
+    std::array<char, 128> inline_bytes_;
+    std::string_view borrowed_;
+    std::size_t size_{};
+    enum class backing : std::uint8_t { inline_text, borrowed, admitted };
+    backing backing_{backing::inline_text};
+public:
+    /** Start without allocation; optional credit is borrowed only during growth. */
+    explicit preservation_scalar(io_memory_credit* credit = nullptr) : storage_(credit) {}
+    preservation_scalar(const preservation_scalar&) = delete;
+    preservation_scalar& operator=(const preservation_scalar&) = delete;
+    /** Move only initialized inline bytes; heap/mapped views retain their owners. */
+    preservation_scalar(preservation_scalar&& other) noexcept
+        : storage_(std::move(other.storage_)), borrowed_(other.borrowed_),
+          size_(other.size_), backing_(other.backing_) {
+        if (backing_ == backing::inline_text)
+            std::copy_n(other.inline_bytes_.data(), size_, inline_bytes_.data());
+    }
+    /** Retire existing storage before replacing its permit and decoded value. */
+    preservation_scalar& operator=(preservation_scalar&& other) noexcept {
+        if (this != &other) {
+            storage_ = std::move(other.storage_);
+            borrowed_ = other.borrowed_;
+            size_ = other.size_;
+            backing_ = other.backing_;
+            if (backing_ == backing::inline_text)
+                std::copy_n(other.inline_bytes_.data(), size_, inline_bytes_.data());
+        }
+        return *this;
+    }
+    /** Borrow a fully validated unescaped string until its containing input dies. */
+    [[nodiscard]] static preservation_scalar borrow(std::string_view text) {
+        preservation_scalar result;
+        result.borrowed_ = text;
+        result.size_ = text.size();
+        result.backing_ = backing::borrowed;
+        return result;
+    }
+    /** Append one validated decoded fragment, admitting dynamic storage first. */
+    [[nodiscard]] std::expected<void, std::string> append(std::string_view fragment) {
+        if (backing_ == backing::borrowed || fragment.size() > std::numeric_limits<std::size_t>::max() - size_)
+            return std::unexpected("decoded scalar is immutable or overflows");
+        if (backing_ == backing::inline_text && fragment.size() <= inline_bytes_.size() - size_) {
+            std::copy(fragment.begin(), fragment.end(), inline_bytes_.data() + size_);
+        } else {
+            if (backing_ == backing::inline_text) {
+                if (auto stored = storage_.append(std::string_view{inline_bytes_.data(), size_}); !stored) return stored;
+                backing_ = backing::admitted;
+            }
+            if (auto stored = storage_.append(fragment); !stored) return stored;
+        }
+        size_ += fragment.size();
+        return {};
+    }
+    /** Freeze any spill-backed storage before a callback borrows its decoded view. */
+    [[nodiscard]] std::expected<void, std::string> seal() {
+        return backing_ == backing::admitted ? storage_.seal() : std::expected<void, std::string>{};
+    }
+    /** Return the decoded byte count independently of its backing. */
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    /** Borrow decoded text only while this owner and its original input survive. */
+    [[nodiscard]] std::string_view text() const noexcept {
+        if (backing_ == backing::borrowed) return borrowed_;
+        if (backing_ == backing::admitted) return storage_.text();
+        return {inline_bytes_.data(), size_};
+    }
+};
+
+/** Adapt bounded names to the existing null-terminated alphabet registry. */
+[[nodiscard]] inline std::optional<supported_storage_alphabets::alphabet_code_t>
+preservation_alphabet_code(std::string_view name) {
+    std::array<char, 65> terminated;
+    if (name.size() >= terminated.size()) return std::nullopt;
+    std::copy(name.begin(), name.end(), terminated.begin());
+    terminated[name.size()] = '\0';
+    const auto code = supported_storage_alphabets::try_index_of_name(terminated.data());
+    if (!code || supported_storage_alphabets::name_of_alphabet_code(*code) != name) return std::nullopt;
+    return code;
+}
+
 /** Strict pull cursor over retained payload bytes; strings may stream to a consumer.
  *  The surrounding record framer owns admission and may retain a mapped spool view.
  *  Only scalar fields use owned strings; rank/auxiliary strings need no whole copy. */
@@ -62,10 +149,15 @@ class preservation_json_cursor {
     std::string_view input_;
     std::size_t position_{};
     std::size_t scalar_limit_;
+    io_memory_credit* credit_{};
 public:
     /** Borrow a validated record/spool view and its admitted scalar allocation limit. */
-    explicit preservation_json_cursor(std::string_view input, std::size_t scalar_limit)
-        : input_(input), scalar_limit_(scalar_limit) {}
+    explicit preservation_json_cursor(std::string_view input, std::size_t scalar_limit,
+        io_memory_credit* credit = nullptr)
+        : input_(input), scalar_limit_(scalar_limit), credit_(credit) {}
+
+    /** Nested replay cursors share optional credit, never scalar ownership. */
+    [[nodiscard]] io_memory_credit* memory_credit() const noexcept { return credit_; }
 
     /** Current byte offset, used to retain replay slices without copying rank strings. */
     [[nodiscard]] std::size_t position() const noexcept { return position_; }
@@ -247,26 +339,42 @@ public:
         }
         return {};
     }
-    /** Decode a bounded scalar string, leaving large biological strings to string_to. */
-    [[nodiscard]] std::expected<std::string, std::string> string(std::optional<std::size_t> limit = std::nullopt) {
-        std::string output;
+    /** Decode a bounded scalar while retaining every dynamically allocated byte. */
+    [[nodiscard]] std::expected<preservation_scalar, std::string> string(std::optional<std::size_t> limit = std::nullopt) {
         const auto maximum = limit.value_or(scalar_limit_);
+        const auto saved_position = position_;
+        whitespace();
+        if (position_ < input_.size() && input_[position_] == '"') {
+            const auto begin = position_ + 1u;
+            const auto count = bioseq::io::simd::scan_json_ascii_prefix(
+                input_.data() + begin, input_.size() - begin);
+            if (begin + count < input_.size() && input_[begin + count] == '"') {
+                if (count > maximum) {
+                    position_ = begin; // Match string_to's failing consumer position.
+                    return std::unexpected("preservation scalar exceeds admitted byte limit");
+                }
+                position_ = begin + count + 1u;
+                return preservation_scalar::borrow(input_.substr(begin, count));
+            }
+        }
+        position_ = saved_position;
+        preservation_scalar output{credit_};
         const auto parsed = string_to([&output, maximum](std::string_view fragment)
             -> std::expected<void, std::string> {
             if (fragment.size() > maximum - output.size())
                 return std::unexpected("preservation scalar exceeds admitted byte limit");
-            output.append(fragment);
-            return {};
+            return output.append(fragment);
         });
         if (!parsed) return std::unexpected(parsed.error());
+        if (auto sealed = output.seal(); !sealed) return std::unexpected(sealed.error());
         return output;
     }
     /** Decode optional text without conflating an empty string and JSON null. */
-    [[nodiscard]] std::expected<std::optional<std::string>, std::string> optional_string() {
-        if (literal("null")) return std::optional<std::string>{};
+    [[nodiscard]] std::expected<std::optional<preservation_scalar>, std::string> optional_string() {
+        if (literal("null")) return std::optional<preservation_scalar>{};
         auto value = string();
         if (!value) return std::unexpected(value.error());
-        return std::optional<std::string>{std::move(*value)};
+        return std::optional<preservation_scalar>{std::move(*value)};
     }
     /** Visit all required named fields exactly once; reject unknown and duplicate keys. */
     template<std::size_t Count, class Visitor>
@@ -280,10 +388,18 @@ public:
                 const auto key = string(128);
                 if (!key) return std::unexpected(key.error());
                 std::size_t index = 0;
-                while (index < Count && keys[index] != *key) ++index;
-                if (index == Count) return std::unexpected("unknown preservation key: " + *key);
+                while (index < Count && keys[index] != key->text()) ++index;
+                if (index == Count) {
+                    std::string error{"unknown preservation key: "};
+                    error.append(key->text());
+                    return std::unexpected(std::move(error));
+                }
                 const auto bit = std::uint64_t{1} << index;
-                if ((seen & bit) != 0) return std::unexpected("duplicate preservation key: " + *key);
+                if ((seen & bit) != 0) {
+                    std::string error{"duplicate preservation key: "};
+                    error.append(key->text());
+                    return std::unexpected(std::move(error));
+                }
                 seen |= bit;
                 if (auto colon = require(':'); !colon) return colon;
                 if (auto value = visit(index); !value) return value;
@@ -348,7 +464,7 @@ template<std::integral Integer>
         if (matching && key_length == key_name.size()) {
             auto probe = cursor;
             const auto value = probe.string(16);
-            if (value && *value == "bioseq.io") return true;
+            if (value && value->text() == "bioseq.io") return true;
             if (!cursor.skip_value()) return false;
         } else if (!cursor.skip_value()) return false;
         if (cursor.take('}')) return false;
@@ -373,8 +489,8 @@ template<class Destination>
             if (cursor.literal("null")) return {};
             const auto name = cursor.string(64);
             if (!name) return std::unexpected(name.error());
-            descriptor.alphabet_code = supported_storage_alphabets::try_index_of_name(name->c_str());
-            if (!descriptor.alphabet_code || supported_storage_alphabets::name_of_alphabet_code(*descriptor.alphabet_code) != *name)
+            descriptor.alphabet_code = preservation_alphabet_code(name->text());
+            if (!descriptor.alphabet_code || supported_storage_alphabets::name_of_alphabet_code(*descriptor.alphabet_code) != name->text())
                 return std::unexpected("unknown preservation alphabet");
         } else if (field == 1) {
             if (cursor.literal("true")) descriptor.present = true;
@@ -382,14 +498,14 @@ template<class Destination>
         } else if (field == 2) {
             const auto text = cursor.string(32);
             if (!text) return std::unexpected(text.error());
-            const auto length = preservation_integer<std::uint64_t>(*text);
+            const auto length = preservation_integer<std::uint64_t>(text->text());
             if (!length) return std::unexpected(length.error());
             descriptor.original_length = *length;
         } else if (field == 3) {
             const auto storage = cursor.string(16);
             if (!storage) return std::unexpected(storage.error());
-            if (*storage == "rank_hex") descriptor.storage = preservation_storage::rank_hex;
-            else if (*storage != "native") return std::unexpected("unknown preservation sequence storage");
+            if (storage->text() == "rank_hex") descriptor.storage = preservation_storage::rank_hex;
+            else if (storage->text() != "native") return std::unexpected("unknown preservation sequence storage");
         } else {
             if (cursor.literal("null")) return {};
             const auto begin = cursor.position();
@@ -416,7 +532,7 @@ template<class Destination>
     if (auto result = destination.begin_sequence(role, descriptor); !result) return result;
     if (rank_token) {
         const auto cardinality = *supported_storage_alphabets::cardinality_for_code(*descriptor.alphabet_code);
-        preservation_json_cursor ranks{*rank_token, scalar_limit};
+        preservation_json_cursor ranks{*rank_token, scalar_limit, cursor.memory_credit()};
         std::array<std::uint8_t, bioseq::simd::sequence_rank_io_chunk_capacity> tile{};
         std::size_t used = 0;
         std::uint64_t count = 0;
@@ -544,7 +660,7 @@ template<preservation_auxiliary_destination Destination>
     const auto decoded = cursor.array([&cursor, &destination, &tags, projected, scalar_limit](std::size_t)
         -> std::expected<void, std::string> {
         std::array<char, 2> tag{};
-        std::string type;
+        preservation_scalar type;
         std::string_view value_token;
         bool value_array = false;
         constexpr std::array<std::string_view, 3> keys{"tag", "type", "value"};
@@ -553,11 +669,11 @@ template<preservation_auxiliary_destination Destination>
             if (field == 0) {
                 const auto value = cursor.string(2);
                 if (!value || value->size() != 2) return std::unexpected("preserved auxiliary tag requires two characters");
-                std::copy(value->begin(), value->end(), tag.begin());
+                std::copy(value->text().begin(), value->text().end(), tag.begin());
             } else if (field == 1) {
-                const auto value = cursor.string(3);
+                auto value = cursor.string(3);
                 if (!value) return std::unexpected(value.error());
-                type = *value;
+                type = std::move(*value);
             } else {
                 cursor.whitespace();
                 const auto begin = cursor.position();
@@ -584,37 +700,37 @@ template<preservation_auxiliary_destination Destination>
         tags.set(*tag_index);
         if (tag == std::array<char, 2>{'C', 'G'} || (projected && tag == std::array<char, 2>{'b', 'q'}))
             return std::unexpected("transport/envelope tag appears in preserved ordinary auxiliary fields");
-        preservation_json_cursor value{value_token, scalar_limit};
+        preservation_json_cursor value{value_token, scalar_limit, cursor.memory_credit()};
         if (value_array) {
-            if (type.size() != 3 || !type.starts_with("B:")
-                || bioseq::io::alignment::auxiliary_element_bytes(type[2]) == 0 || type[2] == 'A')
+            if (type.size() != 3 || !type.text().starts_with("B:")
+                || bioseq::io::alignment::auxiliary_element_bytes(type.text()[2]) == 0 || type.text()[2] == 'A')
                 return std::unexpected("preserved auxiliary array has an invalid type");
-            if (auto begun = destination.begin_auxiliary(projected, tag, 'B', type[2]); !begun) return begun;
-            const auto count = value.array([&value, &destination, subtype = type[2]](std::size_t)
+            if (auto begun = destination.begin_auxiliary(projected, tag, 'B', type.text()[2]); !begun) return begun;
+            const auto count = value.array([&value, &destination, subtype = type.text()[2]](std::size_t)
                 -> std::expected<void, std::string> {
                 const auto text = value.string(32);
                 if (!text) return std::unexpected(text.error());
-                const auto number = decode_preserved_auxiliary_number(subtype, *text, true);
+                const auto number = decode_preserved_auxiliary_number(subtype, text->text(), true);
                 if (!number) return std::unexpected(number.error());
                 return destination.append_auxiliary_bytes({number->bytes.data(), number->width});
             });
             if (!count) return std::unexpected(count.error());
             return destination.end_auxiliary(static_cast<std::uint32_t>(*count));
         }
-        if (type.size() != 1 || std::string_view{"AifZH"}.find(type[0]) == std::string_view::npos)
+        if (type.size() != 1 || std::string_view{"AifZH"}.find(type.text()[0]) == std::string_view::npos)
             return std::unexpected("invalid preserved auxiliary scalar type");
-        if (type[0] == 'i' || type[0] == 'f') {
+        if (type.text()[0] == 'i' || type.text()[0] == 'f') {
             const auto text = value.string(32);
             if (!text) return std::unexpected(text.error());
-            const auto number = decode_preserved_auxiliary_number(type[0], *text, false);
+            const auto number = decode_preserved_auxiliary_number(type.text()[0], text->text(), false);
             if (!number) return std::unexpected(number.error());
             if (auto begun = destination.begin_auxiliary(projected, tag, number->type, '\0'); !begun) return begun;
             if (auto bytes = destination.append_auxiliary_bytes({number->bytes.data(), number->width}); !bytes) return bytes;
             return destination.end_auxiliary(1);
         }
-        if (auto begun = destination.begin_auxiliary(projected, tag, type[0], '\0'); !begun) return begun;
+        if (auto begun = destination.begin_auxiliary(projected, tag, type.text()[0], '\0'); !begun) return begun;
         std::size_t bytes = 0;
-        const auto text = value.string_to([&destination, &bytes, kind = type[0]](std::string_view fragment)
+        const auto text = value.string_to([&destination, &bytes, kind = type.text()[0]](std::string_view fragment)
             -> std::expected<void, std::string> {
             const auto valid = bioseq::io::simd::scan_sam_auxiliary_prefix(
                 reinterpret_cast<const std::uint8_t*>(fragment.data()), fragment.size(), kind == 'H');
@@ -629,7 +745,7 @@ template<preservation_auxiliary_destination Destination>
             return destination.append_auxiliary_bytes(std::as_bytes(std::span<const char>{fragment.data(), fragment.size()}));
         });
         if (!text) return text;
-        if ((type[0] == 'A' && bytes != 1) || (type[0] == 'H' && bytes % 2 != 0))
+        if ((type.text()[0] == 'A' && bytes != 1) || (type.text()[0] == 'H' && bytes % 2 != 0))
             return std::unexpected("invalid preserved character/hex auxiliary length");
         return destination.end_auxiliary(1);
     });
@@ -640,8 +756,9 @@ template<preservation_auxiliary_destination Destination>
 /** Share the same auxiliary grammar between SQL alignment composites and files. */
 template<preservation_auxiliary_destination Destination>
 [[nodiscard]] std::expected<void, std::string> decode_auxiliary_json(
-    std::string_view input, Destination& destination, std::size_t admitted_scalar_limit) {
-    preservation_json_cursor cursor{input, admitted_scalar_limit};
+    std::string_view input, Destination& destination, std::size_t admitted_scalar_limit,
+    io_memory_credit* credit = nullptr) {
+    preservation_json_cursor cursor{input, admitted_scalar_limit, credit};
     if (auto decoded = decode_preserved_auxiliary(cursor, destination, false, admitted_scalar_limit); !decoded)
         return decoded;
     return cursor.finish();
@@ -708,7 +825,7 @@ template<preservation_record_destination Destination>
         if (key == "template_length" || key == "cigar_form" || key == "source_orientation")
             return std::unexpected("required alignment scalar cannot be null");
     } else {
-        const std::string_view text = **value;
+        const std::string_view text = (*value)->text();
         if (key == "cigar_form") {
             if (text != "sam_complete" && text != "alignment_core") return std::unexpected("unknown preserved CIGAR form");
         } else if (key == "source_orientation") {
@@ -722,8 +839,13 @@ template<preservation_record_destination Destination>
                 return std::unexpected("invalid preserved alignment coordinate/flag/MAPQ");
         }
     }
-    const std::string name = "alignment." + std::string{key};
-    return destination.field(name, *value ? std::optional<std::string_view>{**value} : std::nullopt);
+    constexpr std::string_view prefix = "alignment.";
+    std::array<char, 64> name;
+    if (key.size() > name.size() - prefix.size()) return std::unexpected("alignment scalar key exceeds fixed scratch");
+    std::copy(prefix.begin(), prefix.end(), name.begin());
+    std::copy(key.begin(), key.end(), name.begin() + prefix.size());
+    return destination.field(std::string_view{name.data(), prefix.size() + key.size()},
+        *value ? std::optional<std::string_view>{(*value)->text()} : std::nullopt);
 }
 
 /** Decode the shared original alignment model; coordinate/base validation follows. */
@@ -749,9 +871,9 @@ template<preservation_record_destination Destination>
     preservation_json_cursor& cursor, Destination& destination, bool types_only) {
     const auto entries = cursor.array([&cursor, &destination, types_only](std::size_t)
         -> std::expected<void, std::string> {
-        std::string name;
-        std::string type;
-        std::optional<std::string> value;
+        preservation_scalar name;
+        preservation_scalar type;
+        std::optional<preservation_scalar> value;
         const auto field = [&cursor, &name, &type, &value](std::size_t index)
             -> std::expected<void, std::string> {
             if (index == 2) {
@@ -769,8 +891,8 @@ template<preservation_record_destination Destination>
             ? cursor.object(std::array<std::string_view, 2>{"name", "type"}, field)
             : cursor.object(std::array<std::string_view, 3>{"name", "type", "value"}, field);
         if (!parsed) return parsed;
-        if (name.empty() || type.empty()) return std::unexpected("preserved metadata requires name and type");
-        return destination.metadata(name, type, value ? std::optional<std::string_view>{*value} : std::nullopt, types_only);
+        if (name.text().empty() || type.text().empty()) return std::unexpected("preserved metadata requires name and type");
+        return destination.metadata(name.text(), type.text(), value ? std::optional<std::string_view>{value->text()} : std::nullopt, types_only);
     });
     if (!entries) return std::unexpected(entries.error());
     return {};
@@ -782,8 +904,8 @@ template<preservation_record_destination Destination>
 template<preservation_record_destination Destination>
 [[nodiscard]] std::expected<void, std::string> decode_preservation_record(
     std::string_view input, Destination& destination, bool text_format,
-    std::size_t admitted_scalar_limit) {
-    preservation_json_cursor cursor{input, admitted_scalar_limit};
+    std::size_t admitted_scalar_limit, io_memory_credit* credit = nullptr) {
+    preservation_json_cursor cursor{input, admitted_scalar_limit, credit};
     const auto field = [&cursor, &destination, text_format, admitted_scalar_limit](std::string_view key)
         -> std::expected<void, std::string> {
         if (key == "version") {
@@ -805,27 +927,27 @@ template<preservation_record_destination Destination>
             if (cursor.literal("null")) return destination.field(key, std::nullopt);
             const auto value = cursor.string(254u);
             if (!value) return std::unexpected(value.error());
-            if (!bioseq::io::alignment::valid_read_name(*value))
+            if (!bioseq::io::alignment::valid_read_name(value->text()))
                 return std::unexpected("invalid projected QNAME");
-            return destination.field(key, std::string_view{*value});
+            return destination.field(key, value->text());
         }
         const auto value = cursor.optional_string();
         if (!value) return std::unexpected(value.error());
         if (key == "magic") {
-            if (!*value || **value != "bioseq.io") return std::unexpected("invalid preservation magic");
+            if (!*value || (*value)->text() != "bioseq.io") return std::unexpected("invalid preservation magic");
             return {};
         }
         if (key == "representation") {
-            if (!*value || (text_format ? **value != "text" : (**value != "native" && **value != "synthetic-codon-v1")))
+            if (!*value || (text_format ? (*value)->text() != "text" : ((*value)->text() != "native" && (*value)->text() != "synthetic-codon-v1")))
                 return std::unexpected("invalid preservation representation");
         } else if (key == "projected_flag" || key == "header_context" || key == "template_id" || key == "segment_id" || key == "reference_id") {
             if (*value) {
-                const auto number = preservation_integer<std::uint64_t>(**value);
+                const auto number = preservation_integer<std::uint64_t>((*value)->text());
                 if (!number || (key == "projected_flag" && *number > 4095))
                     return std::unexpected("invalid preservation flag/context");
             }
         }
-        return destination.field(key, *value ? std::optional<std::string_view>{**value} : std::nullopt);
+        return destination.field(key, *value ? std::optional<std::string_view>{(*value)->text()} : std::nullopt);
     };
     std::expected<void, std::string> decoded;
     if (text_format) {
@@ -948,14 +1070,16 @@ public:
 template<class Destination>
 concept preservation_manifest_destination = requires(Destination& destination,
     std::uint8_t code, std::uint64_t identity, std::string_view line,
-    const reference_descriptor& reference, const sam_header_field& attribute) {
+    const reference_descriptor& reference, std::array<char, 2> tag) {
     { destination.manifest_quality_alphabet(code) } -> std::same_as<std::expected<void, std::string>>;
     { destination.manifest_alphabet(code) } -> std::same_as<std::expected<void, std::string>>;
+    { destination.begin_replay_header(true) } -> std::same_as<std::expected<void, std::string>>;
+    { destination.replay_header_line(line) } -> std::same_as<std::expected<void, std::string>>;
     { destination.begin_context(identity) } -> std::same_as<std::expected<void, std::string>>;
     { destination.context_line(line) } -> std::same_as<std::expected<void, std::string>>;
     { destination.end_context() } -> std::same_as<std::expected<void, std::string>>;
-    { destination.begin_reference(reference, line, true) } -> std::same_as<std::expected<void, std::string>>;
-    { destination.reference_attribute(attribute) } -> std::same_as<std::expected<void, std::string>>;
+    { destination.begin_reference(reference, line, line, true) } -> std::same_as<std::expected<void, std::string>>;
+    { destination.reference_attribute(tag, line) } -> std::same_as<std::expected<void, std::string>>;
     { destination.end_reference() } -> std::same_as<std::expected<void, std::string>>;
     { destination.finish_manifest() } -> std::same_as<std::expected<void, std::string>>;
 };
@@ -963,9 +1087,10 @@ concept preservation_manifest_destination = requires(Destination& destination,
 /** Decode the complete version-one file manifest using bounded scalar/replay views. */
 template<preservation_manifest_destination Destination>
 [[nodiscard]] std::expected<void, std::string> decode_preservation_manifest(
-    std::string_view input, Destination& destination, std::size_t admitted_scalar_limit) {
-    preservation_json_cursor cursor{input, admitted_scalar_limit};
-    constexpr std::array<std::string_view, 7> keys{"magic", "version", "record_payload", "sequence_alphabets", "contexts", "references", "quality_alphabets"};
+    std::string_view input, Destination& destination, std::size_t admitted_scalar_limit,
+    io_memory_credit* credit = nullptr) {
+    preservation_json_cursor cursor{input, admitted_scalar_limit, credit};
+    constexpr std::array<std::string_view, 8> keys{"magic", "version", "record_payload", "sequence_alphabets", "contexts", "references", "quality_alphabets", "replay_header_lines"};
     const auto decoded = cursor.object(keys, [&cursor, &destination, admitted_scalar_limit](std::size_t field)
         -> std::expected<void, std::string> {
         if (field == 1) {
@@ -974,7 +1099,7 @@ template<preservation_manifest_destination Destination>
         }
         if (field == 0 || field == 2) {
             const auto value = cursor.string(16);
-            if (!value || *value != (field == 0 ? "bioseq.io" : "bq"))
+            if (!value || value->text() != (field == 0 ? "bioseq.io" : "bq"))
                 return std::unexpected("invalid manifest magic/payload tag");
             return {};
         }
@@ -984,14 +1109,26 @@ template<preservation_manifest_destination Destination>
                 -> std::expected<void, std::string> {
                 const auto name = cursor.string(64);
                 if (!name) return std::unexpected(name.error());
-                const auto code = supported_storage_alphabets::try_index_of_name(name->c_str());
-                if (!code || supported_storage_alphabets::name_of_alphabet_code(*code) != *name || seen.test(*code)
+                const auto code = preservation_alphabet_code(name->text());
+                if (!code || supported_storage_alphabets::name_of_alphabet_code(*code) != name->text() || seen.test(*code)
                     || (field == 3 ? *code >= supported_biological_alphabets::alphabet_count : !is_quality_alphabet_code(*code)))
                     return std::unexpected("invalid or duplicate manifest alphabet");
                 seen.set(*code);
                 return field == 3 ? destination.manifest_alphabet(*code) : destination.manifest_quality_alphabet(*code);
             });
             if (!alphabets) return std::unexpected(alphabets.error());
+            return {};
+        }
+        if (field == 7) {
+            const bool present = !cursor.literal("null");
+            if (auto begun = destination.begin_replay_header(present); !begun) return begun;
+            if (!present) return {};
+            const auto lines = cursor.array([&cursor, &destination](std::size_t) -> std::expected<void, std::string> {
+                const auto line = cursor.string();
+                if (!line) return std::unexpected(line.error());
+                return destination.replay_header_line(line->text());
+            });
+            if (!lines) return std::unexpected(lines.error());
             return {};
         }
         if (field == 4) {
@@ -1005,7 +1142,7 @@ template<preservation_manifest_destination Destination>
                     if (index == 0) {
                         const auto text = cursor.string(32);
                         if (!text) return std::unexpected(text.error());
-                        const auto number = preservation_integer<std::uint64_t>(*text);
+                        const auto number = preservation_integer<std::uint64_t>(text->text());
                         if (!number) return std::unexpected(number.error());
                         id = *number;
                     } else {
@@ -1020,14 +1157,14 @@ template<preservation_manifest_destination Destination>
                 });
                 if (!context) return context;
                 if (auto begun = destination.begin_context(id); !begun) return begun;
-                preservation_json_cursor lines{lines_token, admitted_scalar_limit};
+                preservation_json_cursor lines{lines_token, admitted_scalar_limit, cursor.memory_credit()};
                 const auto replay = lines.array([&lines, &destination](std::size_t)
                     -> std::expected<void, std::string> {
                     const auto text = lines.string();
                     if (!text) return std::unexpected(text.error());
-                    if (text->find_first_of("\r\n") != std::string::npos || text->starts_with("@CO\tbioseq.io:"))
+                    if (text->text().find_first_of("\r\n") != std::string_view::npos || text->text().starts_with("@CO\tbioseq.io:"))
                         return std::unexpected("invalid or recursively nested original header context line");
-                    return destination.context_line(*text);
+                    return destination.context_line(text->text());
                 });
                 if (!replay) return std::unexpected(replay.error());
                 return destination.end_context();
@@ -1038,12 +1175,13 @@ template<preservation_manifest_destination Destination>
         const auto references = cursor.array([&cursor, &destination, admitted_scalar_limit](std::size_t)
             -> std::expected<void, std::string> {
             reference_descriptor reference;
-            std::string wire_name;
+            preservation_scalar wire_name;
+            preservation_scalar original_name;
             bool synthetic = false;
             std::string_view attributes_token;
             constexpr std::array<std::string_view, 9> reference_keys{"wire_name", "source_id", "context", "original_name", "alphabet", "length", "representation", "topology", "attributes"};
             const auto parsed = cursor.object(reference_keys,
-                [&cursor, &reference, &wire_name, &synthetic, &attributes_token](std::size_t index)
+                [&cursor, &reference, &wire_name, &original_name, &synthetic, &attributes_token](std::size_t index)
                 -> std::expected<void, std::string> {
                 if (index == 8) {
                     const auto begin = cursor.position();
@@ -1053,9 +1191,9 @@ template<preservation_manifest_destination Destination>
                         for (;;) {
                             const auto key = cursor.string(2);
                             if (!key || key->size() != 2) return std::unexpected("invalid manifest reference attribute name");
-                            const std::array<char, 2> tag{(*key)[0], (*key)[1]};
+                            const std::array<char, 2> tag{key->text()[0], key->text()[1]};
                             const auto tag_index = bioseq::io::alignment::auxiliary_tag_index(tag);
-                            if (!tag_index || tags.test(*tag_index) || *key == "SN" || *key == "LN")
+                            if (!tag_index || tags.test(*tag_index) || key->text() == "SN" || key->text() == "LN")
                                 return std::unexpected("duplicate/invalid manifest reference attribute");
                             tags.set(*tag_index);
                             if (auto colon = cursor.require(':'); !colon) return colon;
@@ -1069,39 +1207,39 @@ template<preservation_manifest_destination Destination>
                     return {};
                 }
                 if ((index == 2 || index == 4) && cursor.literal("null")) return {};
-                const auto text = cursor.string();
+                auto text = cursor.string();
                 if (!text) return std::unexpected(text.error());
                 switch (index) {
-                case 0: wire_name = *text; break;
+                case 0: wire_name = std::move(*text); break;
                 case 1: case 2: case 5: {
-                    const auto number = preservation_integer<std::uint64_t>(*text);
+                    const auto number = preservation_integer<std::uint64_t>(text->text());
                     if (!number) return std::unexpected(number.error());
                     if (index == 1) reference.identity = *number;
                     else if (index == 2) reference.context_id = *number;
                     else reference.length = *number;
                     break;
                 }
-                case 3: reference.name = *text; break;
+                case 3: original_name = std::move(*text); break;
                 case 4:
-                    reference.alphabet_code = supported_biological_alphabets::try_index_of_name(text->c_str());
+                    reference.alphabet_code = preservation_alphabet_code(text->text());
                     if (!reference.alphabet_code
-                        || supported_biological_alphabets::name_of_alphabet_code(*reference.alphabet_code) != *text)
+                        || *reference.alphabet_code >= supported_biological_alphabets::alphabet_count)
                         return std::unexpected("unknown manifest reference alphabet");
                     break;
                 case 6:
-                    synthetic = *text == "synthetic-codon-v1";
-                    if (!synthetic && *text != "native") return std::unexpected("unknown manifest reference representation");
+                    synthetic = text->text() == "synthetic-codon-v1";
+                    if (!synthetic && text->text() != "native") return std::unexpected("unknown manifest reference representation");
                     break;
                 case 7:
-                    reference.circular = *text == "circular";
-                    if (!reference.circular && *text != "linear") return std::unexpected("unknown manifest reference topology");
+                    reference.circular = text->text() == "circular";
+                    if (!reference.circular && text->text() != "linear") return std::unexpected("unknown manifest reference topology");
                     break;
                 default: return std::unexpected("invalid manifest reference field");
                 }
                 return {};
             });
             if (!parsed) return parsed;
-            if (!bioseq::io::alignment::valid_reference_name(wire_name) || reference.length == 0
+            if (!bioseq::io::alignment::valid_reference_name(wire_name.text()) || reference.length == 0
                 || reference.length > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) / (synthetic ? 3 : 1)
                 || (synthetic && !reference.alphabet_code))
                 return std::unexpected("manifest reference name/length/domain cannot be represented");
@@ -1112,8 +1250,8 @@ template<preservation_manifest_destination Destination>
                 if (protein != synthetic)
                     return std::unexpected("manifest reference representation conflicts with its alphabet");
             }
-            if (auto begun = destination.begin_reference(reference, wire_name, synthetic); !begun) return begun;
-            preservation_json_cursor attributes{attributes_token, admitted_scalar_limit};
+            if (auto begun = destination.begin_reference(reference, original_name.text(), wire_name.text(), synthetic); !begun) return begun;
+            preservation_json_cursor attributes{attributes_token, admitted_scalar_limit, cursor.memory_credit()};
             if (auto opening = attributes.require('{'); !opening) return opening;
             if (!attributes.take('}')) {
                 for (;;) {
@@ -1122,8 +1260,7 @@ template<preservation_manifest_destination Destination>
                     if (auto colon = attributes.require(':'); !colon) return colon;
                     auto value = attributes.string();
                     if (!value) return std::unexpected(value.error());
-                    const sam_header_field attribute{{(*tag)[0], (*tag)[1]}, std::move(*value)};
-                    if (auto added = destination.reference_attribute(attribute); !added) return added;
+                    if (auto added = destination.reference_attribute({tag->text()[0], tag->text()[1]}, value->text()); !added) return added;
                     if (attributes.take('}')) break;
                     if (auto comma = attributes.require(','); !comma) return comma;
                 }
@@ -1447,9 +1584,12 @@ template<header_text_sink Sink>
     Sink& sink, const record_source_metadata& metadata,
     std::span<const preservation_reference_view> references,
     std::span<const std::uint8_t> sequence_alphabets = {},
-    std::span<const std::uint8_t> quality_alphabets = {}) {
+    std::span<const std::uint8_t> quality_alphabets = {},
+    std::optional<std::span<const std::string>> replay_header_lines = std::nullopt) {
     if (sequence_alphabets.empty()) sequence_alphabets = metadata.declared_alphabet_codes;
     if (quality_alphabets.empty()) quality_alphabets = metadata.declared_quality_alphabet_codes;
+    if (!replay_header_lines && metadata.replay_header_lines)
+        replay_header_lines = std::span<const std::string>{*metadata.replay_header_lines};
     preservation_encoder<Sink> encoder{sink};
     encoder.text("{\"magic\":\"bioseq.io\",\"version\":1,\"record_payload\":\"bq\",\"sequence_alphabets\":[");
     for (std::size_t index = 0; index < sequence_alphabets.size(); ++index) {
@@ -1467,7 +1607,20 @@ template<header_text_sink Sink>
             return std::unexpected("manifest quality alphabet must encode quality scores");
         encoder.string(supported_storage_alphabets::name_of_alphabet_code(code));
     }
-    encoder.text("],\"contexts\":[");
+    encoder.text("],\"replay_header_lines\":");
+    if (!replay_header_lines) encoder.text("null");
+    else {
+        encoder.text("[");
+        for (std::size_t index = 0; index < replay_header_lines->size(); ++index) {
+            const auto& line = (*replay_header_lines)[index];
+            if (!is_sam_replay_header_line(line))
+                return std::unexpected("invalid non-geometric replay header line");
+            if (index != 0) encoder.text(",");
+            encoder.string(line);
+        }
+        encoder.text("]");
+    }
+    encoder.text(",\"contexts\":[");
     for (std::size_t index = 0; index < metadata.header_contexts.size(); ++index) {
         if (index != 0) encoder.text(",");
         const auto& context = metadata.header_contexts[index];

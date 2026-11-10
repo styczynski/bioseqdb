@@ -7,6 +7,7 @@
  * header fields and defaults, and rollback when loading fails.
  */
 #include <cstdlib>
+#include <libpq-fe.h>
 #include <zlib.h>
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -1706,6 +1707,130 @@ namespace {
     return records;
 }
 
+/** Independent native header/QNAME/FLAG evidence for small owned SAM/BAM fixtures. */
+struct exported_native_summary {
+    std::vector<std::string> names;
+    std::vector<std::uint16_t> flags;
+    std::vector<std::pair<std::string, std::uint32_t>> references;
+};
+
+/** Inspect native dictionary, QNAME and FLAG bytes without the preservation decoder. */
+[[nodiscard]] exported_native_summary inspect_exported_native(
+    const std::string& path, std::string_view format) {
+    exported_native_summary summary;
+    constexpr std::size_t fixture_limit = 1024u * 1024u;
+    REQUIRE(std::filesystem::file_size(path) <= fixture_limit);
+    // Both native formats carry the same textual @SQ declarations. BAM's
+    // independent binary dictionary must agree with that text, including order.
+    const auto text_references = [](std::string_view header) {
+        std::vector<std::pair<std::string, std::uint32_t>> references;
+        std::istringstream input{std::string{header}};
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.starts_with("@SQ\t")) continue;
+            std::istringstream fields{line};
+            std::string field;
+            std::optional<std::string> name;
+            std::optional<std::uint32_t> length;
+            while (std::getline(fields, field, '\t')) {
+                if (field.starts_with("SN:")) {
+                    REQUIRE_FALSE(name.has_value());
+                    name = field.substr(3);
+                    REQUIRE_FALSE(name->empty());
+                } else if (field.starts_with("LN:")) {
+                    REQUIRE_FALSE(length.has_value());
+                    std::uint32_t value{};
+                    const auto parsed = std::from_chars(field.data() + 3, field.data() + field.size(), value);
+                    REQUIRE(parsed.ec == std::errc{});
+                    REQUIRE(parsed.ptr == field.data() + field.size());
+                    REQUIRE(value > 0);
+                    REQUIRE(value <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()));
+                    length = value;
+                }
+            }
+            REQUIRE(name.has_value());
+            REQUIRE(length.has_value());
+            references.emplace_back(std::move(*name), *length);
+        }
+        return references;
+    };
+    if (format == "sam") {
+        const auto text = read_export_fixture(path);
+        REQUIRE(text.size() <= fixture_limit);
+        summary.references = text_references(text);
+        for (const auto& record : exported_sam_records(text)) {
+            summary.names.push_back(record[0]);
+            std::uint16_t flags{};
+            const auto parsed = std::from_chars(record[1].data(), record[1].data() + record[1].size(), flags);
+            REQUIRE(parsed.ec == std::errc{});
+            REQUIRE(parsed.ptr == record[1].data() + record[1].size());
+            summary.flags.push_back(flags);
+        }
+        return summary;
+    }
+    REQUIRE(format == "bam");
+    const std::unique_ptr<std::remove_pointer_t<gzFile>, decltype(&gzclose)> input(gzopen(path.c_str(), "rb"), &gzclose);
+    REQUIRE(input != nullptr);
+    std::string bytes;
+    std::array<char, 4096> chunk{};
+    for (;;) {
+        const auto count = gzread(input.get(), chunk.data(), static_cast<unsigned>(chunk.size()));
+        REQUIRE(count >= 0);
+        if (count == 0) break;
+        REQUIRE(bytes.size() + static_cast<std::size_t>(count) <= fixture_limit);
+        bytes.append(chunk.data(), static_cast<std::size_t>(count));
+    }
+    REQUIRE(bytes.size() >= 4);
+    REQUIRE(bytes.substr(0, 4) == std::string("BAM\1", 4));
+    std::size_t offset = 4;
+    const auto unsigned_word = [&bytes, &offset] {
+        REQUIRE(bytes.size() - offset >= 4);
+        std::uint32_t value{};
+        for (unsigned index = 0; index < 4; ++index)
+            value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[offset + index])) << (index * 8u);
+        offset += 4;
+        return value;
+    };
+    const auto skip = [&bytes, &offset](std::size_t count) {
+        REQUIRE(count <= bytes.size() - offset);
+        offset += count;
+    };
+    const auto text_length = unsigned_word();
+    REQUIRE(text_length <= bytes.size() - offset);
+    const auto declared_references = text_references(std::string_view{bytes}.substr(offset, text_length));
+    skip(text_length);
+    const auto reference_count = unsigned_word();
+    REQUIRE(reference_count <= (bytes.size() - offset) / 10u);
+    for (std::uint32_t index = 0; index < reference_count; ++index) {
+        const auto name_size = unsigned_word();
+        REQUIRE(name_size >= 2);
+        REQUIRE(name_size <= bytes.size() - offset);
+        REQUIRE(bytes[offset + name_size - 1] == '\0');
+        const std::string_view name{bytes.data() + offset, name_size - 1};
+        REQUIRE(name.find('\0') == std::string_view::npos);
+        skip(name_size);
+        const auto length = unsigned_word();
+        REQUIRE(length > 0);
+        REQUIRE(length <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()));
+        summary.references.emplace_back(name, length);
+    }
+    REQUIRE(summary.references == declared_references);
+    while (offset < bytes.size()) {
+        const auto record_size = unsigned_word();
+        REQUIRE(record_size >= 32);
+        REQUIRE(record_size <= bytes.size() - offset);
+        const auto name_size = static_cast<unsigned char>(bytes[offset + 8]);
+        REQUIRE(name_size >= 1);
+        REQUIRE(name_size <= record_size - 32);
+        REQUIRE(bytes[offset + 32 + name_size - 1] == '\0');
+        summary.names.emplace_back(bytes.data() + offset + 32, name_size - 1);
+        summary.flags.push_back(static_cast<std::uint16_t>(static_cast<unsigned char>(bytes[offset + 14]))
+            | (static_cast<std::uint16_t>(static_cast<unsigned char>(bytes[offset + 15])) << 8u));
+        skip(record_size);
+    }
+    return summary;
+}
+
 } // namespace
 
 TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and header whitespace",
@@ -1783,6 +1908,237 @@ TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and 
             }
         }
     }
+    // Inspect nested SQL types at binding time, including NULL/empty values,
+    // while preserving ordinary arrays/composites and deliberate text casts.
+    it::exec_sql(ctx,
+        "CREATE TYPE write_meta_first.scalar_pair AS (number integer,note text); "
+        "CREATE TYPE write_meta_first.payload_pair AS "
+        "(sequence bioseq.seq,quality bioseq.seq,cigar bioseq.seq,alignment bioseq.alignment); "
+        "CREATE DOMAIN write_meta_first.payload_array AS bioseq.seq[]; "
+        "CREATE TYPE write_meta_first.payload_range AS RANGE "
+        "(subtype=bioseq.seq,multirange_type_name=write_meta_first.payload_multirange); "
+        "CREATE TABLE write_meta_first.container_source(header text,seq bioseq.seq('dna5'),"
+        "quality bioseq.seq('phred63'),scalar_array text[],scalar_record write_meta_first.scalar_pair,"
+        "scalar_range int4range,scalar_multirange int4multirange,intentional_text text) USING bioseq; "
+        "INSERT INTO write_meta_first.container_source VALUES "
+        "('nested','ACNG','!!!!',ARRAY['a',NULL],ROW(7,'retained'),'[1,7)','{[1,7)}',(ARRAY['ACNG'::bioseq.seq('dna5')])::text),"
+        "('empty','','',ARRAY[]::text[],ROW(0,''),'empty','{}',(ARRAY[]::bioseq.seq[])::text),"
+        "('null',NULL,NULL,NULL,NULL,NULL,NULL,NULL); "
+        "CREATE FUNCTION write_meta_first.opaque_record() RETURNS record LANGUAGE plpgsql STABLE AS "
+        "$$BEGIN RETURN ROW(7,'opaque'::text); END$$");
+    const std::string nested_query =
+        "SELECT source.*,ARRAY[seq] AS omitted_sequence_array,ARRAY[quality] AS omitted_quality_array,"
+        "ARRAY['1M'::bioseq.seq('cigar')] AS omitted_cigar_array,"
+        "ARRAY[NULL::bioseq.alignment] AS omitted_alignment_array,"
+        "ARRAY[seq]::write_meta_first.payload_array AS omitted_domain_array,"
+        "NULL::write_meta_first.payload_pair AS omitted_null_composite,"
+        "ROW(seq,quality,'1M'::bioseq.seq('cigar'),NULL::bioseq.alignment)"
+        "::write_meta_first.payload_pair AS omitted_named_composite,"
+        "ARRAY[]::bioseq.seq[] AS omitted_empty_array,"
+        "write_meta_first.payload_range(seq,seq,'[]') AS omitted_sequence_range,"
+        "write_meta_first.payload_multirange(write_meta_first.payload_range(seq,seq,'[]')) "
+        "AS omitted_sequence_multirange,"
+        "ROW(ARRAY[seq],ROW(quality,'1M'::bioseq.seq('cigar'))) AS omitted_anonymous_record,"
+        "ARRAY[repeat('A',65536)::bioseq.seq('dna5')] AS omitted_large_array "
+        "FROM write_meta_first.container_source source ORDER BY header";
+    for (const std::string_view format : {"fasta", "fastq"}) {
+        CAPTURE(format);
+        const std::string path = "/tmp/bioseq_write_containers_" + backend + "." + std::string{format};
+        std::filesystem::remove(path);
+        it::exec_sql(ctx, "DROP TABLE IF EXISTS write_meta_first.container_loaded; "
+            "CREATE TABLE write_meta_first.container_loaded(header text,seq bioseq.seq('dna5'),"
+            "quality bioseq.seq('phred63'),scalar_array text[],scalar_record write_meta_first.scalar_pair,"
+            "scalar_range int4range,scalar_multirange int4multirange,intentional_text text) USING bioseq");
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$" + nested_query +
+            "$query$::text,'" + path + "')") == 3);
+        const auto encoded = read_export_fixture(path);
+        REQUIRE(encoded.size() < 32768);
+        REQUIRE(encoded.find("omitted_") == std::string::npos);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('write_meta_first.container_loaded'::regclass,'"
+            + path + "')") == 3);
+        const std::string fields = "SELECT header,seq::text," +
+            std::string{format == "fastq" ? "quality::text," : ""} +
+            "scalar_array,scalar_record::text,scalar_range::text,scalar_multirange::text,intentional_text FROM ";
+        REQUIRE(it::query_rows(ctx, fields + "write_meta_first.container_loaded ORDER BY header") ==
+            it::query_rows(ctx, fields + "write_meta_first.container_source ORDER BY header"));
+        std::filesystem::remove(path);
+    }
+    const std::string rejected_path = "/tmp/bioseq_write_containers_" + backend + "_rejected.sam";
+    std::filesystem::remove(rejected_path);
+    for (const std::string_view role : {"metadata", "tag:ZZ"}) {
+        CAPTURE(role);
+        const auto rejected = it::sql_error(ctx, "SELECT bioseq.write($query$" + nested_query +
+            "$query$::text,'" + rejected_path + "',columns=>ARRAY["
+            "ROW('omitted_sequence_array','" + std::string{role} + "')::bioseq.column_mapping])");
+        REQUIRE(rejected.sqlstate == "22023");
+        REQUIRE(rejected.contains("payload containers"));
+        REQUIRE_FALSE(std::filesystem::exists(rejected_path));
+    }
+    const std::string opaque_query = "SELECT header,seq,write_meta_first.opaque_record() AS opaque "
+        "FROM write_meta_first.container_source ORDER BY header";
+    const std::string opaque_path = "/tmp/bioseq_write_containers_" + backend + "_opaque.fasta";
+    std::filesystem::remove(opaque_path);
+    const auto unknown = it::sql_error(ctx, "SELECT bioseq.write($query$" + opaque_query +
+        "$query$::text,'" + opaque_path + "')");
+    REQUIRE(unknown.sqlstate == "22023");
+    REQUIRE(unknown.contains("SQL pseudo-type"));
+    REQUIRE_FALSE(std::filesystem::exists(opaque_path));
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$" + opaque_query +
+        "$query$::text,'" + opaque_path + "',columns=>ARRAY[ROW('opaque','omit')::bioseq.column_mapping])") == 3);
+    REQUIRE(read_export_fixture(opaque_path).find("opaque=") == std::string::npos);
+    std::filesystem::remove(opaque_path);
+    // Even a statically known scalar RECORD or VOID cannot become a table column.
+    for (const std::string_view expression : {"ROW(7,'scalar'::text)", "pg_sleep(0)"}) {
+        for (const bool explicit_metadata : {false, true}) {
+            CAPTURE(expression, explicit_metadata);
+            const std::string scalar_query = "SELECT header,seq," + std::string{expression}
+                + " AS unstorable FROM write_meta_first.container_source ORDER BY header";
+            const auto rejected = it::sql_error(ctx, "SELECT bioseq.write($query$" + scalar_query
+                + "$query$::text,'" + opaque_path + "'" + (explicit_metadata
+                    ? ",columns=>ARRAY[ROW('unstorable','metadata')::bioseq.column_mapping]" : "") + ")");
+            REQUIRE(rejected.sqlstate == "22023");
+            REQUIRE(rejected.contains("SQL pseudo-type"));
+            REQUIRE_FALSE(std::filesystem::exists(opaque_path));
+        }
+    }
+    const std::string cast_query = "SELECT header,seq,ROW(7,'scalar'::text)::text AS record_text,"
+        "write_meta_first.opaque_record()::text AS opaque_text,pg_sleep(0)::text AS void_text "
+        "FROM write_meta_first.container_source ORDER BY header";
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$" + cast_query
+        + "$query$::text,'" + opaque_path + "')") == 3);
+    it::exec_sql(ctx, "CREATE TABLE write_meta_first.cast_loaded(header text,seq bioseq.seq('dna5'),"
+        "record_text text,opaque_text text,void_text text) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('write_meta_first.cast_loaded'::regclass,'"
+        + opaque_path + "')") == 3);
+    REQUIRE(it::query_rows(ctx, "SELECT header,seq::text,record_text,opaque_text,void_text "
+        "FROM write_meta_first.cast_loaded ORDER BY header") == it::query_rows(ctx,
+        "SELECT header,seq::text,'(7,scalar)'::text,'(7,opaque)'::text,''::text "
+        "FROM write_meta_first.container_source ORDER BY header"));
+    std::filesystem::remove(opaque_path);
+    // A generic plan must classify a nested named type again after ALTER TYPE,
+    // including a NULL value whose expression never exposes the nested fields.
+    {
+        it::guc_scope generic_plan(ctx, "plan_cache_mode", "force_generic_plan");
+        const std::string schema_path = "/tmp/bioseq_write_type_schema_" + backend + ".fasta";
+        std::filesystem::remove(schema_path);
+        it::exec_sql(ctx, "CREATE TYPE write_meta_first.mutable_leaf AS (note integer); "
+            "CREATE TYPE write_meta_first.mutable_wrapper AS (item write_meta_first.mutable_leaf); "
+            "PREPARE write_metadata_type_schema AS SELECT bioseq.write("
+            "$query$SELECT 'typed'::text AS header,'AC'::bioseq.seq('dna4') AS seq,"
+            "NULL::write_meta_first.mutable_wrapper AS mutable_metadata$query$::text,'" + schema_path +
+            "',options=>'{\"overwrite\":true}'::jsonb)");
+        REQUIRE(it::query_scalar_int(ctx, "EXECUTE write_metadata_type_schema") == 1);
+        REQUIRE(read_export_fixture(schema_path).find("mutable_metadata") != std::string::npos);
+        it::exec_sql(ctx, "ALTER TYPE write_meta_first.mutable_leaf ADD ATTRIBUTE payload bioseq.seq");
+        REQUIRE(it::query_scalar_int(ctx, "EXECUTE write_metadata_type_schema") == 1);
+        REQUIRE(read_export_fixture(schema_path).find("mutable_metadata") == std::string::npos);
+        it::exec_sql(ctx, "ALTER TYPE write_meta_first.mutable_leaf DROP ATTRIBUTE payload");
+        REQUIRE(it::query_scalar_int(ctx, "EXECUTE write_metadata_type_schema") == 1);
+        REQUIRE(read_export_fixture(schema_path).find("mutable_metadata") != std::string::npos);
+        it::exec_sql(ctx, "DEALLOCATE write_metadata_type_schema");
+        std::filesystem::remove(schema_path);
+    }
+    {
+        it::guc_scope scalar_cap(ctx, "bioseq.index.memory_cap_mb", "256");
+        it::guc_scope scalar_mode(ctx, "bioseq.scheduler.pipeline.mode", "'single_thread'");
+        it::guc_scope scalar_overlap(ctx, "bioseq.load.write_overlap.enabled", "off");
+        it::guc_scope scalar_timeout(ctx, "statement_timeout", "'60s'");
+        it::guc_scope scalar_lock_timeout(ctx, "lock_timeout", "'3s'");
+        const std::string prefix = (std::filesystem::temp_directory_path()
+            / ("bioseq_scalar_input_" + backend)).string();
+        const std::array<std::string, 2> paths{prefix + "_edges.fasta", prefix + "_large.fasta"};
+        struct scalar_input_cleanup {
+            const it::connection_test_context& ctx;
+            const std::array<std::string, 2>& paths;
+            ~scalar_input_cleanup() {
+                if (PGresult* result = PQexec(ctx.raw(),
+                        "DROP TABLE IF EXISTS public.load_scalar_admitted,public.load_scalar_text,"
+                        "public.load_scalar_short"); result != nullptr) PQclear(result);
+                for (const auto& path : paths) {
+                    std::error_code ignored;
+                    std::filesystem::remove(path, ignored);
+                }
+            }
+        } cleanup{ctx, paths};
+        const auto quote_literal = [&ctx](std::string_view value) {
+            std::unique_ptr<char, decltype(&PQfreemem)> escaped{
+                PQescapeLiteral(ctx.raw(), value.data(), value.size()), &PQfreemem};
+            REQUIRE(escaped != nullptr);
+            return std::string{escaped.get()};
+        };
+        constexpr std::string_view admission_sql =
+            "SELECT index_memory_reserved_bytes FROM bioseq.scheduler_stats()";
+        it::exec_sql(ctx,
+            "DROP TABLE IF EXISTS public.load_scalar_admitted,public.load_scalar_text,public.load_scalar_short; "
+            "CREATE TABLE public.load_scalar_admitted(header text,seq bioseq.seq('dna4'),note varchar,payload bytea) USING bioseq; "
+            "CREATE TABLE public.load_scalar_text(header text,seq bioseq.seq('dna4'),note text,payload bytea) USING bioseq; "
+            "CREATE TABLE public.load_scalar_short(header text,seq bioseq.seq('dna4'),note varchar(1),payload bytea) USING bioseq");
+        for (const auto& path : paths) std::filesystem::remove(path);
+        // Whitespace and binary values straddle the stack/heap boundary, including
+        // empty bytea and 126/127 bytes (255/257 CString bytes with prefix + NUL).
+        const std::string edges =
+            "SELECT 'edge_'||n::text AS header,'AC'::bioseq.seq('dna4') AS seq,"
+            "(CASE WHEN n=0 THEN '' ELSE ' '||repeat('x',n)||' ' END)::varchar AS note,"
+            "substring(decode(repeat('007fff',n),'hex') FROM 1 FOR n) AS payload "
+            "FROM (VALUES(0),(1),(126),(127),(253),(254),(255),(256)) AS v(n)";
+        const std::string large =
+            "SELECT 'large'::text AS header,'AC'::bioseq.seq('dna4') AS seq,"
+            "('  '||repeat('x',2097152)||'  ')::varchar AS note,''::bytea AS payload";
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write(" + quote_literal(edges)
+            + "::text," + quote_literal(paths[0]) + ")") == 8);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write(" + quote_literal(large)
+            + "::text," + quote_literal(paths[1]) + ")") == 1);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('public.load_scalar_admitted'::regclass,"
+            + quote_literal(paths[0]) + ")") == 8);
+        const auto expected_edges = it::query_rows(ctx,
+            "SELECT header,seq::text,note,encode(payload,'hex') FROM (" + edges + ") AS expected ORDER BY header");
+        constexpr std::string_view admitted_rows =
+            "SELECT header,seq::text,note,encode(payload,'hex') FROM public.load_scalar_admitted ORDER BY header";
+        REQUIRE(it::query_rows(ctx, admitted_rows) == expected_edges);
+        const std::string load_large = "SELECT bioseq.load('public.load_scalar_admitted'::regclass,"
+            + quote_literal(paths[1]) + ")";
+        it::exec_sql(ctx, "SET bioseq.index.memory_cap_mb=2");
+        // scheduler_stats applies backend_sync before taking the baseline. The
+        // 2 MiB cap leaves the 1 MiB raw-header chunk enough room to spill. The
+        // direct TEXT path verifies this source can parse under that same cap.
+        static_cast<void>(it::query_scalar_int(ctx, admission_sql));
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('public.load_scalar_text'::regclass,"
+            + quote_literal(paths[1]) + ")") == 1);
+        REQUIRE(it::query_scalar(ctx, "SELECT header='large' AND seq::text='AC' AND "
+            "note=('  '||repeat('x',2097152)||'  ') AND payload=''::bytea FROM public.load_scalar_text") == "t");
+        // The writable scalar copy requests >4 MiB through the vector helper.
+        // Require its exact diagnostic, not an earlier parser refusal.
+        const auto reserved = it::query_scalar_int(ctx, admission_sql);
+        for (unsigned attempt = 0; attempt != 2; ++attempt) {
+            CAPTURE(attempt);
+            const auto error = it::sql_error(ctx, load_large);
+            CAPTURE(error.message);
+            REQUIRE(error.sqlstate == "53200");
+            REQUIRE(error.contains("cannot admit canonical scalar input"));
+            REQUIRE(it::query_scalar_int(ctx, admission_sql) == reserved);
+            REQUIRE(it::query_rows(ctx, admitted_rows) == expected_edges);
+            REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()") == backend);
+        }
+        it::exec_sql(ctx, "SET bioseq.index.memory_cap_mb=256");
+        static_cast<void>(it::query_scalar_int(ctx, admission_sql));
+        REQUIRE(it::query_scalar_int(ctx, load_large) == 1);
+        REQUIRE(it::query_scalar(ctx, "SELECT seq::text='AC' AND note=('  '||repeat('x',2097152)||'  ') "
+            "AND payload=''::bytea FROM public.load_scalar_admitted WHERE header='large'") == "t");
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM public.load_scalar_admitted") == 9);
+        REQUIRE(it::query_scalar_int(ctx, admission_sql) == reserved);
+        const auto before_type_error = it::query_scalar_int(ctx, admission_sql);
+        // The admitted heap owner must also unwind when PostgreSQL type input
+        // rejects the value after receiving its mutable CString.
+        const auto type_error = it::sql_error(ctx, "SELECT bioseq.load('public.load_scalar_short'::regclass,"
+            + quote_literal(paths[1]) + ")");
+        CAPTURE(type_error.message);
+        REQUIRE(type_error.sqlstate == "22001");
+        REQUIRE(it::query_scalar_int(ctx, admission_sql) == before_type_error);
+        REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM public.load_scalar_short") == 0);
+        REQUIRE(it::query_scalar(ctx, "SELECT pg_backend_pid()") == backend);
+        it::exec_sql(ctx, "DROP TABLE public.load_scalar_admitted,public.load_scalar_text,public.load_scalar_short");
+        for (const auto& path : paths) REQUIRE(std::filesystem::remove(path));
+    }
     it::exec_sql(ctx, "DROP SCHEMA write_meta_first CASCADE; DROP SCHEMA write_meta_second CASCADE");
 }
 
@@ -1858,7 +2214,8 @@ TEST_CASE("bioseq.write: mapped nucleotide and protein SAM BAM preserve original
 
 TEST_CASE("bioseq.write: automatic alignment joins retain both source row identities",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
-    auto ctx = it::fresh_context({"write_join_refs", "write_join_reads", "write_join_loaded"});
+    auto ctx = it::fresh_context({"write_join_refs", "write_join_reads", "write_join_loaded",
+        "write_join_flags_loaded", "write_set_barrier_loaded"});
     it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
     it::guc_scope index_read(ctx, "bioseq.index.sequence_read.enabled", "off");
     it::guc_scope minimum_score(ctx, "bioseq.aligner.chaining.minimum_score", "30");
@@ -1933,8 +2290,501 @@ TEST_CASE("bioseq.write: automatic alignment joins retain both source row identi
                     "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
                     "(alignment).cigar::text FROM write_join_loaded ORDER BY header") == expected);
                 std::filesystem::remove(path);
+                // Owner classification covers only reverse/secondary/supplementary.
+                // Preserve unrelated Boolean bits under every existing scan setting.
+                for (const auto& [projection, flags] : std::vector<std::pair<std::string, unsigned>>{
+                        {"true AS duplicate", 1024u}, {"true AS fails_qc", 512u},
+                        {"1024 AS flag", 1024u}, {"512 AS flag", 512u}}) {
+                    CAPTURE(format, projection, flags);
+                    std::filesystem::remove(path);
+                    const auto request = "SELECT bioseq.write($query$SELECT q.seq," + projection + join + matches
+                        + "$query$::text,'" + path + "')";
+                    const auto plan = it::explain_text<false>(ctx, request);
+                    REQUIRE(it::plan_contains(plan, "BioseqExport"));
+                    REQUIRE(it::plan_contains(plan, "BioseqBatchJoin"));
+                    REQUIRE_FALSE(std::filesystem::exists(path));
+                    REQUIRE(it::query_scalar_int(ctx, request) == 4);
+                    const auto native = inspect_exported_native(path, format);
+                    REQUIRE(native.names.size() == 4u);
+                    REQUIRE(native.flags.size() == 4u);
+                    for (const auto native_flag : native.flags) REQUIRE(native_flag == flags);
+                    it::exec_sql(ctx, "DROP TABLE IF EXISTS write_join_flags_loaded; "
+                        "CREATE TABLE write_join_flags_loaded(header text,seq bioseq.seq('dna4',64),"
+                        "quality bioseq.seq('phred63')) USING bioseq");
+                    REQUIRE(it::query_scalar_int(ctx,
+                        "SELECT bioseq.load('write_join_flags_loaded'::regclass,'" + path + "')") == 4);
+                    REQUIRE(it::query_scalar_int(ctx, "SELECT count(*) FROM write_join_flags_loaded WHERE "
+                        "(alignment).flag=" + std::to_string(flags)) == 4);
+                    REQUIRE(it::query_rows(ctx,
+                        "SELECT header,seq::text,quality::text,(alignment).reference_name,"
+                        "(alignment).reference_length,(alignment).target_start,(alignment).target_end,"
+                        "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
+                        "(alignment).cigar::text FROM write_join_flags_loaded ORDER BY header") == expected);
+                    std::filesystem::remove(path);
+                }
+                // Map the visible constraint before automatic helper completion;
+                // otherwise the inferred reverse helper competes with its alias.
+                // The private owner status still supplies the authoritative bits.
+                for (const auto& [projection, role] : std::vector<std::pair<std::string_view, std::string_view>>{
+                        {"true AS reversed", "reversed"}, {"true AS secondary", "secondary"},
+                        {"true AS supplementary", "supplementary"},
+                        {"16 AS flag", "flags"}, {"256 AS flag", "flags"}, {"2048 AS flag", "flags"}}) {
+                    CAPTURE(format, projection, role);
+                    const auto request = "SELECT bioseq.write($query$SELECT q.seq," + std::string{projection} + join + matches
+                        + "$query$::text,'" + path + "',columns=>ARRAY[ROW('#2','" + std::string{role}
+                        + "')::bioseq.column_mapping])";
+                    const auto error = it::sql_error(ctx, request);
+                    REQUIRE(error.sqlstate == "22023");
+                    REQUIRE(error.contains("owning alignment classification"));
+                    REQUIRE_FALSE(std::filesystem::exists(path));
+                }
             }
         }
+    }
+
+    it::exec_sql(ctx, "ALTER TABLE write_join_loaded ADD COLUMN reference_length bigint DEFAULT -1");
+    // Each branch has its own executable alignment owner. Explicitly supplied
+    // rows may cross UNION ALL; the export root must not adopt either branch's
+    // owner or ask that owner to complete fields for rows from the other branch.
+    const auto branch = [&join](int identifier) {
+        return "SELECT q.header,q.seq,q.quality,t.seq AS reference_sequence,"
+            "t.header AS reference_name,bioseq.target_len(t.seq) AS size_of_reference,"
+            "bioseq.target_start(t.seq) AS locus,bioseq.target_end(t.seq) AS locus_end,"
+            "bioseq.query_len(t.seq) AS read_size,bioseq.query_start(t.seq) AS clipped_left,"
+            "bioseq.query_end(t.seq) AS clipped_right,bioseq.cigar(t.seq) AS recipe,"
+            "bioseq.is_reverse(t.seq) AS backward,0 AS flag,37 AS mapq" + join
+            + "WHERE public.mmsearch(t.seq,q.seq) AND t.id=" + std::to_string(identifier);
+    };
+    auto set_query = "WITH merged AS MATERIALIZED (" + branch(1) + " UNION ALL " + branch(2)
+        + ") SELECT * FROM (SELECT * FROM merged) projected ORDER BY header";
+    for (unsigned level = 0; level != 16; ++level)
+        set_query = "SELECT * FROM (" + set_query + ") projected_" + std::to_string(level);
+    const auto require_owned_plan = [](const std::vector<std::string>& plan, std::size_t owners) {
+        // Plain BioseqScan nodes also read tables. Require the existing mmsearch
+        // owner property once per branch and no executable rendezvous join filter.
+        REQUIRE(static_cast<std::size_t>(std::count_if(plan.begin(), plan.end(), [](const auto& line) {
+            return line.find("Bioseq Index Read Requirement:") != std::string::npos;
+        })) == owners);
+        REQUIRE(it::plan_contains(plan, "Nested Loop"));
+        REQUIRE(std::none_of(plan.begin(), plan.end(), [](const auto& line) {
+            return line.find("Join Filter:") != std::string::npos
+                && line.find("mmsearch(") != std::string::npos;
+        }));
+    };
+    auto explicit_expected = expected;
+    for (std::size_t index = 0; index != explicit_expected.size(); ++index) {
+        auto& row = explicit_expected[index];
+        row.insert(row.begin() + 3, gen_bases(640u, 1548u + index / 2u, false));
+        row.emplace_back("f");
+        row.emplace_back("0");
+        row.emplace_back("37");
+    }
+    {
+        it::guc_scope custom_scans(ctx, "bioseq.planner.custom_scan.enabled", "off");
+        const auto error = it::sql_error(ctx, branch(1) + " ORDER BY q.header");
+        REQUIRE(error.sqlstate == "0A000");
+        REQUIRE(error.contains("readable mmsearch target requires a parameterized BioseqScan owner"));
+    }
+    for (const std::string_view vectorized : {"off", "on"}) {
+        it::guc_scope vectorization(ctx, "bioseq.vectorization.enabled", vectorized);
+        for (const std::string_view pushdown : {"off", "on"}) {
+            it::guc_scope pushed(ctx, "bioseq.planner.qual_pushdown.enabled", pushdown);
+            for (const std::string_view cache : {"off", "on"}) {
+                it::guc_scope cached(ctx, "bioseq.column_cache.enabled", cache);
+                CAPTURE(vectorized, pushdown, cache);
+                for (const int identifier : {1, 2}) {
+                    CAPTURE(identifier);
+                    const auto source = branch(identifier) + " ORDER BY q.header";
+                    require_owned_plan(it::explain_text<false>(ctx, source), 1u);
+                    // Keep the bare reference_sequence output; an upper projection
+                    // could prune it and accidentally make the locator BatchJoin legal.
+                    const auto rows = it::query_rows(ctx, source);
+                    REQUIRE(rows.size() == 2);
+                    REQUIRE(rows[0] == explicit_expected[2u * static_cast<unsigned>(identifier - 1)]);
+                    REQUIRE(rows[1] == explicit_expected[2u * static_cast<unsigned>(identifier - 1) + 1u]);
+                }
+                require_owned_plan(it::explain_text<false>(ctx, set_query), 2u);
+                REQUIRE(it::query_rows(ctx, set_query + " ORDER BY header") == explicit_expected);
+            }
+        }
+    }
+    const std::string mappings = "ARRAY[ROW('seq','sequence')::bioseq.column_mapping,"
+        "ROW('reference_sequence','reference_sequence')::bioseq.column_mapping]";
+    for (const std::string_view format : {"sam", "bam"}) {
+        const auto path = "/tmp/bioseq_write_explicit_set_" + backend + "." + std::string{format};
+        std::filesystem::remove(path);
+        const auto request = "SELECT bioseq.write($query$" + set_query + "$query$::text,'" + path
+            + "',columns=>" + mappings + ")";
+        const auto plan = it::explain_text<false>(ctx, request);
+        REQUIRE(it::plan_contains(plan, "BioseqExport"));
+        require_owned_plan(plan, 2u);
+        REQUIRE(it::plan_contains(plan, "Alignment Owner: false"));
+        REQUIRE_FALSE(std::filesystem::exists(path));
+        REQUIRE(it::query_scalar_int(ctx, request) == 4);
+        if (format == "sam") {
+            const auto records = exported_sam_records(read_export_fixture(path));
+            REQUIRE(records.size() == 4);
+            for (const auto& record : records) {
+                REQUIRE(record[1] == "0");
+                REQUIRE(record[3] == "48");
+                REQUIRE(record[4] == "37");
+                REQUIRE(record[5] == "512M");
+            }
+        }
+        it::exec_sql(ctx, "TRUNCATE write_join_loaded");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('write_join_loaded'::regclass,'" + path + "')") == 4);
+        REQUIRE(it::query_rows(ctx,
+            "SELECT header,seq::text,quality::text,(alignment).reference_name,"
+            "(alignment).reference_length,(alignment).target_start,(alignment).target_end,"
+            "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
+            "(alignment).cigar::text FROM write_join_loaded ORDER BY header") == expected);
+        std::filesystem::remove(path);
+        // A transformed helper in either branch remains scalar metadata even
+        // under a canonical native-field alias. Reference sequences still supply
+        // native dictionary lengths, but the original optional row length is absent.
+        auto mixed_expected = expected;
+        for (auto& row : mixed_expected) {
+            row[4] = std::nullopt;
+            row.emplace_back("0");
+            row.emplace_back("37");
+        }
+        const std::vector<std::pair<std::string, std::uint32_t>> expected_references{
+            {"reference_1", 640u}, {"reference_2", 640u}};
+        const std::vector<std::string> expected_names{"read_1a", "read_1b", "read_2a", "read_2b"};
+        for (const bool transformed_first : {false, true}) {
+            const auto change_length = [](std::string query, bool transformed) {
+                const std::string from = "bioseq.target_len(t.seq) AS size_of_reference";
+                const auto found = query.find(from);
+                REQUIRE(found != std::string::npos);
+                query.replace(found, from.size(), std::string{"bioseq.target_len(t.seq)"}
+                    + (transformed ? "+1" : "") + " AS reference_length");
+                return query;
+            };
+            const auto mixed_query = "WITH merged AS MATERIALIZED ("
+                + change_length(branch(1), transformed_first) + " UNION ALL "
+                + change_length(branch(2), !transformed_first) + ") SELECT * FROM merged ORDER BY header";
+            REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$" + mixed_query
+                + "$query$::text,'" + path + "',columns=>" + mappings + ")") == 4);
+            const auto native = inspect_exported_native(path, format);
+            REQUIRE(native.names == expected_names);
+            REQUIRE(native.references == expected_references);
+            it::exec_sql(ctx, "TRUNCATE write_join_loaded");
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.load('write_join_loaded'::regclass,'" + path + "')") == 4);
+            REQUIRE(it::query_scalar(ctx,
+                "SELECT string_agg(reference_length::text,',' ORDER BY header) FROM write_join_loaded")
+                == (transformed_first ? "641,641,640,640" : "640,640,641,641"));
+            REQUIRE(it::query_rows(ctx,
+                "SELECT header,seq::text,quality::text,(alignment).reference_name,"
+                "(alignment).reference_length,(alignment).target_start,(alignment).target_end,"
+                "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
+                "(alignment).cigar::text,(alignment).flag,(alignment).mapq "
+                "FROM write_join_loaded ORDER BY header") == mixed_expected);
+            std::filesystem::remove(path);
+        }
+        const auto outer_query = "SELECT q.seq" + join
+            + " CROSS JOIN (SELECT 1 AS marker UNION ALL SELECT 2) unrelated "
+            + "WHERE public.mmsearch(t.seq,q.seq) AND unrelated.marker=1 ORDER BY q.header";
+        const auto outer_request = "SELECT bioseq.write($query$" + outer_query
+            + "$query$::text,'" + path + "')";
+        const auto outer_plan = it::explain_text<false>(ctx, outer_request);
+        REQUIRE(it::plan_contains(outer_plan, "BioseqExport"));
+        REQUIRE(it::plan_contains(outer_plan, "Alignment Owner: true"));
+        REQUIRE(std::count_if(outer_plan.begin(), outer_plan.end(), [](const auto& line) {
+            return line.find("Bioseq Index Read Requirement:") != std::string::npos;
+        }) == 1);
+        REQUIRE(std::none_of(outer_plan.begin(), outer_plan.end(), [](const auto& line) {
+            return line.find("Join Filter:") != std::string::npos
+                && line.find("mmsearch(") != std::string::npos;
+        }));
+        REQUIRE(it::query_scalar_int(ctx, outer_request) == 4);
+        if (format == "sam") {
+            const auto records = exported_sam_records(read_export_fixture(path));
+            REQUIRE(records.size() == 4u);
+            for (const auto& record : records) {
+                REQUIRE(record[1] == "0");
+                REQUIRE(record[3] == "48");
+                REQUIRE(record[5] == "512M");
+            }
+        }
+        it::exec_sql(ctx, "TRUNCATE write_join_loaded");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('write_join_loaded'::regclass,'" + path + "')") == 4);
+        REQUIRE(it::query_rows(ctx,
+            "SELECT header,seq::text,quality::text,(alignment).reference_name,"
+            "(alignment).reference_length,(alignment).target_start,(alignment).target_end,"
+            "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
+            "(alignment).cigar::text FROM write_join_loaded ORDER BY header") == expected);
+        std::filesystem::remove(path);
+        // The outer equality may use either ordinary join algorithm above
+        // the one real alignment owner. Preserve its rows and native geometry.
+        for (const std::string_view algorithm : {"hash", "merge"}) {
+            it::guc_scope nested(ctx, "enable_nestloop", "off");
+            it::guc_scope hashed(ctx, "enable_hashjoin", algorithm == "hash" ? "on" : "off");
+            it::guc_scope merged(ctx, "enable_mergejoin", algorithm == "merge" ? "on" : "off");
+            CAPTURE(format, algorithm);
+            const auto equality_query = "SELECT q.seq" + join
+                + " JOIN write_join_refs u ON t.id=u.id "
+                + "WHERE public.mmsearch(t.seq,q.seq) ORDER BY q.header";
+            const auto equality_request = "SELECT bioseq.write($query$" + equality_query
+                + "$query$::text,'" + path + "')";
+            const auto equality_plan = it::explain_text<false>(ctx, equality_request);
+            REQUIRE(it::plan_contains(equality_plan, "BioseqExport"));
+            REQUIRE(it::plan_contains(equality_plan, "Alignment Owner: true"));
+            REQUIRE(it::plan_contains(equality_plan, algorithm == "hash" ? "Hash Join" : "Merge Join"));
+            REQUIRE(std::count_if(equality_plan.begin(), equality_plan.end(), [](const auto& line) {
+                return line.find("Bioseq Index Read Requirement:") != std::string::npos;
+            }) == 1);
+            REQUIRE(std::none_of(equality_plan.begin(), equality_plan.end(), [](const auto& line) {
+                return line.find("Join Filter:") != std::string::npos
+                    && line.find("mmsearch(") != std::string::npos;
+            }));
+            REQUIRE(it::query_scalar_int(ctx, equality_request) == 4);
+            if (format == "sam") {
+                const auto records = exported_sam_records(read_export_fixture(path));
+                REQUIRE(records.size() == 4u);
+                for (const auto& record : records) {
+                    REQUIRE(record[1] == "0");
+                    REQUIRE(record[3] == "48");
+                    REQUIRE(record[5] == "512M");
+                }
+            }
+            it::exec_sql(ctx, "TRUNCATE write_join_loaded");
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.load('write_join_loaded'::regclass,'" + path + "')") == 4);
+            REQUIRE(it::query_rows(ctx,
+                "SELECT header,seq::text,quality::text,(alignment).reference_name,"
+                "(alignment).reference_length,(alignment).target_start,(alignment).target_end,"
+                "(alignment).query_length,(alignment).query_start,(alignment).query_end,"
+                "(alignment).cigar::text FROM write_join_loaded ORDER BY header") == expected);
+            std::filesystem::remove(path);
+        }
+        const auto conflicting_query = "SELECT q.seq,unrelated.reference_length" + join
+            + " CROSS JOIN (SELECT bioseq.target_len('AC'::bioseq.seq('dna4')) AS reference_length "
+            + "UNION ALL SELECT bioseq.target_len('GT'::bioseq.seq('dna4'))) unrelated "
+            + "WHERE public.mmsearch(t.seq,q.seq)";
+        const auto conflicting = it::sql_error(ctx, "SELECT bioseq.write($query$"
+            + conflicting_query + "$query$::text,'" + path + "')");
+        REQUIRE(conflicting.sqlstate == "22023");
+        REQUIRE(conflicting.contains("one coherent mmsearch owner"));
+        REQUIRE_FALSE(std::filesystem::exists(path));
+        // A set arm's correlated terminal Var is already paired with its resolved
+        // owning frame. Applying its original varlevelsup again would mistake
+        // this plain integer for the unrelated unused helper two levels above.
+        const std::string correlated_query =
+            "SELECT 'scope_'||row_number() OVER ()::text AS header,'AC'::bioseq.seq('dna4') AS seq,"
+            "outer_layer.mapq FROM (SELECT bioseq.target_len('AC'::bioseq.seq('dna4')) AS unused,"
+            "inner_layer.mapq FROM (SELECT t.id AS unused,alternatives.mapq FROM write_join_refs t "
+            "CROSS JOIN LATERAL (SELECT t.id AS mapq UNION ALL SELECT t.id) alternatives) inner_layer) "
+            "outer_layer ORDER BY outer_layer.mapq";
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$" + correlated_query
+            + "$query$::text,'" + path + "')") == 4);
+        if (format == "sam") {
+            const auto records = exported_sam_records(read_export_fixture(path));
+            REQUIRE(records.size() == 4);
+            for (std::size_t index = 0; index < records.size(); ++index)
+                REQUIRE(records[index][4] == (index < 2 ? "1" : "2"));
+        }
+        it::exec_sql(ctx, "TRUNCATE write_join_loaded");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('write_join_loaded'::regclass,'" + path + "')") == 4);
+        REQUIRE(it::query_scalar(ctx,
+            "SELECT string_agg((alignment).mapq::text,',' ORDER BY (alignment).mapq) FROM write_join_loaded") == "1,1,2,2");
+        std::filesystem::remove(path);
+    }
+    // A barrier suppresses owner inference, not the obligation to preserve a
+    // reachable real match. These shapes must fail before any native output.
+    const auto bare_target = "SELECT t.header,t.seq" + join
+        + "WHERE public.mmsearch(t.seq,q.seq) AND t.id=1";
+    const auto recursive_source = "WITH RECURSIVE matched(depth,header,seq) AS (SELECT 0,t.header,t.seq"
+        + join + "WHERE public.mmsearch(t.seq,q.seq) AND t.id=1 UNION ALL "
+        "SELECT depth+1,header,seq FROM matched WHERE depth<1) ";
+    const std::vector<std::string> opaque_sources{
+        bare_target + " UNION ALL " + bare_target,
+        bare_target + " UNION " + bare_target,
+        "WITH merged AS MATERIALIZED (" + bare_target + " UNION ALL " + bare_target
+            + ") SELECT * FROM (SELECT * FROM merged) wrapped",
+        recursive_source + "SELECT header,seq FROM matched",
+        recursive_source + "SELECT header,seq FROM matched UNION ALL SELECT header,seq FROM matched"};
+    const auto bare_reads = "SELECT q.header,q.seq,q.quality" + join
+        + "WHERE public.mmsearch(t.seq,q.seq) AND t.id=1";
+    const auto repeated_reads = "(" + bare_reads + " UNION ALL " + bare_reads + ") repeated";
+    const auto reset_barrier_destination = [&ctx] {
+        // Every load owns fresh provenance, independently of earlier imports.
+        it::exec_sql(ctx, "DROP TABLE IF EXISTS write_set_barrier_loaded; "
+            "CREATE TABLE write_set_barrier_loaded(header text,seq bioseq.seq('dna4',64),"
+            "quality bioseq.seq('phred63')) USING bioseq");
+    };
+    for (const std::string_view format : {"sam", "bam"}) {
+        CAPTURE(format);
+        const auto path = "/tmp/bioseq_write_match_barrier_" + backend + "." + std::string{format};
+        std::filesystem::remove(path);
+        // An unrelated projected sequence has a discoverable NULL alignment.
+        // Completion must not append that hidden old record and use it to erase
+        // the opaque match obligation. Selecting it visibly is explicit intent.
+        it::exec_sql(ctx, "DROP TABLE IF EXISTS write_set_barrier_loaded; "
+            "CREATE TABLE write_set_barrier_loaded(header text,seq bioseq.seq('dna4',64),"
+            "alignment bioseq.alignment) USING bioseq; "
+            "INSERT INTO write_set_barrier_loaded VALUES('prior','ACGT',NULL)");
+        const auto unrelated_from = " FROM write_set_barrier_loaded prior CROSS JOIN " + repeated_reads;
+        const auto hidden_request = "SELECT bioseq.write($query$SELECT prior.seq" + unrelated_from
+            + "$query$::text,'" + path + "')";
+        const auto hidden_error = it::sql_error(ctx, "EXPLAIN (COSTS OFF) " + hidden_request);
+        REQUIRE(hidden_error.sqlstate == "22023");
+        REQUIRE(hidden_error.contains("export completion cannot cross"));
+        REQUIRE(hidden_error.contains("missing CIGAR"));
+        REQUIRE_FALSE(std::filesystem::exists(path));
+        const auto visible_request = "SELECT bioseq.write($query$SELECT prior.header,prior.seq,prior.alignment"
+            + unrelated_from + "$query$::text,'" + path + "')";
+        const auto visible_plan = it::explain_text<false>(ctx, visible_request);
+        REQUIRE(it::plan_contains(visible_plan, "Alignment Owner: false"));
+        REQUIRE_FALSE(it::plan_contains(visible_plan, "Explicit Alignment Fields Required"));
+        REQUIRE(it::query_scalar_int(ctx, visible_request) == 4);
+        REQUIRE(inspect_exported_native(path, format).references.empty());
+        std::filesystem::remove(path);
+        for (const auto& source : opaque_sources) {
+            CAPTURE(source);
+            const auto request = "SELECT bioseq.write($query$" + source + "$query$::text,'" + path + "')";
+            for (const auto& command : {"EXPLAIN (COSTS OFF) " + request, request}) {
+                const auto error = it::sql_error(ctx, command);
+                REQUIRE(error.sqlstate == "22023");
+                REQUIRE(error.contains("export completion cannot cross"));
+                REQUIRE(error.contains("missing CIGAR"));
+                REQUIRE_FALSE(std::filesystem::exists(path));
+            }
+        }
+        // Unused definitions and predicate/scalar-only consumers cannot own
+        // exported rows and must not acquire the new native-field obligation.
+        const auto kept = "SELECT 'kept'::text AS header,'ACGT'::bioseq.seq('dna4',64) AS seq";
+        for (const auto& source : std::vector<std::string>{
+                recursive_source + kept,
+                recursive_source + kept + " WHERE EXISTS (SELECT 1 FROM matched)",
+                recursive_source + "SELECT 'kept'::text AS header,'ACGT'::bioseq.seq('dna4',64) AS seq,"
+                    "(SELECT count(*) FROM matched) AS hit_count"}) {
+            const auto request = "SELECT bioseq.write($query$" + source + "$query$::text,'" + path + "')";
+            const auto plan = it::explain_text<false>(ctx, request);
+            REQUIRE(it::plan_contains(plan, "Alignment Owner: false"));
+            REQUIRE_FALSE(it::plan_contains(plan, "Explicit Alignment Fields Required"));
+            REQUIRE(it::query_scalar_int(ctx, request) == 1);
+            REQUIRE(inspect_exported_native(path, format).references.empty());
+            std::filesystem::remove(path);
+        }
+        // Constant and row-dependent unmapped intent need no CIGAR/POS/RNAME.
+        // A nullable alignment composite remains an explicitly supplied record.
+        const std::vector<std::pair<std::string, std::string>> intentional_unmapped{
+            {"4 AS flag", ""},
+            {"CASE WHEN header LIKE '%a' THEN 4 ELSE 260 END AS flag", ""},
+            {"true AS unmapped", "ROW('unmapped','unmapped')::bioseq.column_mapping"},
+            {"NULL::bioseq.alignment AS alignment", "ROW('alignment','alignment')::bioseq.column_mapping"}};
+        for (const auto& [projection, mapping] : intentional_unmapped) {
+            CAPTURE(projection);
+            const auto source = "SELECT header,seq,quality," + projection + " FROM " + repeated_reads
+                + " ORDER BY header";
+            const auto request = "SELECT bioseq.write($query$" + source + "$query$::text,'" + path + "'"
+                + (mapping.empty() ? ")" : ",columns=>ARRAY[" + mapping + "])");
+            REQUIRE(it::query_scalar_int(ctx, request) == 4);
+            const auto native = inspect_exported_native(path, format);
+            REQUIRE(native.names.size() == 4u);
+            REQUIRE(native.references.empty());
+            if (format == "sam") {
+                for (const auto& record : exported_sam_records(read_export_fixture(path))) {
+                    REQUIRE((std::stoi(record[1]) & 4) != 0);
+                    REQUIRE(record[2] == "*");
+                    REQUIRE(record[3] == "0");
+                    REQUIRE(record[5] == "*");
+                }
+            }
+            reset_barrier_destination();
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.load('write_set_barrier_loaded'::regclass,'" + path + "')") == 4);
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT count(*) FROM write_set_barrier_loaded WHERE (alignment).cigar IS NULL "
+                "AND (alignment).target_start IS NULL AND (alignment).reference_name IS NULL") == 4);
+            std::filesystem::remove(path);
+        }
+        // Mapped0, false-unmapped and NULL do not authorize fallback. A later
+        // failing row must also leave an existing destination byte-for-byte intact.
+        for (const auto& [projection, mapping] : std::vector<std::pair<std::string, std::string>>{
+                {"0 AS flag", "ROW('flag','flags')::bioseq.column_mapping"},
+                {"CASE WHEN header LIKE '%a' THEN 4 ELSE 0 END AS flag", "ROW('flag','flags')::bioseq.column_mapping"},
+                {"CASE WHEN header LIKE '%a' THEN 4 ELSE NULL::integer END AS flag", "ROW('flag','flags')::bioseq.column_mapping"},
+                {"false AS unmapped", "ROW('unmapped','unmapped')::bioseq.column_mapping"},
+                {"NULL::boolean AS unmapped", "ROW('unmapped','unmapped')::bioseq.column_mapping"}}) {
+            CAPTURE(projection);
+            const std::string prior = "existing complete destination\n";
+            { std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                output << prior; REQUIRE(output.good()); }
+            const auto source = "SELECT header,seq,quality," + projection + " FROM " + repeated_reads
+                + " ORDER BY header";
+            const auto request = "SELECT bioseq.write($query$" + source + "$query$::text,'" + path
+                + "',columns=>ARRAY[" + mapping + "],"
+                    "options=>'{\"overwrite\":true}'::jsonb)";
+            const auto plan = it::explain_text<false>(ctx, request);
+            REQUIRE(it::plan_contains(plan, "Explicit Alignment Fields Required: true"));
+            REQUIRE(read_export_fixture(path) == prior);
+            const auto error = it::sql_error(ctx, request);
+            REQUIRE(error.sqlstate == "22023");
+            REQUIRE(error.contains("export completion cannot cross"));
+            REQUIRE(error.contains("missing CIGAR"));
+            REQUIRE(read_export_fixture(path) == prior);
+            std::filesystem::remove(path);
+        }
+        for (const auto& [projection, missing] : std::vector<std::pair<std::string, std::string>>{
+                {"header,seq,quality,reference_sequence,reference_name,NULL::bigint AS target_start,recipe,0 AS flag",
+                    "target_start"},
+                {"header,seq,quality,NULL::bioseq.seq('dna4',64) AS reference_sequence,"
+                    "NULL::text AS reference_name,locus,recipe,0 AS flag", "reference_sequence or reference_name"},
+                {"header,seq,quality,reference_sequence,reference_name,locus,recipe,"
+                    "NULL::integer AS flag,NULL::boolean AS reversed", "FLAG or reversed"}}) {
+            CAPTURE(projection);
+            const auto source = "SELECT " + projection + " FROM (" + set_query + ") explicit_rows";
+            const auto request = "SELECT bioseq.write($query$" + source + "$query$::text,'" + path
+                + "',columns=>" + mappings + ")";
+            REQUIRE(it::plan_contains(it::explain_text<false>(ctx, request),
+                "Explicit Alignment Fields Required: true"));
+            const auto error = it::sql_error(ctx, request);
+            REQUIRE(error.sqlstate == "22023");
+            REQUIRE(error.contains("export completion cannot cross"));
+            REQUIRE(error.contains("missing " + missing));
+            REQUIRE_FALSE(std::filesystem::exists(path));
+        }
+        // Explicit mapped rows may still pass through actual recursion. This
+        // uses every original field and no hidden companions/fixed-point inference.
+        const std::string fields = "header,seq,quality,reference_sequence,reference_name,"
+            "size_of_reference,locus,locus_end,read_size,clipped_left,clipped_right,recipe,backward,flag,mapq";
+        const auto seed = branch(1);
+        const auto explicit_recursive = "WITH RECURSIVE matched AS (SELECT 0 AS depth," + seed.substr(7)
+            + " UNION ALL SELECT depth+1," + fields + " FROM matched WHERE depth<1) SELECT "
+            + fields + " FROM matched ORDER BY header,depth";
+        const std::string explicit_mapping = "ARRAY["
+            "ROW('header','header')::bioseq.column_mapping,ROW('seq','sequence')::bioseq.column_mapping,"
+            "ROW('quality','quality')::bioseq.column_mapping,"
+            "ROW('reference_sequence','reference_sequence')::bioseq.column_mapping,"
+            "ROW('reference_name','reference_name')::bioseq.column_mapping,"
+            "ROW('size_of_reference','reference_length')::bioseq.column_mapping,"
+            "ROW('locus','target_start')::bioseq.column_mapping,ROW('locus_end','target_end')::bioseq.column_mapping,"
+            "ROW('read_size','query_length')::bioseq.column_mapping,ROW('clipped_left','query_start')::bioseq.column_mapping,"
+            "ROW('clipped_right','query_end')::bioseq.column_mapping,ROW('recipe','cigar')::bioseq.column_mapping,"
+            "ROW('backward','reversed')::bioseq.column_mapping,ROW('flag','flags')::bioseq.column_mapping,"
+            "ROW('mapq','mapping_quality')::bioseq.column_mapping]";
+        const auto request = "SELECT bioseq.write($query$" + explicit_recursive + "$query$::text,'" + path
+            + "',columns=>" + explicit_mapping + ")";
+        REQUIRE(it::plan_contains(it::explain_text<false>(ctx, request), "Alignment Owner: false"));
+        REQUIRE(it::query_scalar_int(ctx, request) == 4);
+        const auto native = inspect_exported_native(path, format);
+        REQUIRE(native.names.size() == 4u);
+        REQUIRE((native.references == std::vector<std::pair<std::string, std::uint32_t>>{{"reference_1",640u}}));
+        reset_barrier_destination();
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('write_set_barrier_loaded'::regclass,'" + path + "')") == 4);
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT count(*) FROM write_set_barrier_loaded WHERE (alignment).flag=0 "
+            "AND (alignment).reference_name='reference_1' AND (alignment).reference_length=640 "
+            "AND (alignment).target_start=47 AND (alignment).target_end=559 "
+            "AND (alignment).query_length=512 AND (alignment).query_start=0 AND (alignment).query_end=512 "
+            "AND (alignment).cigar::text='512M'") == 4);
+        std::filesystem::remove(path);
     }
 }
 
@@ -2063,7 +2913,9 @@ TEST_CASE("bioseq.write: explicit alignment interpretation reaches native bytes 
 
 TEST_CASE("bioseq.write: native SAM import retains high quality and malformed load rolls back",
           "[component:bioseq][layer:integration][feature:io][feature:quality][resource:postgres][resource:filesystem]") {
-    auto ctx = it::fresh_context({"write_native_source", "write_native_loaded", "write_native_invalid"});
+    auto ctx = it::fresh_context({"write_native_source", "write_native_loaded", "write_native_invalid",
+        "write_native_set_a", "write_native_set_b", "write_native_set_loaded",
+        "write_native_inherit", "write_native_inherit_child", "write_native_contextless"});
     it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
     const auto backend = it::query_scalar(ctx, "SELECT pg_backend_pid()");
     const std::string path = "/tmp/bioseq_write_native_" + backend + ".sam";
@@ -2107,6 +2959,233 @@ TEST_CASE("bioseq.write: native SAM import retains high quality and malformed lo
     REQUIRE(it::query_scalar_int(ctx,
         "SELECT count(*) FROM pg_attribute WHERE attrelid='write_native_invalid'::regclass "
         "AND attname='alignment' AND NOT attisdropped") == 0);
+    // Parser target Vars for set operations point at the leftmost arm. Header
+    // contexts and local import IDs must nevertheless describe every actual row.
+    const std::string set_prefix = "/tmp/bioseq_write_set_provenance_" + backend;
+    const std::string left_path = set_prefix + "_left.sam";
+    const std::string right_path = set_prefix + "_right.sam";
+    const std::string shared_header = "@HD\tVN:1.6\n@SQ\tSN:chr\tLN:100\n@RG\tID:shared\tSM:";
+    { std::ofstream output(left_path, std::ios::binary);
+      output << shared_header << "left\nleft\t256\tchr\t8\t37\t2M\t*\t0\t0\tAC\tII\tRG:Z:shared\n"; }
+    { std::ofstream output(right_path, std::ios::binary);
+      output << shared_header << "right\nright\t256\tchr\t8\t37\t2M\t*\t0\t0\tGT\tJJ\tRG:Z:shared\n"; }
+    it::exec_sql(ctx,
+        "CREATE TABLE write_native_set_a(header text,seq bioseq.seq('dna15'),quality bioseq.seq('phred94')) USING bioseq; "
+        "CREATE TABLE write_native_set_b(LIKE write_native_set_a) USING bioseq; "
+        "CREATE TABLE write_native_set_loaded(LIKE write_native_set_a,reference_length bigint DEFAULT -1) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT bioseq.load('write_native_set_a'::regclass,'" + left_path + "')") == 1);
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT bioseq.load('write_native_set_b'::regclass,'" + right_path + "')") == 1);
+    const std::string from_left = "SELECT header,seq,quality,alignment FROM write_native_set_a";
+    const std::string from_right = "SELECT header,seq,quality,alignment FROM write_native_set_b";
+    // Secondary records can be repeated by UNION ALL without violating the
+    // independent one-primary-per-imported-segment validation policy.
+    std::string shared_ctes = "WITH repeated_0 AS MATERIALIZED (" + from_left + ")";
+    for (unsigned level = 1; level <= 18; ++level) {
+        const auto previous = "repeated_" + std::to_string(level - 1);
+        shared_ctes += ",repeated_" + std::to_string(level) + " AS MATERIALIZED (SELECT * FROM "
+            + previous + " UNION ALL SELECT * FROM " + previous + ")";
+    }
+    shared_ctes += " SELECT * FROM repeated_18 LIMIT 1";
+    const std::array same_origin{
+        std::pair{from_left + " UNION ALL " + from_left, 2},
+        std::pair{"(" + from_left + " UNION " + from_left + ") INTERSECT " + from_left, 1},
+        std::pair{"WITH merged AS MATERIALIZED ((" + from_left + " UNION ALL " + from_left
+            + ") EXCEPT ALL " + from_left + ") SELECT * FROM (SELECT * FROM merged) projected", 1},
+        std::pair{shared_ctes, 1}
+    };
+    const std::string explicit_header = R"sql('{"sam_header":["@HD\tVN:1.6","@SQ\tSN:chr\tLN:100","@RG\tID:shared\tSM:chosen"]}'::jsonb)sql";
+    const auto left_expected = it::query_rows(ctx, projection + "write_native_set_a");
+    for (const std::string_view format : {"sam", "bam"}) {
+        CAPTURE(format);
+        const std::string output_path = set_prefix + "." + std::string{format};
+        std::filesystem::remove(output_path);
+        for (const auto& [query, rows] : same_origin) {
+            CAPTURE(query);
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.write($query$" + query + "$query$::text,'" + output_path + "')") == rows);
+            if (format == "sam") {
+                const auto contents = read_export_fixture(output_path);
+                REQUIRE(contents.find("@RG\tID:shared\tSM:left") != std::string::npos);
+                REQUIRE(contents.find("SM:right") == std::string::npos);
+            }
+            it::exec_sql(ctx, "TRUNCATE write_native_set_loaded");
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.load('write_native_set_loaded'::regclass,'" + output_path + "')") == rows);
+            const auto loaded = it::query_rows(ctx, projection + "write_native_set_loaded");
+            REQUIRE(loaded.size() == static_cast<std::size_t>(rows));
+            for (const auto& row : loaded) REQUIRE(row == left_expected.front());
+            std::filesystem::remove(output_path);
+        }
+        for (const std::string& query : {
+                from_left + " UNION ALL " + from_right,
+                "WITH merged AS MATERIALIZED (" + from_left + " UNION ALL " + from_right
+                    + ") SELECT * FROM (SELECT * FROM merged) projected"}) {
+            const auto mismatch = it::sql_error(ctx,
+                "SELECT bioseq.write($query$" + query + "$query$::text,'" + output_path + "')");
+            REQUIRE(mismatch.sqlstate == "22023");
+            REQUIRE(mismatch.contains("alignment IO provenance does not match"));
+            REQUIRE_FALSE(std::filesystem::exists(output_path));
+        }
+        // The existing explicit-header escape remains available after CTAS or
+        // deliberately mixed contexts. An empty result requires no row context.
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.write($query$" + from_left + " UNION ALL " + from_right
+            + "$query$::text,'" + output_path + "',options=>" + explicit_header + ")") == 2);
+        if (format == "sam")
+            REQUIRE(read_export_fixture(output_path).find("@RG\tID:shared\tSM:chosen") != std::string::npos);
+        auto native_names = inspect_exported_native(output_path, format).names;
+        std::ranges::sort(native_names);
+        REQUIRE((native_names == std::vector<std::string>{"left", "right"}));
+        std::filesystem::remove(output_path);
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.write($query$" + from_left + " WHERE false UNION ALL " + from_right
+            + " WHERE false$query$::text,'" + output_path + "')") == 0);
+        std::filesystem::remove(output_path);
+
+    }
+    // Inheritance introduces a second physical namespace without a set operation.
+    // Keep a generic export plan across attach/detach to exercise normal relation
+    // invalidation as well as the final-plan provenance guard.
+    it::exec_sql(ctx,
+        "CREATE TABLE write_native_inherit(LIKE write_native_set_a) USING bioseq; "
+        "CREATE TABLE write_native_inherit_child(LIKE write_native_set_a) USING bioseq");
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT bioseq.load('write_native_inherit'::regclass,'" + left_path + "')") == 1);
+    REQUIRE(it::query_scalar_int(ctx,
+        "SELECT bioseq.load('write_native_inherit_child'::regclass,'" + right_path + "')") == 1);
+    const auto inherited_expected = it::query_rows(ctx,
+        projection + "write_native_set_a UNION ALL " + projection + "write_native_set_b ORDER BY header");
+    it::guc_scope generic_inheritance(ctx, "plan_cache_mode", "force_generic_plan");
+    for (const std::string_view format : {"sam", "bam"}) {
+        CAPTURE(format);
+        const std::string output_path = set_prefix + "_inherited." + std::string{format};
+        std::filesystem::remove(output_path);
+        it::exec_sql(ctx, "PREPARE write_inherited_export AS SELECT bioseq.write("
+            "'write_native_inherit'::regclass,'" + output_path + "')");
+        const std::string execute = "EXECUTE write_inherited_export";
+        REQUIRE(it::plan_contains(it::explain_text<false>(ctx, execute), "BioseqExport"));
+        REQUIRE(it::query_scalar_int(ctx, execute) == 1);
+        std::filesystem::remove(output_path);
+        it::exec_sql(ctx, "ALTER TABLE write_native_inherit_child INHERIT write_native_inherit");
+        const std::string inherited_union =
+            "SELECT * FROM write_native_inherit UNION ALL SELECT * FROM write_native_inherit";
+        // Permission costing must support the same inherited UNION in ordinary
+        // SQL before the writer can apply its separate provenance restriction.
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT count(*) FROM (" + inherited_union + ") combined") == 4);
+        const auto inherited = it::sql_error(ctx, execute);
+        REQUIRE(inherited.sqlstate == "22023");
+        REQUIRE(inherited.contains("alignment IO provenance does not match"));
+        REQUIRE_FALSE(std::filesystem::exists(output_path));
+        for (const std::string& query : {
+                std::string{"SELECT * FROM write_native_inherit"},
+                std::string{"WITH inherited AS MATERIALIZED (SELECT * FROM write_native_inherit) "
+                    "SELECT * FROM (SELECT * FROM inherited) projected"},
+                inherited_union}) {
+            CAPTURE(query);
+            const auto mismatch = it::sql_error(ctx, "SELECT bioseq.write($query$" + query
+                + "$query$::text,'" + output_path + "')");
+            REQUIRE(mismatch.sqlstate == "22023");
+            REQUIRE(mismatch.contains("alignment IO provenance does not match"));
+            REQUIRE_FALSE(std::filesystem::exists(output_path));
+        }
+        for (const auto& [table, sample] : {
+                std::pair{"write_native_inherit", "left"},
+                std::pair{"write_native_inherit_child", "right"}}) {
+            REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$SELECT * FROM ONLY "
+                + std::string{table} + "$query$::text,'" + output_path + "')") == 1);
+            if (format == "sam")
+                REQUIRE(read_export_fixture(output_path).find("@RG\tID:shared\tSM:" + std::string{sample})
+                    != std::string::npos);
+            std::filesystem::remove(output_path);
+        }
+        REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write('write_native_inherit'::regclass,'"
+            + output_path + "',options=>" + explicit_header + ")") == 2);
+        if (format == "sam")
+            REQUIRE(read_export_fixture(output_path).find("@RG\tID:shared\tSM:chosen") != std::string::npos);
+        auto native_names = inspect_exported_native(output_path, format).names;
+        std::ranges::sort(native_names);
+        REQUIRE((native_names == std::vector<std::string>{"left", "right"}));
+        it::exec_sql(ctx, "TRUNCATE write_native_set_loaded");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('write_native_set_loaded'::regclass,'" + output_path + "')") == 2);
+        REQUIRE(it::query_rows(ctx, projection + "write_native_set_loaded ORDER BY header") == inherited_expected);
+        std::filesystem::remove(output_path);
+        it::exec_sql(ctx, "ALTER TABLE write_native_inherit_child NO INHERIT write_native_inherit");
+        REQUIRE(it::query_scalar_int(ctx, execute) == 1);
+        std::filesystem::remove(output_path);
+        it::exec_sql(ctx, "DEALLOCATE write_inherited_export");
+    }
+    // INSERT SELECT retains local IDs but does not copy the table's IO namespace.
+    // Distinct ordinary primary reads must remain distinct on native output.
+    it::exec_sql(ctx, "CREATE TABLE write_native_contextless(LIKE write_native_set_a) USING bioseq");
+    // Explicit header replacement can discard an unverified namespace, but
+    // it must not turn an invalid negative numeric identity into an absent one.
+    for (const std::string_view context : {"null", "9223372036854775807"}) {
+        CAPTURE(context);
+        const auto changes = std::string{"{\"reference_id\":-1,\"header_context_id\":"}
+            + std::string{context} + "}";
+        it::exec_sql(ctx, "TRUNCATE write_native_contextless; INSERT INTO write_native_contextless "
+            "SELECT header,seq,quality,jsonb_populate_record(alignment,'" + changes
+            + "'::jsonb) FROM write_native_set_a");
+        for (const std::string_view format : {"sam", "bam"}) {
+            CAPTURE(format);
+            const auto output_path = set_prefix + "_negative_reference." + std::string{format};
+            std::filesystem::remove(output_path);
+            const auto rejected = it::sql_error(ctx,
+                "SELECT bioseq.write('write_native_contextless'::regclass,'" + output_path
+                + "',options=>" + explicit_header + ")");
+            REQUIRE(rejected.sqlstate == "22023");
+            REQUIRE(rejected.contains("negative imported reference identity"));
+            REQUIRE_FALSE(std::filesystem::exists(output_path));
+        }
+    }
+    for (const bool same_name : {false, true}) {
+        CAPTURE(same_name);
+        const std::string changes = same_name ? R"({"flag":0,"qname":"shared"})" : R"({"flag":0})";
+        it::exec_sql(ctx, "TRUNCATE write_native_contextless; INSERT INTO write_native_contextless "
+            "SELECT header,seq,quality,jsonb_populate_record(alignment,'" + changes
+            + "'::jsonb) FROM write_native_set_a UNION ALL "
+            "SELECT header,seq,quality,jsonb_populate_record(alignment,'" + changes
+            + "'::jsonb) FROM write_native_set_b");
+        for (const std::string_view format : {"sam", "bam"}) {
+            const std::string output_path = set_prefix + "_anonymous." + std::string{format};
+            const std::string replay_path = set_prefix + "_anonymous_again." + std::string{format};
+            std::filesystem::remove(output_path);
+            std::filesystem::remove(replay_path);
+            REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$SELECT * FROM "
+                "write_native_contextless ORDER BY header$query$::text,'" + output_path
+                + "',options=>" + explicit_header + ")") == 2);
+            const auto native_names = inspect_exported_native(output_path, format).names;
+            REQUIRE(native_names.size() == 2);
+            REQUIRE(native_names[0] != native_names[1]);
+            if (same_name) REQUIRE(native_names[0] == "shared");
+            else REQUIRE((native_names == std::vector<std::string>{"left", "right"}));
+            it::exec_sql(ctx, "DROP TABLE write_native_set_loaded; "
+                "CREATE TABLE write_native_set_loaded(LIKE write_native_set_a) USING bioseq");
+            REQUIRE(it::query_scalar_int(ctx,
+                "SELECT bioseq.load('write_native_set_loaded'::regclass,'" + output_path + "')") == 2);
+            REQUIRE(it::query_scalar(ctx, "SELECT bool_and((alignment).template_id IS NULL "
+                "AND (alignment).segment_id IS NULL AND (alignment).flag=0) FROM write_native_set_loaded") == "t");
+            REQUIRE(it::query_scalar(ctx, "SELECT string_agg((alignment).qname,',' ORDER BY header) "
+                "FROM write_native_set_loaded") == (same_name ? "shared,shared" : "left,right"));
+            REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.write($query$SELECT header,seq,quality,alignment FROM "
+                "write_native_set_loaded ORDER BY header$query$::text,'" + replay_path + "')") == 2);
+            REQUIRE(inspect_exported_native(replay_path, format).names == native_names);
+            if (format == "sam") {
+                const auto replayed = read_export_fixture(replay_path);
+                REQUIRE(replayed.find("@RG\tID:shared\tSM:chosen\n") != std::string::npos);
+                REQUIRE(replayed.find("@CO\tbioseq.io:1:") != std::string::npos);
+                REQUIRE(replayed.find("@CO\tbioseq.io:1:") == replayed.rfind("@CO\tbioseq.io:1:"));
+            }
+            std::filesystem::remove(output_path);
+            std::filesystem::remove(replay_path);
+        }
+    }
+    std::filesystem::remove(left_path);
+    std::filesystem::remove(right_path);
     std::filesystem::remove(path);
     std::filesystem::remove(bam_path);
     std::filesystem::remove(bad_path);
@@ -2699,4 +3778,600 @@ TEST_CASE("bioseq.write: transformed and materialized companions keep their owni
     REQUIRE(denied.contains("one unambiguous CTE reference"));
     REQUIRE_FALSE(std::filesystem::exists(denied_path));
     REQUIRE(it::query_scalar_int(ctx, "SELECT 1") == 1);
+}
+
+namespace {
+
+/** One existing libpq asynchronous request; no worker thread or Catch assertion. */
+struct io_pending_sql_result {
+    bool completed{};
+    bool consume_ok{true};
+    bool successful{true};
+    bool fallback_cancelled{};
+    unsigned results{};
+    std::string first_value;
+    it::sql_error_info failure;
+};
+
+/** Consume complete protocol results only after PQisBusy reports readiness. */
+[[nodiscard]] bool drain_io_sql(it::connection_test_context& connection,
+        io_pending_sql_result& result, std::chrono::seconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (PQconsumeInput(connection.raw()) == 0) {
+            result.consume_ok = false;
+            return false;
+        }
+        if (PQisBusy(connection.raw()) != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            continue;
+        }
+        std::unique_ptr<PGresult, decltype(&PQclear)> response{PQgetResult(connection.raw()), &PQclear};
+        if (!response) {
+            result.completed = true;
+            return true;
+        }
+        ++result.results;
+        const auto status = PQresultStatus(response.get());
+        result.successful = result.successful && (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK);
+        if (const auto* state = PQresultErrorField(response.get(), PG_DIAG_SQLSTATE))
+            result.failure.sqlstate = state;
+        if (const auto* message = PQresultErrorMessage(response.get()); message && *message)
+            result.failure.message = message;
+        if (status == PGRES_TUPLES_OK && PQntuples(response.get()) == 1
+            && PQnfields(response.get()) > 0 && !PQgetisnull(response.get(), 0, 0))
+            result.first_value = PQgetvalue(response.get(), 0, 0);
+    }
+    return false;
+}
+
+/** Bound unexpected paths, cancel once if necessary, and close an undrainable connection. */
+[[nodiscard]] io_pending_sql_result finish_io_sql(it::connection_test_context& worker,
+        const it::connection_test_context& controller, long long worker_pid) {
+    io_pending_sql_result result;
+    if (drain_io_sql(worker, result, std::chrono::seconds{15})) return result;
+    result.fallback_cancelled = it::query_scalar(controller,
+        fmt::format("SELECT pg_cancel_backend({})", worker_pid)) == "t";
+    if (!drain_io_sql(worker, result, std::chrono::seconds{5})) worker.close();
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("bioseq.load: provenance catalog errors unwind reader admission in the same backend",
+          "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
+    auto loader = it::fresh_context({"load_provenance_cleanup"});
+    it::connection_test_context blocker;
+    it::connection_test_context observer;
+    it::exec_sql(loader,
+        "SET bioseq.index.insert_maintenance.enabled=off; "
+        "CREATE TABLE load_provenance_cleanup(header text,seq bioseq.seq('dna15'),"
+        "quality bioseq.seq('phred94'),alignment bioseq.alignment) USING bioseq; "
+        "SET lock_timeout='5s'; SET statement_timeout='20s'");
+    it::exec_sql(observer, "SET statement_timeout='2s'");
+    const auto loader_pid = it::query_scalar_int(loader, "SELECT pg_backend_pid()");
+    const auto blocker_pid = it::query_scalar_int(blocker, "SELECT pg_backend_pid()");
+    const std::string prefix = "/tmp/bioseq_provenance_cleanup_" + std::to_string(loader_pid);
+    const std::array<std::string, 2> paths{prefix + ".sam", prefix + ".sam.gz"};
+    const std::string input = "@HD\tVN:1.6\n@SQ\tSN:chr\tLN:100\n"
+        "read\t0\tchr\t1\t37\t4M\t*\t0\t0\tACGT\tIIII\n";
+    {
+        std::ofstream output(paths[0], std::ios::binary | std::ios::trunc);
+        output << input;
+        REQUIRE(output.good());
+    }
+    {
+        gzFile output = gzopen(paths[1].c_str(), "wb");
+        REQUIRE(output != nullptr);
+        const auto written = gzwrite(output, input.data(), static_cast<unsigned>(input.size()));
+        const auto closed = gzclose(output);
+        REQUIRE(written == static_cast<int>(input.size()));
+        REQUIRE(closed == Z_OK);
+    }
+    constexpr std::string_view rows_sql =
+        "SELECT header,seq::text,quality::text,alignment::text "
+        "FROM load_provenance_cleanup ORDER BY header,seq::text,alignment::text";
+    constexpr std::string_view provenance_sql =
+        "SELECT io_provenance::text FROM bioseq_internal.options "
+        "WHERE regclass='load_provenance_cleanup'::regclass";
+    constexpr std::string_view admission_sql =
+        "SELECT index_memory_reserved_bytes FROM bioseq.scheduler_stats()";
+
+    for (const auto& path : paths) {
+        CAPTURE(path);
+        const std::string load_sql =
+            "SELECT bioseq.load('load_provenance_cleanup'::regclass,'" + path + "')";
+        // Warm the successful path before comparing backend-local retained admission.
+        REQUIRE(it::query_scalar_int(loader, load_sql) == 1);
+        for (const bool cancel : {false, true}) {
+            for (unsigned repetition = 0; repetition != 2; ++repetition) {
+                CAPTURE(cancel, repetition);
+                const auto rows_before = it::query_rows(loader, rows_sql);
+                const auto provenance_before = it::query_rows(loader, provenance_sql);
+                const auto reserved_before = it::query_scalar_int(loader, admission_sql);
+                it::exec_sql(blocker, "BEGIN; LOCK TABLE bioseq_internal.options IN SHARE MODE");
+                it::exec_sql(loader, "BEGIN");
+                const bool sent = PQsendQuery(loader.raw(), load_sql.c_str()) == 1;
+                bool observed_initializer_wait = false;
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+                while (sent && std::chrono::steady_clock::now() < deadline) {
+                    observed_initializer_wait = it::query_scalar(observer, fmt::format(
+                        "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid={} "
+                        "AND relation='bioseq_internal.options'::regclass "
+                        "AND mode='RowExclusiveLock' AND NOT granted) "
+                        "AND {}=ANY(pg_blocking_pids({}))",
+                        loader_pid, blocker_pid, loader_pid)) == "t";
+                    if (observed_initializer_wait) break;
+                    if (PQconsumeInput(loader.raw()) == 0 || PQisBusy(loader.raw()) == 0) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                }
+                // Cancel only after observing the exact catalog wait. A missing wait
+                // also cancels/drains before assertions so failure cannot leave work running.
+                bool cancellation_sent = false;
+                if (sent && (cancel || !observed_initializer_wait)) {
+                    cancellation_sent = it::query_scalar(observer,
+                        fmt::format("SELECT pg_cancel_backend({})", loader_pid)) == "t";
+                }
+                const auto result = sent ? finish_io_sql(loader, observer, loader_pid) : io_pending_sql_result{};
+                if (result.completed) it::exec_sql(loader, "ROLLBACK");
+                else loader.close();
+                it::exec_sql(blocker, "ROLLBACK");
+
+                CAPTURE(result.failure.message);
+                REQUIRE(sent);
+                REQUIRE(result.completed);
+                REQUIRE(result.consume_ok);
+                REQUIRE(result.results == 1);
+                REQUIRE_FALSE(result.successful);
+                REQUIRE_FALSE(result.fallback_cancelled);
+                REQUIRE(observed_initializer_wait);
+                if (cancel) REQUIRE(cancellation_sent);
+                REQUIRE(result.failure.sqlstate == (cancel ? "57014" : "55P03"));
+                REQUIRE(it::query_scalar_int(loader, "SELECT pg_backend_pid()") == loader_pid);
+                REQUIRE(it::query_rows(loader, rows_sql) == rows_before);
+                REQUIRE(it::query_rows(loader, provenance_sql) == provenance_before);
+                REQUIRE(it::query_scalar_int(loader, admission_sql) == reserved_before);
+                REQUIRE(it::query_scalar_int(loader, load_sql) == 1);
+                REQUIRE(it::query_scalar_int(loader, admission_sql) == reserved_before);
+            }
+        }
+    }
+    for (const auto& path : paths) std::filesystem::remove(path);
+}
+
+namespace {
+
+/** Remove test event triggers even when an assertion unwinds the fixture. */
+struct io_ddl_test_cleanup {
+    it::connection_test_context& worker;
+    it::connection_test_context& controller;
+    long long worker_pid;
+    std::string sql;
+    ~io_ddl_test_cleanup() noexcept {
+        try {
+            if (worker.raw() != nullptr && PQconsumeInput(worker.raw()) == 0) worker.close();
+            if (worker.raw() != nullptr && PQisBusy(worker.raw()) != 0) {
+                const auto cancel = "SELECT pg_cancel_backend(" + std::to_string(worker_pid) + ")";
+                if (controller.raw() != nullptr)
+                    if (auto* result = PQexec(controller.raw(), cancel.c_str())) PQclear(result);
+                io_pending_sql_result abandoned;
+                if (!drain_io_sql(worker, abandoned, std::chrono::seconds{5})) worker.close();
+            }
+            if (worker.raw() != nullptr)
+                if (auto* result = PQexec(worker.raw(), "ROLLBACK; RESET ROLE")) PQclear(result);
+        } catch (...) {
+            worker.close();
+        }
+        if (controller.raw() != nullptr && !sql.empty())
+            if (auto* result = PQexec(controller.raw(), sql.c_str())) PQclear(result);
+    }
+};
+
+} // namespace
+
+TEST_CASE("bioseq.load: automatic destination DDL preserves relation identity through event triggers",
+          "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
+    auto loader = it::fresh_context({});
+    it::connection_test_context observer;
+    it::connection_test_context renamer;
+    it::exec_sql(observer, "SET statement_timeout='2s'");
+    const auto loader_pid = it::query_scalar_int(loader, "SELECT pg_backend_pid()");
+    const std::string role = "bioseq_ddl_guard_importer_" + std::to_string(loader_pid);
+    io_ddl_test_cleanup cleanup{loader, observer, loader_pid,
+        "SET statement_timeout='3s'; SELECT pg_advisory_unlock_all(); "
+        "DROP EVENT TRIGGER IF EXISTS bioseq_ddl_guard_start; "
+        "DROP EVENT TRIGGER IF EXISTS bioseq_ddl_guard_end; "
+        "DROP SCHEMA IF EXISTS ddl_guard_source,ddl_guard_replacement,ddl_guard_move,"
+        "ddl_guard_meta,ddl_guard_renamed CASCADE; "
+        "DO $cleanup$ BEGIN IF EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='" + role + "') THEN "
+        "EXECUTE 'REVOKE ALL ON SCHEMA bioseq FROM '||quote_ident('" + role + "'); "
+        "EXECUTE 'REVOKE pg_read_server_files FROM '||quote_ident('" + role + "'); "
+        "EXECUTE 'DROP ROLE '||quote_ident('" + role + "'); END IF; END $cleanup$"};
+    it::exec_sql(loader,
+        "SET bioseq.index.insert_maintenance.enabled=off; SET statement_timeout='20s'; "
+        "CREATE SCHEMA ddl_guard_source; CREATE SCHEMA ddl_guard_replacement; "
+        "CREATE SCHEMA ddl_guard_move; CREATE SCHEMA ddl_guard_meta; "
+        "CREATE TABLE ddl_guard_source.target(header text,seq bioseq.seq('dna4')) USING bioseq; "
+        "CREATE TABLE ddl_guard_source.missing(header text,seq bioseq.seq('dna4')) USING bioseq; "
+        "CREATE TABLE ddl_guard_replacement.target(header text,seq bioseq.seq('dna4')) USING bioseq; "
+        "CREATE TABLE ddl_guard_meta.control(action text,armed boolean); "
+        "INSERT INTO ddl_guard_meta.control VALUES ('',false); "
+        "CREATE TABLE ddl_guard_meta.events(phase text,object_id oid); "
+        "CREATE SEQUENCE ddl_guard_meta.ends");
+    it::exec_sql(loader, "CREATE ROLE " + role + " NOLOGIN");
+    const std::string path = "/tmp/bioseq_ddl_guard_" + std::to_string(loader_pid) + ".fastq";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "@record\nACGT\n+\nIIII\n";
+        REQUIRE(output.good());
+    }
+    it::exec_sql(loader, R"SQL(
+        CREATE FUNCTION ddl_guard_meta.on_start() RETURNS event_trigger LANGUAGE plpgsql AS $body$
+        DECLARE requested_action text;
+        BEGIN
+            INSERT INTO ddl_guard_meta.events VALUES ('start',NULL);
+            SELECT action INTO requested_action FROM ddl_guard_meta.control WHERE armed;
+            IF FOUND THEN
+                UPDATE ddl_guard_meta.control SET armed=false;
+                IF requested_action<>'' THEN EXECUTE requested_action; END IF;
+            END IF;
+        END $body$;
+        CREATE FUNCTION ddl_guard_meta.on_end() RETURNS event_trigger LANGUAGE plpgsql AS $body$
+        BEGIN
+            PERFORM nextval('ddl_guard_meta.ends');
+            INSERT INTO ddl_guard_meta.events
+                SELECT 'end',objid FROM pg_event_trigger_ddl_commands()
+                WHERE classid='pg_class'::regclass;
+        END $body$;
+        CREATE EVENT TRIGGER bioseq_ddl_guard_start ON ddl_command_start
+            WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION ddl_guard_meta.on_start();
+        CREATE EVENT TRIGGER bioseq_ddl_guard_end ON ddl_command_end
+            WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION ddl_guard_meta.on_end();
+    )SQL");
+    const auto original_oid = it::query_scalar_int(loader, "SELECT 'ddl_guard_source.target'::regclass::oid");
+    const auto replacement_oid = it::query_scalar_int(loader, "SELECT 'ddl_guard_replacement.target'::regclass::oid");
+    const std::string load_sql = "SELECT bioseq.load('ddl_guard_source.target'::regclass,'" + path + "')";
+    constexpr std::string_view ends_sql =
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM ddl_guard_meta.ends";
+    const auto assert_unmodified = [&loader, original_oid, replacement_oid, loader_pid] {
+        REQUIRE(it::query_scalar_int(loader, "SELECT 'ddl_guard_source.target'::regclass::oid") == original_oid);
+        REQUIRE(it::query_scalar_int(loader, "SELECT 'ddl_guard_replacement.target'::regclass::oid") == replacement_oid);
+        REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_source.target") == 0);
+        REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_replacement.target") == 0);
+        REQUIRE(it::query_scalar_int(loader,
+            "SELECT count(*) FROM pg_attribute WHERE attrelid IN ('ddl_guard_source.target'::regclass,"
+            "'ddl_guard_replacement.target'::regclass) AND attname='quality' AND NOT attisdropped") == 0);
+        REQUIRE(it::query_scalar_int(loader, fmt::format(
+            "SELECT count(*) FROM pg_locks WHERE pid={} AND relation='pg_namespace'::regclass "
+            "AND mode='ShareLock' AND granted", loader_pid)) == 0);
+    };
+    struct attempted_mutation { std::string sql; long long nested_ends; };
+    const std::array mutations{
+        attempted_mutation{"ALTER SCHEMA ddl_guard_source RENAME TO ddl_guard_renamed; "
+            "ALTER SCHEMA ddl_guard_replacement RENAME TO ddl_guard_source", 0},
+        attempted_mutation{"ALTER TABLE ddl_guard_source.target RENAME TO renamed", 0},
+        attempted_mutation{"ALTER TABLE ddl_guard_source.target SET SCHEMA ddl_guard_move", 0},
+        attempted_mutation{"DROP TABLE ddl_guard_source.target", 0},
+        // A successful nested load must restore the still-active outer guard.
+        attempted_mutation{"SELECT bioseq.load('ddl_guard_replacement.target'::regclass,'" + path + "'); "
+            "ALTER SCHEMA ddl_guard_source RENAME TO ddl_guard_renamed", 1}
+    };
+    for (const auto& mutation : mutations) {
+        CAPTURE(mutation.sql);
+        it::exec_sql(loader, "UPDATE ddl_guard_meta.control SET armed=true,action=$action$"
+            + mutation.sql + "$action$");
+        const auto ends_before = it::query_scalar_int(loader, ends_sql);
+        const auto failure = it::sql_error(loader, load_sql);
+        REQUIRE(failure.sqlstate == "55000");
+        REQUIRE(failure.contains("identity changed"));
+        // Sequences are nontransactional: a failing outer ADD COLUMN must not
+        // reach ddl_command_end. Only the deliberately successful nested load may.
+        REQUIRE(it::query_scalar_int(loader, ends_sql) == ends_before + mutation.nested_ends);
+        assert_unmodified();
+        // The failed scope must also be gone in this backend after rollback.
+        it::exec_sql(loader, "ALTER SCHEMA ddl_guard_source RENAME TO ddl_guard_renamed; "
+            "ALTER SCHEMA ddl_guard_renamed RENAME TO ddl_guard_source");
+    }
+
+    // Pause the successful command inside its ordinary ddl_command_start hook.
+    // A second backend must not rename its schema while the identity is guarded.
+    it::exec_sql(loader, "TRUNCATE ddl_guard_meta.events; UPDATE ddl_guard_meta.control "
+        "SET armed=true,action='SELECT pg_advisory_xact_lock(" + std::to_string(loader_pid) + ")'; BEGIN");
+    it::exec_sql(observer, fmt::format("SELECT pg_advisory_lock({})", loader_pid));
+    const bool sent = PQsendQuery(loader.raw(), load_sql.c_str()) == 1;
+    bool guard_wait_observed = false;
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    while (sent && std::chrono::steady_clock::now() < wait_deadline) {
+        guard_wait_observed = it::query_scalar(observer, fmt::format(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid={} AND locktype='advisory' AND NOT granted) "
+            "AND EXISTS(SELECT 1 FROM pg_locks WHERE pid={} AND relation='pg_namespace'::regclass "
+            "AND mode='ShareLock' AND granted)", loader_pid, loader_pid)) == "t";
+        if (guard_wait_observed) break;
+        if (PQconsumeInput(loader.raw()) == 0 || PQisBusy(loader.raw()) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    it::sql_error_info rename_failure;
+    if (guard_wait_observed) {
+        it::exec_sql(renamer, "SET lock_timeout='500ms'; SET statement_timeout='2s'");
+        rename_failure = it::sql_error(renamer,
+            "ALTER SCHEMA ddl_guard_source RENAME TO ddl_guard_renamed");
+    }
+    it::exec_sql(observer, fmt::format("SELECT pg_advisory_unlock({})", loader_pid));
+    const auto result = sent ? finish_io_sql(loader, observer, loader_pid) : io_pending_sql_result{};
+    if (!result.completed) loader.close();
+    CAPTURE(result.failure.message);
+    REQUIRE(sent);
+    REQUIRE(result.completed);
+    REQUIRE(result.consume_ok);
+    REQUIRE_FALSE(result.fallback_cancelled);
+    REQUIRE(guard_wait_observed);
+    REQUIRE(rename_failure.sqlstate == "55P03");
+    REQUIRE(result.successful);
+    REQUIRE(result.results == 1);
+    REQUIRE(result.first_value == "1");
+    REQUIRE(it::query_scalar_int(loader, fmt::format(
+        "SELECT count(*) FROM pg_locks WHERE pid={} AND relation='pg_namespace'::regclass "
+        "AND mode='ShareLock' AND granted", loader_pid)) == 0);
+    // Keep the loader transaction open: schema renames now succeed independently
+    // despite its transaction-held target AccessExclusiveLock.
+    it::exec_sql(renamer, "SET lock_timeout='2s'; ALTER SCHEMA ddl_guard_source RENAME TO ddl_guard_renamed; "
+        "ALTER SCHEMA ddl_guard_renamed RENAME TO ddl_guard_source");
+    REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_meta.events WHERE phase='start'") == 1);
+    REQUIRE(it::query_scalar_int(loader, fmt::format(
+        "SELECT count(*) FROM ddl_guard_meta.events WHERE phase='end' AND object_id={}", original_oid)) >= 1);
+    it::exec_sql(loader, "COMMIT");
+
+    // Missing destinations retain owner checks; predeclared columns need INSERT.
+    it::exec_sql(loader, "GRANT pg_read_server_files TO " + role + "; GRANT USAGE ON SCHEMA "
+        "bioseq,ddl_guard_source TO " + role + "; GRANT INSERT ON ddl_guard_source.target,"
+        "ddl_guard_source.missing TO " + role + "; SET ROLE " + role);
+    const auto owner_failure = it::sql_error(loader,
+        "SELECT bioseq.load('ddl_guard_source.missing'::regclass,'" + path + "')");
+    const auto predeclared = it::query_scalar_int(loader, load_sql);
+    it::exec_sql(loader, "RESET ROLE");
+    REQUIRE(owner_failure.sqlstate == "42501");
+    REQUIRE(owner_failure.contains("predeclare"));
+    REQUIRE(predeclared == 1);
+    REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_source.target") == 2);
+    REQUIRE(it::query_scalar_int(loader,
+        "SELECT count(*) FROM pg_attribute WHERE attrelid='ddl_guard_source.missing'::regclass "
+        "AND attname='quality' AND NOT attisdropped") == 0);
+    REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_meta.events WHERE phase='start'") == 1);
+
+    // A normal end trigger may remove a column without changing relation identity.
+    // The alignment caller must report the absent attribute before TupleDescAttr.
+    const std::string sam_path = path + ".sam";
+    {
+        std::ofstream output(sam_path, std::ios::binary | std::ios::trunc);
+        output << "@HD\tVN:1.6\n@SQ\tSN:chr\tLN:100\n"
+            "aligned\t0\tchr\t1\t37\t4M\t*\t0\t0\tACGT\tIIII\n";
+        REQUIRE(output.good());
+    }
+    it::exec_sql(loader, R"SQL(
+        UPDATE ddl_guard_meta.control SET armed=false,action='drop_alignment';
+        CREATE OR REPLACE FUNCTION ddl_guard_meta.on_end() RETURNS event_trigger LANGUAGE plpgsql AS $body$
+        BEGIN
+            IF EXISTS(SELECT 1 FROM ddl_guard_meta.control WHERE action='drop_alignment') THEN
+                UPDATE ddl_guard_meta.control SET action='';
+                ALTER TABLE ddl_guard_source.target DROP COLUMN alignment;
+            END IF;
+        END $body$;
+    )SQL");
+    const auto absent_attribute = it::sql_error(loader,
+        "SELECT bioseq.load('ddl_guard_source.target'::regclass,'" + sam_path + "')");
+    REQUIRE(absent_attribute.sqlstate == "42703");
+    REQUIRE(absent_attribute.contains("alignment destination"));
+    REQUIRE(it::query_scalar_int(loader, "SELECT count(*) FROM ddl_guard_source.target") == 2);
+    REQUIRE(it::query_scalar_int(loader,
+        "SELECT count(*) FROM pg_attribute WHERE attrelid='ddl_guard_source.target'::regclass "
+        "AND attname='alignment' AND NOT attisdropped") == 0);
+    REQUIRE(it::query_scalar_int(loader, fmt::format(
+        "SELECT count(*) FROM pg_locks WHERE pid={} AND relation='pg_namespace'::regclass "
+        "AND mode='ShareLock' AND granted", loader_pid)) == 0);
+    std::filesystem::remove(path);
+    std::filesystem::remove(sam_path);
+    it::exec_sql(observer, cleanup.sql);
+    cleanup.sql.clear();
+}
+
+TEST_CASE("bioseq.load: a concurrently predeclared destination is reused after the target lock wait",
+          "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
+    auto loader = it::fresh_context({"ddl_concurrent_column"});
+    it::connection_test_context owner;
+    it::connection_test_context observer;
+    it::exec_sql(observer, "SET statement_timeout='2s'");
+    it::exec_sql(owner, "SET statement_timeout='5s'");
+    it::exec_sql(loader,
+        "SET bioseq.index.insert_maintenance.enabled=off; SET statement_timeout='20s'; "
+        "CREATE TABLE ddl_concurrent_column(header text,seq bioseq.seq('dna4')) USING bioseq");
+    const auto loader_pid = it::query_scalar_int(loader, "SELECT pg_backend_pid()");
+    const auto owner_pid = it::query_scalar_int(owner, "SELECT pg_backend_pid()");
+    const std::string path = "/tmp/bioseq_ddl_concurrent_" + std::to_string(loader_pid) + ".fastq";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << "@concurrent\nACGT\n+\nIIII\n";
+        REQUIRE(output.good());
+    }
+    it::exec_sql(owner, "BEGIN; ALTER TABLE ddl_concurrent_column ADD COLUMN quality bioseq.seq('phred42')");
+    const std::string load_sql = "SELECT bioseq.load('ddl_concurrent_column'::regclass,'" + path
+        + "',columns=>ARRAY[ROW('quality','quality')::bioseq.column_mapping])";
+    const bool sent = PQsendQuery(loader.raw(), load_sql.c_str()) == 1;
+    bool wait_observed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    while (sent && std::chrono::steady_clock::now() < deadline) {
+        wait_observed = it::query_scalar(observer, fmt::format(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid={} AND relation='ddl_concurrent_column'::regclass "
+            "AND mode='RowExclusiveLock' AND NOT granted) AND {}=ANY(pg_blocking_pids({}))",
+            loader_pid, owner_pid, loader_pid)) == "t";
+        if (wait_observed) break;
+        if (PQconsumeInput(loader.raw()) == 0 || PQisBusy(loader.raw()) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    it::exec_sql(owner, "COMMIT");
+    const auto result = sent ? finish_io_sql(loader, observer, loader_pid) : io_pending_sql_result{};
+    if (!result.completed) loader.close();
+    CAPTURE(result.failure.message);
+    REQUIRE(sent);
+    REQUIRE(result.completed);
+    REQUIRE(result.consume_ok);
+    REQUIRE_FALSE(result.fallback_cancelled);
+    REQUIRE(wait_observed);
+    REQUIRE(result.successful);
+    REQUIRE(result.results == 1);
+    REQUIRE(result.first_value == "1");
+    REQUIRE(it::query_scalar_int(loader,
+        "SELECT count(*) FROM pg_attribute WHERE attrelid='ddl_concurrent_column'::regclass "
+        "AND attname='quality' AND NOT attisdropped") == 1);
+    REQUIRE(it::query_scalar(loader, "SELECT quality::text FROM ddl_concurrent_column") == "IIII");
+    std::filesystem::remove(path);
+}
+
+namespace {
+
+/** Release the type DDL before draining any abandoned prepared execution. */
+struct io_type_plan_test_cleanup {
+    it::connection_test_context& worker;
+    it::connection_test_context& owner;
+    it::connection_test_context& controller;
+    std::string cancel_sql;
+    std::string drop_sql;
+    std::filesystem::path output;
+    bool pending{};
+
+    /** Cleanup commands use the session's already bounded statement timeout. */
+    static bool command(it::connection_test_context& connection, const char* sql) noexcept {
+        if (connection.raw() == nullptr) return false;
+        auto* result = PQexec(connection.raw(), sql);
+        if (result == nullptr) return false;
+        const auto status = PQresultStatus(result);
+        PQclear(result);
+        return status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK;
+    }
+
+    ~io_type_plan_test_cleanup() noexcept {
+        if (!command(owner, "ROLLBACK")) owner.close();
+        try {
+            if (pending && worker.raw() != nullptr) {
+                io_pending_sql_result abandoned;
+                if (!drain_io_sql(worker, abandoned, std::chrono::seconds{1})) {
+                    static_cast<void>(command(controller, cancel_sql.c_str()));
+                    if (!drain_io_sql(worker, abandoned, std::chrono::seconds{5})) worker.close();
+                }
+            }
+            if (worker.raw() != nullptr && !command(worker, "ROLLBACK; DEALLOCATE ALL")) worker.close();
+        } catch (...) {
+            worker.close();
+        }
+        if (!drop_sql.empty()) static_cast<void>(command(controller, drop_sql.c_str()));
+        std::error_code ignored;
+        std::filesystem::remove(output, ignored);
+    }
+};
+
+} // namespace
+
+TEST_CASE("bioseq.write: cached metadata classification locks and revalidates nested composite types",
+          "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
+    auto worker = it::fresh_context({});
+    it::connection_test_context owner;
+    it::connection_test_context controller;
+    it::exec_sql(worker, "SET statement_timeout='20s'; SET lock_timeout='10s'; "
+        "SET plan_cache_mode=force_generic_plan; SET bioseq.index.insert_maintenance.enabled=off");
+    it::exec_sql(owner, "SET statement_timeout='5s'; SET lock_timeout='3s'");
+    it::exec_sql(controller, "SET statement_timeout='2s'; SET lock_timeout='1s'");
+    const auto worker_pid = it::query_scalar_int(worker, "SELECT pg_backend_pid()");
+    const auto owner_pid = it::query_scalar_int(owner, "SELECT pg_backend_pid()");
+    const auto quote_identifier = [&worker](std::string_view value) {
+        std::unique_ptr<char, decltype(&PQfreemem)> escaped{
+            PQescapeIdentifier(worker.raw(), value.data(), value.size()), &PQfreemem};
+        REQUIRE(escaped != nullptr);
+        return std::string{escaped.get()};
+    };
+    const auto quote_literal = [&worker](std::string_view value) {
+        std::unique_ptr<char, decltype(&PQfreemem)> escaped{
+            PQescapeLiteral(worker.raw(), value.data(), value.size()), &PQfreemem};
+        REQUIRE(escaped != nullptr);
+        return std::string{escaped.get()};
+    };
+    const std::string schema = quote_identifier("bioseq_nested_type_lock_" + std::to_string(worker_pid));
+    const std::string leaf = schema + "." + quote_identifier("leaf");
+    const std::string wrapper = schema + "." + quote_identifier("wrapper");
+    const std::string payload = quote_identifier("payload");
+    const std::string statement_name = "bioseq_nested_type_plan_" + std::to_string(worker_pid);
+    const std::string statement = quote_identifier(statement_name);
+    const std::string path = (std::filesystem::temp_directory_path()
+        / ("bioseq_nested_type_lock_" + std::to_string(worker_pid) + ".fasta")).string();
+    const std::string drop_sql = "DROP SCHEMA IF EXISTS " + schema + " CASCADE";
+    io_type_plan_test_cleanup cleanup{worker, owner, controller,
+        fmt::format("SELECT pg_cancel_backend({})", worker_pid), drop_sql, path};
+    std::filesystem::remove(path);
+    it::exec_sql(owner, "CREATE SCHEMA " + schema + "; CREATE TYPE " + leaf
+        + " AS (\"note\" integer); CREATE TYPE " + wrapper + " AS (\"item\" " + leaf + ")");
+    const auto leaf_relation = it::query_scalar_int(controller,
+        "SELECT typrelid FROM pg_catalog.pg_type WHERE oid=" + quote_literal(leaf) + "::regtype");
+    REQUIRE(leaf_relation > 0);
+    const std::string source = "SELECT 'typed'::text AS header,'AC'::bioseq.seq('dna4') AS seq,NULL::"
+        + wrapper + " AS mutable_metadata";
+    it::exec_sql(worker, "PREPARE " + statement + " AS SELECT bioseq.write("
+        + quote_literal(source) + "::text," + quote_literal(path)
+        + ",options=>'{\"overwrite\":true}'::jsonb)");
+    const std::string execute_sql = "EXECUTE " + statement;
+    const std::string generic_count_sql = "SELECT generic_plans FROM pg_catalog.pg_prepared_statements WHERE name="
+        + quote_literal(statement_name);
+    REQUIRE(it::query_scalar_int(worker, execute_sql) == 1);
+    REQUIRE(it::query_scalar_int(worker, generic_count_sql) == 1);
+    REQUIRE(read_export_fixture(path).find("mutable_metadata") != std::string::npos);
+
+    // The source query names only the wrapper. The leaf is discovered by
+    // metadata classification and is otherwise unused in the SQL expression.
+    it::exec_sql(owner, "BEGIN; ALTER TYPE " + leaf + " ADD ATTRIBUTE " + payload + " bioseq.seq");
+    REQUIRE(it::query_scalar(controller, fmt::format(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid={} AND locktype='relation' "
+        "AND relation={}::oid AND mode='AccessExclusiveLock' AND granted)",
+        owner_pid, leaf_relation)) == "t");
+    const bool sent = PQsendQuery(worker.raw(), execute_sql.c_str()) == 1;
+    cleanup.pending = sent;
+    bool type_wait_observed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    while (sent && std::chrono::steady_clock::now() < deadline) {
+        type_wait_observed = it::query_scalar(controller, fmt::format(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks WHERE pid={} AND locktype='relation' "
+            "AND relation={}::oid AND mode='AccessShareLock' AND NOT granted) "
+            "AND {}=ANY(pg_catalog.pg_blocking_pids({}))",
+            worker_pid, leaf_relation, owner_pid, worker_pid)) == "t";
+        if (type_wait_observed) break;
+        if (PQconsumeInput(worker.raw()) == 0 || PQisBusy(worker.raw()) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    // Commit and drain before assertions. The queued invalidation must be
+    // processed after lock acquisition, rebuilding the old generic plan.
+    it::exec_sql(owner, "COMMIT");
+    const auto result = sent ? finish_io_sql(worker, controller, worker_pid) : io_pending_sql_result{};
+    cleanup.pending = sent && !result.completed;
+    if (!result.completed) worker.close();
+    CAPTURE(result.failure.message);
+    REQUIRE(sent);
+    REQUIRE(type_wait_observed);
+    REQUIRE(result.completed);
+    REQUIRE(result.consume_ok);
+    REQUIRE(result.successful);
+    REQUIRE(result.results == 1);
+    REQUIRE_FALSE(result.fallback_cancelled);
+    REQUIRE(result.first_value == "1");
+    REQUIRE(it::query_scalar_int(worker, generic_count_sql) == 2);
+    REQUIRE(read_export_fixture(path).find("mutable_metadata") == std::string::npos);
+    REQUIRE(it::query_scalar_int(worker, "SELECT pg_backend_pid()") == worker_pid);
+    REQUIRE(it::query_scalar_int(controller, fmt::format(
+        "SELECT count(*) FROM pg_catalog.pg_locks WHERE pid={} AND locktype='relation' "
+        "AND relation={}::oid AND mode='AccessShareLock'", worker_pid, leaf_relation)) == 0);
+
+    // The same backend and prepared statement remain usable after the replan.
+    it::exec_sql(owner, "ALTER TYPE " + leaf + " DROP ATTRIBUTE " + payload);
+    REQUIRE(it::query_scalar_int(worker, execute_sql) == 1);
+    REQUIRE(it::query_scalar_int(worker, generic_count_sql) == 3);
+    REQUIRE(read_export_fixture(path).find("mutable_metadata") != std::string::npos);
+    it::exec_sql(worker, "DEALLOCATE " + statement);
+    it::exec_sql(controller, drop_sql);
+    cleanup.drop_sql.clear();
+    REQUIRE(std::filesystem::remove(path));
 }
