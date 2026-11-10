@@ -1,7 +1,7 @@
 include_guard(GLOBAL)
 
 function(_bioseq_build_config_fail message_text)
-  message(FATAL_ERROR "Bioseq build config: ${message_text}")
+  message(FATAL_ERROR "Bioseq build config: ${message_text}" ${ARGN})
 endfunction()
 
 function(_bioseq_build_config_bool value output_variable)
@@ -26,7 +26,6 @@ endfunction()
 # Configuration needs names/types only; the existing Clang registry scan resolves geometry.
 function(_bioseq_biological_alphabet_entries output_variable)
   set(_registry_source "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../bioseq/backend/sequences/packed_sequence_parts/core.cppm")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_registry_source}")
   file(READ "${_registry_source}" _registry_text)
   string(REGEX MATCH "using[ \t\r\n]+supported_biological_alphabets[ \t\r\n]*=[^;]+;" _registry "${_registry_text}")
   if(NOT _registry)
@@ -57,6 +56,31 @@ function(_bioseq_biological_alphabet_entries output_variable)
     _bioseq_build_config_fail("biological alphabet identity exceeds one byte")
   endif()
   set(${output_variable} "${_result}" PARENT_SCOPE)
+  if(NOT CMAKE_SCRIPT_MODE_FILE)
+    set(_inventory "${CMAKE_BINARY_DIR}/generated/biological-alphabets.txt")
+    set(_contents "${_result}\n")
+    set(_old_contents "")
+    if(EXISTS "${_inventory}")
+      file(READ "${_inventory}" _old_contents)
+    endif()
+    if(NOT _old_contents STREQUAL _contents)
+      file(WRITE "${_inventory}" "${_contents}")
+    endif()
+    if(NOT TARGET bioseq_biological_alphabet_inventory)
+      set(_stamp "${CMAKE_BINARY_DIR}/generated/biological-alphabets.scan.stamp")
+      set(_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/scan_biological_alphabet_registry.cmake")
+      add_custom_command(
+        OUTPUT "${_stamp}" BYPRODUCTS "${_inventory}"
+        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT:FILEPATH=${_inventory}"
+          "-DSTAMP:FILEPATH=${_stamp}" -P "${_script}"
+        DEPENDS "${_registry_source}" "${_script}"
+          "${CMAKE_CURRENT_FUNCTION_LIST_FILE}"
+        COMMENT "Scanning biological alphabet registry topology"
+        VERBATIM)
+      add_custom_target(bioseq_biological_alphabet_inventory DEPENDS "${_stamp}")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_inventory}")
+  endif()
 endfunction()
 
 function(_bioseq_build_config_profiles output_variable)

@@ -23,6 +23,7 @@ module;
 #include <clang/Basic/Version.h>
 #include <clang/Frontend/CompilerInstance.h>
 #include <clang/Frontend/FrontendAction.h>
+#include <clang/Frontend/TextDiagnosticPrinter.h>
 #include <clang/Index/USRGeneration.h>
 #include <clang/Lex/Lexer.h>
 #include <clang/Lex/PPCallbacks.h>
@@ -5954,7 +5955,7 @@ class structural_visitor final
             if (definition_path.empty()) throw std::runtime_error("alphabet definition lacks source identity");
             metadata.source_digest = bioseq::common::sha256_hex(
                 metadata.source_digest + "\n" + canonical_type + "\n"
-                + bioseq::common::sha256_hex(read_artifact_bytes(definition_path)));
+                + hash_artifact_file(definition_path));
         }
     }
 
@@ -7974,7 +7975,7 @@ struct relocation_context {
     std::string material;
     for (const std::filesystem::path& input : inputs) {
         material += input.generic_string() + "\t"
-            + bioseq::common::sha256_hex(read_artifact_bytes(input)) + "\n";
+            + hash_artifact_file(input) + "\n";
     }
     return bioseq::common::sha256_hex(material);
 }
@@ -8051,7 +8052,7 @@ struct relocation_context {
 }
 
 inline constexpr std::string_view k_module_preparation_policy_domain{
-    "bioseq_clang_module_preparation\nrevision=5"};
+    "bioseq_clang_module_preparation\nrevision=6"};
 
 struct module_build_record {
     std::string module_name;
@@ -8337,7 +8338,7 @@ parse_make_depfile(
                     + dependency.string());
             }
             position->second =
-                bioseq::common::sha256_hex(read_artifact_bytes(dependency));
+                hash_artifact_file(dependency);
         }
         material += key + "\t" + position->second + "\n";
     }
@@ -8417,7 +8418,7 @@ parse_make_depfile(
     for (const std::filesystem::path& file : files) {
         dependencies.push_back(file);
         material += file.lexically_relative(root).generic_string()
-            + "\t" + bioseq::common::sha256_hex(read_artifact_bytes(file)) + "\n";
+            + "\t" + hash_artifact_file(file) + "\n";
     }
     return bioseq::common::sha256_hex(material);
 }
@@ -8630,7 +8631,7 @@ validate_selected_toolchain(
     const std::filesystem::path linked_llvm_config =
         weakly_canonical_path(BIOSEQ_LINKED_LLVM_CONFIG);
     if (configured_llvm_config != linked_llvm_config
-        || bioseq::common::sha256_hex(read_artifact_bytes(configured_llvm_config))
+        || hash_artifact_file(configured_llvm_config)
             != BIOSEQ_LINKED_LLVM_CONFIG_SHA256) {
         throw std::runtime_error(
             "selected llvm-config does not match the exact LibTooling "
@@ -8694,10 +8695,13 @@ validate_selected_toolchain(
         weakly_canonical_path(BIOSEQ_LINKED_LLVM_LIBRARY);
     if (!path_within_root(linked_clang_cpp, prefix)
         || !path_within_root(linked_llvm, prefix)
-        || bioseq::common::sha256_hex(read_artifact_bytes(linked_clang_cpp))
+        || hash_artifact_file(linked_clang_cpp)
             != BIOSEQ_LINKED_CLANG_CPP_SHA256
-        || bioseq::common::sha256_hex(read_artifact_bytes(linked_llvm))
-            != BIOSEQ_LINKED_LLVM_LIBRARY_SHA256) {
+        || (linked_clang_cpp == linked_llvm
+            ? std::string_view{BIOSEQ_LINKED_CLANG_CPP_SHA256}
+                != BIOSEQ_LINKED_LLVM_LIBRARY_SHA256
+            : hash_artifact_file(linked_llvm)
+                != BIOSEQ_LINKED_LLVM_LIBRARY_SHA256)) {
         throw std::runtime_error(
             "linked Clang/LLVM libraries no longer match their "
             "configure-time identities");
@@ -9669,7 +9673,7 @@ load_compiler_module_inventory(
 
 void scan_active_module_imports(
     module_build_record& record,
-    const std::filesystem::path& clang_scan_deps,
+    clang::tooling::DependencyScanningTool& scanner,
     const std::string& clang_binary_sha256,
     const std::string& clang_scan_deps_sha256,
     const std::filesystem::path& scan_root,
@@ -9735,52 +9739,63 @@ void scan_active_module_imports(
             relocation,
             record.base_arguments.front(),
             clang_binary_sha256);
-    const std::filesystem::path staged_result =
-        create_owned_staging_file(
-            pcm_root, artifacts.result, "P1689 scan result");
-    scoped_artifact_cleanup result_cleanup{staged_result};
-    const std::filesystem::path staged_diagnostics =
-        create_owned_staging_file(
-            pcm_root, artifacts.diagnostics, "P1689 diagnostics");
-    scoped_artifact_cleanup diagnostics_cleanup{
-        staged_diagnostics};
-    const std::vector<std::string> arguments{
-        clang_scan_deps.string(),
-        "-compilation-database=" + artifacts.database.string(),
-        "-format=p1689",
-        "-j",
-        "1",
-        "-o",
-        staged_result.string(),
-    };
-    execute_clang(
-        clang_scan_deps,
-        arguments,
+    // Use the exact authenticated LibTooling build already linked into the
+    // generator. Its service lives for one preparation only: common headers
+    // and dependency directives are reused across providers, never across
+    // builds (where new include candidates or changed headers must be seen).
+    std::string diagnostics;
+    llvm::raw_string_ostream diagnostic_stream{diagnostics};
+    clang::DiagnosticOptions diagnostic_options;
+    clang::TextDiagnosticPrinter diagnostic_printer{
+        diagnostic_stream, diagnostic_options};
+    const clang::tooling::CompileCommand command{
         record.command.Directory,
-        record.module_name,
-        "P1689 dependency discovery",
-        staged_diagnostics);
-    publish_owned_staging_file(
-        pcm_root,
-        staged_result,
-        artifacts.result,
-        "P1689 scan result");
-    result_cleanup.release();
-    publish_owned_staging_file(
-        pcm_root,
-        staged_diagnostics,
-        artifacts.diagnostics,
-        "P1689 diagnostics");
-    diagnostics_cleanup.release();
-    const std::string diagnostics =
-        read_artifact_bytes(artifacts.diagnostics);
+        record.source_path.string(),
+        scan_command,
+        "", // The logical database has no separate "output" field.
+    };
+    const auto rule = scanner.getP1689ModuleDependencyFile(
+        command, record.command.Directory, diagnostic_printer);
+    if (!rule) {
+        throw std::runtime_error(
+            "linked-Clang P1689 dependency discovery failed for module '"
+            + record.module_name + "':\n" + diagnostics);
+    }
+    llvm::json::Object output_rule{{"primary-output", rule->PrimaryOutput}};
+    if (rule->Provides) {
+        output_rule["provides"] = llvm::json::Array{llvm::json::Object{
+            {"logical-name", rule->Provides->ModuleName},
+            {"source-path", rule->Provides->SourcePath},
+            {"is-interface", rule->Provides->IsStdCXXModuleInterface},
+        }};
+    }
+    llvm::json::Array requirements;
+    for (const auto& required : rule->Requires) {
+        llvm::json::Object entry{{"logical-name", required.ModuleName}};
+        if (!required.SourcePath.empty()) {
+            entry["source-path"] = required.SourcePath;
+        }
+        requirements.push_back(std::move(entry));
+    }
+    if (!requirements.empty()) output_rule["requires"] = std::move(requirements);
+    const llvm::json::Value output(llvm::json::Object{
+        {"version", 1}, {"revision", 0},
+        {"rules", llvm::json::Array{std::move(output_rule)}},
+    });
+    std::string result_document;
+    llvm::raw_string_ostream result_stream{result_document};
+    result_stream << llvm::formatv("{0:2}\n", output);
+    atomic_write_owned_file(
+        pcm_root, artifacts.result, result_document, "P1689 scan result");
+    atomic_write_owned_file(
+        pcm_root, artifacts.diagnostics, diagnostics, "P1689 diagnostics");
     record.dependency_scan_diagnostics_sha256 =
         bioseq::common::sha256_hex(diagnostics);
     record.relocatable_dependency_scan_diagnostics_sha256 =
         relocatable_document_hash(
             diagnostics, relocation);
     record.dependency_scan_result_sha256 =
-        bioseq::common::sha256_hex(read_artifact_bytes(artifacts.result));
+        hash_artifact_file(artifacts.result);
     record.relocatable_dependency_scan_result_sha256 =
         relocatable_document_hash(
             read_artifact_bytes(artifacts.result), relocation);
@@ -10600,7 +10615,7 @@ prepare_compilation_environment(
            std::string_view expected,
            std::string_view role) {
             if (expected.size() != 64
-                || bioseq::common::sha256_hex(read_artifact_bytes(path)) != expected) {
+                || hash_artifact_file(path) != expected) {
                 throw std::runtime_error(
                     std::string{role}
                     + " differs from its configure-time SHA-256");
@@ -10653,12 +10668,11 @@ prepare_compilation_environment(
             clang_scan_deps,
             llvm_config,
             compiler_module_inventory);
-    const std::string clang_binary_sha256 =
-        bioseq::common::sha256_hex(read_artifact_bytes(clang_binary));
+    // These exact bytes were checked above in this observation pass.
+    const std::string clang_binary_sha256{expected_clang_sha256};
     const std::string& clang_scan_deps_version =
         toolchain.clang_scan_deps_full_version;
-    const std::string clang_scan_deps_sha256 =
-        bioseq::common::sha256_hex(read_artifact_bytes(clang_scan_deps));
+    const std::string clang_scan_deps_sha256{expected_clang_scan_deps_sha256};
     const std::filesystem::path import_scan_root =
         clang_backend::ensure_owned_directory(
             pcm_root, ".module-dependency-scan");
@@ -10933,129 +10947,137 @@ prepare_compilation_environment(
         }
         dependencies.push_back(expected);
     }
-    std::map<std::string, int, std::less<>> visit_state;
     std::vector<std::string> build_order;
-    std::vector<std::string> visit_stack;
-    std::function<void(const std::string&)> visit = [
-                                                        &ambiguous_selected_commands,
-                                                        &build_order,
-                                                        &clang_binary,
-                                                        &clang_binary_sha256,
-                                                        &clang_scan_deps,
-                                                        &clang_scan_deps_sha256,
-                                                        &compiler_profile,
-                                                        &dependencies,
-                                                        &import_scan_root,
-                                                        &modules,
-                                                        &observed_actions,
-                                                        &relocation,
-                                                        &relocation_root,
-                                                        &toolchain,
-                                                        &visit,
-                                                        &visit_stack,
-                                                        &visit_state](
-                                                        const std::string& module_name)
-        -> void {
-            const int state = visit_state[module_name];
-            if (state == 2) return;
-            if (state == 1) {
-                std::string cycle;
-                for (const std::string& name : visit_stack) {
-                    if (!cycle.empty()) cycle += " -> ";
-                    cycle += name;
-                }
-                if (!cycle.empty()) cycle += " -> ";
-                cycle += module_name;
-                throw std::runtime_error(
-                    "Clang module dependency cycle: " + cycle);
-            }
-            const auto found = modules.find(module_name);
-            if (found == modules.end()) {
-                if (module_name == "std"
-                    || module_name == "std.compat"
-                    || module_name.starts_with("std.")) {
-                    throw std::runtime_error(
-                        "compiler-owned module import '" + module_name
-                        + "' has no selected-Clang source provider in "
-                          "the raw compile database");
-                }
-                throw std::runtime_error(
-                    "Clang module import has no source provider in the "
-                    "raw compile database: " + module_name);
-            }
-            visit_state[module_name] = 1;
-            visit_stack.push_back(module_name);
-            clang_backend::module_build_record& record =
-                found->second;
-            if (record.base_arguments.empty()) {
-                if (ambiguous_selected_commands.contains(
-                        record.source_path)) {
-                    throw std::runtime_error(
-                        "raw compile database has equal-preference commands "
-                        "with unequal normalized flags for "
-                        + record.source_path.string());
-                }
-                record.source_sha256 =
-                    bioseq::common::sha256_hex(read_artifact_bytes(record.source_path));
-                record.relocatable_source_sha256 =
-                    clang_backend::relocatable_document_hash(
-                        read_artifact_bytes(record.source_path), relocation);
-                const std::size_t dependency_begin =
-                    dependencies.size();
-                record.base_arguments =
-                    clang_backend::normalized_base_arguments(
-                        record.command,
-                        record.source_path,
-                        clang_binary,
-                        toolchain.resource_dir,
-                        relocation_root,
-                        compiler_profile,
-                        dependencies);
-                record.command_inputs.assign(
-                    dependencies.begin()
-                        + static_cast<std::ptrdiff_t>(
-                            dependency_begin),
-                    dependencies.end());
-                std::ranges::sort(record.command_inputs);
-                record.command_inputs.erase(
-                    std::ranges::unique(
-                        record.command_inputs).begin(),
-                    record.command_inputs.end());
-                record.command_input_sha256 =
-                    clang_backend::command_input_hash(
-                        record.command_inputs);
-                record.relocatable_command_input_sha256 =
-                    clang_backend::relocatable_command_input_hash(
-                        record.command_inputs,
-                        relocation);
-                clang_backend::scan_active_module_imports(
-                    record,
-                    clang_scan_deps,
-                    clang_binary_sha256,
-                    clang_scan_deps_sha256,
-                    import_scan_root,
-                    relocation,
-                    observed_actions);
-            }
-            for (const std::string& imported :
-                 record.description.imports) {
-                if (imported.starts_with("std")
-                    && imported != "std"
-                    && imported != "std.compat") {
-                    throw std::runtime_error(
-                        "unsupported compiler-owned module import '"
-                        + imported + "' in module '" + module_name
-                        + "'; selected-Clang policy permits only std "
-                          "and std.compat");
-                }
-                visit(imported);
-            }
-            visit_stack.pop_back();
-            visit_state[module_name] = 2;
-            build_order.push_back(module_name);
+    {
+        // Release the scanner's shared buffers before memory-heavy PCM builds.
+        std::map<std::string, int, std::less<>> visit_state;
+        std::vector<std::string> visit_stack;
+        clang::dependencies::DependencyScanningService import_scan_service{
+            clang::dependencies::ScanningMode::DependencyDirectivesScan,
+            clang::dependencies::ScanningOutputFormat::P1689,
         };
-    for (const std::filesystem::path& root : roots) {
-        visit(module_by_source.at(root));
+        clang::tooling::DependencyScanningTool import_scanner{import_scan_service};
+        std::function<void(const std::string&)> visit = [
+                                                            &ambiguous_selected_commands,
+                                                            &build_order,
+                                                            &clang_binary,
+                                                            &clang_binary_sha256,
+                                                            &clang_scan_deps_sha256,
+                                                            &compiler_profile,
+                                                            &dependencies,
+                                                            &import_scan_root,
+                                                            &import_scanner,
+                                                            &modules,
+                                                            &observed_actions,
+                                                            &relocation,
+                                                            &relocation_root,
+                                                            &toolchain,
+                                                            &visit,
+                                                            &visit_stack,
+                                                            &visit_state](
+                                                            const std::string& module_name)
+            -> void {
+                const int state = visit_state[module_name];
+                if (state == 2) return;
+                if (state == 1) {
+                    std::string cycle;
+                    for (const std::string& name : visit_stack) {
+                        if (!cycle.empty()) cycle += " -> ";
+                        cycle += name;
+                    }
+                    if (!cycle.empty()) cycle += " -> ";
+                    cycle += module_name;
+                    throw std::runtime_error(
+                        "Clang module dependency cycle: " + cycle);
+                }
+                const auto found = modules.find(module_name);
+                if (found == modules.end()) {
+                    if (module_name == "std"
+                        || module_name == "std.compat"
+                        || module_name.starts_with("std.")) {
+                        throw std::runtime_error(
+                            "compiler-owned module import '" + module_name
+                            + "' has no selected-Clang source provider in "
+                              "the raw compile database");
+                    }
+                    throw std::runtime_error(
+                        "Clang module import has no source provider in the "
+                        "raw compile database: " + module_name);
+                }
+                visit_state[module_name] = 1;
+                visit_stack.push_back(module_name);
+                clang_backend::module_build_record& record =
+                    found->second;
+                if (record.base_arguments.empty()) {
+                    if (ambiguous_selected_commands.contains(
+                            record.source_path)) {
+                        throw std::runtime_error(
+                            "raw compile database has equal-preference commands "
+                            "with unequal normalized flags for "
+                            + record.source_path.string());
+                    }
+                    record.source_sha256 =
+                        hash_artifact_file(record.source_path);
+                    record.relocatable_source_sha256 =
+                        clang_backend::relocatable_document_hash(
+                            read_artifact_bytes(record.source_path), relocation);
+                    const std::size_t dependency_begin =
+                        dependencies.size();
+                    record.base_arguments =
+                        clang_backend::normalized_base_arguments(
+                            record.command,
+                            record.source_path,
+                            clang_binary,
+                            toolchain.resource_dir,
+                            relocation_root,
+                            compiler_profile,
+                            dependencies);
+                    record.command_inputs.assign(
+                        dependencies.begin()
+                            + static_cast<std::ptrdiff_t>(
+                                dependency_begin),
+                        dependencies.end());
+                    std::ranges::sort(record.command_inputs);
+                    record.command_inputs.erase(
+                        std::ranges::unique(
+                            record.command_inputs).begin(),
+                        record.command_inputs.end());
+                    record.command_input_sha256 =
+                        clang_backend::command_input_hash(
+                            record.command_inputs);
+                    record.relocatable_command_input_sha256 =
+                        clang_backend::relocatable_command_input_hash(
+                            record.command_inputs,
+                            relocation);
+                    clang_backend::scan_active_module_imports(
+                        record,
+                        import_scanner,
+                        clang_binary_sha256,
+                        clang_scan_deps_sha256,
+                        import_scan_root,
+                        relocation,
+                        observed_actions);
+                }
+                for (const std::string& imported :
+                     record.description.imports) {
+                    if (imported.starts_with("std")
+                        && imported != "std"
+                        && imported != "std.compat") {
+                        throw std::runtime_error(
+                            "unsupported compiler-owned module import '"
+                            + imported + "' in module '" + module_name
+                            + "'; selected-Clang policy permits only std "
+                              "and std.compat");
+                    }
+                    visit(imported);
+                }
+                visit_stack.pop_back();
+                visit_state[module_name] = 2;
+                build_order.push_back(module_name);
+            };
+        for (const std::filesystem::path& root : roots) {
+            visit(module_by_source.at(root));
+        }
     }
 
     std::unordered_map<std::string, std::string>
@@ -11213,7 +11235,7 @@ prepare_compilation_environment(
                 relocation,
                 relocatable_dependency_hash_cache);
         record.depfile_sha256 =
-            bioseq::common::sha256_hex(read_artifact_bytes(record.depfile_path));
+            hash_artifact_file(record.depfile_path);
         record.relocatable_depfile_sha256 =
             clang_backend::relocatable_document_hash(
                 read_artifact_bytes(record.depfile_path),
@@ -11279,7 +11301,7 @@ prepare_compilation_environment(
                     + module_name + "'");
             }
             record.pcm_sha256 =
-                bioseq::common::sha256_hex(read_artifact_bytes(pcm_artifacts.pcm));
+                hash_artifact_file(pcm_artifacts.pcm);
             const std::string expected_provenance =
                 clang_backend::render_pcm_provenance(
                     record,
@@ -11363,7 +11385,7 @@ prepare_compilation_environment(
                     + ")");
             }
             record.pcm_sha256 =
-                bioseq::common::sha256_hex(read_artifact_bytes(pcm_artifacts.pcm));
+                hash_artifact_file(pcm_artifacts.pcm);
             const std::string provenance =
                 clang_backend::render_pcm_provenance(
                     record,
@@ -11694,7 +11716,7 @@ prepare_compilation_environment(
                 << clang_backend::json_escape(
                        input.string())
                 << "\", \"sha256\": \""
-                << bioseq::common::sha256_hex(read_artifact_bytes(input))
+                << hash_artifact_file(input)
                 << "\", \"relocatable_sha256\": \""
                 << clang_backend::relocatable_document_hash(
                     read_artifact_bytes(input), relocation)
@@ -12868,7 +12890,7 @@ validate_dependency_compilation_environment(
            std::string_view expected,
            std::string_view role) {
             if (expected.size() != 64
-                || bioseq::common::sha256_hex(read_artifact_bytes(path)) != expected) {
+                || hash_artifact_file(path) != expected) {
                 throw std::runtime_error(
                     std::string{role}
                     + " differs from its configure-time SHA-256");
@@ -12898,8 +12920,7 @@ validate_dependency_compilation_environment(
             configured_compiler_module_inventory);
     const std::filesystem::path& clang_binary =
         configured_clang_binary;
-    const std::string clang_binary_sha256 =
-        bioseq::common::sha256_hex(read_artifact_bytes(clang_binary));
+    const std::string clang_binary_sha256{expected_clang_sha256};
     if (clang_binary_sha256
         != required_string(*root, "clang_binary_sha256")) {
         throw std::runtime_error(
@@ -12909,8 +12930,7 @@ validate_dependency_compilation_environment(
         configured_clang_scan_deps;
     const std::string& clang_scan_deps_version =
         toolchain.clang_scan_deps_full_version;
-    const std::string clang_scan_deps_sha256 =
-        bioseq::common::sha256_hex(read_artifact_bytes(clang_scan_deps));
+    const std::string clang_scan_deps_sha256{expected_clang_scan_deps_sha256};
     if (clang_scan_deps_version
             != required_string(
                 *root, "clang_scan_deps_version")
@@ -12989,7 +13009,7 @@ validate_dependency_compilation_environment(
             "PREPARE compiler-module inventory seal is incomplete");
     }
     if (!compiler_inventory_path.empty()
-        && bioseq::common::sha256_hex(read_artifact_bytes(compiler_inventory_path))
+        && hash_artifact_file(compiler_inventory_path)
             != compiler_inventory_sha256) {
         throw std::runtime_error(
             "selected Clang compiler-module inventory is stale");
@@ -13184,7 +13204,7 @@ validate_dependency_compilation_environment(
                 clang_backend::weakly_canonical_path(
                     required_string(*input, "path"));
             if (!std::filesystem::is_regular_file(path)
-                || bioseq::common::sha256_hex(read_artifact_bytes(path))
+                || hash_artifact_file(path)
                     != required_string(*input, "sha256")
                 || clang_backend::relocatable_document_hash(
                        read_artifact_bytes(path), relocation)
@@ -13278,7 +13298,7 @@ validate_dependency_compilation_environment(
             clang_backend::weakly_canonical_path(
                 module.pcm_provenance);
         if (!std::filesystem::is_regular_file(module.source)
-            || bioseq::common::sha256_hex(read_artifact_bytes(module.source))
+            || hash_artifact_file(module.source)
                 != module.source_sha256
             || clang_backend::relocatable_document_hash(
                    read_artifact_bytes(module.source),
@@ -13584,7 +13604,7 @@ validate_dependency_compilation_environment(
         if (!clang_backend::path_within_root(
                 module.depfile, pcm_root)
             || !std::filesystem::is_regular_file(module.depfile)
-            || bioseq::common::sha256_hex(read_artifact_bytes(module.depfile))
+            || hash_artifact_file(module.depfile)
                 != module.depfile_sha256
             || clang_backend::relocatable_document_hash(
                    read_artifact_bytes(module.depfile),
@@ -13597,7 +13617,7 @@ validate_dependency_compilation_environment(
         if (!clang_backend::path_within_root(
                 module.pcm, pcm_root)
             || !std::filesystem::is_regular_file(module.pcm)
-            || bioseq::common::sha256_hex(read_artifact_bytes(module.pcm))
+            || hash_artifact_file(module.pcm)
                 != module.pcm_sha256) {
             throw std::runtime_error(
                 "PREPARE PCM is missing, foreign, or corrupt for module '"

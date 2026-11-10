@@ -61,6 +61,7 @@ bioseq_template_flatten_probe(
   OUT_ENABLED_ORDINALS BIOSEQ_TYPED_ENABLED_ORDINALS
   OUT_ENABLED_SOURCES BIOSEQ_TYPED_PROBED_ENABLED_SOURCES)
 bioseq_template_flatten_read_group(
+  ENABLED_ONLY
   TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   ROLE identity
   GROUP alphabet
@@ -68,6 +69,7 @@ bioseq_template_flatten_read_group(
   OUT_REPLACEMENTS BIOSEQ_TYPED_ALPHABET_REPLACEMENTS
   OUT_ORDINALS BIOSEQ_TYPED_ALPHABET_ORDINALS)
 bioseq_template_flatten_read_group(
+  ENABLED_ONLY
   TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   ROLE identity
   GROUP width
@@ -108,7 +110,7 @@ unset(_bioseq_highway_alignment_alphabet_ordinal)
 
 # Minimizer target wrappers use the same scheduler-owned alphabet/width axes.
 # Each synthetic family is one Cartesian case; the Highway renderer validates
-# exact 2 x 4 closure and folds these leaves back into the neutral three-member
+# the enabled alphabet/width closure and folds these leaves into the three-member
 # MinimizerKernels table. The renderer also reconciles these records with the
 # typed alignment families to emit the root table's neutral alphabet identity;
 # no additional CMake alphabet registry participates.

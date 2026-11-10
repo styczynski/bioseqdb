@@ -682,7 +682,7 @@ capture_prepare_file_snapshot(
         result.push_back(prepare_file_snapshot{
             .configured_spelling = spelling,
             .identity = identity,
-            .sha256 = bioseq::common::sha256_hex(read_artifact_bytes(identity)),
+            .sha256 = hash_artifact_file(identity),
         });
     }
     return result;
@@ -1075,7 +1075,6 @@ inline void require_prepare_content(
 inline void validate_configure_handshake(
     const command_line& command,
     const configure_topology_provenance& configure,
-    std::string_view source_sha256,
     const topology_plan& topology) {
     validate_configure_topology_digest(
         topology, command.expected_topology_digest);
@@ -1084,7 +1083,7 @@ inline void validate_configure_handshake(
         || configure.emission != command.policy
         || configure.name != command.name
         || path_identity(configure.source_path) != path_identity(command.source)
-        || configure.source_sha256 != source_sha256
+        || configure.source_module != topology.region.source_module.provided_module
         || path_identity(configure.output_root)
             != path_identity(command.output_root)
         || configure.output_module != command.output_module
@@ -1127,7 +1126,7 @@ inline void validate_configure_handshake(
         sliced, command.output_module, command.policy, source, alphabets);
     topology_plan topology = build_topology_plan(std::move(region));
     validate_configure_handshake(
-        command, configure, source_sha256, topology);
+        command, configure, topology);
     validate_enabled_ordinals(
         topology, command.profile, command.enabled_ordinals);
     validate_entry_ownership(topology);

@@ -1638,6 +1638,34 @@ inline void verify_typed_minimizer_binder() {
         checked_minimizer_owner_units == 6U,
         "each fixed target compiles three minimizer owner units");
 
+    generation_plan uint64_only = plan;
+    std::erase_if(uint64_only.source_inventory.slots, [](const slot_spec& slot) {
+        return slot.family_field.starts_with("minimizer_case_")
+            && !slot.family_field.ends_with("_8");
+    });
+    std::size_t uint64_owner_units = 0U;
+    for (const generated_artifact& artifact : render_generation(uint64_only).artifacts) {
+        if (artifact.kind != artifact_kind::kernel_instantiation
+            || !artifact.source_key.starts_with("minimizer_")) continue;
+        ++uint64_owner_units;
+        const std::string callable = artifact.source_key == "minimizer_minimap2_reference"
+            ? "minimap2_reference_admit"
+            : artifact.source_key.substr(std::string_view{"minimizer_"}.size()) + "_case";
+        require(
+            occurrences(artifact.content, callable + "<") == 2U,
+            "the uint64 profile retains both alphabets and every minimizer algorithm");
+        std::string compact_content = artifact.content;
+        std::erase(compact_content, ' ');
+        for (const std::string_view alphabet : {"::seq::dna4", "::seq::dna5"}) {
+            require(
+                compact_content.contains(callable + "<" + std::string{alphabet}
+                                         + ",::std::uint64_t>"),
+                "the uint64 profile retains the existing specialized kernel call");
+        }
+    }
+    require(uint64_owner_units == 6U,
+            "width filtering retains all algorithm owners on both fixed targets");
+
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.erase(
         incomplete.source_inventory.slots.begin(),

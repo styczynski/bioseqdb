@@ -797,6 +797,9 @@ function(bioseq_add_codegen)
   if(CMAKE_TOOLCHAIN_FILE)
     list(APPEND _bioseq_codegen_dependency_cmake_args
       "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${CMAKE_TOOLCHAIN_FILE}"
+      # Parent configure owns installation. Re-running it from the host tool
+      # can rebuild the same tree with different compiler/ABI settings.
+      "-DVCPKG_MANIFEST_INSTALL:BOOL=OFF"
       "-DVCPKG_MANIFEST_DIR:PATH=${_bioseq_repository_root}")
   endif()
   if(VCPKG_INSTALLED_DIR)
@@ -897,4 +900,24 @@ function(bioseq_add_codegen)
     "Path to the built bioseq_codegen host-tool executable"
     FORCE)
   set(BIOSEQ_CODEGEN_EXECUTABLE "${_executable}" PARENT_SCOPE)
+
+  if(_enable_sql)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_custom_target(bioseq_codegen_incremental_tests
+      COMMAND "${Python3_EXECUTABLE}"
+        "${_bioseq_repository_root}/cmake/tests/integration/test_template_flatten_incremental.py"
+      COMMAND "${Python3_EXECUTABLE}"
+        "${_bioseq_repository_root}/codegen/structural_analysis/tests/integration/test_prepare_incremental.py"
+        run --codegen "${_executable}" --ninja "${CMAKE_MAKE_PROGRAM}"
+        --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
+        --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
+        --llvm-config "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
+        --compiler-inventory "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+        --clang-sha256 "${BIOSEQ_CODEGEN_CLANG_SHA256}"
+        --clang-scan-deps-sha256 "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
+        --llvm-config-sha256 "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
+        --compiler-inventory-sha256 "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
+      DEPENDS ${ARG_PROJECT_TARGET}
+      USES_TERMINAL VERBATIM)
+  endif()
 endfunction()

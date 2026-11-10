@@ -447,6 +447,9 @@ foreach(_negative_case IN LISTS _negative_cases)
   endif()
   string(CONCAT _negative_diagnostics
     "${_negative_output}" "${_negative_error}")
+  # CMake wraps diagnostics according to the terminal width.
+  string(REGEX REPLACE "[ \t\r\n]+" " " _negative_diagnostics
+    "${_negative_diagnostics}")
   _require_contains("${_negative_diagnostics}"
     "${_negative_expected_diagnostic}"
     "build-config negative case ${_negative_name}")

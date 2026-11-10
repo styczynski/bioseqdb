@@ -1,5 +1,7 @@
 module;
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -8,8 +10,11 @@ module;
 #include <string_view>
 #include <system_error>
 #include <stdexcept>
+#include <span>
 
 export module bioseq.codegen.support:artifact_io;
+
+import bioseq.common.hashing;
 
 namespace fs = std::filesystem;
 
@@ -40,6 +45,25 @@ struct artifact_owner_view {
         throw std::runtime_error("cannot finish reading " + path.string());
     }
     return result;
+}
+
+/// Hashes exact file bytes with bounded memory, including large compiler/PCM files.
+[[nodiscard]] std::string hash_artifact_file(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error("cannot read " + path.string());
+    }
+    bioseq::common::sha256_hasher hasher;
+    std::array<char, 64 * 1024> buffer;
+    while (input) {
+        input.read(buffer.data(), buffer.size());
+        hasher.update(std::as_bytes(std::span{
+            buffer.data(), static_cast<std::size_t>(input.gcount())}));
+    }
+    if (!input.eof()) {
+        throw std::runtime_error("cannot finish reading " + path.string());
+    }
+    return bioseq::common::to_hex(hasher.finalize());
 }
 
 /// @brief Replaces a generated file only when its contents, change.

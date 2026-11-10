@@ -65,7 +65,7 @@ struct configure_topology_provenance {
     emission_policy emission{emission_policy::selector_api};
     std::string name;
     std::filesystem::path source_path;
-    std::string source_sha256;
+    std::string source_module;
     std::filesystem::path output_root;
     std::string output_module;
     std::string profile;
@@ -1840,7 +1840,7 @@ parse_configure_topology_provenance(
             std::string_view{"emission_policy"},
             std::string_view{"name"},
             std::string_view{"source_path"},
-            std::string_view{"source_sha256"},
+            std::string_view{"source_module"},
             std::string_view{"output_root"},
             std::string_view{"output_module"},
             std::string_view{"profile"},
@@ -1882,8 +1882,8 @@ parse_configure_topology_provenance(
         fs::path{require_string(
             require_member(root, "source_path", owner), "source_path")},
         "configure topology source path");
-    const std::string source_sha256{require_string(
-        require_member(root, "source_sha256", owner), "source_sha256")};
+    const std::string source_module{require_string(
+        require_member(root, "source_module", owner), "source_module")};
     const fs::path output_root = checked_absolute_path(
         fs::path{require_string(
             require_member(root, "output_root", owner), "output_root")},
@@ -1924,12 +1924,11 @@ parse_configure_topology_provenance(
     const std::string topology_digest{require_string(
         require_member(root, "topology_digest", owner),
         "topology_digest")};
-    if (!manifest_label(name) || output_module.empty()) {
+    if (!manifest_label(name) || output_module.empty() || source_module.empty()) {
         throw std::runtime_error(
             std::string{owner}
             + ": configure topology name or module identity is invalid");
     }
-    require_sha256(source_sha256, "source_sha256");
     require_sha256(topology_digest, "topology_digest");
 
     const json_value& bindings_value = require_member(root, "bindings", owner);
@@ -2335,7 +2334,7 @@ parse_configure_topology_provenance(
         .emission = emission,
         .name = name,
         .source_path = source_path,
-        .source_sha256 = source_sha256,
+        .source_module = source_module,
         .output_root = output_root,
         .output_module = output_module,
         .profile = profile,

@@ -17,7 +17,7 @@ import bioseq.codegen.structural_analysis;
 export namespace bioseq::codegen::namespace_materialization {
 
 /// Versions of the JSON formats written by this generator.
-inline constexpr std::uint32_t topology_schema_revision = 2;
+inline constexpr std::uint32_t topology_schema_revision = 3;
 inline constexpr std::uint32_t artifact_schema_revision = 4;
 inline constexpr std::uint32_t publication_schema_revision = 1;
 

@@ -689,7 +689,7 @@ enum class topology_mutation : std::uint8_t {
 
 inline void verify_closed_grammar() {
     require(
-        topology_schema_revision == 2U
+        topology_schema_revision == 3U
             && artifact_schema_revision == 4U
             && publication_schema_revision == 1U
             && parse_emission_policy("selector_api")
@@ -2290,7 +2290,7 @@ inline void verify_generated_topology() {
         "two identities/two shards render API, selector, two probes, four units, and one topology manifest");
     require(
         generated.topology_manifest_json.contains(
-            "\"schema_revision\": 2")
+            "\"schema_revision\": 3")
             && generated.topology_manifest_json.contains(
                 "\"generator_identity\": "
                 "\"bioseq-namespace-materialization\"")
@@ -2446,7 +2446,7 @@ inline void verify_owner_generated_topology() {
         "owner publication owns 0/0/N compilable outputs and excludes inspection-only probes");
     require(
         generated.topology_manifest_json.contains(
-            "\"schema_revision\": 2")
+            "\"schema_revision\": 3")
             && generated.topology_manifest_json.contains(
                 "\"emission_policy\": \"implementation_owners\"")
             && generated.artifact_manifest_json.contains(

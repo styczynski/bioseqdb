@@ -500,7 +500,7 @@ parse_minimizer_registry_command_line(
 
     const std::vector<std::filesystem::path> source_paths =
         source_paths_of(sources);
-    // The prepared database points Clang to temporar compiled modules. Use it
+    // The prepared database points Clang to temporary compiled modules. Use it
     // to find callable positions for HWY_ATTR insertion. The temporary modules
     // belong to this analysis step and are not linked into the application.
     constexpr std::string_view compiler_profile = "production";
@@ -521,18 +521,14 @@ parse_minimizer_registry_command_line(
             compiler_profile,
             "core");
     validate_highway_prepared_closure(sources, prepared);
-    const structural_analysis::structural_index structural =
-        structural_analysis::scan_translation_units_from_database(
+    const auto scanned =
+        structural_analysis::scan_translation_units_and_module_graph_from_database(
             source_paths,
             command.compile_database,
             compiler_profile,
             command.pcm_root);
-    const structural_analysis::module_graph graph =
-        structural_analysis::scan_module_graph_from_database(
-            source_paths,
-            command.compile_database,
-            compiler_profile,
-            command.pcm_root);
+    const auto& structural = scanned.structural;
+    const auto& graph = scanned.graph;
 
     generation_plan plan{
         .target_inventory = std::move(targets),

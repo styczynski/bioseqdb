@@ -2,7 +2,7 @@ include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/bioseq_build_config_codegen.cmake")
 
 function(_bioseq_template_flatten_fail message_text)
-  message(FATAL_ERROR "Bioseq template-flatten codegen: ${message_text}")
+  message(FATAL_ERROR "Bioseq template-flatten codegen: ${message_text}" ${ARGN})
 endfunction()
 
 function(_bioseq_template_flatten_scheduler_count_error profile expected actual
@@ -274,10 +274,7 @@ function(bioseq_template_flatten_probe)
     set(_api_partition "")
     set(_selector_partition "")
   endif()
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${_source_path}")
   file(READ "${_source_path}" _source)
-  file(SHA256 "${_source_path}" _source_sha256)
 
   string(REGEX MATCH
     "export[ \t\r\n]+module[ \t\r\n]+([A-Za-z_][A-Za-z0-9_.]*)[ \t\r\n]*;"
@@ -531,7 +528,7 @@ function(bioseq_template_flatten_probe)
     "${_emission_policy}" _q_emission_policy)
   _bioseq_template_flatten_json_quote("${ARG_NAME}" _q_name)
   _bioseq_template_flatten_json_quote("${_source_path}" _q_source)
-  _bioseq_template_flatten_json_quote("${_source_sha256}" _q_source_sha)
+  _bioseq_template_flatten_json_quote("${_source_module}" _q_source_module)
   _bioseq_template_flatten_json_quote("${_output_root}" _q_root)
   _bioseq_template_flatten_json_quote("${ARG_OUTPUT_MODULE}" _q_module)
   _bioseq_template_flatten_json_quote("${ARG_PROFILE}" _q_profile)
@@ -544,14 +541,14 @@ function(bioseq_template_flatten_probe)
     set(_q_api null)
     set(_q_selector null)
   endif()
-  set(_json "{\n  \"schema_revision\": 2,\n")
+  set(_json "{\n  \"schema_revision\": 3,\n")
   string(APPEND _json
     "  \"generator_identity\": ${_q_generator_identity},\n"
     "  \"policy\": ${_q_policy},\n"
     "  \"emission_policy\": ${_q_emission_policy},\n"
     "  \"name\": ${_q_name},\n"
     "  \"source_path\": ${_q_source},\n"
-    "  \"source_sha256\": ${_q_source_sha},\n"
+    "  \"source_module\": ${_q_source_module},\n"
     "  \"output_root\": ${_q_root},\n"
     "  \"output_module\": ${_q_module},\n"
     "  \"profile\": ${_q_profile},\n"
@@ -702,10 +699,40 @@ function(bioseq_template_flatten_probe)
   _bioseq_template_flatten_write_if_different(
     "${_configure_manifest}" "${_json}")
 
-  set_property(SOURCE "${_source_path}" PROPERTY
-    BIOSEQ_TEMPLATE_FLATTEN_GENERATOR_INPUT TRUE)
-  set_property(GLOBAL APPEND PROPERTY BIOSEQ_TEMPLATE_FLATTEN_INPUTS
-    "${_source_path}")
+  if(NOT CMAKE_SCRIPT_MODE_FILE)
+    # Ninja updates this content-stable inventory before RERUN_CMAKE. A body
+    # edit runs the lexical probe but leaves CMake and output ownership alone.
+    set(_scan_script
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/scan_template_flatten_topology.cmake")
+    set(_scan_stamp "${_output_root}/topology.scan.stamp")
+    add_custom_command(
+      OUTPUT "${_scan_stamp}"
+      BYPRODUCTS "${_configure_manifest}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DBUILD_ROOT:PATH=${CMAKE_BINARY_DIR}"
+        "-DNAME:STRING=${ARG_NAME}"
+        "-DSOURCE:FILEPATH=${_source_path}"
+        "-DOUTPUT_ROOT:PATH=${_output_root}"
+        "-DOUTPUT_MODULE:STRING=${ARG_OUTPUT_MODULE}"
+        "-DPROFILE:STRING=${ARG_PROFILE}"
+        "-DEMISSION_POLICY:STRING=${_emission_policy}"
+        "-DSTAMP:FILEPATH=${_scan_stamp}"
+        -P "${_scan_script}"
+      DEPENDS "${_source_path}" "${_scan_script}"
+        "${CMAKE_CURRENT_FUNCTION_LIST_FILE}"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/bioseq_build_config_codegen.cmake"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../bioseq/backend/sequences/packed_sequence_parts/core.cppm"
+      COMMENT "Scanning ${ARG_NAME} template-flatten topology"
+      VERBATIM)
+    add_custom_target("bioseq_${ARG_NAME}_topology_scan"
+      DEPENDS "${_scan_stamp}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${_configure_manifest}")
+    set_property(SOURCE "${_source_path}" PROPERTY
+      BIOSEQ_TEMPLATE_FLATTEN_GENERATOR_INPUT TRUE)
+    set_property(GLOBAL APPEND PROPERTY BIOSEQ_TEMPLATE_FLATTEN_INPUTS
+      "${_source_path}")
+  endif()
   set(${ARG_OUT_CONFIGURE_TOPOLOGY_MANIFEST}
     "${_configure_manifest}" PARENT_SCOPE)
   set(${ARG_OUT_TOPOLOGY_DIGEST} "${_topology_digest}" PARENT_SCOPE)
@@ -714,7 +741,7 @@ function(bioseq_template_flatten_probe)
 endfunction()
 
 function(bioseq_template_flatten_read_group)
-  cmake_parse_arguments(PARSE_ARGV 0 ARG ""
+  cmake_parse_arguments(PARSE_ARGV 0 ARG "ENABLED_ONLY"
     "TOPOLOGY_MANIFEST;ROLE;GROUP;EMISSION_POLICY;OUT_LABELS;OUT_REPLACEMENTS;OUT_ORDINALS"
     "")
   foreach(_required IN ITEMS TOPOLOGY_MANIFEST ROLE GROUP OUT_LABELS
@@ -740,7 +767,7 @@ function(bioseq_template_flatten_read_group)
   string(JSON _recorded_emission_policy GET
     "${_json}" emission_policy)
   if(NOT _schema_type STREQUAL "NUMBER"
-      OR NOT _schema_revision STREQUAL "2"
+      OR NOT _schema_revision STREQUAL "3"
       OR NOT _generator_identity STREQUAL
         "bioseq-namespace-materialization"
       OR NOT _policy STREQUAL "template_flatten"
@@ -751,8 +778,35 @@ function(bioseq_template_flatten_read_group)
   string(JSON _group_count LENGTH "${_json}" groups)
   set(_found FALSE)
   set(_labels)
+  set(_seen_labels)
   set(_replacements)
   set(_ordinals)
+  # Project the configured coordinates, retaining their original ordinals.
+  # Consumers must not expand disabled cases back into template instantiations.
+  set(_enabled_labels)
+  if(ARG_ENABLED_ONLY)
+    string(JSON _coordinate_count LENGTH "${_json}" coordinates)
+    math(EXPR _last_coordinate "${_coordinate_count} - 1")
+    foreach(_coordinate RANGE 0 ${_last_coordinate})
+      string(JSON _enabled GET "${_json}" coordinates ${_coordinate} enabled)
+      if(NOT _enabled)
+        continue()
+      endif()
+      string(JSON _assignment_count LENGTH "${_json}"
+        coordinates ${_coordinate} assignments)
+      math(EXPR _last_assignment "${_assignment_count} - 1")
+      foreach(_assignment RANGE 0 ${_last_assignment})
+        string(JSON _assignment_group GET "${_json}"
+          coordinates ${_coordinate} assignments ${_assignment} group)
+        if(_assignment_group STREQUAL ARG_GROUP)
+          string(JSON _assignment_label GET "${_json}"
+            coordinates ${_coordinate} assignments ${_assignment} label)
+          list(APPEND _enabled_labels "${_assignment_label}")
+        endif()
+      endforeach()
+    endforeach()
+    list(REMOVE_DUPLICATES _enabled_labels)
+  endif()
   if(_group_count GREATER 0)
     math(EXPR _last_group "${_group_count} - 1")
     foreach(_index RANGE 0 ${_last_group})
@@ -784,11 +838,15 @@ function(bioseq_template_flatten_read_group)
         string(JSON _replacement GET "${_json}"
           groups ${_index} cases ${_case_index} replacement)
         if(NOT _ordinal EQUAL _case_index OR _label STREQUAL ""
-            OR _replacement STREQUAL "" OR _label IN_LIST _labels
+            OR _replacement STREQUAL "" OR _label IN_LIST _seen_labels
             OR _replacement MATCHES ";")
           _bioseq_template_flatten_fail(
             "group '${ARG_GROUP}' requires contiguous ordinals, unique "
             "labels, and non-empty list-safe replacements")
+        endif()
+        list(APPEND _seen_labels "${_label}")
+        if(ARG_ENABLED_ONLY AND NOT _label IN_LIST _enabled_labels)
+          continue()
         endif()
         list(APPEND _ordinals "${_ordinal}")
         list(APPEND _labels "${_label}")
@@ -905,7 +963,7 @@ function(bioseq_add_template_flatten_codegen)
     "${_json}" emission_policy)
   string(JSON _manifest_name GET "${_json}" name)
   if(NOT _schema_type STREQUAL "NUMBER"
-      OR NOT _schema_revision STREQUAL "2"
+      OR NOT _schema_revision STREQUAL "3"
       OR NOT _generator_identity STREQUAL
         "bioseq-namespace-materialization"
       OR NOT _policy STREQUAL "template_flatten"

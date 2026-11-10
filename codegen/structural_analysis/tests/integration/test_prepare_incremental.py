@@ -299,6 +299,7 @@ def _run_fixture(arguments: argparse.Namespace) -> int:
     ) as temporary:
         root = Path(temporary).resolve()
         source = root / "fixture.cppm"
+        provider = root / "provider.cppm"
         raw_database = root / "raw-compile-commands.json"
         owned_database = root / "owned-compile-commands.json"
         pcm_root = root / "pcm"
@@ -310,8 +311,16 @@ def _run_fixture(arguments: argparse.Namespace) -> int:
         config_path = root / "config.json"
         build_file = root / "build.ninja"
         source.write_text(
+            "module;\n#include <cstdint>\n"
             "export module fixture.incremental;\n"
+            "import fixture.provider;\n"
             "export int incremental_value();\n",
+            encoding="utf-8",
+        )
+        provider.write_text(
+            "module;\n#include <cstdint>\n"
+            "export module fixture.provider;\n"
+            "export int provider_value();\n",
             encoding="utf-8",
         )
         raw_database.write_text(
@@ -319,15 +328,16 @@ def _run_fixture(arguments: argparse.Namespace) -> int:
                 [
                     {
                         "directory": str(root),
-                        "file": str(source),
+                        "file": str(path),
                         "arguments": [
                             arguments.clang_binary,
                             "-std=c++26",
                             "-x",
                             "c++-module",
-                            str(source),
+                            str(path),
                         ],
                     }
+                    for path in (provider, source)
                 ],
                 indent=2,
                 sort_keys=True,
@@ -408,6 +418,20 @@ def _run_fixture(arguments: argparse.Namespace) -> int:
         manifest_document = json.loads(baseline_manifest)
         pcm = Path(manifest_document["modules"][0]["pcm"])
         baseline_pcm = pcm.read_bytes()
+        # Keep the linked scanner's public P1689 contract equal to the paired
+        # command-line scanner, independently of the generator's own parser.
+        for module in json.loads(baseline_manifest)["modules"]:
+            scan = subprocess.run(
+                [config["clang_scan_deps"], "-format=p1689", "-j", "1",
+                 "-compilation-database=" + module["active_import_scan_database"]],
+                text=True, capture_output=True, check=True, timeout=CODEGEN_TIMEOUT_SECONDS,
+            )
+            observed = json.loads(Path(module["active_import_scan_result"]).read_text())
+            if observed != json.loads(scan.stdout):
+                raise RuntimeError(
+                    "linked and command-line P1689 discovery disagree: "
+                    + module["active_import_scan_database"]
+                )
         ninja_state_paths = [
             source,
             pcm,
