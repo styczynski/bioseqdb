@@ -153,6 +153,15 @@ struct scheduler_stats_row final {
     double uptime_secs;
     std::int64_t async_persist_jobs_waiting;
     std::int64_t index_memory_reserved_bytes;
+    std::int64_t io_closed_spool_files;
+    std::int64_t io_closed_spool_reserved_bytes;
+    std::int64_t io_input_slab_capacity_peak_bytes;
+    std::int64_t io_scalar_buffer_capacity_peak_bytes;
+    std::int64_t io_output_wave_capacity_peak_bytes;
+    std::int64_t io_sql_loads_completed;
+    std::int64_t io_sql_writes_completed;
+    bool io_resource_counters_valid;
+    std::optional<std::int64_t> backend_peak_rss_bytes;
 };
 
 /** @brief Stored-index counts for a test that expects no existing sequence index. */

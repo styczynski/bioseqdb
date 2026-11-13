@@ -511,6 +511,55 @@ TEST_CASE("identifier_parser: canonical envelope rejects contradictory visible f
 
 TEST_CASE("preservation scalar ownership survives moves spill denial and parser errors",
           "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {
+    // Exercise the encoder's full decimal bounds before changing admission limits.
+    {
+        struct text_sink {
+            std::string text;
+            std::size_t calls{};
+            bool refuse{};
+            /** Copy synchronously, or expose one stable fixture failure. */
+            [[nodiscard]] std::expected<void, std::string> append(std::string_view bytes) {
+                ++calls;
+                if (refuse) return std::unexpected(std::string{"fixture sink refusal"});
+                text.append(bytes);
+                return {};
+            }
+        } sink;
+        preservation_encoder<text_sink> encoder{sink};
+        const auto check = [&sink, &encoder](auto value, std::string_view expected) {
+            sink.text.clear();
+            encoder.integer(value);
+            REQUIRE(encoder.result().has_value());
+            REQUIRE(sink.text == expected);
+        };
+        check(std::numeric_limits<std::int8_t>::min(), "\"-128\"");
+        check(std::numeric_limits<std::uint8_t>::max(), "\"255\"");
+        check(std::numeric_limits<std::int16_t>::min(), "\"-32768\"");
+        check(std::numeric_limits<std::uint16_t>::max(), "\"65535\"");
+        check(std::numeric_limits<std::int32_t>::min(), "\"-2147483648\"");
+        check(std::numeric_limits<std::uint32_t>::max(), "\"4294967295\"");
+        check(std::numeric_limits<std::int64_t>::min(), "\"-9223372036854775808\"");
+        check(std::numeric_limits<std::uint64_t>::max(), "\"18446744073709551615\"");
+        check(std::optional<std::int64_t>{}, "null");
+        check(std::optional<std::int64_t>{0}, "\"0\"");
+
+        sink.text.clear();
+        sink.refuse = true;
+        const auto calls_before_refusal = sink.calls;
+        encoder.integer(std::numeric_limits<std::int64_t>::min());
+        const auto refused = encoder.result();
+        REQUIRE_FALSE(refused.has_value());
+        REQUIRE(refused.error() == "fixture sink refusal");
+        REQUIRE(sink.calls == calls_before_refusal + 1u);
+        REQUIRE(sink.text.empty());
+        sink.refuse = false;
+        encoder.integer(std::numeric_limits<std::uint64_t>::max());
+        const auto later = encoder.result();
+        REQUIRE_FALSE(later.has_value());
+        REQUIRE(later.error() == "fixture sink refusal");
+        REQUIRE(sink.calls == calls_before_refusal + 1u);
+        REQUIRE(sink.text.empty());
+    }
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const auto baseline = admission.reserved_bytes();
     struct restore_cap {
@@ -613,8 +662,26 @@ TEST_CASE("preservation metadata retains concurrent decoded owners through desti
     const std::string payload = "[{\"name\":\"" + scalar + "\",\"type\":\"" + scalar
         + "\",\"value\":\"" + scalar + "\"}]";
     struct observed_record : bioseq::io::decoded_record {
+        using bioseq::io::decoded_record::decoded_record;
         std::size_t callbacks{};
+        std::size_t auxiliary_begins{}, auxiliary_appends{}, auxiliary_ends{};
         std::uint64_t before_copy{}, after_copy{};
+        /** Count entry into the existing destination admission path. */
+        std::expected<void, std::string> begin_auxiliary(bool projected,
+                std::array<char, 2> tag, char type, char subtype) {
+            ++auxiliary_begins;
+            return bioseq::io::decoded_record::begin_auxiliary(projected, tag, type, subtype);
+        }
+        /** Count exact decoded fragments without retaining parser scratch. */
+        std::expected<void, std::string> append_auxiliary_bytes(std::span<const std::byte> bytes) {
+            ++auxiliary_appends;
+            return bioseq::io::decoded_record::append_auxiliary_bytes(bytes);
+        }
+        /** Count successful passage through final text-length checks. */
+        std::expected<void, std::string> end_auxiliary(std::uint32_t count) {
+            ++auxiliary_ends;
+            return bioseq::io::decoded_record::end_auxiliary(count);
+        }
         /** Observe actual simultaneous temporary and retained admission. */
         std::expected<void, std::string> metadata(std::string_view name, std::string_view type,
             std::optional<std::string_view> value, bool types_only) {
@@ -650,6 +717,93 @@ TEST_CASE("preservation metadata retains concurrent decoded owners through desti
             REQUIRE(row->metadata.front().qualified_type == std::string(4096u, 'a'));
             REQUIRE(row->metadata.front().bytes == std::string(4096u, 'a'));
         }
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+
+    // The first pass may borrow one complete ASCII fragment, but admission and
+    // the exact second-stage text checks still precede destination appends.
+    const std::string long_value(4097u, 'A');
+    const std::string long_auxiliary = "[{\"tag\":\"XZ\",\"type\":\"Z\",\"value\":\"" + long_value + "\"}]";
+    const std::array<std::tuple<std::string_view, std::string_view, char, std::size_t>, 8> auxiliary_values{{
+        {R"json([{"tag":"XZ","type":"Z","value":"plain"}])json", "plain", 'Z', 1u},
+        {R"json([{"value":"AF","type":"H","tag":"XZ"}])json", "AF", 'H', 1u},
+        {R"json([{"tag":"XZ","type":"A","value":"Q"}])json", "Q", 'A', 1u},
+        {R"json([{"tag":"XZ","type":"Z","value":""}])json", "", 'Z', 0u},
+        {R"json([{"tag":"XZ","type":"H","value":""}])json", "", 'H', 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"\u0041"}])json", "A", 'Z', 1u},
+        {R"json([{"tag":"XZ","type":"Z","value":"A\u0042C"}])json", "ABC", 'Z', 3u},
+        {long_auxiliary, long_value, 'Z', 1u}}};
+    for (const auto& [json, expected, expected_type, expected_appends] : auxiliary_values) {
+        for (const bool projected : {false, true}) {
+            for (const bool use_credit : {false, true}) {
+                CAPTURE(json, projected, use_credit);
+                bioseq::io::io_memory_credit credit;
+                if (use_credit) {
+                    auto spare = admission.try_reserve(8192u);
+                    REQUIRE(spare.has_value());
+                    credit.reset(std::move(*spare));
+                }
+                {
+                    observed_record destination{use_credit ? &credit : nullptr};
+                    destination.record.alignment.emplace();
+                    preservation_json_cursor cursor{json, 8u, use_credit ? &credit : nullptr};
+                    REQUIRE(decode_preserved_auxiliary(cursor, destination, projected, 8u).has_value());
+                    REQUIRE(cursor.finish().has_value());
+                    REQUIRE(destination.auxiliary_begins == 1u);
+                    REQUIRE(destination.auxiliary_appends == expected_appends);
+                    REQUIRE(destination.auxiliary_ends == 1u);
+                    credit.release(); // Exact owners must survive unused-credit release.
+                    const auto row = destination.freeze();
+                    REQUIRE(row.has_value());
+                    const auto fields = projected ? destination.projected_auxiliary() : row->alignment->auxiliary;
+                    REQUIRE(fields.size() == 1u);
+                    REQUIRE((fields.front().tag == std::array<char, 2>{'X', 'Z'}));
+                    REQUIRE(fields.front().type == expected_type);
+                    REQUIRE(std::ranges::equal(fields.front().payload,
+                        std::as_bytes(std::span{expected.data(), expected.size()})));
+                }
+                REQUIRE(admission.reserved_bytes() == baseline);
+            }
+        }
+    }
+    const std::array<std::tuple<std::string_view, std::string_view, std::size_t, std::size_t>, 13> auxiliary_errors{{
+        {R"json([{"tag":"XZ","type":"A","value":""}])json", "invalid preserved character/hex auxiliary length", 1u, 0u},
+        {R"json([{"tag":"XZ","type":"H","value":"A"}])json", "invalid preserved character/hex auxiliary length", 1u, 1u},
+        {R"json([{"tag":"XZ","type":"H","value":"AG"}])json", "preserved auxiliary text must be printable ASCII or uppercase hex", 1u, 0u},
+        {R"json([{"tag":"XZ","type":"A","value":" "}])json", "preserved character auxiliary must be one non-space printable byte", 1u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"\u0001"}])json", "preserved auxiliary text must be printable ASCII or uppercase hex", 1u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"λ"}])json", "preserved auxiliary text must be printable ASCII or uppercase hex", 1u, 0u},
+        {"[{\"tag\":\"XZ\",\"type\":\"Z\",\"value\":\"\x7f\"}]", "preserved auxiliary text must be printable ASCII or uppercase hex", 1u, 0u},
+        {R"json([{"value":"plain","tag":"XZ","type":"?"}])json", "invalid preserved auxiliary scalar type", 0u, 0u},
+        {R"json([{"value":"plain","tag":"1Z","type":"Z"}])json", "invalid or duplicate preserved auxiliary tag", 0u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"plain","value":"again"}])json", "duplicate preservation key: value", 0u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"plain","extra":null}])json", "unknown preservation key: extra", 0u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"\uD800"}])json", "JSON high surrogate lacks a low surrogate", 0u, 0u},
+        {R"json([{"tag":"XZ","type":"Z","value":"plain)json", "unterminated preservation JSON string", 0u, 0u}}};
+    for (const auto& [json, error, begins, appends] : auxiliary_errors) {
+        CAPTURE(json, error);
+        {
+            observed_record destination;
+            const auto parsed = decode_auxiliary_json(json, destination, 8u);
+            REQUIRE_FALSE(parsed.has_value());
+            REQUIRE(parsed.error() == error);
+            REQUIRE(destination.auxiliary_begins == begins);
+            REQUIRE(destination.auxiliary_appends == appends);
+            REQUIRE(destination.auxiliary_ends == 0u);
+        }
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(baseline, 1u));
+    for (const auto json : {
+        R"json([{"tag":"XZ","type":"Z","value":"plain"}])json",
+        R"json([{"tag":"XZ","type":"H","value":"AG"}])json"}) {
+        observed_record destination;
+        const auto parsed = decode_auxiliary_json(json, destination, 8u);
+        REQUIRE_FALSE(parsed.has_value());
+        REQUIRE(parsed.error() == "Cannot admit IO vector growth peak");
+        REQUIRE(destination.auxiliary_begins == 1u);
+        REQUIRE(destination.auxiliary_appends == 0u);
+        REQUIRE(destination.auxiliary_ends == 0u);
         REQUIRE(admission.reserved_bytes() == baseline);
     }
 }

@@ -19,6 +19,7 @@ module;
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -32,6 +33,107 @@ import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::io {
+
+/** Diagnostic snapshots are cumulative within one process and never control IO behavior.
+ * Spool totals count closed private owners' reserved logical extents, not physical
+ * allocation or peak simultaneous disk use. Capacity maxima describe only named
+ * retained buffers; they exclude allocator transitions, vendor state and PG memory.
+ */
+struct io_resource_snapshot {
+    std::uint64_t closed_spool_files{};
+    std::uint64_t closed_spool_reserved_bytes{};
+    std::uint64_t input_slab_capacity_peak_bytes{};
+    std::uint64_t scalar_buffer_capacity_peak_bytes{};
+    std::uint64_t output_wave_capacity_peak_bytes{};
+    std::uint64_t sql_loads_completed{};
+    std::uint64_t sql_writes_completed{};
+    bool valid{true};
+};
+
+/** Allocation-free observation shared by caller and joined IO workers.
+ * Read snapshots only at quiescent operation boundaries. A sticky overflow bit
+ * makes diagnostic evidence unavailable without changing success/error behavior.
+ */
+class io_resource_counters {
+    std::atomic<std::uint64_t> spool_files_{};
+    std::atomic<std::uint64_t> spool_bytes_{};
+    std::atomic<std::uint64_t> input_slab_peak_{};
+    std::atomic<std::uint64_t> scalar_buffer_peak_{};
+    std::atomic<std::uint64_t> output_wave_peak_{};
+    std::atomic<std::uint64_t> sql_loads_{};
+    std::atomic<std::uint64_t> sql_writes_{};
+    std::atomic<bool> valid_{true};
+
+    /** Saturate at the SQL diagnostic range; never wrap evidence counters. */
+    void add(std::atomic<std::uint64_t>& counter, std::uint64_t increment) noexcept {
+        constexpr auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        auto previous = counter.load(std::memory_order_relaxed);
+        for (;;) {
+            const bool overflow = increment > maximum - previous;
+            const auto next = overflow ? maximum : previous + increment;
+            if (counter.compare_exchange_weak(previous, next, std::memory_order_relaxed)) {
+                if (overflow) valid_.store(false, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
+
+    /** Retain an observed capacity maximum; this is not an allocator peak. */
+    void observe(std::atomic<std::uint64_t>& counter, std::uint64_t bytes) noexcept {
+        constexpr auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        if (bytes > maximum) {
+            valid_.store(false, std::memory_order_relaxed);
+            bytes = maximum;
+        }
+        auto previous = counter.load(std::memory_order_relaxed);
+        while (previous < bytes
+            && !counter.compare_exchange_weak(previous, bytes, std::memory_order_relaxed)) {}
+    }
+public:
+    /** Return independently loaded cumulative values after dependent workers join. */
+    [[nodiscard]] io_resource_snapshot snapshot() const noexcept {
+        return {spool_files_.load(std::memory_order_relaxed), spool_bytes_.load(std::memory_order_relaxed),
+            input_slab_peak_.load(std::memory_order_relaxed), scalar_buffer_peak_.load(std::memory_order_relaxed),
+            output_wave_peak_.load(std::memory_order_relaxed), sql_loads_.load(std::memory_order_relaxed),
+            sql_writes_.load(std::memory_order_relaxed), valid_.load(std::memory_order_relaxed)};
+    }
+    /** Account once when one successfully opened private spool owner retires. */
+    void record_spool(std::uint64_t reserved_bytes) noexcept {
+        add(spool_files_, 1u);
+        add(spool_bytes_, reserved_bytes);
+    }
+    /** Observe the largest individual retained alignment/text input slab. */
+    void observe_input_slab(std::uint64_t bytes) noexcept { observe(input_slab_peak_, bytes); }
+    /** Observe the largest individual resident canonical scalar byte buffer. */
+    void observe_scalar_buffer(std::uint64_t bytes) noexcept { observe(scalar_buffer_peak_, bytes); }
+    /** Observe combined retained output staging and one formatting wave. */
+    void observe_output_wave(std::uint64_t bytes) noexcept { observe(output_wave_peak_, bytes); }
+    /** Count completed SQL loads; failed calls and internal neutral reads do not count. */
+    void completed_sql_load() noexcept { add(sql_loads_, 1u); }
+    /** Count completed SQL writes once, after source owners have retired. */
+    void completed_sql_write() noexcept { add(sql_writes_, 1u); }
+};
+
+/** Process-local diagnostics only; no parser, planner or writer branches on these values. */
+[[nodiscard]] inline io_resource_counters& io_resource_diagnostics() noexcept {
+    static io_resource_counters counters;
+    return counters;
+}
+
+/** OS process-lifetime resident high-water mark, queried outside measured work. */
+[[nodiscard]] inline std::optional<std::uint64_t> io_process_peak_rss_bytes() noexcept {
+    rusage usage{};
+    if (::getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss < 0) return std::nullopt;
+    const auto value = static_cast<std::uint64_t>(usage.ru_maxrss);
+#if defined(__APPLE__)
+    return value;
+#else
+    return common::checked_mul(value, std::uint64_t{1024u});
+#endif
+}
+
+/** Final-output staging is distinct from unpublished internal replay storage. */
+enum class io_file_usage : std::uint8_t { output, private_spool };
 
 /** Share one bounded, already-admitted tranche across a quiescent IO wave.
  * Actual allocations always take independent owned permits. The bank is stable
@@ -288,6 +390,7 @@ class posix_pwrite_sink {
     bool overwrite_{};
     bool sealed_{};
     bool published_{};
+    bool observe_spool_{};
 
     /** Report one saved errno without reading shared diagnostic state. */
     [[nodiscard]] static std::string system_error(std::string_view operation, int error) {
@@ -302,6 +405,8 @@ class posix_pwrite_sink {
 
     /** Release unpublished resources; never turn destructor cleanup into publication. */
     void cleanup() noexcept {
+        if (std::exchange(observe_spool_, false))
+            io_resource_diagnostics().record_spool(extent_.load(std::memory_order_relaxed));
         if (descriptor_ >= 0) { ::close(descriptor_); descriptor_ = -1; }
         if (directory_descriptor_ >= 0) {
             if (!temporary_name_.empty())
@@ -325,7 +430,8 @@ public:
           destination_name_(std::move(other.destination_name_)),
           extent_(other.extent_.load(std::memory_order_relaxed)),
           maximum_output_bytes_(other.maximum_output_bytes_),
-          overwrite_(other.overwrite_), sealed_(other.sealed_), published_(other.published_) {}
+          overwrite_(other.overwrite_), sealed_(other.sealed_), published_(other.published_),
+          observe_spool_(std::exchange(other.observe_spool_, false)) {}
 
     /** Abandon previous unpublished output and adopt a stopped source owner. */
     posix_pwrite_sink& operator=(posix_pwrite_sink&& other) noexcept {
@@ -340,6 +446,7 @@ public:
             overwrite_ = other.overwrite_;
             sealed_ = other.sealed_;
             published_ = other.published_;
+            observe_spool_ = std::exchange(other.observe_spool_, false);
         }
         return *this;
     }
@@ -353,7 +460,8 @@ public:
      */
     [[nodiscard]] static std::expected<posix_pwrite_sink, std::string>
     try_open(std::string_view path, bool overwrite = false,
-            std::optional<std::uint64_t> maximum_output_bytes = std::nullopt) {
+            std::optional<std::uint64_t> maximum_output_bytes = std::nullopt,
+            io_file_usage usage = io_file_usage::output) {
         if (maximum_output_bytes && !representable_range(*maximum_output_bytes, 0u))
             return std::unexpected("maximum_output_bytes exceeds the supported output offset range");
         if (path.empty() || path.find('\0') != std::string_view::npos)
@@ -379,7 +487,10 @@ public:
             sink.temporary_name_ = fmt::format(".bioseq-{}-{}-{}", ::getpid(), epoch, serial);
             sink.descriptor_ = ::openat(directory, sink.temporary_name_.c_str(),
                 O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-            if (sink.descriptor_ >= 0) return sink;
+            if (sink.descriptor_ >= 0) {
+                sink.observe_spool_ = usage == io_file_usage::private_spool;
+                return sink;
+            }
             const int error = errno;
             sink.temporary_name_.clear(); // an existing collision is not ours to unlink
             if (error != EEXIST)
@@ -543,13 +654,19 @@ class admitted_byte_buffer {
             return std::unexpected("byte-buffer growth accounting overflows");
         const auto peak = capacity + bytes_.capacity();
         bool admitted = grow_io_memory(permit_, peak, credit_);
-        if (admitted) { bytes_.reserve(capacity); permit_.shrink_to(bytes_.capacity()); return {}; }
+        if (admitted) {
+            bytes_.reserve(capacity);
+            permit_.shrink_to(bytes_.capacity());
+            io_resource_diagnostics().observe_scalar_buffer(bytes_.capacity());
+            return {};
+        }
         if (bytes_.capacity() > std::numeric_limits<std::size_t>::max() - 4096u)
             return std::unexpected("byte-buffer spill accounting overflows");
         const auto spill_peak = bytes_.capacity() + 4096u;
         admitted = grow_io_memory(permit_, spill_peak, credit_);
         if (!admitted) return std::unexpected("cannot admit private byte-buffer ownership");
-        auto opened = posix_pwrite_sink::try_open("/tmp/bioseq_byte_spool", true);
+        auto opened = posix_pwrite_sink::try_open("/tmp/bioseq_byte_spool", true,
+            std::nullopt, io_file_usage::private_spool);
         if (!opened) return std::unexpected(opened.error());
         if (!bytes_.empty()) {
             const auto written = opened->append_bytes(bytes_);

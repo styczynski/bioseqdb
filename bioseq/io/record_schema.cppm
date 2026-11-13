@@ -576,7 +576,8 @@ make_record_sequence_owner(std::uint8_t alphabet_code, std::uint64_t length, boo
                 auto scratch = reserve_io_memory(
                     sizeof(file_record_sequence_owner<Alphabet>) + 4096u, credit);
                 if (!scratch) { result = std::unexpected(std::string{"cannot admit decoded sequence packing scratch"}); return; }
-                auto file = posix_pwrite_sink::try_open("/tmp/bioseq_sequence_spool", true);
+                auto file = posix_pwrite_sink::try_open("/tmp/bioseq_sequence_spool", true,
+                    std::nullopt, io_file_usage::private_spool);
                 if (!file) { result = std::unexpected(file.error()); return; }
                 result = std::make_unique<file_record_sequence_owner<Alphabet>>(
                     std::move(*scratch), std::move(*file), static_cast<std::size_t>(length));

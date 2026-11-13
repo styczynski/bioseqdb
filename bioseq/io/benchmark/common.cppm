@@ -49,6 +49,7 @@ import bioseq.simd.utils;
 import bioseq.io.reader;
 import bioseq.io.record_schema;
 import bioseq.io.options;
+import bioseq.io.sinks;
 import bioseq.io.compression.chunk_fetcher;
 import bioseq.io.compression.deflate;
 import bioseq.io.writer;
@@ -69,10 +70,47 @@ using bioseq::io::sequence_file_format;
 using bioseq::io::sequence_writer;
 using bioseq::io::writer_options;
 
+/** Observations bracket one measured callback; peaks retain their process-lifetime scope. */
+struct io_resource_measurement {
+    io_resource_snapshot before;
+    io_resource_snapshot after;
+    std::optional<std::uint64_t> process_lifetime_peak_rss_bytes;
+    bool bioseq_spool_scope{};
+};
+
+/** Capture after all measured IO owners retire, before untimed validation begins. */
+[[nodiscard]] inline io_resource_measurement capture_io_resources(
+        const io_resource_snapshot& before, bool bioseq_spool_scope) {
+    const auto after = io_resource_diagnostics().snapshot();
+    if (!before.valid || !after.valid || after.closed_spool_files < before.closed_spool_files
+        || after.closed_spool_reserved_bytes < before.closed_spool_reserved_bytes)
+        throw std::runtime_error("IO resource diagnostic counters overflowed or decreased");
+    return {before, after, io_process_peak_rss_bytes(), bioseq_spool_scope};
+}
+
+/** Export honest named scopes; vendor-private spool/scratch metrics are unavailable, not zero. */
+[[nodiscard]] inline std::map<std::string, double> io_resource_metrics(const io_resource_measurement& resources) {
+    std::map<std::string, double> metrics{
+        {"process_lifetime_peak_rss_available", resources.process_lifetime_peak_rss_bytes ? 1.0 : 0.0},
+        {"bioseq_private_spool_metrics_available", resources.bioseq_spool_scope ? 1.0 : 0.0}};
+    if (resources.process_lifetime_peak_rss_bytes)
+        metrics.emplace("process_lifetime_peak_rss_bytes", static_cast<double>(*resources.process_lifetime_peak_rss_bytes));
+    if (resources.bioseq_spool_scope) {
+        metrics.emplace("closed_private_spool_files", static_cast<double>(resources.after.closed_spool_files - resources.before.closed_spool_files));
+        metrics.emplace("closed_private_spool_reserved_bytes", static_cast<double>(resources.after.closed_spool_reserved_bytes - resources.before.closed_spool_reserved_bytes));
+        // Max individual input slab/scalar buffer and max summed writer wave, not all heap or RSS.
+        metrics.emplace("process_lifetime_input_slab_capacity_peak_bytes", static_cast<double>(resources.after.input_slab_capacity_peak_bytes));
+        metrics.emplace("process_lifetime_scalar_buffer_capacity_peak_bytes", static_cast<double>(resources.after.scalar_buffer_capacity_peak_bytes));
+        metrics.emplace("process_lifetime_output_wave_capacity_peak_bytes", static_cast<double>(resources.after.output_wave_capacity_peak_bytes));
+    }
+    return metrics;
+}
+
 /** Untimed shared-arena scope; measured IO owners must join before restoration. */
 struct io_pool_scope {
     parallelism::pool_config previous;
     std::size_t framework_limit{};
+    io_resource_snapshot resource_before;
     bool was_active{};
     bool restore{};
     std::string error;
@@ -108,7 +146,7 @@ struct io_pool_scope {
     io_pool_scope& operator=(const io_pool_scope&) = delete;
     /** Transfer the only restoration obligation when returning a prepared iteration. */
     io_pool_scope(io_pool_scope&& other) noexcept
-        : previous{other.previous}, framework_limit{other.framework_limit},
+        : previous{other.previous}, framework_limit{other.framework_limit}, resource_before{other.resource_before},
           was_active{other.was_active}, restore{std::exchange(other.restore, false)},
           error{std::move(other.error)} {}
     io_pool_scope& operator=(io_pool_scope&&) = delete;
@@ -195,6 +233,7 @@ struct io_measurement {
     std::size_t observed_body_bytes = 0;
     std::size_t bytes_written = 0;          ///< writer outputs only
     std::size_t roundtrip_record_count = 0; ///< Reserved for a writer round-trip record count.
+    io_resource_measurement resources;
 };
 
 /// Reader input and field mapping for comparing UniProt header parsing with

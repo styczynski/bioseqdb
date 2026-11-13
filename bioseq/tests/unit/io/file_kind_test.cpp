@@ -468,6 +468,97 @@ TEST_CASE("IO output capacity distinguishes zero from an absent limit",
     }
 }
 
+TEST_CASE("IO diagnostics count retired private spools without counting output staging",
+          "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {
+    publication_fixture fixture;
+    auto& diagnostics = bioseq::io::io_resource_diagnostics();
+    const auto before = diagnostics.snapshot();
+    REQUIRE(before.valid);
+    {
+        auto first = bioseq::io::posix_pwrite_sink::try_open((fixture.directory / "first").string(),
+            false, std::nullopt, bioseq::io::io_file_usage::private_spool);
+        auto second = bioseq::io::posix_pwrite_sink::try_open((fixture.directory / "second").string(),
+            false, std::nullopt, bioseq::io::io_file_usage::private_spool);
+        REQUIRE(first.has_value()); REQUIRE(second.has_value());
+        stage_publication(*first, "ACGT");
+        stage_publication(*second, "NN");
+        auto moved = std::move(*first);
+        *second = std::move(moved); // Retire the previous two-byte spool once.
+        const auto during = diagnostics.snapshot();
+        REQUIRE(during.closed_spool_files == before.closed_spool_files + 1u);
+        REQUIRE(during.closed_spool_reserved_bytes == before.closed_spool_reserved_bytes + 2u);
+    }
+    REQUIRE(std::filesystem::is_empty(fixture.directory));
+    const auto retired = diagnostics.snapshot();
+    REQUIRE(retired.closed_spool_files == before.closed_spool_files + 2u);
+    REQUIRE(retired.closed_spool_reserved_bytes == before.closed_spool_reserved_bytes + 6u);
+    {
+        const auto invalid = bioseq::io::posix_pwrite_sink::try_open("", false,
+            std::nullopt, bioseq::io::io_file_usage::private_spool);
+        REQUIRE_FALSE(invalid.has_value());
+        auto output = bioseq::io::posix_pwrite_sink::try_open((fixture.directory / "output").string());
+        REQUIRE(output.has_value());
+        stage_publication(*output, "published");
+        REQUIRE(output->publish().has_value());
+    }
+    REQUIRE(publication_fixture::read(fixture.directory / "output") == "published");
+    const auto after = diagnostics.snapshot();
+    REQUIRE(after.valid);
+    REQUIRE(after.closed_spool_files == retired.closed_spool_files);
+    REQUIRE(after.closed_spool_reserved_bytes == retired.closed_spool_reserved_bytes);
+}
+
+TEST_CASE("IO diagnostics observe actual admitted-byte spill cleanup",
+          "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    struct restore_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t previous;
+        ~restore_cap() { admission.set_index_memory_cap_bytes(previous); }
+    } restore{admission, admission.index_memory_cap_bytes()};
+    const auto reserved_before = admission.reserved_bytes();
+    admission.set_index_memory_cap_bytes(reserved_before + 4096u);
+    const auto before = bioseq::io::io_resource_diagnostics().snapshot();
+    const std::string payload(8192u, 'A');
+    {
+        bioseq::io::admitted_byte_buffer buffer;
+        REQUIRE(buffer.append(payload).has_value());
+        REQUIRE(buffer.seal().has_value());
+        REQUIRE(buffer.text() == payload);
+        REQUIRE(buffer.accounted_capacity_bytes() == 4096u);
+        REQUIRE(bioseq::io::io_resource_diagnostics().snapshot().closed_spool_files == before.closed_spool_files);
+    }
+    const auto after = bioseq::io::io_resource_diagnostics().snapshot();
+    REQUIRE(after.valid);
+    REQUIRE(after.closed_spool_files == before.closed_spool_files + 1u);
+    REQUIRE(after.closed_spool_reserved_bytes == before.closed_spool_reserved_bytes + payload.size());
+    REQUIRE(admission.reserved_bytes() == reserved_before);
+}
+
+TEST_CASE("IO diagnostic overflow invalidates evidence without wrapping or changing IO policy",
+          "[component:bioseq][layer:unit][feature:io]") {
+    bioseq::io::io_resource_counters counters; // Never invalidate the live process ledger.
+    counters.observe_input_slab(1024u);
+    counters.observe_input_slab(512u);
+    counters.observe_scalar_buffer(64u);
+    counters.observe_output_wave(2048u);
+    counters.completed_sql_load();
+    counters.completed_sql_write();
+    const auto valid = counters.snapshot();
+    REQUIRE(valid.valid);
+    REQUIRE(valid.input_slab_capacity_peak_bytes == 1024u);
+    REQUIRE(valid.scalar_buffer_capacity_peak_bytes == 64u);
+    REQUIRE(valid.output_wave_capacity_peak_bytes == 2048u);
+    REQUIRE(valid.sql_loads_completed == 1u);
+    REQUIRE(valid.sql_writes_completed == 1u);
+    counters.record_spool(std::numeric_limits<std::uint64_t>::max());
+    const auto invalid = counters.snapshot();
+    REQUIRE_FALSE(invalid.valid);
+    REQUIRE(invalid.closed_spool_files == 1u);
+    REQUIRE(invalid.closed_spool_reserved_bytes
+        == static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+}
+
 TEST_CASE("ordered writer propagates exact bounds and abandons oversized output",
           "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {
     publication_fixture fixture;
@@ -1691,6 +1782,138 @@ TEST_CASE("IO auxiliary vector growth owns both allocations and preserves values
         for (std::size_t index = 0; index < values.size(); ++index) REQUIRE(values[index].value == index);
     }
     REQUIRE(admission.reserved_bytes() == baseline);
+
+    // Exercise only the checked codec/private visitor contract, not public
+    // reader delivery or its outer frame-size check.
+    namespace codec = bioseq::io::alignment;
+    constexpr std::array<std::uint8_t, 4> duplicate_tail{'X', 'A', 'Z', 0};
+    constexpr std::array<std::uint8_t, 12> invalid_cg_tail{
+        'C', 'G', 'B', 'I', 1, 0, 0, 0, 16, 0, 0, 0};
+    struct auxiliary_tail_fixture {
+        std::span<const std::uint8_t> bytes;
+        std::string_view expected_error;
+    };
+    const std::array<auxiliary_tail_fixture, 3> tails{{
+        {{}, {}},
+        {duplicate_tail, "BAM record contains a duplicate auxiliary tag"},
+        {invalid_cg_tail, "BAM CG tag does not describe a long-CIGAR placeholder"}}};
+    for (const auto& tail : tails) {
+        CAPTURE(tail.expected_error);
+        admission.set_index_memory_cap_bytes(baseline + 16u * 1024u * 1024u);
+        {
+            std::vector<std::uint8_t> bytes(38u); // Outlive every borrowed auxiliary view.
+            bioseq::io::io_memory_credit credit;
+            bioseq::parallelism::memory_permit views_permit;
+            std::vector<bioseq::io::auxiliary_field_view> views;
+            REQUIRE(bioseq::io::reserve_io_vector_capacity(views, views_permit, 1u).has_value());
+            const auto retained_capacity = views.capacity();
+            const auto field_count = retained_capacity + 2u;
+            REQUIRE(field_count <= 26u);
+            const auto retained_reservation = admission.reserved_bytes();
+            auto spare = admission.try_reserve(sizeof(bioseq::io::auxiliary_field_view));
+            REQUIRE(spare.has_value());
+            credit.reset(std::move(*spare));
+            // The existing capacity fits. Any growth must drop this insufficient
+            // spare credit and then fail exact admission, leaving live views intact.
+            admission.set_index_memory_cap_bytes(admission.reserved_bytes());
+
+            // Independent unmapped BAM core, QNAME q, absent SEQ/QUAL and no CIGAR.
+            const auto core = std::span{bytes}.subspan(4);
+            for (const std::size_t offset : {0u, 4u, 20u, 24u})
+                codec::store_wire_integer(core.subspan(offset, 4), std::int32_t{-1});
+            core[8] = 2u;
+            codec::store_wire_integer(core.subspan(14, 2), std::uint16_t{4});
+            core[32] = 'q';
+            for (std::size_t index = 0; index < field_count; ++index)
+                bytes.insert(bytes.end(), {'X', static_cast<std::uint8_t>('A' + index), 'Z', 0});
+            bytes.insert(bytes.end(), tail.bytes.begin(), tail.bytes.end());
+            codec::store_wire_integer(std::span{bytes}.first(4), static_cast<std::uint32_t>(bytes.size() - 4u));
+
+            std::optional<std::string> admission_error;
+            std::size_t visitor_calls{}, retention_attempts{};
+            const auto retain = [&views, &views_permit, &credit, &admission_error,
+                                 &visitor_calls, &retention_attempts](const bioseq::io::auxiliary_field_view& field) {
+                ++visitor_calls;
+                if (admission_error) return;
+                ++retention_attempts;
+                if (auto admitted = bioseq::io::reserve_io_vector_capacity(
+                        views, views_permit, views.size() + 1u, &credit); !admitted) {
+                    admission_error = std::move(admitted.error());
+                    return;
+                }
+                views.push_back(field);
+            };
+            const auto parsed = codec::parse_bam_record(bytes, 0u, codec::sequence_codec_kernel(), retain);
+            if (tail.expected_error.empty()) {
+                REQUIRE(parsed.has_value());
+                REQUIRE(parsed->consumed_bytes == bytes.size());
+            } else {
+                REQUIRE_FALSE(parsed.has_value());
+                REQUIRE(parsed.error() == tail.expected_error);
+            }
+            REQUIRE(admission_error.has_value());
+            REQUIRE(*admission_error == "Cannot admit IO vector growth peak");
+            REQUIRE(visitor_calls == field_count); // Neither duplicate nor CG reaches the visitor.
+            REQUIRE(retention_attempts == retained_capacity + 1u); // No retries after the first refusal.
+            REQUIRE(views.size() == retained_capacity);
+            for (std::size_t index = 0; index < views.size(); ++index) {
+                REQUIRE((views[index].tag == std::array<char, 2>{'X', static_cast<char>('A' + index)}));
+                REQUIRE(views[index].type == 'Z');
+                REQUIRE(views[index].payload.empty());
+            }
+            REQUIRE(admission.reserved_bytes() == retained_reservation);
+        }
+        REQUIRE(admission.reserved_bytes() == baseline);
+    }
+
+    // Direct borrowed-field controls retain terminator/parity/content precedence.
+    struct text_auxiliary_error {
+        std::array<std::uint8_t, 6> bytes;
+        std::size_t input_size;
+        std::string_view expected_error;
+    };
+    constexpr std::array<text_auxiliary_error, 6> invalid_text{{
+        {{'X', 'H', 'H', 'G', 0, 0}, 5u, "BAM hex auxiliary field has odd length"},
+        {{'X', 'H', 'H', 'G', 'A', 0}, 6u, "BAM text/hex auxiliary contains invalid bytes"},
+        {{'X', 'Z', 'Z', 'A', 1, 0}, 5u, "BAM text auxiliary field lacks terminator"},
+        {{'X', 'H', 'H', 'G', 'A', 0}, 5u, "BAM text auxiliary field lacks terminator"},
+        {{'X', 'Z', 'Z', 'A', 1, 0}, 6u, "BAM text/hex auxiliary contains invalid bytes"},
+        {{'X', 'Z', 'Z', 0, 0, 0}, 3u, "BAM text auxiliary field lacks terminator"}}};
+    for (const auto& input : invalid_text) {
+        CAPTURE(input.input_size, input.expected_error);
+        const auto parsed = codec::parse_bam_auxiliary(std::span{input.bytes}.first(input.input_size));
+        REQUIRE_FALSE(parsed.has_value());
+        REQUIRE(parsed.error() == input.expected_error);
+    }
+    for (const char type : {'Z', 'H'}) {
+        for (const bool empty_value : {true, false}) {
+            CAPTURE(type, empty_value);
+            std::vector<std::uint8_t> bytes{'X', 'A', static_cast<std::uint8_t>(type)};
+            if (!empty_value) bytes.insert(bytes.end(), {'A', 'F'});
+            bytes.push_back(0);
+            bytes.insert(bytes.end(), {'Y', 'B', 'A', 'Q'}); // A second complete typed field.
+            const std::size_t payload_size = empty_value ? 0u : 2u;
+            const auto expected_payload = std::as_bytes(std::span{bytes}.subspan(3u, payload_size));
+            const auto first = codec::parse_bam_auxiliary(bytes);
+            REQUIRE(first.has_value());
+            REQUIRE((first->field.tag == std::array<char, 2>{'X', 'A'}));
+            REQUIRE(first->field.type == type);
+            REQUIRE(first->field.array_element_type == 0);
+            REQUIRE(first->field.payload.data() == expected_payload.data());
+            REQUIRE(std::ranges::equal(first->field.payload, expected_payload));
+            REQUIRE(first->consumed_bytes == 4u + payload_size);
+            const auto second = codec::parse_bam_auxiliary(std::span{bytes}.subspan(first->consumed_bytes));
+            REQUIRE(second.has_value());
+            REQUIRE((second->field.tag == std::array<char, 2>{'Y', 'B'}));
+            REQUIRE(second->field.type == 'A');
+            REQUIRE(second->field.array_element_type == 0);
+            REQUIRE(second->field.payload.data() == std::as_bytes(std::span{bytes}).data() + first->consumed_bytes + 3u);
+            REQUIRE(second->field.payload.size() == 1u);
+            REQUIRE(second->field.payload.front() == std::byte{'Q'});
+            REQUIRE(second->consumed_bytes == 4u);
+            REQUIRE(first->consumed_bytes + second->consumed_bytes == bytes.size());
+        }
+    }
 }
 
 TEST_CASE("SAM many tiny auxiliaries retain ordered values through native and restored vectors",

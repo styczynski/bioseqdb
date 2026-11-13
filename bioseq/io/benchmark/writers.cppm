@@ -542,10 +542,12 @@ template<sequence_alphabet Alphabet, bool IsFasta>
     }
     if (!valid) bioseq_log<logging_level::error>("writer measurement rejected: algorithm={} alphabet={} records={}",
         algorithm, input.alphabet, output.observed_record_count);
-    return {{"bytes_on_disk", static_cast<double>(output.bytes_written)},
+    std::map<std::string, double> metrics{{"bytes_on_disk", static_cast<double>(output.bytes_written)},
         {"record_count", static_cast<double>(output.observed_record_count)},
         {"output_bytes_nonzero", output.bytes_written != 0u ? 1.0 : 0.0},
         {"roundtrip_record_match", valid ? 1.0 : std::numeric_limits<double>::quiet_NaN()}};
+    metrics.merge(io_resource_metrics(output.resources));
+    return metrics;
 }
 
 /** Remove only generated fixture files and this run's private output path. */

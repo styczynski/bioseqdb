@@ -200,6 +200,7 @@ public:
         }
         if (result->blocks_.empty())
             return std::unexpected(std::string{"memory admission cannot reserve one output block"});
+        io_resource_diagnostics().observe_output_wave(result->buffer_capacity_bytes());
         if (result->blocks_.size() > 1u && parallelism::has_parallel_dispatch(pool.get_mode()))
             result->jobs_ = pool.make_task_group();
         return result;
@@ -277,6 +278,20 @@ public:
     /** Stable reserved byte count remains observable after successful publication. */
     [[nodiscard]] std::uint64_t bytes_written() const noexcept {
         return file_.size_bytes();
+    }
+
+    /** Exact retained staging capacities, excluding compressor/vendor workspace. */
+    [[nodiscard]] std::uint64_t buffer_capacity_bytes() const noexcept {
+        std::uint64_t bytes{};
+        for (const auto& block : blocks_) {
+            const auto input_total = common::checked_add(bytes,
+                static_cast<std::uint64_t>(block->input.capacity()));
+            const auto total = input_total ? common::checked_add(*input_total,
+                static_cast<std::uint64_t>(block->compressed.capacity())) : std::nullopt;
+            if (!total) return std::numeric_limits<std::uint64_t>::max();
+            bytes = *total;
+        }
+        return bytes;
     }
 };
 
@@ -608,8 +623,17 @@ template<class Sink, class Resolved>
     std::bitset<52 * 62> occupied_tags;
     std::uint64_t auxiliary_bytes{};
     for (const auto& field : original_auxiliary) {
-        const auto validated = validate_auxiliary_field(field);
-        if (!validated) return std::unexpected(validated.error());
+        // BAM sizing already validates the field. SAM needs only validation here;
+        // both formats still check fields excluded from the native projection.
+        std::uint64_t native_bytes{};
+        if (binary) {
+            const auto measured = measure_bam_auxiliary(field);
+            if (!measured) return std::unexpected(measured.error());
+            native_bytes = *measured;
+        } else {
+            if (const auto validated = validate_auxiliary_field(field); !validated)
+                return std::unexpected(validated.error());
+        }
         const auto tag = *auxiliary_tag_index(field.tag);
         if (occupied_tags[tag]) return std::unexpected(std::string{"alignment contains duplicate auxiliary tags"});
         occupied_tags.set(tag);
@@ -621,18 +645,24 @@ template<class Sink, class Resolved>
                 return std::unexpected(std::string{"supplied NM/MD contradicts the actual sequence/reference alignment"});
             continue;
         }
-        const auto measured = measure_bam_auxiliary(field);
-        if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
-            return std::unexpected(measured ? std::string{"auxiliary size overflows"} : measured.error());
-        auxiliary_bytes += *measured;
+        if (binary) {
+            if (native_bytes > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
+                return std::unexpected(std::string{"auxiliary size overflows"});
+            auxiliary_bytes += native_bytes;
+        }
         auxiliary_storage[projected_auxiliary_size++] = field;
     }
     if (derived.active()) {
         for (const auto& field : derived_fields) {
-            const auto measured = measure_bam_auxiliary(field);
-            if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
-                return std::unexpected(measured ? std::string{"derived auxiliary size overflows"} : measured.error());
-            auxiliary_bytes += *measured;
+            if (binary) {
+                const auto measured = measure_bam_auxiliary(field);
+                if (!measured || *measured > std::numeric_limits<std::uint64_t>::max() - auxiliary_bytes)
+                    return std::unexpected(measured ? std::string{"derived auxiliary size overflows"} : measured.error());
+                auxiliary_bytes += *measured;
+            } else {
+                if (const auto validated = validate_auxiliary_field(field); !validated)
+                    return std::unexpected(validated.error());
+            }
             auxiliary_storage[projected_auxiliary_size++] = field;
         }
     }
@@ -1009,6 +1039,12 @@ public:
     template<class SerialWriter>
     [[nodiscard]] std::expected<void, record_error> drain(ordered_output_sink& output, SerialWriter&& serial) {
         output.wait_for_compression();
+        auto observed_bytes = output.buffer_capacity_bytes();
+        for (const auto& job : jobs_)
+            observed_bytes = common::checked_add(observed_bytes,
+                static_cast<std::uint64_t>(job->output.capacity))
+                .value_or(std::numeric_limits<std::uint64_t>::max());
+        io_resource_diagnostics().observe_output_wave(observed_bytes);
         if (jobs_.size() >= 4u) run_pending();
         tasks_.wait();
         for (auto& job : jobs_) {
@@ -1087,7 +1123,8 @@ public:
 
     /** Open another private file in the destination directory; it is never published. */
     [[nodiscard]] static std::expected<record_replay_file, std::string> open(std::string_view output_path) {
-        auto opened = posix_pwrite_sink::try_open(output_path, false);
+        auto opened = posix_pwrite_sink::try_open(output_path, false,
+            std::nullopt, io_file_usage::private_spool);
         if (!opened) return std::unexpected(opened.error());
         record_replay_file replay;
         replay.file_ = std::move(*opened);

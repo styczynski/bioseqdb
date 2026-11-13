@@ -92,14 +92,9 @@ public:
         }
         return *this;
     }
-    /** Borrow a fully validated unescaped string until its containing input dies. */
-    [[nodiscard]] static preservation_scalar borrow(std::string_view text) {
-        preservation_scalar result;
-        result.borrowed_ = text;
-        result.size_ = text.size();
-        result.backing_ = backing::borrowed;
-        return result;
-    }
+    /** Borrow already validated unescaped text; its input must outlive this owner. */
+    explicit preservation_scalar(std::string_view text)
+        : storage_(nullptr), borrowed_(text), size_(text.size()), backing_(backing::borrowed) {}
     /** Append one validated decoded fragment, admitting dynamic storage first. */
     [[nodiscard]] std::expected<void, std::string> append(std::string_view fragment) {
         if (backing_ == backing::borrowed || fragment.size() > std::numeric_limits<std::size_t>::max() - size_)
@@ -354,7 +349,8 @@ public:
                     return std::unexpected("preservation scalar exceeds admitted byte limit");
                 }
                 position_ = begin + count + 1u;
-                return preservation_scalar::borrow(input_.substr(begin, count));
+                return std::expected<preservation_scalar, std::string>{
+                    std::in_place, input_.substr(begin, count)};
             }
         }
         position_ = saved_position;
@@ -374,7 +370,8 @@ public:
         if (literal("null")) return std::optional<preservation_scalar>{};
         auto value = string();
         if (!value) return std::unexpected(value.error());
-        return std::optional<preservation_scalar>{std::move(*value)};
+        return std::expected<std::optional<preservation_scalar>, std::string>{
+            std::in_place, std::in_place, std::move(*value)};
     }
     /** Visit all required named fields exactly once; reject unknown and duplicate keys. */
     template<std::size_t Count, class Visitor>
@@ -662,9 +659,10 @@ template<preservation_auxiliary_destination Destination>
         std::array<char, 2> tag{};
         preservation_scalar type;
         std::string_view value_token;
+        std::optional<std::string_view> ascii_value;
         bool value_array = false;
         constexpr std::array<std::string_view, 3> keys{"tag", "type", "value"};
-        const auto object = cursor.object(keys, [&cursor, &tag, &type, &value_token, &value_array](std::size_t field)
+        const auto object = cursor.object(keys, [&cursor, &tag, &type, &value_token, &ascii_value, &value_array](std::size_t field)
             -> std::expected<void, std::string> {
             if (field == 0) {
                 const auto value = cursor.string(2);
@@ -687,10 +685,26 @@ template<preservation_auxiliary_destination Destination>
                     if (*values > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
                         return std::unexpected("preserved auxiliary array count exceeds SAM/BAM limit");
                 } else {
-                    const auto value = cursor.string_to([](std::string_view) -> std::expected<void, std::string> { return {}; });
+                    bool first_fragment = true;
+                    const auto value = cursor.string_to([&cursor, begin, &ascii_value, &first_fragment](std::string_view fragment)
+                        -> std::expected<void, std::string> {
+                        // Only the immutable input can be retained; escaped fragments borrow decoder scratch.
+                        if (first_fragment && !fragment.empty()
+                            && fragment.data() == cursor.slice(begin + 1u, begin + 1u).data()
+                            && static_cast<unsigned char>(fragment.front()) >= 0x20u
+                            && static_cast<unsigned char>(fragment.front()) < 0x7fu)
+                            ascii_value = fragment;
+                        else ascii_value.reset();
+                        first_fragment = false;
+                        return {};
+                    });
                     if (!value) return value;
                 }
                 value_token = cursor.slice(begin, cursor.position());
+                if (ascii_value && (value_token.size() < 2u
+                    || ascii_value->data() != value_token.data() + 1u
+                    || ascii_value->size() != value_token.size() - 2u))
+                    ascii_value.reset();
             }
             return {};
         });
@@ -730,7 +744,7 @@ template<preservation_auxiliary_destination Destination>
         }
         if (auto begun = destination.begin_auxiliary(projected, tag, type.text()[0], '\0'); !begun) return begun;
         std::size_t bytes = 0;
-        const auto text = value.string_to([&destination, &bytes, kind = type.text()[0]](std::string_view fragment)
+        const auto consume_text = [&destination, &bytes, kind = type.text()[0]](std::string_view fragment)
             -> std::expected<void, std::string> {
             const auto valid = bioseq::io::simd::scan_sam_auxiliary_prefix(
                 reinterpret_cast<const std::uint8_t*>(fragment.data()), fragment.size(), kind == 'H');
@@ -743,7 +757,9 @@ template<preservation_auxiliary_destination Destination>
                 return std::unexpected("preserved auxiliary text length overflow");
             bytes += fragment.size();
             return destination.append_auxiliary_bytes(std::as_bytes(std::span<const char>{fragment.data(), fragment.size()}));
-        });
+        };
+        // Preserve begin/admission and SAM text checks; only avoid replaying a proven JSON fragment.
+        const auto text = ascii_value ? consume_text(*ascii_value) : value.string_to(consume_text);
         if (!text) return text;
         if ((type.text()[0] == 'A' && bytes != 1) || (type.text()[0] == 'H' && bytes % 2 != 0))
             return std::unexpected("invalid preserved character/hex auxiliary length");
@@ -1325,11 +1341,11 @@ public:
     template<std::integral Integer>
     void integer(Integer value) {
         std::array<char, std::numeric_limits<Integer>::digits10 + 4> decimal{};
-        const auto converted = std::to_chars(decimal.data(), decimal.data() + decimal.size(), value);
+        decimal.front() = '"';
+        const auto converted = std::to_chars(decimal.data() + 1, decimal.data() + decimal.size() - 1, value);
         if (converted.ec != std::errc{}) { fail("preservation integer conversion overflow"); return; }
-        text("\"");
-        text({decimal.data(), static_cast<std::size_t>(converted.ptr - decimal.data())});
-        text("\"");
+        *converted.ptr = '"';
+        text({decimal.data(), static_cast<std::size_t>(converted.ptr - decimal.data()) + 1u});
     }
 
     /** Unknown optional quantities stay null; zero remains a known quantity. */

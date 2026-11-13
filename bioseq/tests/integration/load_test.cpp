@@ -1836,6 +1836,10 @@ struct exported_native_summary {
 TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and header whitespace",
           "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
     auto ctx = it::fresh_context({"write_text_source", "write_text_loaded"});
+    const std::string completed_writes_query =
+        "SELECT io_sql_writes_completed FROM bioseq.scheduler_stats()";
+    const std::string completed_loads_query =
+        "SELECT io_sql_loads_completed FROM bioseq.scheduler_stats()";
     it::guc_scope maintenance(ctx, "bioseq.index.insert_maintenance.enabled", "off");
     it::guc_scope array_nulls(ctx, "array_nulls", "off");
     it::guc_scope xmloption(ctx, "xmloption", "document");
@@ -1872,8 +1876,12 @@ TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and 
                     ",sample_no integer NOT NULL,sample text,target_start bigint,optional_note text,"
                     "scalar_array text[],regclass_value regclass,xml_content xml,amount money) USING bioseq; "
                     "SET search_path TO write_meta_first,public");
+                const auto writes_before = it::query_scalar_int(ctx, completed_writes_query);
+                const auto loads_before = it::query_scalar_int(ctx, completed_loads_query);
                 REQUIRE(it::query_scalar_int(ctx,
                     "SELECT bioseq.write('public.write_text_source'::regclass,'" + path + "')") == 3);
+                REQUIRE(it::query_scalar_int(ctx, completed_writes_query) == writes_before + 1);
+                REQUIRE(it::query_scalar_int(ctx, completed_loads_query) == loads_before);
                 REQUIRE(it::query_scalar(ctx, "SHOW search_path") == "write_meta_first, public");
                 REQUIRE(it::query_scalar(ctx, "SHOW array_nulls") == "off");
                 REQUIRE(it::query_scalar(ctx, "SELECT upper(current_setting('xmloption'))") == "DOCUMENT");
@@ -1884,6 +1892,13 @@ TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and 
                 REQUIRE(it::query_scalar_int(ctx,
                     "SELECT bioseq.load('public.write_text_loaded'::regclass,'" + path +
                     "',header_format=>'uniprot')") == 3);
+                REQUIRE(it::query_scalar_int(ctx, completed_writes_query) == writes_before + 1);
+                REQUIRE(it::query_scalar_int(ctx, completed_loads_query) == loads_before + 1);
+                REQUIRE(it::query_scalar_int(ctx,
+                    "SELECT (io_resource_counters_valid AND io_closed_spool_files>=0 "
+                    "AND io_closed_spool_reserved_bytes>=0 AND "
+                    "(backend_peak_rss_bytes IS NULL OR backend_peak_rss_bytes>0))::int "
+                    "FROM bioseq.scheduler_stats()") == 1);
                 REQUIRE(it::query_scalar(ctx, "SHOW search_path") == "write_meta_second, public");
                 REQUIRE(it::query_scalar(ctx, "SHOW array_nulls") == "off");
                 REQUIRE(it::query_scalar(ctx, "SELECT upper(current_setting('xmloption'))") == "DOCUMENT");
@@ -1967,12 +1982,16 @@ TEST_CASE("bioseq.write: canonical text round trips preserve typed metadata and 
     std::filesystem::remove(rejected_path);
     for (const std::string_view role : {"metadata", "tag:ZZ"}) {
         CAPTURE(role);
+        const auto writes_before = it::query_scalar_int(ctx, completed_writes_query);
+        const auto loads_before = it::query_scalar_int(ctx, completed_loads_query);
         const auto rejected = it::sql_error(ctx, "SELECT bioseq.write($query$" + nested_query +
             "$query$::text,'" + rejected_path + "',columns=>ARRAY["
             "ROW('omitted_sequence_array','" + std::string{role} + "')::bioseq.column_mapping])");
         REQUIRE(rejected.sqlstate == "22023");
         REQUIRE(rejected.contains("payload containers"));
         REQUIRE_FALSE(std::filesystem::exists(rejected_path));
+        REQUIRE(it::query_scalar_int(ctx, completed_writes_query) == writes_before);
+        REQUIRE(it::query_scalar_int(ctx, completed_loads_query) == loads_before);
     }
     const std::string opaque_query = "SELECT header,seq,write_meta_first.opaque_record() AS opaque "
         "FROM write_meta_first.container_source ORDER BY header";
@@ -2294,7 +2313,9 @@ TEST_CASE("bioseq.write: automatic alignment joins retain both source row identi
                 // Preserve unrelated Boolean bits under every existing scan setting.
                 for (const auto& [projection, flags] : std::vector<std::pair<std::string, unsigned>>{
                         {"true AS duplicate", 1024u}, {"true AS fails_qc", 512u},
-                        {"1024 AS flag", 1024u}, {"512 AS flag", 512u}}) {
+                        {"1024 AS flag", 1024u}, {"512 AS flag", 512u},
+                        {"false AS reversed", 0u}, {"NULL::boolean AS reversed", 0u},
+                        {"false AS reversed,false AS secondary,false AS supplementary", 0u}}) {
                     CAPTURE(format, projection, flags);
                     std::filesystem::remove(path);
                     const auto request = "SELECT bioseq.write($query$SELECT q.seq," + projection + join + matches
@@ -2322,9 +2343,33 @@ TEST_CASE("bioseq.write: automatic alignment joins retain both source row identi
                         "(alignment).cigar::text FROM write_join_flags_loaded ORDER BY header") == expected);
                     std::filesystem::remove(path);
                 }
-                // Map the visible constraint before automatic helper completion;
-                // otherwise the inferred reverse helper competes with its alias.
-                // The private owner status still supplies the authoritative bits.
+                // Named Boolean constraints bind before private helper completion;
+                // conflicts must reach the independent authoritative owner status.
+                for (const std::string_view projection : {"true AS reversed", "true AS secondary", "true AS supplementary"}) {
+                    CAPTURE(format, projection);
+                    const auto request = "SELECT bioseq.write($query$SELECT q.seq," + std::string{projection} + join + matches
+                        + "$query$::text,'" + path + "')";
+                    const auto error = it::sql_error(ctx, request);
+                    REQUIRE(error.sqlstate == "22023");
+                    REQUIRE(error.contains("owning alignment classification"));
+                    REQUIRE_FALSE(std::filesystem::exists(path));
+                }
+                // Two visible names for one bit remain ambiguous even when their
+                // values agree. Explicit choice plus omission resolves the pair.
+                const auto ambiguous = it::sql_error(ctx,
+                    "SELECT bioseq.write($query$SELECT q.seq,false AS reversed,false AS reverse_strand" + join + matches
+                    + "$query$::text,'" + path + "')");
+                REQUIRE(ambiguous.sqlstate == "22023");
+                REQUIRE(ambiguous.contains("ambiguous export role"));
+                REQUIRE_FALSE(std::filesystem::exists(path));
+                REQUIRE(it::query_scalar_int(ctx,
+                    "SELECT bioseq.write($query$SELECT q.seq,false AS reversed,true AS reverse_strand" + join + matches
+                    + "$query$::text,'" + path + "',columns=>ARRAY[ROW('#2','reversed')::bioseq.column_mapping,"
+                    "ROW('#3','omit')::bioseq.column_mapping])") == 4);
+                const auto selected = inspect_exported_native(path, format);
+                REQUIRE(selected.flags == std::vector<std::uint16_t>(4u, 0u));
+                std::filesystem::remove(path);
+                // Explicitly mapped constraints retain the same owner validation.
                 for (const auto& [projection, role] : std::vector<std::pair<std::string_view, std::string_view>>{
                         {"true AS reversed", "reversed"}, {"true AS secondary", "secondary"},
                         {"true AS supplementary", "supplementary"},

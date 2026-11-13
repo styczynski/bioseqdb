@@ -168,11 +168,30 @@ struct alignment_cache_observation {
     for (std::uint64_t offset{}; offset < expected.bytes;) {
         if (std::chrono::steady_clock::now() > deadline) return failure("cold input preparation deadline exceeded");
         const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(window_bytes, expected.bytes - offset));
-        auto mapped = mapped_read_window::open(input.descriptor, offset, count);
-        if (!mapped) return failure(mapped.error());
-        // This PROT_READ mapping is never dereferenced or COW-modified. Success
-        // is only an invalidation request; mincore below supplies the evidence.
-        if (::msync(const_cast<std::byte*>(mapped->bytes().data()), count, MS_SYNC | MS_INVALIDATE) != 0) {
+        if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())
+            || offset % page_bytes != 0u)
+            return failure("cold input invalidation mapping has invalid offset geometry");
+        /** Own only this benchmark's shared, read-only invalidation mapping. */
+        struct shared_invalidation_window {
+            void* address;
+            std::size_t bytes;
+            /** Map file-backed pages without reading or modifying their contents. */
+            shared_invalidation_window(int descriptor, off_t file_offset, std::size_t count)
+                : address{::mmap(nullptr, count, PROT_READ, MAP_SHARED, descriptor, file_offset)}, bytes{count} {}
+            shared_invalidation_window(const shared_invalidation_window&) = delete;
+            shared_invalidation_window& operator=(const shared_invalidation_window&) = delete;
+            /** Release the mapping on success and every early return. */
+            ~shared_invalidation_window() { if (address != MAP_FAILED) ::munmap(address, bytes); }
+        } mapped{input.descriptor, static_cast<off_t>(offset), count};
+        if (mapped.address == MAP_FAILED) {
+            result.request_errno = errno;
+            bioseq_log<logging_level::error>("cold invalidation mapping failed: path={} offset={} errno={}", path, offset, result.request_errno);
+            return failure("cold input invalidation mapping failed");
+        }
+        // A shared mapping targets the file cache; Darwin can leave private
+        // mappings resident after a successful msync. This mapping is never
+        // dereferenced. Only the separate mincore pass qualifies the input.
+        if (::msync(mapped.address, count, MS_SYNC | MS_INVALIDATE) != 0) {
             result.request_errno = errno;
             bioseq_log<logging_level::error>("cold invalidation failed: path={} offset={} errno={}", path, offset, result.request_errno);
             return failure("cold input invalidation request failed");
@@ -717,6 +736,8 @@ struct alignment_measurement {
     bool observed_content{};
     alignment_cache_observation cache;
     std::uint64_t observation_to_measurement_ns{}, measured_ns{};
+    io_resource_measurement resources;
+    std::uint64_t prepared_codec_scratch_capacity_bytes{};
     std::string error;
 };
 
@@ -1385,7 +1406,7 @@ struct alignment_comparison_consumer {
     }
     const bool full_file_metrics = valid && !codec;
     if (!valid) bioseq_log<logging_level::error>("alignment IO validation failed: {}", error);
-    return {{"record_count", static_cast<double>(output.records)}, {"bytes_on_disk", codec ? 0.0 : static_cast<double>(output.bytes)},
+    std::map<std::string, double> metrics{{"record_count", static_cast<double>(output.records)}, {"bytes_on_disk", codec ? 0.0 : static_cast<double>(output.bytes)},
         {"input_symbols", static_cast<double>(input.record_count) * input.record_length},
         {"compression_level", !codec && format == sequence_file_format::bam ? static_cast<double>(input.compression_level) : 0.0},
         {"input_pre_read_completed", input.warm_inputs && operation == "read" ? 1.0 : 0.0},
@@ -1410,6 +1431,9 @@ struct alignment_comparison_consumer {
         {"cache_observation_to_measurement_ns", static_cast<double>(output.observation_to_measurement_ns)},
         {"cache_cold_observed", output.cache.cold ? 1.0 : 0.0},
         {"full_record_match", valid ? 1.0 : std::numeric_limits<double>::quiet_NaN()}};
+    metrics.merge(io_resource_metrics(output.resources));
+    if (codec) metrics.emplace("prepared_codec_buffer_capacity_bytes", static_cast<double>(output.prepared_codec_scratch_capacity_bytes));
+    return metrics;
 }
 
 /** Remove only generated benchmark data; pinned source and build artifacts are retained. */

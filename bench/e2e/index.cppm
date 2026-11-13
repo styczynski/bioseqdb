@@ -18746,6 +18746,7 @@ struct sequence_io_preparation {
     std::vector<std::string> explain;
     nlohmann::json controls;
     nlohmann::json warmup_evidence;
+    nlohmann::json io_resources_before;
     std::unique_ptr<scoped_resource_monitor> resources;
 };
 
@@ -18763,6 +18764,7 @@ struct sequence_io_output {
     nlohmann::json controls;
     nlohmann::json warmup_evidence;
     nlohmann::json validation;
+    nlohmann::json io_resources;
 };
 
 /** Capture session identity; a catalog version/path alone is never a binary receipt. */
@@ -18774,6 +18776,45 @@ struct sequence_io_output {
         "'postmaster_start',pg_postmaster_start_time()::text,'database',current_database(),"
         "'database_oid',(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),"
         "'server_version_num',current_setting('server_version_num'))::text"));
+}
+
+/** Snapshot backend counters outside timing; these diagnostics never alter IO behavior. */
+[[nodiscard]] nlohmann::json sequence_io_resource_snapshot(const it::connection_test_context& connection) {
+    return {{"session_identity",sequence_io_session_identity(connection)},
+        {"counters",nlohmann::json::parse(sequence_io_scalar(connection,
+            "SELECT to_jsonb(s)::text FROM bioseq.scheduler_stats() s"))}};
+}
+
+/** Bind closed-owner totals to exactly one successful SQL IO request on the same backend. */
+[[nodiscard]] nlohmann::json sequence_io_resource_delta(
+    const nlohmann::json& before, const nlohmann::json& after, std::string_view operation) {
+    if (before.at("session_identity") != after.at("session_identity"))
+        throw std::runtime_error("[bench_sequence_io] resource snapshot backend identity changed");
+    const auto& first = before.at("counters");
+    const auto& last = after.at("counters");
+    if (!first.at("io_resource_counters_valid").get<bool>() || !last.at("io_resource_counters_valid").get<bool>())
+        throw std::runtime_error("[bench_sequence_io] resource diagnostics overflowed");
+    const auto delta = [&first,&last](std::string_view field) {
+        const auto lower = first.at(std::string{field}).get<std::int64_t>();
+        const auto upper = last.at(std::string{field}).get<std::int64_t>();
+        if (lower < 0 || upper < lower)
+            throw std::runtime_error("[bench_sequence_io] resource diagnostic counter decreased");
+        return static_cast<std::uint64_t>(upper - lower);
+    };
+    const auto loads = delta("io_sql_loads_completed");
+    const auto writes = delta("io_sql_writes_completed");
+    if (loads != (operation == "sql_load" ? 1u : 0u) || writes != (operation == "sql_write" ? 1u : 0u))
+        throw std::runtime_error("[bench_sequence_io] resource interval lacks exactly one matching SQL IO completion");
+    return {{"before",before},{"after",after},
+        {"closed_private_spool_files",delta("io_closed_spool_files")},
+        {"closed_private_spool_reserved_bytes",delta("io_closed_spool_reserved_bytes")},
+        {"backend_process_lifetime_peak_rss_bytes",last.at("backend_peak_rss_bytes")},
+        {"input_slab_capacity_process_lifetime_peak_bytes",last.at("io_input_slab_capacity_peak_bytes")},
+        {"scalar_buffer_capacity_process_lifetime_peak_bytes",last.at("io_scalar_buffer_capacity_peak_bytes")},
+        {"output_wave_capacity_process_lifetime_peak_bytes",last.at("io_output_wave_capacity_peak_bytes")},
+        {"spool_scope","sum of final logical reserved extents of closed Bioseq IO private spools; excludes final output staging and PostgreSQL temporary files; not bytes written or peak disk use"},
+        {"scratch_scope","process-lifetime max individual input slab/scalar buffer and max summed writer wave; excludes allocation overlap, source rows, vendor workspace and PostgreSQL memory"},
+        {"rss_scope","OS process-lifetime high-water, not a per-statement delta"}};
 }
 
 /** Fail closed when the current installed catalog cannot express the measured API. */
@@ -19119,6 +19160,9 @@ void sequence_io_require_count(const captured_query_rows& result, std::size_t ex
             throw std::runtime_error("[bench_sequence_io] EXPLAIN lacks export ownership or published output");
     }
     preparation.resources = std::make_unique<scoped_resource_monitor>();
+    preparation.io_resources_before = sequence_io_resource_snapshot(input->connection);
+    if (preparation.io_resources_before.at("session_identity") != input->identity)
+        throw std::runtime_error("[bench_sequence_io] resource preparation has a different backend identity");
     return preparation;
 }
 
@@ -19141,6 +19185,8 @@ void finalize_sequence_io_iteration(
     preparation.resources.reset();
     output.measured_region_ns = window.elapsed_ns;
     const auto result = materialize_captured_query_rows(input->connection,std::move(output.pending));
+    output.io_resources = sequence_io_resource_delta(preparation.io_resources_before,
+        sequence_io_resource_snapshot(input->connection),operation);
     output.validation = sequence_io_finish_operation(*input,preparation.profile,operation,preparation.path,result);
     output.file_bytes = std::filesystem::file_size(preparation.path);
     output.rows = input->rows;
@@ -19166,7 +19212,7 @@ void finalize_sequence_io_iteration(
     if (!output.correctness_accepted || output.measured_region_ns==0u)
         throw std::runtime_error("[bench_sequence_io] invalid timing or semantic acceptance");
     const auto seconds = static_cast<double>(output.measured_region_ns)/1e9;
-    return {{"row_count",static_cast<double>(output.rows)},
+    std::map<std::string,double> metrics{{"row_count",static_cast<double>(output.rows)},
         {"original_symbols",static_cast<double>(output.input_symbols)},
         {"file_bytes",static_cast<double>(output.file_bytes)},
         {"rows_per_second",static_cast<double>(output.rows)/seconds},
@@ -19176,6 +19222,14 @@ void finalize_sequence_io_iteration(
         {"sampled_bench_rss_mb",output.resources.bench_rss_kb/1024.0},
         {"sampled_min_tmp_available_gib",output.resources.tmp_available_kb/(1024.0*1024.0)},
         {"sampled_swap_used_mb",output.resources.swap_used_mb}};
+    for (const auto field : {"closed_private_spool_files","closed_private_spool_reserved_bytes",
+            "input_slab_capacity_process_lifetime_peak_bytes","scalar_buffer_capacity_process_lifetime_peak_bytes",
+            "output_wave_capacity_process_lifetime_peak_bytes"})
+        metrics.emplace(field,output.io_resources.at(field).get<double>());
+    const auto& rss = output.io_resources.at("backend_process_lifetime_peak_rss_bytes");
+    metrics.emplace("backend_process_lifetime_peak_rss_available",rss.is_null() ? 0.0 : 1.0);
+    if (!rss.is_null()) metrics.emplace("backend_process_lifetime_peak_rss_bytes",rss.get<double>());
+    return metrics;
 }
 
 /** Retain exact SQL/units/validation and the managed runner's distinct binary-authority contract. */
@@ -19200,7 +19254,7 @@ void finalize_sequence_io_iteration(
         {"original_symbols",output.input_symbols},{"file_bytes",output.file_bytes},
         {"file_emission_order_acceptance","separate neutral/manual owner; SQL oracle compares full original rows"},
         {"native_nm_md_oracle","normal reader validates projection; independent native wire oracle is separate"},
-        {"samtools_speed_ratio",nullptr},{"scratch_spool_bytes",nullptr},
+        {"samtools_speed_ratio",nullptr},{"io_resources",output.io_resources},
         {"resource_sampling","existing 500ms host PostgreSQL process RSS sampling; not exact per-backend peak"},
         {"pmu_scope","framework client thread around libpq, not PostgreSQL backend work"},
         {"sampled_cluster_postgres_rss_kb",output.resources.postgres_rss_kb},

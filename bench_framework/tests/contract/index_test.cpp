@@ -7,6 +7,8 @@
  * also rebuild paired comparisons from the saved samples so the reports can be
  * checked independently of the produntion aggregation code.
  */
+module;
+
 #include <catch2/catch_approx.hpp>
 
 #include <simdjson.h>
@@ -14,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include <oneapi/tbb/global_control.h>
+#include <oneapi/tbb/task_arena.h>
 
 #include <cerrno>
 #include <cstdio>
@@ -24,13 +27,15 @@
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
 
+// Keep white-box scheduler contracts inside the owning module without exporting internals.
+module bioseq.bench.framework;
+
 import std;
 import bioseq.common.logging;
 import bioseq.instrumentation;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
-import bioseq.bench.framework;
 import bioseq.bench.prefilter_algorithm_selection;
 
 namespace {
@@ -1120,6 +1125,94 @@ TEST_CASE("bench_lock drains older work, blocks newer work and is globally exclu
     REQUIRE(older_end.load() < lock_start.load());
     REQUIRE(lock_start.load() < lock_end.load());
     REQUIRE(lock_end.load() < newer_start.load());
+}
+
+TEST_CASE("a memory-blocked exclusive batch cannot expire its fitting successor",
+          "[component:benchmark_framework][layer:contract][feature:scheduling]") {
+    using bioseq::bench::framework::detail::batch_scheduler;
+    using bioseq::bench::framework::detail::benchmark_memory_budget;
+    using bioseq::bench::framework::detail::progress_group;
+    using bioseq::bench::framework::detail::scheduled_batch;
+
+    benchmark_memory_budget budget{50.0};
+    const auto memory = budget.current_system_snapshot();
+    const auto cap = benchmark_memory_budget::cap_for(
+        memory.system_total_bytes, budget.memory_buffer_pct());
+    REQUIRE(cap + 1u < memory.system_total_bytes);
+    REQUIRE(cap < static_cast<std::uint64_t>(
+        (std::numeric_limits<std::int64_t>::max)()));
+    REQUIRE(memory.process_footprint_bytes + 1u < cap);
+
+    std::promise<void> gate_started;
+    auto started = gate_started.get_future();
+    std::promise<void> release_gate;
+    auto released = release_gate.get_future().share();
+    std::atomic<std::size_t> oversized_calls{0u};
+    std::atomic<std::size_t> fitting_calls{0u};
+    progress_group oversized_progress;
+    progress_group fitting_progress;
+    oneapi::tbb::task_arena arena{2};
+    batch_scheduler scheduler{budget, arena};
+
+    // Keep work running until both pending requests have crossed a scheduler
+    // tick. This reproduces a common idle boundary without racing two enqueues.
+    scheduler.enqueue_batch(scheduled_batch{
+        .benchmark_index = 0u,
+        .body = [&gate_started, released] {
+            gate_started.set_value();
+            released.wait();
+        },
+    });
+    scheduler.enqueue_batch(scheduled_batch{
+        .benchmark_index = 1u,
+        .bench_lock = true,
+        .base_bytes = static_cast<std::size_t>(cap + 1u),
+        .total_bytes = static_cast<std::int64_t>(cap + 1u),
+        .body = [&oversized_calls] { oversized_calls.fetch_add(1u); },
+        .group_for_ui = &oversized_progress,
+    });
+    scheduler.enqueue_batch(scheduled_batch{
+        .benchmark_index = 2u,
+        .bench_lock = true,
+        .base_bytes = 1u,
+        .total_bytes = 1,
+        .body = [&fitting_calls] { fitting_calls.fetch_add(1u); },
+        .group_for_ui = &fitting_progress,
+    });
+    const auto gate_status = started.wait_for(std::chrono::seconds{5});
+    // Reset after both enqueues, then observe the existing scheduler mirrors.
+    // Either implementation overwrites these sentinels (old: timestamp, fixed:
+    // zero), proving both requests were processed while the gate stayed held.
+    oversized_progress.idle_start_ns.store(-1, std::memory_order_release);
+    fitting_progress.idle_start_ns.store(-1, std::memory_order_release);
+    const auto observation_deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds{5};
+    const auto pending_observed = [&oversized_progress, &fitting_progress] {
+        return oversized_progress.idle_start_ns.load(std::memory_order_acquire) != -1
+            && fitting_progress.idle_start_ns.load(std::memory_order_acquire) != -1;
+    };
+    while (!pending_observed() && std::chrono::steady_clock::now() < observation_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    const bool observed_both_pending = pending_observed();
+    const auto waiting = scheduler.capture_live_snapshot();
+    const auto idle_start = std::chrono::steady_clock::now();
+    release_gate.set_value();
+    scheduler.wait_for_benchmark(1u);
+    scheduler.wait_for_benchmark(2u);
+    scheduler.wait_for_completion();
+    const auto elapsed = std::chrono::steady_clock::now() - idle_start;
+    const auto completed = scheduler.capture_live_snapshot();
+
+    REQUIRE(gate_status == std::future_status::ready);
+    REQUIRE(observed_both_pending);
+    REQUIRE(waiting.running_count == 1u);
+    REQUIRE(waiting.pending_count == 2u);
+    REQUIRE(oversized_calls.load() == 0u);
+    REQUIRE(fitting_calls.load() == 1u);
+    REQUIRE(elapsed >= batch_scheduler::k_max_idle_waiting_time);
+    REQUIRE(completed.running_count == 0u);
+    REQUIRE(completed.pending_count == 0u);
+    REQUIRE(completed.reserved_bytes == 0u);
 }
 
 TEST_CASE("all benchmark drivers prepare before caller-thread finalization",
@@ -4321,7 +4414,8 @@ TEST_CASE("Alignment IO defaults retain full operations and qualify native and c
     for (const auto metric : {"encoded_bytes", "native_sequence_symbols", "full_file_byte_metrics_present",
             "uncompressed_file_bytes", "uncompressed_to_physical_ratio", "uncompressed_file_bytes_per_second"}) {
         REQUIRE(metrics.at(metric).at("type") == "evaluation");
-        REQUIRE_FALSE(metrics.at(metric).at("description").get<std::string>().empty());
+        REQUIRE(benchmark.at("description").get<std::string>().find(
+            std::string{metric} + ": ") != std::string::npos);
     }
     const auto& rules = matrix.at("metrics").at("wall_clock_ns").at("rules");
     REQUIRE(rules.size() == 336u);
@@ -4351,6 +4445,47 @@ TEST_CASE("Alignment IO defaults retain full operations and qualify native and c
     }
     REQUIRE(original_rules == 168u);
     REQUIRE(new_rules == 168u);
+    // Parse every production declaration and all global regression references.
+    // Only the copied fast flags change: --fast skips workloads after the
+    // framework's schema and semantic checks, before any input is prepared.
+    auto validation_config = config;
+    temporary_report_directory report_dir;
+    std::vector<std::string> benchmark_keys;
+    for (auto& [key, declaration] : validation_config.items()) {
+        if (!declaration.is_object() || !declaration.contains("matrix")) continue;
+        declaration["fast"] = false;
+        benchmark_keys.push_back(key);
+    }
+    REQUIRE_FALSE(benchmark_keys.empty());
+    const auto config_path = write_config_file(report_dir, validation_config.dump());
+    std::size_t estimator_calls{};
+    std::vector<erased_benchmark> validation_benchmarks;
+    for (const auto& key : benchmark_keys) {
+        validation_benchmarks.push_back(make_toy_bench(key, key, config_path,
+            [&estimator_calls](std::string_view, std::string_view,
+                               simdjson::dom::element) {
+                ++estimator_calls;
+                return run_constraints{};
+            }));
+    }
+    const std::array<std::string, 6> args{
+        "bench_framework_test", "--report", report_dir.path.string(),
+        "--threads", "2", "--fast"};
+    argument_vector_builder argv_holder{std::span<const std::string>{args}};
+    int validation_exit_code = -1;
+    std::string validation_stderr;
+    {
+        standard_error_capture capture;
+        validation_exit_code = bioseq::bench::framework::detail::run_impl(
+            argv_holder.argc(), argv_holder.argv(),
+            report_dir.path.string(), report_dir.path.string(),
+            std::move(validation_benchmarks));
+        validation_stderr = capture.text();
+    }
+    INFO(validation_stderr);
+    REQUIRE(validation_exit_code == 0);
+    REQUIRE(estimator_calls == 0u);
+
     const auto& axes = matrix.at("over").at("bioseq_alignment");
     for (const auto& [name, ignored] : matrix.at("for").items()) {
         (void)ignored;

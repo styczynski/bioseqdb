@@ -1857,14 +1857,14 @@ private:
                     }
                 }, tg_);
             } else {
-                // Count idle time only while no batch is running Running work may
-                // release memory, so give pending batches a fresh timeout then.
-                const auto now_ns = static_cast<std::int64_t>(
-                                         bioseq::instrumentation::clock::now_ns());
-                if (!running_batches_.empty()) {
-                    pending_iter->last_idle_start_ns = now_ns;
+                // Only memory admission can consume this timeout. A predecessor's
+                // exclusive lock or running work must not expire a later batch
+                // before that batch gets its own opportunity to request memory.
+                if (!running_batches_.empty() || !bench_ok || !concurrency_ok) {
+                    pending_iter->last_idle_start_ns = 0;
                 } else if (pending_iter->last_idle_start_ns == 0) {
-                    pending_iter->last_idle_start_ns = now_ns;
+                    pending_iter->last_idle_start_ns = static_cast<std::int64_t>(
+                        bioseq::instrumentation::clock::now_ns());
                 }
                 mirror_idle_to_ui(*pending_iter,
                                    pending_iter->last_idle_start_ns);

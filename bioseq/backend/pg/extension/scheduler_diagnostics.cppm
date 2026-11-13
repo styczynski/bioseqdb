@@ -59,6 +59,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.storage.indexing.minimizer_build_stats;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.parallelism.mode;
+import bioseq.io.sinks;
 
 using namespace bioseq::postgres::support;
 
@@ -267,6 +268,18 @@ bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::scheduler_stats_row>
 scheduler_stats() {
 	const auto snap = bioseq::postgres::scheduler::snapshot();
+    const auto io = bioseq::io::io_resource_diagnostics().snapshot();
+    const auto rss = bioseq::io::io_process_peak_rss_bytes();
+    constexpr auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    const bool io_representable = io.closed_spool_files <= maximum && io.closed_spool_reserved_bytes <= maximum
+        && io.input_slab_capacity_peak_bytes <= maximum && io.scalar_buffer_capacity_peak_bytes <= maximum
+        && io.output_wave_capacity_peak_bytes <= maximum && io.sql_loads_completed <= maximum
+        && io.sql_writes_completed <= maximum;
+    // Invalid diagnostic values remain flagged; they never influence IO execution.
+    const auto sql_count = [](std::uint64_t count) {
+        return static_cast<std::int64_t>(std::min(count,
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())));
+    };
 	const std::string mode_string{
 		bioseq::parallelism::concurrency_mode_name(snap.mode)};
 	std::vector<bioseq::postgres::sql_rows::scheduler_stats_row> rows;
@@ -287,6 +300,15 @@ scheduler_stats() {
 		snap.uptime_secs,
 		static_cast<std::int64_t>(snap.async_persist_jobs_waiting),
 		static_cast<std::int64_t>(snap.index_memory_reserved_bytes),
+        sql_count(io.closed_spool_files),
+        sql_count(io.closed_spool_reserved_bytes),
+        sql_count(io.input_slab_capacity_peak_bytes),
+        sql_count(io.scalar_buffer_capacity_peak_bytes),
+        sql_count(io.output_wave_capacity_peak_bytes),
+        sql_count(io.sql_loads_completed),
+        sql_count(io.sql_writes_completed),
+        io.valid && io_representable,
+        rss && *rss <= maximum ? std::optional{static_cast<std::int64_t>(*rss)} : std::nullopt,
 	});
 	return bioseq::postgres::support::table_rows<
 		bioseq::postgres::sql_rows::scheduler_stats_row>{std::move(rows)};

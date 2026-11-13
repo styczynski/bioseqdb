@@ -299,9 +299,10 @@ template <sequence_alphabet p_alphabet,
         // Consume each refill, even when an unwrapped sequence line is larger
         // than the input slab. Only the encoder's partial word spans refills.
         const auto remaining_bytes = std::min<std::size_t>(slab_size - parse_cursor, 65536);
-        const auto newline_offset = simd::scan_first_byte('\n', slab_data + parse_cursor, remaining_bytes);
-        const auto carriage_offset = simd::scan_first_byte('\r', slab_data + parse_cursor, remaining_bytes);
-        const auto line_size = std::min(newline_offset, carriage_offset);
+        // Stop at either line ending in one pass. A separate CR scan would
+        // repeatedly traverse later records in ordinary LF-only input slabs.
+        const auto line_size = simd::scan_first_byte_pair('\n', '\r',
+            slab_data + parse_cursor, remaining_bytes);
         if (line_size == 0) {
             if (slab_data[parse_cursor++] == '\r') state.sequence_pending_cr = true;
             else state.progress = fastq_parser_progress::at_body_line_start;
@@ -340,8 +341,11 @@ template <sequence_alphabet p_alphabet,
         const std::size_t remaining_bytes = slab_size - parse_cursor;
         const std::size_t newline_offset =
             simd::scan_first_byte('\n', slab_data + parse_cursor, remaining_bytes);
-        if (newline_offset == remaining_bytes)
+        if (newline_offset == remaining_bytes) {
+            // The ignored comment needs no retained bytes between refills.
+            parse_cursor = slab_size;
             return need_more();
+        }
         parse_cursor += newline_offset + 1;
         state.progress = fastq_parser_progress::in_quality_line;
     }
@@ -364,21 +368,22 @@ template <sequence_alphabet p_alphabet,
             break;
         }
         // Consume bounded spans even when one quality line exceeds the refill buffer.
-        std::size_t line_size = 0;
+        const auto remaining_bytes = std::min<std::size_t>(slab_size - parse_cursor, 65536);
+        std::size_t line_size{};
         if constexpr (Mode == fastq_parse_mode::frame) {
-            line_size = simd::scan_first_byte_pair('\n', '\r', slab_data + parse_cursor,
-                std::min<std::size_t>(slab_size - parse_cursor, 65536));
-        } else {
-            while (parse_cursor + line_size < slab_size && line_size < 65536
-                && slab_data[parse_cursor + line_size] != '\n'
-                && slab_data[parse_cursor + line_size] != '\r') {
+            line_size = simd::scan_first_byte_pair('\n', '\r', slab_data + parse_cursor, remaining_bytes);
+        } else if (strict_fastq) {
+            // Newlines and CR are outside the accepted quality interval, so
+            // this one SIMD pass finds both the line boundary and bad bytes.
+            line_size = simd::scan_fastq_quality_prefix(slab_data + parse_cursor, remaining_bytes);
+            if (line_size != remaining_bytes) {
                 const auto byte = slab_data[parse_cursor + line_size];
-                if (strict_fastq && (byte < 33 || byte > 126)) {
+                if (byte != '\n' && byte != '\r')
                     return reject_quality_byte(byte, state.quality_byte_count + line_size,
                         parse_cursor + line_size, global_offset + parse_cursor + line_size);
-                }
-                ++line_size;
             }
+        } else {
+            line_size = simd::scan_first_byte_pair('\n', '\r', slab_data + parse_cursor, remaining_bytes);
         }
         const std::size_t next_cursor = parse_cursor + line_size;
         const auto next_quality_count =

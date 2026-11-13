@@ -6,6 +6,8 @@ module;
 
 #include <functional>
 #include <map>
+#include <optional>
+#include <stdexcept>
 #include <simdjson.h>
 #include <string>
 #include <string_view>
@@ -18,6 +20,8 @@ import :readers;
 import :writers;
 import :alignment;
 import bioseq.common.logging;
+import bioseq.io.sinks;
+import bioseq.common.checked_arithmetic;
 import bioseq.bench.framework;
 
 #ifndef BIOSEQ_IO_REPORT_DIR
@@ -126,16 +130,27 @@ int run(int argc, char** argv) {
         .enabled = [](std::string_view, const parameter_map&, const alignment_benchmark_input&) { return true; },
         .before_iteration = [](std::string_view algorithm, const parameter_map& parameters,
                 const alignment_benchmark_input& input, std::size_t repeat) {
-            return prepare_alignment_iteration(algorithm, parameters, input, repeat);
+            auto preparation = prepare_alignment_iteration(algorithm, parameters, input, repeat);
+            preparation.pool.resource_before = bioseq::io::io_resource_diagnostics().snapshot();
+            return preparation;
         },
         .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
                 const alignment_benchmark_input& input, alignment_iteration_preparation& preparation) {
             if (!preparation.error.empty()) return alignment_measurement{.cache = preparation.cache, .error = preparation.error};
             return run_alignment(algorithm, parameters, input, &preparation);
         },
-        .after_iteration = [](std::string_view, const parameter_map& parameters, const alignment_benchmark_input& input,
+        .after_iteration = [](std::string_view algorithm, const parameter_map& parameters, const alignment_benchmark_input& input,
                 alignment_iteration_preparation& preparation, alignment_measurement& output,
                 const bioseq::bench::framework::iteration_measurement_window& window) {
+            output.resources = capture_io_resources(preparation.pool.resource_before, algorithm == "bioseq_alignment");
+            for (const auto& scratch : preparation.scratch) {
+                const auto combined = bioseq::common::checked_add(
+                    static_cast<std::uint64_t>(scratch->bytes.capacity), static_cast<std::uint64_t>(scratch->text.m));
+                const auto total = combined ? bioseq::common::checked_add(output.prepared_codec_scratch_capacity_bytes, *combined)
+                    : std::nullopt;
+                if (!total) throw std::runtime_error("native codec scratch capacity overflows");
+                output.prepared_codec_scratch_capacity_bytes = *total;
+            }
             if (!preparation.finish_codec()) { output.valid = false; output.error = "native codec transport close failed"; }
             output.measured_ns = window.elapsed_ns;
             if (output.measured_ns == 0u) { output.valid = false; output.error = "alignment measurement has nonpositive elapsed time"; }
@@ -159,15 +174,20 @@ int run(int argc, char** argv) {
         .enabled = [](std::string_view, const parameter_map&, const reader_input&) { return true; },
         .before_iteration = [](std::string_view algorithm, const parameter_map&,
                 const reader_input&, std::size_t repeat) {
-            return prepare_reader_iteration(algorithm, repeat);
+            auto preparation = prepare_reader_iteration(algorithm, repeat);
+            preparation.resource_before = bioseq::io::io_resource_diagnostics().snapshot();
+            return preparation;
         },
         .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
                 const reader_input& input, io_pool_scope&) {
             return run_reader(algorithm, parameters, input);
         },
-        .after_iteration = [](std::string_view, const parameter_map&, const reader_input&,
-                io_pool_scope& preparation, io_measurement&,
-                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+        .after_iteration = [](std::string_view algorithm, const parameter_map&, const reader_input&,
+                io_pool_scope& preparation, io_measurement& output,
+                const bioseq::bench::framework::iteration_measurement_window&) {
+            output.resources = capture_io_resources(preparation.resource_before, algorithm.starts_with("bioseq_"));
+            preparation.restore_previous();
+        },
     };
 
     bioseq::bench::framework::iteration_boundary_callbacks<writer_input,
@@ -175,7 +195,9 @@ int run(int argc, char** argv) {
         .enabled = [](std::string_view, const parameter_map&, const writer_input&) { return true; },
         .before_iteration = [](std::string_view algorithm, const parameter_map&,
                 const writer_input&, std::size_t repeat) {
-            return prepare_writer_iteration(algorithm, repeat);
+            auto preparation = prepare_writer_iteration(algorithm, repeat);
+            preparation.resource_before = bioseq::io::io_resource_diagnostics().snapshot();
+            return preparation;
         },
         .measured_iteration = [](std::string_view algorithm, const parameter_map& parameters,
                 const writer_input& input, io_pool_scope& preparation) {
@@ -185,9 +207,12 @@ int run(int argc, char** argv) {
             }
             return run_writer(algorithm, parameters, input);
         },
-        .after_iteration = [](std::string_view, const parameter_map&, const writer_input&,
-                io_pool_scope& preparation, io_measurement&,
-                const bioseq::bench::framework::iteration_measurement_window&) { preparation.restore_previous(); },
+        .after_iteration = [](std::string_view algorithm, const parameter_map&, const writer_input&,
+                io_pool_scope& preparation, io_measurement& output,
+                const bioseq::bench::framework::iteration_measurement_window&) {
+            output.resources = capture_io_resources(preparation.resource_before, algorithm.starts_with("bioseq_"));
+            preparation.restore_previous();
+        },
     };
 
     return bioseq::bench::framework::run(

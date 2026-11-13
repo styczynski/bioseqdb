@@ -6,6 +6,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -193,12 +194,21 @@ linux_process_charge_bytes(std::string_view status) noexcept {
 /** Return total physical memory, or zero if unavailable. */
 [[nodiscard]] inline std::uint64_t system_total_bytes() noexcept {
 #if defined(__APPLE__)
+    // Darwin's HW_MEMSIZE is fixed during kernel boot. Retain only a complete,
+    // positive reading; footprint and available-memory probes remain live.
+    // This scalar lock-free cache adds no fork hazard and owns no port.
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    static constinit std::atomic<std::uint64_t> known_total{0u};
+    if (const auto known = known_total.load(std::memory_order_relaxed); known != 0u)
+        return known;
     std::uint64_t memory = 0;
     std::size_t length = sizeof(memory);
     int selectors[2] = {CTL_HW, HW_MEMSIZE};
-    return ::sysctl(selectors, 2, &memory, &length, nullptr, 0) == 0
-        ? memory
-        : 0;
+    if (::sysctl(selectors, 2, &memory, &length, nullptr, 0) != 0)
+        return 0;
+    if (length == sizeof(memory) && memory != 0u)
+        known_total.store(memory, std::memory_order_relaxed);
+    return memory;
 #elif defined(__linux__)
     const long pages = ::sysconf(_SC_PHYS_PAGES);
     const long bytes_per_page = ::sysconf(_SC_PAGESIZE);
@@ -274,7 +284,7 @@ struct memory_budget {
     double cap_fraction = 0.80;
     std::uint64_t min_free_bytes = std::uint64_t{2} << 30;
 
-    /** Sample process usage, available memory and total memory with separate OS calls. */
+    /** Sample current process usage and available memory alongside physical capacity. */
     [[nodiscard]] memory_snapshot snapshot() const noexcept {
         return memory_snapshot{
             .process_footprint_bytes = process_footprint_bytes(),
@@ -309,7 +319,7 @@ struct memory_budget {
             static_cast<double>(total) * bounded_fraction);
     }
 
-    /** Compute the process memory limit from a fresh total-memory reading. */
+    /** Compute the process memory limit from the available physical-capacity reading. */
     [[nodiscard]] std::uint64_t soft_cap_bytes() const noexcept {
         return soft_cap_bytes(total_bytes());
     }
@@ -356,7 +366,7 @@ struct memory_budget {
             || sample.system_available_bytes < min_free_bytes;
     }
 
-    /** Take fresh memory readings and check whether either limit is exceeded. */
+    /** Refresh usage and availability, then check whether either limit is exceeded. */
     [[nodiscard]] bool under_pressure() const noexcept {
         return under_pressure(snapshot());
     }

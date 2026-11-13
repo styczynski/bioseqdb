@@ -39,6 +39,14 @@ template<std::signed_integral Integer>
     return std::bit_cast<Integer>(read_wire_unsigned<std::make_unsigned_t<Integer>>(bytes));
 }
 
+/** Store one explicit little-endian scalar into prechecked caller storage. */
+template<std::integral Integer>
+inline void store_wire_integer(std::span<std::uint8_t> output, const Integer value) {
+    const auto encoded = std::bit_cast<std::make_unsigned_t<Integer>>(value);
+    for (std::size_t index = 0; index < sizeof(Integer); ++index)
+        output[index] = static_cast<std::uint8_t>(encoded >> (8 * index));
+}
+
 /** Streaming destinations own and admit their buffers; codecs never grow them. */
 template<class Sink>
 concept alignment_byte_sink = requires(Sink& sink, std::span<const std::uint8_t> bytes) {
@@ -50,10 +58,7 @@ template<std::integral Integer, alignment_byte_sink Sink>
 [[nodiscard]] inline std::expected<void, std::string> append_wire_integer(
     Sink& sink, const Integer value) {
     std::array<std::uint8_t, sizeof(Integer)> bytes{};
-    using unsigned_type = std::make_unsigned_t<Integer>;
-    const auto encoded = std::bit_cast<unsigned_type>(value);
-    for (std::size_t index = 0; index < bytes.size(); ++index)
-        bytes[index] = static_cast<std::uint8_t>(encoded >> (8 * index));
+    store_wire_integer(bytes, value);
     return sink.append(bytes);
 }
 
@@ -194,12 +199,18 @@ parse_bam_auxiliary(std::span<const std::uint8_t> bytes) {
     std::size_t payload_bytes = auxiliary_element_bytes(field.type);
     if (field.type == 'Z' || field.type == 'H') {
         const auto remaining = bytes.subspan(prefix);
-        payload_bytes = io::simd::scan_first_byte(0, remaining.data(), remaining.size());
+        // NUL fails both predicates, so a valid prefix also locates its terminator.
+        // Malformed prefixes retain the original terminator/parity/byte error order.
+        payload_bytes = io::simd::scan_sam_auxiliary_prefix(remaining.data(), remaining.size(), field.type == 'H');
+        const bool invalid_before_terminator = payload_bytes < remaining.size() && remaining[payload_bytes] != 0;
+        if (invalid_before_terminator)
+            payload_bytes = io::simd::scan_first_byte(0, remaining.data(), remaining.size());
         if (payload_bytes == remaining.size())
             return std::unexpected(std::string{"BAM text auxiliary field lacks terminator"});
         if (field.type == 'H' && payload_bytes % 2 != 0)
             return std::unexpected(std::string{"BAM hex auxiliary field has odd length"});
-        if (io::simd::scan_sam_auxiliary_prefix(remaining.data(), payload_bytes, field.type == 'H') != payload_bytes)
+        if (invalid_before_terminator
+            && io::simd::scan_sam_auxiliary_prefix(remaining.data(), payload_bytes, field.type == 'H') != payload_bytes)
             return std::unexpected(std::string{"BAM text/hex auxiliary contains invalid bytes"});
         field.payload = std::as_bytes(remaining.first(payload_bytes));
         return bam_auxiliary_view{field, prefix + payload_bytes + 1};
@@ -321,10 +332,19 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
 /** Parse one complete BAM record and its auxiliary fields with strict bounds.
  * reference_count is the already-validated binary dictionary size. CG:B:I is
  * treated as transport only with the prescribed two-operation placeholder.
+ * An optional private visitor borrows non-CG fields during the checked scan;
+ * it must keep them private until parsing and caller framing checks succeed.
+ * Visitor admission errors may be latched without interrupting validation.
  */
+template<class AuxiliaryVisitor = std::nullptr_t>
+    requires (std::same_as<std::remove_cvref_t<AuxiliaryVisitor>, std::nullptr_t>
+        || requires(AuxiliaryVisitor& visitor, const auxiliary_field_view& field) {
+            { visitor(field) } -> std::same_as<void>;
+        })
 [[nodiscard]] inline std::expected<bam_record_view, std::string> parse_bam_record(
     std::span<const std::uint8_t> bytes, const std::uint32_t reference_count,
-    bioseq::simd::sequence_rank_transform_kernel transform = sequence_codec_kernel()) {
+    bioseq::simd::sequence_rank_transform_kernel transform = sequence_codec_kernel(),
+    AuxiliaryVisitor&& auxiliary_visitor = nullptr) {
     if (bytes.size() < 36)
         return std::unexpected(std::string{"BAM record fixed core is truncated"});
     const auto signed_block_size = read_wire_signed<std::int32_t>(bytes.first(4));
@@ -397,6 +417,8 @@ measure_native_cigar(std::span<const std::uint8_t> words) {
             const auto payload = parsed->field.payload;
             expanded_cigar = std::span<const std::uint8_t>{
                 reinterpret_cast<const std::uint8_t*>(payload.data()) + 4, payload.size() - 4};
+        } else if constexpr (!std::same_as<std::remove_cvref_t<AuxiliaryVisitor>, std::nullptr_t>) {
+            auxiliary_visitor(parsed->field);
         }
         auxiliary_offset += parsed->consumed_bytes;
     }
@@ -710,9 +732,6 @@ template<alignment_byte_sink Sink>
 [[nodiscard]] std::expected<void, std::string> emit_bam_record_prefix(
     Sink& sink, std::string_view qname, const bam_core_fields& core,
     const bam_record_measurement& measured) {
-    const auto write_u32 = [&sink](const std::uint32_t value) {
-        return append_wire_integer(sink, value);
-    };
     const std::array<std::uint32_t, 9> fixed{
         std::bit_cast<std::uint32_t>(measured.block_size),
         std::bit_cast<std::uint32_t>(core.reference_id),
@@ -725,10 +744,12 @@ template<alignment_byte_sink Sink>
         std::bit_cast<std::uint32_t>(core.mate_reference_id),
         std::bit_cast<std::uint32_t>(core.mate_position),
         std::bit_cast<std::uint32_t>(core.template_length)};
-    for (const auto value : fixed) {
-        const auto written = write_u32(value);
-        if (!written) return written;
-    }
+    std::array<std::uint8_t, 9u * sizeof(std::uint32_t)> bytes;
+    for (std::size_t index = 0; index < fixed.size(); ++index)
+        store_wire_integer(std::span{bytes}.subspan(index * sizeof(std::uint32_t),
+            sizeof(std::uint32_t)), fixed[index]);
+    const auto fixed_written = sink.append(bytes);
+    if (!fixed_written) return fixed_written;
     const auto name_written = sink.append(std::span<const std::uint8_t>{
         reinterpret_cast<const std::uint8_t*>(qname.data()), qname.size()});
     if (!name_written) return name_written;
@@ -1255,14 +1276,6 @@ parse_sam_record(std::string_view line) {
         && (result.reference_name == "*" || !result.position || measured->word_count == 0))
         return std::unexpected(std::string{"Mapped SAM record needs reference, position and real CIGAR"});
     return result;
-}
-
-/** Store one explicit little-endian scalar into prechecked caller storage. */
-template<std::integral Integer>
-inline void store_wire_integer(std::span<std::uint8_t> output, const Integer value) {
-    const auto encoded = std::bit_cast<std::make_unsigned_t<Integer>>(value);
-    for (std::size_t index = 0; index < sizeof(Integer); ++index)
-        output[index] = static_cast<std::uint8_t>(encoded >> (8 * index));
 }
 
 /** Parse one numeric SAM element into its declared binary type with strict range checks. */

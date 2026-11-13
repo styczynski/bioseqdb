@@ -16,6 +16,7 @@ import std;
 import bioseq.io.options;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.io.write_pipeline;
+import bioseq.io.sinks;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.storage.io.exporting.query_binding;
@@ -204,6 +205,8 @@ inline void begin_export_scan(CustomScanState* node, EState* estate, int flags) 
         runtime.phase = export_execution_phase::published;
         state.result_emitted = true;
         runtime.source.reset();
+        // Count only the actual publication, after all source-owned IO is retired.
+        bioseq::io::io_resource_diagnostics().completed_sql_write();
         return export_count_slot(*node, runtime.count);
     });
 }

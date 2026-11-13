@@ -1862,7 +1862,7 @@ scalar_codec_declarations(const bool ranks) {
             throw std::runtime_error("scalar codec reviewed signature changed: " + std::string{specification.name});
         if (enumeration && compact_head(std::string_view{content}.substr(range.begin.byte_offset,
                 range.end.byte_offset - range.begin.byte_offset))
-            != "enumclassbyte_scan_kind:std::uint8_t{needles,json_escape,printable_ascii,upper_hex,header_unreserved};")
+            != "enumclassbyte_scan_kind:std::uint8_t{needles,json_escape,printable_ascii,fastq_quality,upper_hex,header_unreserved};")
             throw std::runtime_error("scalar codec predicate enumeration changed");
         const declaration_record* authenticated = nullptr;
         for (const auto& candidate : semantic.declarations) {

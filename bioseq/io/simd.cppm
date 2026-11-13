@@ -75,7 +75,7 @@ export {
     }
 
     /** Predicate changes share the same bounded scan engine. */
-    enum class byte_scan_kind : std::uint8_t { needles, json_escape, printable_ascii, upper_hex, header_unreserved };
+    enum class byte_scan_kind : std::uint8_t { needles, json_escape, printable_ascii, fastq_quality, upper_hex, header_unreserved };
 
     /** Build the selected predicate without adding a second byte traversal. */
     template<byte_scan_kind Kind, std::size_t Count, class D>
@@ -86,8 +86,9 @@ export {
                                  hn::Ge(bytes, hn::Set(tag, std::uint8_t{0x7f}))),
                 hn::Or(hn::Eq(bytes, hn::Set(tag, static_cast<std::uint8_t>('"'))),
                        hn::Eq(bytes, hn::Set(tag, static_cast<std::uint8_t>('\\')))));
-        } else if constexpr (Kind == byte_scan_kind::printable_ascii) {
-            return hn::Or(hn::Lt(bytes, hn::Set(tag, std::uint8_t{32})), hn::Gt(bytes, hn::Set(tag, std::uint8_t{126})));
+        } else if constexpr (Kind == byte_scan_kind::printable_ascii || Kind == byte_scan_kind::fastq_quality) {
+            constexpr std::uint8_t minimum = Kind == byte_scan_kind::fastq_quality ? 33u : 32u;
+            return hn::Or(hn::Lt(bytes, hn::Set(tag, minimum)), hn::Gt(bytes, hn::Set(tag, std::uint8_t{126})));
         } else if constexpr (Kind == byte_scan_kind::upper_hex) {
             return hn::Not(valid_upper_hex(tag, bytes));
         } else if constexpr (Kind == byte_scan_kind::header_unreserved) {
@@ -106,7 +107,10 @@ export {
             const std::array<std::uint8_t, Count>& needles) {
         if constexpr (Kind == byte_scan_kind::json_escape)
             return byte < 0x20 || byte >= 0x7f || byte == '"' || byte == '\\';
-        else if constexpr (Kind == byte_scan_kind::printable_ascii) return byte < 32 || byte > 126;
+        else if constexpr (Kind == byte_scan_kind::printable_ascii || Kind == byte_scan_kind::fastq_quality) {
+            constexpr std::uint8_t minimum = Kind == byte_scan_kind::fastq_quality ? 33u : 32u;
+            return byte < minimum || byte > 126;
+        }
         else if constexpr (Kind == byte_scan_kind::upper_hex)
             return !valid_upper_hex_byte(byte);
         else if constexpr (Kind == byte_scan_kind::header_unreserved)
@@ -704,6 +708,16 @@ export {
                 HWY_NAMESPACE::byte_scan_kind::upper_hex>(tag, unused, data, size);
         return HWY_NAMESPACE::scan_for_first<1, hn::ScalableTag<std::uint8_t>,
             HWY_NAMESPACE::byte_scan_kind::printable_ascii>(tag, unused, data, size);
+    }
+
+    /** Return the longest Phred+33 prefix (bytes 33..126), stopping at line endings or invalid quality. */
+    [[nodiscard]] std::size_t scan_fastq_quality_prefix(
+            const std::uint8_t* data, std::size_t size) noexcept {
+        namespace hn = hwy::HWY_NAMESPACE;
+        const hn::ScalableTag<std::uint8_t> tag;
+        const std::array<std::uint8_t, 1> unused{};
+        return HWY_NAMESPACE::scan_for_first<1, hn::ScalableTag<std::uint8_t>,
+            HWY_NAMESPACE::byte_scan_kind::fastq_quality>(tag, unused, data, size);
     }
 
     /** Return the canonical header's literal URI-unreserved prefix before decoding escapes. */

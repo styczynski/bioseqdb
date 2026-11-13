@@ -8,6 +8,9 @@
  */
 #include <cstdio>
 #include <unistd.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#endif
 #include <zlib.h>
 // Canonicalize Highway's internal-linkage templates before importing the batch
 // and streaming codec modules (Clang otherwise emits duplicate NEON helpers).
@@ -25,6 +28,7 @@ import bioseq.sequences;
 import bioseq.io.reader;
 import bioseq.io.options;
 import bioseq.io.errors;
+import bioseq.io.simd;
 import bioseq.io.sources;
 import bioseq.io.compression.parallel_gzip_source;
 import bioseq.parallelism.mode;
@@ -800,6 +804,62 @@ TEST_CASE("bioseq_io: pgzip multi-thread vs zlib first divergence",
 
 TEST_CASE("FASTQ streams quality spans with strict boundaries", "[component:bioseq][layer:integration][feature:quality][resource:filesystem]") {
     using namespace bioseq::io;
+    // Compare every byte/position against scalar predicates. Guard both ends
+    // of the readable page so the exact bounded spans also catch overreads.
+#if defined(__unix__) || defined(__APPLE__)
+    const long page_result = ::sysconf(_SC_PAGESIZE);
+    REQUIRE(page_result > 0);
+    const auto page_size = static_cast<std::size_t>(page_result);
+    REQUIRE(page_size <= std::numeric_limits<std::size_t>::max() / 3u);
+#if defined(MAP_ANONYMOUS)
+    constexpr int anonymous_map_flag = MAP_ANONYMOUS;
+#else
+    constexpr int anonymous_map_flag = MAP_ANON;
+#endif
+    struct guarded_mapping {
+        void* address;
+        std::size_t bytes;
+        ~guarded_mapping() { if (address != MAP_FAILED) static_cast<void>(::munmap(address, bytes)); }
+    } mapping{::mmap(nullptr, 3u * page_size, PROT_NONE,
+        MAP_PRIVATE | anonymous_map_flag, -1, 0), 3u * page_size};
+    REQUIRE(mapping.address != MAP_FAILED);
+    auto* const readable = static_cast<std::uint8_t*>(mapping.address) + page_size;
+    REQUIRE(::mprotect(readable, page_size, PROT_READ | PROT_WRITE) == 0);
+    std::fill_n(readable, page_size, std::uint8_t{'I'});
+    const hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t> tag;
+    const auto scan_size = 4u * hwy::HWY_NAMESPACE::Lanes(tag) + 3u;
+    REQUIRE(scan_size <= page_size);
+    auto* const tail = readable + page_size - scan_size;
+    for (unsigned value = 0; value < 256u; ++value) {
+        const auto byte = static_cast<std::uint8_t>(value);
+        for (std::size_t offset = 0; offset < scan_size; ++offset) {
+            CAPTURE(value, offset, scan_size);
+            tail[offset] = byte;
+            REQUIRE(simd::scan_fastq_quality_prefix(tail, scan_size)
+                == (value >= 33u && value <= 126u ? scan_size : offset));
+            REQUIRE(simd::scan_first_byte_pair('\n', '\r', tail, scan_size)
+                == (byte == '\n' || byte == '\r' ? offset : scan_size));
+            tail[offset] = 'I';
+        }
+    }
+    for (std::size_t size = 0; size <= scan_size; ++size) {
+        CAPTURE(size, scan_size);
+        // Vary every starting alignment and tail length through the unrolled
+        // scan. Empty input ends exactly at the inaccessible right-hand page.
+        auto* const end_aligned = readable + page_size - size;
+        REQUIRE(simd::scan_fastq_quality_prefix(end_aligned, size) == size);
+        REQUIRE(simd::scan_first_byte_pair('\n', '\r', end_aligned, size) == size);
+        REQUIRE(simd::scan_fastq_quality_prefix(readable, size) == size);
+        REQUIRE(simd::scan_first_byte_pair('\n', '\r', readable, size) == size);
+        if (size != 0) {
+            end_aligned[size - 1u] = 0;
+            REQUIRE(simd::scan_fastq_quality_prefix(end_aligned, size) == size - 1u);
+            end_aligned[size - 1u] = '\r';
+            REQUIRE(simd::scan_first_byte_pair('\n', '\r', end_aligned, size) == size - 1u);
+            end_aligned[size - 1u] = 'I';
+        }
+    }
+#endif
     struct sink_type {
         std::string quality;
         std::size_t committed{}, chunks{}, largest{}, sequence_symbols{}, largest_sequence_chunk{};
@@ -842,6 +902,94 @@ TEST_CASE("FASTQ streams quality spans with strict boundaries", "[component:bios
         REQUIRE(kind == (bad_byte ? input_failure_kind::invalid_quality_byte : input_failure_kind::other));
         if (bad_byte) { REQUIRE(diagnostic.contains("quality offset 2")); REQUIRE(diagnostic.contains("record 'r'")); }
         fs::remove(path);
+    }
+    {
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        struct restore_separator_pool {
+            bioseq::parallelism::global_pool& pool;
+            bool active{pool.is_active()};
+            bioseq::parallelism::pool_config config{pool.maximum_concurrency(), pool.get_mode()};
+            ~restore_separator_pool() { if (active) pool.configure(config); else pool.shutdown(); }
+        } restore{pool};
+        pool.configure({2u, bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel});
+        // An ignored separator comment must stream through a fixed-size slab.
+        // This length places CR at the last byte of a 16-byte refill for CRLF.
+        const std::string long_separator = "@r\nACGT\n+" + std::string(4102u, 'x');
+        auto separator_options = default_reader_options;
+        separator_options.io.initial_buffer_size = 16u;
+        separator_options.io.max_buffer_size = 16u;
+        separator_options.io.prefer_mmap = false;
+        separator_options.io.gzip_auto_detect = false;
+        for (const std::string_view ending : {"\n", "\r\n", ""}) {
+            CAPTURE(ending);
+            const auto input = long_separator + std::string{ending}
+                + (ending.empty() ? "" : "!@+~\n");
+            const auto separator_path = write_tmp_file(input);
+            sink_type separator_sink;
+            std::string diagnostic;
+            auto kind = input_failure_kind::other;
+            const auto read = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
+                separator_path.c_str(), separator_sink,
+                [&diagnostic, &kind](std::string&& message, input_failure_kind failure_kind = input_failure_kind::other) {
+                    diagnostic = std::move(message); kind = failure_kind;
+                }, separator_options);
+            if (ending.empty()) {
+                REQUIRE_FALSE(read.has_value()); REQUIRE(separator_sink.committed == 0u);
+                REQUIRE(kind == input_failure_kind::other);
+                REQUIRE(diagnostic == fmt::format("truncated FASTQ record at file position {}", input.size()));
+                REQUIRE(read.error() == diagnostic);
+            } else {
+                REQUIRE(read.has_value()); REQUIRE(*read == 1u); REQUIRE(diagnostic.empty());
+                REQUIRE(separator_sink.committed == 1u); REQUIRE(separator_sink.quality == "!@+~");
+                REQUIRE(separator_sink.sequence_symbols == 4u);
+            }
+            for (const std::size_t workers : {0u, 2u}) {
+                CAPTURE(workers);
+                auto batch_options = separator_options;
+                batch_options.concurrency.worker_count = workers;
+                batch_options.concurrency.batch_target_record_count = 1u;
+                using batch_type = sequence_batch<sequence_custom_alphabet<seq::dna4, std::uint64_t>>;
+                std::vector<std::tuple<std::string, std::string, std::string>> records;
+                std::string batch_diagnostic;
+                // One input record schedules at most one handler; the pipeline joins
+                // it before the retained values are checked below.
+                const auto batch_read = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
+                    separator_path, [&records](batch_type&& batch) {
+                        for (std::size_t index = 0; index < batch.size(); ++index) {
+                            const auto quality = batch.quality(index);
+                            records.emplace_back(batch.header(index), decode_to_ascii(batch.sequence(index)),
+                                std::string{reinterpret_cast<const char*>(quality.data()), quality.size()});
+                        }
+                    }, [&batch_diagnostic](std::string&& message) { batch_diagnostic = std::move(message); }, batch_options);
+                if (ending.empty()) {
+                    REQUIRE_FALSE(batch_read.has_value()); REQUIRE(records.empty());
+                    REQUIRE(batch_diagnostic == diagnostic); REQUIRE(batch_read.error() == diagnostic);
+                } else {
+                    REQUIRE(batch_read.has_value()); REQUIRE(*batch_read == 1u); REQUIRE(batch_diagnostic.empty());
+                    REQUIRE(records.size() == 1u);
+                    REQUIRE(std::get<0>(records.front()) == "r");
+                    REQUIRE(std::get<1>(records.front()) == "ACGT");
+                    REQUIRE(std::get<2>(records.front()) == "!@+~");
+                }
+            }
+            fs::remove(separator_path);
+        }
+        const auto bad_separator_path = write_tmp_file(long_separator + "\n!! !!\n");
+        sink_type bad_separator_sink;
+        std::string separator_diagnostic;
+        auto separator_kind = input_failure_kind::other;
+        const auto bad_separator = stream_sequences_file<seq::dna4, std::uint64_t, sequence_file_format::fastq>(
+            bad_separator_path.c_str(), bad_separator_sink,
+            [&separator_diagnostic, &separator_kind](std::string&& message, input_failure_kind kind = input_failure_kind::other) {
+                separator_diagnostic = std::move(message); separator_kind = kind;
+            }, separator_options);
+        REQUIRE_FALSE(bad_separator.has_value()); REQUIRE(bad_separator_sink.committed == 0u);
+        REQUIRE(separator_kind == input_failure_kind::invalid_quality_byte);
+        REQUIRE(separator_diagnostic == fmt::format(
+            "invalid FASTQ quality byte 32 at quality offset 2 in record 'r' (file position {})",
+            long_separator.size() + 3u));
+        REQUIRE(bad_separator.error() == separator_diagnostic);
+        fs::remove(bad_separator_path);
     }
     const std::string long_quality(200003, 'I');
     const auto path = write_tmp_file("@r\n" + std::string(long_quality.size(), 'A') + "\n+\n" + long_quality);

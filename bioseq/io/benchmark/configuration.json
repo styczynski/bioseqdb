@@ -1464,7 +1464,7 @@
     "tags": [
       "io"
     ],
-    "description": "Bioseq full decoding/restoration versus stock native HTSlib reads, and matched resident full-record writing. Each measured read includes canonical serialization and exact ordered comparison against untimed fixture expectations: restored original fields for Bioseq, native SAM fields for HTSlib. This measured consumption cost is included in both timings; it is not a decode-only comparison. Protein restoration work is reported separately by alphabet. Actual HTSlib compression features are logged. Exact native writer fields are additionally compared outside timing; no production hashes. Native_encode compares prepared native SAM/BAM serialization with identical whole-row byte consumption; it excludes compact/protein projection, compression and publication. Read_cold uses per-iteration macOS invalidation requests followed by observed zero file-page residency; unsupported or unachieved cold preparation fails explicitly. Observation does not prove SSD/controller cache state. Existing warmed reads mean a completed pre-read.",
+    "description": "Bioseq full decoding/restoration versus stock native HTSlib reads, and matched resident full-record writing. Each measured read includes canonical serialization and exact ordered comparison against untimed fixture expectations: restored original fields for Bioseq, native SAM fields for HTSlib. This measured consumption cost is included in both timings; it is not a decode-only comparison. Protein restoration work is reported separately by alphabet. Actual HTSlib compression features are logged. Exact native writer fields are additionally compared outside timing; no production hashes. Native_encode compares prepared native SAM/BAM serialization with identical whole-row byte consumption; it excludes compact/protein projection, compression and publication. Read_cold uses per-iteration macOS invalidation requests followed by observed zero file-page residency; unsupported or unachieved cold preparation fails explicitly. Observation does not prove SSD/controller cache state. Existing warmed reads mean a completed pre-read. Metric scopes: encoded_bytes: Native codec row bytes only: BAM block_size/core/payload or counted SAM text without LF/NUL. Excludes full-file header and BGZF framing; zero outside native_encode. native_sequence_symbols: Checked sum of native BAM l_qseq, including projected protein nucleotides. Existing input_symbols continues to count original biological symbols. full_file_byte_metrics_present: One only for validated full read/write/read_cold file metrics; zero for native_encode or invalid evidence. The three full-file byte metrics use zero only as an inapplicable sentinel when this flag is zero. uncompressed_file_bytes: Complete SAM file size or checked sum of validated BGZF ISIZE, including the full BAM header and all records. Does not substitute SAM text size for BAM bytes. uncompressed_to_physical_ratio: Uncompressed complete-file bytes divided by actual physical file bytes; SAM is one, and BGZF framing is included only in the physical denominator. uncompressed_file_bytes_per_second: Complete uncompressed-file bytes divided by the same framework measured on_run wall time. Framing/count preparation and validation are outside timing.",
     "fast": true,
     "concurrency": {
       "bench_lock": true,
@@ -1917,12 +1917,12 @@
         "bytes_on_disk": {
           "type": "evaluation"
         },
-        "encoded_bytes": {"type":"evaluation", "description":"Native codec row bytes only: BAM block_size/core/payload or counted SAM text without LF/NUL. Excludes full-file header and BGZF framing; zero outside native_encode."},
-        "native_sequence_symbols": {"type":"evaluation", "description":"Checked sum of native BAM l_qseq, including projected protein nucleotides. Existing input_symbols continues to count original biological symbols."},
-        "full_file_byte_metrics_present": {"type":"evaluation", "description":"One only for validated full read/write/read_cold file metrics; zero for native_encode or invalid evidence. The three full-file byte metrics use zero only as an inapplicable sentinel when this flag is zero."},
-        "uncompressed_file_bytes": {"type":"evaluation", "description":"Complete SAM file size or checked sum of validated BGZF ISIZE, including the full BAM header and all records. Does not substitute SAM text size for BAM bytes."},
-        "uncompressed_to_physical_ratio": {"type":"evaluation", "description":"Uncompressed complete-file bytes divided by actual physical file bytes; SAM is one, and BGZF framing is included only in the physical denominator."},
-        "uncompressed_file_bytes_per_second": {"type":"evaluation", "description":"Complete uncompressed-file bytes divided by the same framework measured on_run wall time. Framing/count preparation and validation are outside timing."},
+        "encoded_bytes": {"type":"evaluation"},
+        "native_sequence_symbols": {"type":"evaluation"},
+        "full_file_byte_metrics_present": {"type":"evaluation"},
+        "uncompressed_file_bytes": {"type":"evaluation"},
+        "uncompressed_to_physical_ratio": {"type":"evaluation"},
+        "uncompressed_file_bytes_per_second": {"type":"evaluation"},
         "native_codec_control": {"type":"evaluation"},
         "cache_invalidation_requested": {"type":"evaluation"},
         "cache_invalidation_succeeded": {"type":"evaluation"},

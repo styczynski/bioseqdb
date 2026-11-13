@@ -16,6 +16,7 @@ module;
 export module bioseq.io.buffer;
 
 import bioseq.io.options;
+import bioseq.io.sinks;
 
 export namespace bioseq::io {
 
@@ -40,7 +41,10 @@ struct buffer_slab {
         if (initial_capacity == 0u || initial_capacity >= std::numeric_limits<std::size_t>::max() / 2u)
             return;
         data = hwy::AllocateAligned<std::uint8_t>(initial_capacity, allocate, release, context);
-        if (data) capacity = initial_capacity;
+        if (data) {
+            capacity = initial_capacity;
+            io_resource_diagnostics().observe_input_slab(capacity);
+        }
     }
 
     /// Normalize reader initialization to [1,max] when max is nonzero; max zero
@@ -105,6 +109,7 @@ struct buffer_slab {
         }
         data = std::move(new_data);
         capacity = new_capacity;
+        io_resource_diagnostics().observe_input_slab(capacity);
         return true;
     }
 };

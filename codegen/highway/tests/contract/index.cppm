@@ -2048,7 +2048,7 @@ struct scalar_contract_directory {
     for (const auto& specification : scalar_codec_declarations(ranks)) {
         source += specification.head;
         if (specification.name == "byte_scan_kind") {
-            source += " { needles, json_escape, printable_ascii, upper_hex, header_unreserved };\n";
+            source += " { needles, json_escape, printable_ascii, fastq_quality, upper_hex, header_unreserved };\n";
             continue;
         }
         source += " { static_assert(true); ";
@@ -2108,6 +2108,15 @@ inline void verify_scalar_codec_role() {
     require(occurrences(plan.scalar_codec_sources[0].body, "static_assert(true);") == 8u
         && occurrences(plan.scalar_codec_sources[1].body, "static_assert(true);") == 14u,
         "selected bodies retain assertions while namespace assertions remain outside the closure");
+    auto changed_enumeration = scalar_contract_source(false);
+    constexpr std::string_view reviewed_predicate{"fastq_quality"};
+    const auto enumeration_position = changed_enumeration.find(reviewed_predicate);
+    require(enumeration_position != std::string::npos,
+        "enumeration mutation finds the reviewed FASTQ predicate");
+    changed_enumeration.insert(enumeration_position + reviewed_predicate.size(), ", unreviewed_predicate");
+    require_rejected([&io_path, &changed_enumeration] {
+        (void)scalar_contract_extract(io_path, false, changed_enumeration);
+    }, "an added predicate outside the reviewed scalar enumeration is rejected before rendering");
     require_rejected([&io_path] {
         (void)scalar_contract_extract(io_path, false,
             scalar_contract_source(false, false, false, false, true));

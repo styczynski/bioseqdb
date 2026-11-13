@@ -78,6 +78,7 @@ import bioseq.postgres.table.io; // Column  table row writes and per-row memory 
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
 import bioseq.io.reader;                       // Stream sequence chunks and, sample input headers.
+import bioseq.io.sinks;
 
 import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser; // Map input header fields to destination columns.
@@ -222,6 +223,7 @@ void arm_load_failure(std::int32_t stage) {
         phred_type, alignment_name, request_options.reference_table);
     bioseq_log<logging_level::debug>(
         "[bioseq] load: '{}' -> relid={} loaded {} records", path, relid, n);
+    bioseq::io::io_resource_diagnostics().completed_sql_load();
     return n;
 }
 

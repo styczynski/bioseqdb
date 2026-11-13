@@ -1100,6 +1100,19 @@ inline void bind_export_role(export_query_binding& binding, std::size_t column,
             else column.role = export_column_is_metadata(column) ? record_field_role::metadata : record_field_role::omit;
         }
     }
+    // Visible Boolean constraints are supplied facts, not missing companions.
+    // Bind them before completion adds a private reverse helper for the owner.
+    // Explicit mappings and trusted visible helpers have already been resolved.
+    if (export_uses_alignment(format)) {
+        for (std::size_t index = 0; index < binding.visible_count; ++index) {
+            const auto& column = binding.columns[index];
+            if (column.role || column.transformed_helper
+                || column.column.kind != column_value_kind::boolean) continue;
+            const auto role = parse_export_role(column.column.name);
+            if (role && *role >= record_field_role::paired && *role <= record_field_role::supplementary)
+                bind_export_role(binding, index, *role);
+        }
+    }
     return binding;
 }
 

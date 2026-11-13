@@ -389,7 +389,7 @@ run_reader(std::string_view algo, const parameter_map& params, const reader_inpu
          output.observed_body_bytes != input.expected_body_bytes)) {
         throw std::runtime_error("reader result differs from generated record/residue totals");
     }
-    std::map<std::string, double> metrics;
+    auto metrics = io_resource_metrics(output.resources);
     metrics.emplace("bytes_on_disk", static_cast<double>(input.bytes_on_disk));
     metrics.emplace("decompressed_bytes", static_cast<double>(input.decompressed_bytes));
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));

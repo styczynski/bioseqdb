@@ -187,7 +187,8 @@ struct alignment_record_frame {
     template<io_source Source>
     [[nodiscard]] static std::expected<alignment_record_frame, std::string> spill(
         alignment_input_buffer<Source>& input, const std::optional<std::size_t> requested, const std::uint64_t ordinal) {
-        auto file = posix_pwrite_sink::try_open("/tmp/bioseq_alignment_read", false);
+        auto file = posix_pwrite_sink::try_open("/tmp/bioseq_alignment_read", false,
+            std::nullopt, io_file_usage::private_spool);
         if (!file) return std::unexpected(file.error());
         const auto size = input.spool_record(*file, requested);
         if (!size) return std::unexpected(size.error());
@@ -625,11 +626,21 @@ struct alignment_dictionary_index {
     slot.decoded = std::make_unique<decoded_record>(slot.memory_credit);
     std::bitset<52u * 62u> seen;
     if (format == sequence_file_format::bam) {
+        std::optional<std::string> auxiliary_error;
+        // Keep partial views private. Later structural or framing failures must
+        // retain precedence over a latched descriptor-admission refusal.
+        const auto retain_native_auxiliary = [&slot, &auxiliary_error](const auxiliary_field_view& field) {
+            if (auxiliary_error) return;
+            if (auto retained = slot.retain_auxiliary(field, false); !retained)
+                auxiliary_error = std::move(retained.error());
+        };
         const auto parsed = alignment::parse_bam_record(slot.frame.bytes,
-            static_cast<std::uint32_t>(header.native.source_metadata.references.size()), slot.transform);
+            static_cast<std::uint32_t>(header.native.source_metadata.references.size()), slot.transform,
+            retain_native_auxiliary);
         if (!parsed) return std::unexpected(parsed.error());
         if (parsed->consumed_bytes != slot.frame.bytes.size())
             return std::unexpected(std::string{"BAM record framing contains trailing bytes"});
+        if (auxiliary_error) return std::unexpected(std::move(*auxiliary_error));
         slot.bam = *parsed;
         slot.core = parsed->core;
         slot.qname = parsed->qname;
@@ -637,13 +648,6 @@ struct alignment_dictionary_index {
         slot.cigar = slot.bam_cigar.borrow();
         slot.sequence_present = parsed->core.sequence_length != 0;
         slot.quality_present = slot.sequence_present && !parsed->quality_missing;
-        for (std::size_t cursor = 0; cursor < parsed->auxiliary.size();) {
-            const auto field = alignment::parse_bam_auxiliary(parsed->auxiliary.subspan(cursor));
-            if (!field) return std::unexpected(field.error());
-            cursor += field->consumed_bytes;
-            if (parsed->long_cigar && field->field.tag == std::array<char, 2>{'C', 'G'}) continue;
-            if (auto kept = slot.retain_auxiliary(field->field, false); !kept) return kept;
-        }
     } else {
         const auto parsed = alignment::parse_sam_record({reinterpret_cast<const char*>(slot.frame.bytes.data()), slot.frame.bytes.size()});
         if (!parsed) return std::unexpected(parsed.error());
