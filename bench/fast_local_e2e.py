@@ -116,7 +116,7 @@ def retire_completed_group():
                AND n.nspname NOT LIKE 'pg_temp%'
                AND c.relkind IN ('r','p','v','m','f','S')) THEN
           DROP EXTENSION bioseq CASCADE;
-          CREATE EXTENSION bioseq;
+          CREATE EXTENSION bioseq CASCADE;
           RAISE NOTICE 'reset empty benchmark extension after orphaned generation owner';
         END IF;
       END $cleanup$;

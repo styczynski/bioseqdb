@@ -285,8 +285,17 @@ if [[ ! -x "${psql}" ]]; then
 fi
 [[ -x "${psql}" ]] || die "psql is missing"
 psql_command=("${psql}" -X -v ON_ERROR_STOP=1 -h "${socket_dir}" -p 55432 -d postgres)
-run_pg "${psql_command[@]}" -c 'CREATE EXTENSION bioseq_cache;'
-run_pg "${psql_command[@]}" -c 'CREATE EXTENSION bioseq;'
+run_pg "${psql_command[@]}" -c 'CREATE EXTENSION bioseq CASCADE;'
+
+external_catalog="$(run_pg "${psql_command[@]}" -Atqc "SELECT
+  EXISTS (SELECT FROM pg_am a JOIN pg_proc p ON p.oid=a.amhandler
+          WHERE a.amname='bioseq_external' AND p.proname='bioseq_external_handler')
+  AND (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       JOIN pg_am a ON a.oid=c.relam
+       WHERE n.nspname='bioseq_external' AND a.amname='bioseq_external'
+       AND c.relname IN ('catalog','record_genes','record_locations',
+                         'sequence_chunks','sequences','taxonomy')) = 6")"
+[[ "${external_catalog}" == "t" ]] || die "installed package is missing the external API catalog"
 
 preload="$(run_pg "${psql_command[@]}" -Atqc 'SHOW shared_preload_libraries')"
 [[ "${preload}" == "bioseq" ]] \
@@ -663,5 +672,5 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     || die "staged Metal archive helper cannot start (exit ${helper_status})"
 fi
 
-printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"column_defaults_and_vacuum":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
+printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"external_api_enabled":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"column_defaults_and_vacuum":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
   "${distro}" "${requested_arch}" "${postgres_major}" >&3

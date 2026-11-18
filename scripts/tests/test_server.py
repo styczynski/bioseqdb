@@ -1846,6 +1846,7 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
             build_presets.MODES["external-api"].required_cache_variables,
             {
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_BUILD_WEBSITE": "OFF",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "OFF",
             },

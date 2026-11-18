@@ -28,13 +28,20 @@ option(BIOSEQ_BUILD_CACHE
 option(BIOSEQ_BUILD_PAPERS
   "Build paper and chart targets" ON)
 option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
-  "Configure generated external API clients and their integration tests" OFF)
+  "Configure generated external API clients and their integration tests" ON)
 option(BIOSEQ_BENCHMARK_E2E_INTERVALS
   "Compile statement-scoped CIGAR/MAPQ interval evidence for the dedicated E2E benchmark tree" OFF)
 option(BIOSEQ_BUILD_WEBSITE
   "Build versioned static documentation website" OFF)
 option(BIOSEQ_PACKAGE_BUILD
   "Build relocatable native distribution packages with a static C++ runtime" OFF)
+# A distributable production package must never silently omit providers or its
+# required cache companion, even when reusing an older CMake cache.
+if(BIOSEQ_PACKAGE_BUILD AND
+   (NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS OR NOT BIOSEQ_BUILD_CACHE))
+  message(FATAL_ERROR
+    "Production packages require BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON and BIOSEQ_BUILD_CACHE=ON")
+endif()
 option(BIOSEQ_HIGHWAY_GCC_CANARY
   "Build the local Darwin Clang-generator/Homebrew-GCC module boundary canary" OFF)
 if(BIOSEQ_HIGHWAY_GCC_CANARY
@@ -957,6 +964,12 @@ if(TARGET bioseq_cache_unit_tests)
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/bench/tests/contract/test_algorithm_matrix_deadline_campaign.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_production_package_features.py"
+    COMMAND "${CMAKE_COMMAND}"
+      -P "${CMAKE_SOURCE_DIR}/cmake/tests/contract/production_package_flags_test.cmake"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running bioseq-build configure freshness contract tests"
     VERBATIM)

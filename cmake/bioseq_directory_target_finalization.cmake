@@ -1,7 +1,7 @@
 # External API descriptors are build-time inputs. Keep their generated clients
 # outside BIOSEQ_NOPG_MODULES so changing an OpenAPI schema does not rebuild the
-# shared Domain-N module library. The dedicated build mode enables this option;
-# normal configurations must not require the host's code-generation toolchain.
+# shared Domain-N module library. Production builds enable this option by default;
+# test-only configurations may disable the provider stack explicitly.
 # BIOSEQ_BUILD_EXTERNAL_API_CLIENTS is declared at the repository root so the
 # isolated generator can be provisioned once before add_subdirectory(bioseq).
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)

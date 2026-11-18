@@ -54,7 +54,7 @@ list(REMOVE_DUPLICATES SRC_FILES)
 # SRC_MOD_FILES is consumed by the postgresql_bioseq target); the later
 # add_subdirectory(external) reuses the same cached value.
 option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
-  "Configure generated external API clients and their integration tests" OFF)
+  "Configure generated external API clients and their integration tests" ON)
 set(BIOSEQ_EXTERNAL_API_OPTIONAL_PG_MODULES
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/external/errors.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/external/row_writer.cppm"

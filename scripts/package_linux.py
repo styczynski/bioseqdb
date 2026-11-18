@@ -2,7 +2,7 @@
 """Local-only Debian 13/PG17/ARM64 package qualification worker.
 
 The public entry point is :func:`run_package_linux`.  It is intentionally
-stdlib-only so ``build_mcp/server.py`` can import it.  The two private CLI
+stdlib-only so ``build_auto_scripts/server.py`` can import it.  The two private CLI
 entry points run from the locked, builder-owned Python environment or inside
 the exact Linux image and reuse the retained packaging implementation.
 """
@@ -53,7 +53,7 @@ PACKAGE_CACHE_VALUES = {
     "BIOSEQ_BUILD_CORE": "ON",
     "BIOSEQ_BUILD_CACHE": "ON",
     "BIOSEQ_BUILD_PAPERS": "OFF",
-    "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+    "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
     "BIOSEQ_BUILD_WEBSITE": "OFF",
     "BIOSEQ_TEST_INDEXES": "OFF",
     "BIOSEQ_CACHE_BUILD_TESTS": "OFF",
@@ -71,7 +71,7 @@ _INPUT_FILES = (
     "infra/packaging/scripts/build_and_stage.sh",
     "infra/packaging/scripts/prepare_build_environment.sh",
     "infra/packaging/scripts/validate_package.py",
-    "build_mcp/package_linux.py",
+    "build_auto_scripts/package_linux.py",
 )
 _SOURCE_SNAPSHOT_FILES = (
     "CMakeLists.txt",
@@ -84,7 +84,7 @@ _SOURCE_SNAPSHOT_DIRECTORIES = (
     "bench_framework",
     "bioseq",
     "bioseq_caching",
-    "build_mcp",
+    "build_auto_scripts",
     "cmake",
     "codegen",
     "common",
@@ -1010,7 +1010,7 @@ python3 /source/infra/packaging/scripts/validate_package.py \
   > /output/validator.json
 mkdir -p /output/extracted
 dpkg-deb -x /bioseq-postgresql17_4.2.3_arm64.deb /output/extracted
-python3 /source/build_mcp/package_linux.py --internal-inspect \
+python3 /source/build_auto_scripts/package_linux.py --internal-inspect \
   --extracted /output/extracted --validator /output/validator.json \
   --output /output/payload.json
 """
@@ -1154,7 +1154,7 @@ def run_package_linux(
                     log=log_handle, deadline=deadline),
             })
             _run(
-                [str(package_python), str(source / "build_mcp/package_linux.py"),
+                [str(package_python), str(source / "build_auto_scripts/package_linux.py"),
                  "--internal-build", "--source", str(source),
                  "--build-root", str(run_root / "cell"),
                  "--revision", str(snapshot["revision"]),

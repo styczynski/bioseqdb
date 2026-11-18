@@ -814,6 +814,56 @@ TEST_CASE("hash-major reader preserves a generated K20 u64 query profile",
                                                                  options.target_length));
 }
 
+TEST_CASE("hash-major reader preserves the full exact alphabet hash range",
+          "[component:bioseq][layer:unit][feature:index][hash-major-wide]") {
+    using namespace bioseq::indexing;
+    const auto check = []<class Alphabet>(std::uint16_t k) {
+        auto options = hash_major_test_options(100u);
+        const auto identity = test_generation_algorithm_identity<Alphabet, std::uint64_t>(
+            minimizer_algorithm::simd_minimap2_reference, 100u, k, 10u);
+        const auto profile = hash_major_minimizer_profile_for_backend(
+            minimizer_sketch_backend::exact_simd, identity,
+            bioseq::minimizers::minimizer_profile_alphabet_id<Alphabet>(), 100u);
+        REQUIRE(profile.has_value());
+        REQUIRE(profile->hash_width_bytes == sizeof(std::uint64_t));
+        options.storage_profile = *profile;
+        const auto maximum = hash_major_minimizer_max_hash(*profile);
+        const auto middle = maximum / 2u + 1u;
+        hash_major_memory_image image;
+        hash_major_minimizer_logical_encoder encoder{options, image.sink()};
+        const std::array<std::uint64_t, 1> first_positions{12u};
+        const std::array<std::uint64_t, 1> middle_positions{18u};
+        const std::array<std::uint64_t, 1> last_positions{24u};
+        REQUIRE(encoder.append_hash(0u, first_positions).has_value());
+        REQUIRE(encoder.append_hash(middle, middle_positions).has_value());
+        REQUIRE(encoder.append_hash(maximum, last_positions).has_value());
+        const auto metadata = encoder.finish();
+        REQUIRE(metadata.has_value());
+        const std::array<std::uint64_t, 4> queries{0u, middle, middle + 1u, maximum};
+        auto opened = hash_major_minimizer_selective_reader::open(
+            bioseq::parallelism::memory_admission_controller::instance(),
+            metadata->encoded_head, metadata->encoded_manifest, hash_major_expected(options),
+            image.source(), hash_major_query_view(queries, *profile), 10u);
+        REQUIRE(opened.has_value());
+        hash_major_minimizer_selective_reader reader{std::move(*opened)};
+        for (const auto& [hash, position] :
+             std::array<std::pair<std::uint64_t, std::uint64_t>, 3>{
+                 {{0u, 12u}, {middle, 18u}, {maximum, 24u}}}) {
+            const auto found = reader.lookup_spans(hash);
+            REQUIRE(found.positions_complete());
+            REQUIRE(found.contiguous_positions32().size() == 1u);
+            REQUIRE(found.contiguous_positions32().front() == position);
+        }
+        REQUIRE(reader.lookup_spans(middle + 1u).global_occurrence_count() == 0u);
+        REQUIRE_THROWS_AS(reader.lookup_spans(1u), persisted_minimizer_lookup_error);
+    };
+    SECTION("DNA5 40-bit hashes") { check.template operator()<seq::dna5>(20u); }
+    SECTION("AA20 45-bit hashes") { check.template operator()<seq::aa20>(9u); }
+    SECTION("AA20 60-bit hashes") { check.template operator()<seq::aa20>(12u); }
+    SECTION("AA27 60-bit hashes") { check.template operator()<seq::aa27>(12u); }
+    SECTION("reduced protein 64-bit hashes") { check.template operator()<seq::aa10li>(16u); }
+}
+
 TEST_CASE("hash-major applies max_occ before posting IO with exact heavy count",
           "[component:bioseq][layer:unit][feature:index]") {
     using namespace bioseq::indexing;

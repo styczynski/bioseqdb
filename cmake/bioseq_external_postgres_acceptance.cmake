@@ -4,7 +4,7 @@
 
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   foreach(_bioseq_external_acceptance_target
-          postgresql_bioseq bioseq_sql_external_feature_contract)
+          postgresql_bioseq postgresql_bioseq_cache bioseq_sql_external_feature_contract)
     if(NOT TARGET "${_bioseq_external_acceptance_target}")
       message(FATAL_ERROR
         "External PostgreSQL acceptance requires target "
@@ -91,6 +91,9 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       --install-sql "${_bioseq_external_acceptance_sql}"
       --manifest "${_bioseq_external_acceptance_manifest}"
       --dso "$<TARGET_FILE:postgresql_bioseq>"
+      --cache-control-file "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>"
+      --cache-install-sql "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_INSTALL_SQL>"
+      --cache-dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --static-contract-script
         "${_bioseq_external_acceptance_static_contract}"
       --cmake-fragment "${CMAKE_CURRENT_LIST_FILE}"
@@ -98,6 +101,7 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       --timeout-seconds 180
     DEPENDS
       postgresql_bioseq
+      postgresql_bioseq_cache
       bioseq_sql_external_feature_contract
       "${_bioseq_external_acceptance_runner}"
       "${_bioseq_external_acceptance_stage}"

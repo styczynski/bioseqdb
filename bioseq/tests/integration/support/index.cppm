@@ -725,7 +725,7 @@ export inline void reset_extension(const connection_test_context& ctx,
     // The installed objects are  then available to the caller's connection.
     {
         connection_test_context create_ctx;
-        exec_sql(create_ctx, "CREATE EXTENSION bioseq;");
+        exec_sql(create_ctx, "CREATE EXTENSION bioseq CASCADE;");
     }
     // Reset the visible Bioseq settings that, this session can change Reading
     // pg_settings includes new public settings as they are added.

@@ -70,6 +70,8 @@
           "CMAKE_CXX_FLAGS_RELEASE": "",
           "CMAKE_C_FLAGS_RELEASE": "",
           "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
           "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
           "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
           "Intl_INCLUDE_DIR": "/opt/homebrew/opt/gettext/include",

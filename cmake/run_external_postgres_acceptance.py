@@ -41,7 +41,7 @@ class ExternalAcceptanceError(RuntimeError):
 
 
 RECEIPT_SCHEMA = "bioseq.external_postgres.acceptance_receipt"
-RECEIPT_SCHEMA_REVISION = 1
+RECEIPT_SCHEMA_REVISION = 2
 STAGE_MANIFEST_SCHEMA = "bioseq.private_postgres.stage_manifest"
 STAGE_MANIFEST_SCHEMA_REVISION = 3
 ARTIFACT_SPEC_SCHEMA = "bioseq.private_postgres.artifacts"
@@ -366,6 +366,9 @@ BASE_INPUT_FILE_KEYS = frozenset({
     "install_sql",
     "manifest",
     "dso",
+    "cache_control_file",
+    "cache_install_sql",
+    "cache_dso",
     "static_contract_script",
     "cmake_fragment",
     "mode_source",
@@ -1296,86 +1299,99 @@ def _git_provenance(
     }
 
 
-def _artifact_spec_document(
-    *,
-    control_file: Path,
-    install_sql: Path,
-    dso: Path,
-) -> dict[str, object]:
+def _cache_files_from_inputs(input_files: Mapping[str, Any]) -> dict[str, Path]:
+    return {name: Path(input_files["cache_" + name]["path"])
+            for name in ("control_file", "install_sql", "dso")}
+
+
+def _package_members(*, control_file: Path, install_sql: Path, dso: Path,
+                     cache_files: Mapping[str, Path]) -> list[dict[str, Any]]:
+    return [
+        {"name": "bioseq", "control": control_file,
+         "install_sql": install_sql, "library": dso},
+        {"name": "bioseq_cache", "control": cache_files["control_file"],
+         "install_sql": cache_files["install_sql"], "library": cache_files["dso"]},
+    ]
+
+
+def _artifact_spec_document(*, control_file: Path, install_sql: Path, dso: Path,
+                            cache_files: Mapping[str, Path]) -> dict[str, object]:
     return {
         "schema": ARTIFACT_SPEC_SCHEMA,
         "schema_revision": ARTIFACT_SPEC_SCHEMA_REVISION,
-        "artifacts": [{
-            "name": "bioseq",
-            "control": str(control_file),
-            "install_sql": str(install_sql),
-            "library": str(dso),
-        }],
+        "artifacts": [{key: str(value) for key, value in member.items()}
+                      for member in _package_members(
+                          control_file=control_file, install_sql=install_sql,
+                          dso=dso, cache_files=cache_files)],
     }
 
 
-def _validate_artifact_spec(
-    value: object,
-    *,
-    control_file: Path,
-    install_sql: Path,
-    dso: Path,
-) -> dict[str, Any]:
-    spec = _exact_mapping(
-        value,
-        {"schema", "schema_revision", "artifacts"},
-        "external acceptance artifact specification",
-    )
-    revision = _nonnegative_integer(
-        spec["schema_revision"],
-        "external acceptance artifact specification schema revision",
-    )
-    if (
-        spec["schema"] != ARTIFACT_SPEC_SCHEMA
-        or revision != ARTIFACT_SPEC_SCHEMA_REVISION
-    ):
-        raise ExternalAcceptanceError(
-            "external acceptance artifact specification schema is invalid"
-        )
-    artifacts = spec["artifacts"]
-    if not isinstance(artifacts, list) or len(artifacts) != 1:
-        raise ExternalAcceptanceError(
-            "external acceptance requires exactly one staged artifact"
-        )
-    artifact = _exact_mapping(
-        artifacts[0],
-        {"name", "control", "install_sql", "library"},
-        "external acceptance artifact",
-    )
+def _validate_artifact_spec(value: object, *, control_file: Path,
+                            install_sql: Path, dso: Path,
+                            cache_files: Mapping[str, Path]) -> dict[str, Any]:
     expected = _artifact_spec_document(
-        control_file=control_file,
-        install_sql=install_sql,
-        dso=dso,
-    )["artifacts"][0]
-    if artifact != expected:
+        control_file=control_file, install_sql=install_sql, dso=dso,
+        cache_files=cache_files)
+    if value != expected:
         raise ExternalAcceptanceError(
-            "external acceptance artifact specification is inconsistent"
-        )
+            "external acceptance requires the exact Bioseq and cache artifact set")
+    # Equality alone accepts bool as int; keep the integer/schema type contract.
+    spec = _exact_mapping(value, {"schema", "schema_revision", "artifacts"},
+                          "external acceptance artifact specification")
+    _nonnegative_integer(spec["schema_revision"], "artifact specification revision")
     return spec
 
 
-def _stage_package_aggregate(
-    *,
-    control_file: Path,
-    install_sql: Path,
-    dso: Path,
-    control_sha256: str,
-    install_sql_sha256: str,
-    library_sha256: str,
-) -> str:
-    record = (
-        "artifact:bioseq\n"
-        "module_pathname_override:\n"
-        f"control:{control_file.name}:{control_sha256}\n"
-        f"install_sql:{install_sql.name}:{install_sql_sha256}\n"
-        f"library:{dso.name}:{library_sha256}\n"
-    ).encode("utf-8")
-    return _sha256_bytes(record)
+def _package_hashes(control_file: Path, install_sql: Path, dso: Path,
+                    cache_files: Mapping[str, Path]) -> dict[str, str]:
+    hashes = {"control": _sha256(control_file), "install_sql": _sha256(install_sql),
+              "library": _sha256(dso)}
+    hashes.update({"cache_" + key: _sha256(cache_files[name]) for key, name in
+                   (("control", "control_file"), ("install_sql", "install_sql"),
+                    ("library", "dso"))})
+    return hashes
+
+
+def _stage_package_aggregate(*, control_file: Path, install_sql: Path, dso: Path,
+                             control_sha256: str, install_sql_sha256: str,
+                             library_sha256: str, cache_files: Mapping[str, Path],
+                             cache_sha256: Mapping[str, str] | None = None) -> str:
+    hashes = {"control": control_sha256, "install_sql": install_sql_sha256,
+              "library": library_sha256}
+    cache_hashes = cache_sha256 or {
+        key: _sha256(cache_files[name]) for key, name in
+        (("control", "control_file"), ("install_sql", "install_sql"), ("library", "dso"))}
+    records = []
+    for member in _package_members(control_file=control_file, install_sql=install_sql,
+                                   dso=dso, cache_files=cache_files):
+        selected = hashes if member["name"] == "bioseq" else cache_hashes
+        records.append(f"artifact:{member['name']}\nmodule_pathname_override:\n" +
+                       "".join(f"{key}:{member[key].name}:{selected[key]}\n"
+                               for key in ("control", "install_sql", "library")))
+    return _sha256_bytes("".join(records).encode("utf-8"))
+
+
+def _expected_stage_artifacts(*, staged: Mapping[str, str], control_file: Path,
+                              install_sql: Path, dso: Path,
+                              cache_files: Mapping[str, Path],
+                              package_hashes: Mapping[str, str]) -> list[dict[str, Any]]:
+    artifacts = []
+    for member in _package_members(control_file=control_file, install_sql=install_sql,
+                                   dso=dso, cache_files=cache_files):
+        prefix = "" if member["name"] == "bioseq" else "cache_"
+        artifact = {"name": member["name"], "module_pathname_override": None,
+                    "effective_module_name": member["library"].name.split(".", 1)[0]}
+        for kind in ("control", "install_sql", "library"):
+            path = member[kind]
+            directory = staged["pkglibdir"] if kind == "library" else staged["sharedir"] + "/extension"
+            digest = package_hashes[prefix + kind]
+            record = {"source": str(path), "filename": path.name,
+                      "staged": directory + "/" + path.name, "sha256": digest}
+            if kind == "control": record["source_sha256"] = digest
+            if kind == "install_sql": record["version"] = "1.0"
+            artifact[kind] = record
+        artifacts.append(artifact)
+    return artifacts
 
 
 def _runtime_entry_record(entry: Mapping[str, Any]) -> str:
@@ -1664,6 +1680,7 @@ def _validate_stage_manifest(
     control_file: Path,
     install_sql: Path,
     dso: Path,
+    cache_files: Mapping[str, Path],
 ) -> dict[str, object]:
     manifest = _exact_mapping(
         manifest,
@@ -1730,77 +1747,19 @@ def _validate_stage_manifest(
         {"aggregate_sha256", "artifacts"},
         "external stage artifact closure",
     )
-    artifacts = extension_closure["artifacts"]
-    if not isinstance(artifacts, list) or len(artifacts) != 1:
+    package_hashes = _package_hashes(control_file, install_sql, dso, cache_files)
+    expected_artifacts = _expected_stage_artifacts(
+        staged=staged, control_file=control_file, install_sql=install_sql,
+        dso=dso, cache_files=cache_files, package_hashes=package_hashes)
+    if extension_closure["artifacts"] != expected_artifacts:
         raise ExternalAcceptanceError(
-            "stage manifest must contain exactly one Bioseq artifact"
-        )
-    artifact = _exact_mapping(
-        artifacts[0],
-        {
-            "name",
-            "module_pathname_override",
-            "effective_module_name",
-            "control",
-            "install_sql",
-            "library",
-        },
-        "external staged artifact",
-    )
-    control = _exact_mapping(
-        artifact["control"],
-        {"source", "filename", "staged", "source_sha256", "sha256"},
-        "external staged control file",
-    )
-    sql = _exact_mapping(
-        artifact["install_sql"],
-        {"source", "filename", "staged", "version", "sha256"},
-        "external staged install SQL",
-    )
-    library = _exact_mapping(
-        artifact["library"],
-        {"source", "filename", "staged", "sha256"},
-        "external staged library",
-    )
-    package_hashes = {
-        "control": _sha256(control_file),
-        "install_sql": _sha256(install_sql),
-        "library": _sha256(dso),
-    }
-    expected_artifact = {
-        "name": "bioseq",
-        "module_pathname_override": None,
-        "effective_module_name": dso.name.split(".", 1)[0],
-        "control": {
-            "source": str(control_file),
-            "filename": control_file.name,
-            "staged": f"{staged['sharedir']}/extension/{control_file.name}",
-            "source_sha256": package_hashes["control"],
-            "sha256": package_hashes["control"],
-        },
-        "install_sql": {
-            "source": str(install_sql),
-            "filename": install_sql.name,
-            "staged": f"{staged['sharedir']}/extension/{install_sql.name}",
-            "version": "1.0",
-            "sha256": package_hashes["install_sql"],
-        },
-        "library": {
-            "source": str(dso),
-            "filename": dso.name,
-            "staged": f"{staged['pkglibdir']}/{dso.name}",
-            "sha256": package_hashes["library"],
-        },
-    }
-    if {
-        **artifact,
-        "control": control,
-        "install_sql": sql,
-        "library": library,
-    } != expected_artifact:
-        raise ExternalAcceptanceError(
-            "staged Bioseq artifact does not match the current build input"
-        )
+            "staged Bioseq/cache artifacts do not match the current build inputs")
+    for artifact in expected_artifacts:
+        for kind in ("control", "install_sql", "library"):
+            record = artifact[kind]
+            path = _regular_file(stage_root / record["staged"], "staged " + kind)
+            if _sha256(path) != record["sha256"]:
+                raise ExternalAcceptanceError("staged companion/package bytes differ")
     expected_aggregate = _stage_package_aggregate(
         control_file=control_file,
         install_sql=install_sql,
@@ -1808,6 +1767,7 @@ def _validate_stage_manifest(
         control_sha256=package_hashes["control"],
         install_sql_sha256=package_hashes["install_sql"],
         library_sha256=package_hashes["library"],
+        cache_files=cache_files,
     )
     if extension_closure["aggregate_sha256"] != expected_aggregate:
         raise ExternalAcceptanceError(
@@ -2875,37 +2835,12 @@ def _validate_retained_stage_manifest(
     control_path = Path(input_files["control_file"]["path"])
     install_path = Path(input_files["install_sql"]["path"])
     library_path = Path(input_files["dso"]["path"])
+    cache_files = _cache_files_from_inputs(input_files)
     expected_artifacts = {
         "aggregate_sha256": stage["package_aggregate_sha256"],
-        "artifacts": [{
-            "name": "bioseq",
-            "module_pathname_override": None,
-            "effective_module_name": library_path.name.split(".", 1)[0],
-            "control": {
-                "source": str(control_path),
-                "filename": control_path.name,
-                "staged": (
-                    f"{staged['sharedir']}/extension/{control_path.name}"
-                ),
-                "source_sha256": package_hashes["control"],
-                "sha256": package_hashes["control"],
-            },
-            "install_sql": {
-                "source": str(install_path),
-                "filename": install_path.name,
-                "staged": (
-                    f"{staged['sharedir']}/extension/{install_path.name}"
-                ),
-                "version": "1.0",
-                "sha256": package_hashes["install_sql"],
-            },
-            "library": {
-                "source": str(library_path),
-                "filename": library_path.name,
-                "staged": f"{staged['pkglibdir']}/{library_path.name}",
-                "sha256": package_hashes["library"],
-            },
-        }],
+        "artifacts": _expected_stage_artifacts(
+            staged=staged, control_file=control_path, install_sql=install_path,
+            dso=library_path, cache_files=cache_files, package_hashes=package_hashes),
     }
     extension_artifacts = _exact_mapping(
         manifest["extension_artifacts"],
@@ -2983,10 +2918,11 @@ def _validate_receipt_stage(
         "receipt stage section",
     )
     pg_config = postgresql["pg_config"]
+    cache_files = _cache_files_from_inputs(input_files)
     package_hashes = {
-        "control": input_files["control_file"]["sha256"],
-        "install_sql": input_files["install_sql"]["sha256"],
-        "library": input_files["dso"]["sha256"],
+        prefix + key: input_files[prefix + name]["sha256"]
+        for prefix in ("", "cache_")
+        for key, name in (("control", "control_file"), ("install_sql", "install_sql"), ("library", "dso"))
     }
     control_path = Path(input_files["control_file"]["path"])
     install_path = Path(input_files["install_sql"]["path"])
@@ -2998,6 +2934,8 @@ def _validate_receipt_stage(
         control_sha256=package_hashes["control"],
         install_sql_sha256=package_hashes["install_sql"],
         library_sha256=package_hashes["library"],
+        cache_files=cache_files,
+        cache_sha256={key: package_hashes["cache_" + key] for key in ("control", "install_sql", "library")},
     )
     revision = _nonnegative_integer(
         stage["schema_revision"], "receipt stage schema revision"
@@ -3090,6 +3028,7 @@ def _validate_receipt_stage(
             control_file=control_path,
             install_sql=install_path,
             dso=library_path,
+            cache_files=cache_files,
         )
         _validate_retained_stage_manifest(
             _load_json(stage_manifest_path, "retained stage manifest"),
@@ -3244,6 +3183,7 @@ def _stage_package(
     stage_parent: Path,
     retained_root: Path,
     timeout: int,
+    cache_files: Mapping[str, Path],
 ) -> tuple[Path, dict[str, Any], dict[str, object]]:
     stage_root = stage_parent / "external"
     manifest_path = stage_root / "stage-manifest.json"
@@ -3253,12 +3193,14 @@ def _stage_package(
         control_file=control_file,
         install_sql=install_sql,
         dso=dso,
+        cache_files=cache_files,
     )
     _validate_artifact_spec(
         artifact_spec,
         control_file=control_file,
         install_sql=install_sql,
         dso=dso,
+        cache_files=cache_files,
     )
     _write_json(artifact_spec_path, artifact_spec)
     _copy_file(
@@ -3294,6 +3236,7 @@ def _stage_package(
         control_file=control_file,
         install_sql=install_sql,
         dso=dso,
+        cache_files=cache_files,
     )
     _copy_file(
         manifest_path,
@@ -3385,7 +3328,14 @@ COPY (
         sql=f"""
 CREATE SCHEMA {INSTALL_SCHEMA};
 CREATE ROLE {DENIED_ROLE} NOLOGIN;
-CREATE EXTENSION bioseq SCHEMA {INSTALL_SCHEMA};
+CREATE EXTENSION bioseq SCHEMA {INSTALL_SCHEMA} CASCADE;
+DO $cache_dependency$
+BEGIN
+  IF (SELECT count(*) FROM pg_catalog.pg_extension
+      WHERE extname IN ('bioseq', 'bioseq_cache')) <> 2 THEN
+    RAISE EXCEPTION 'Bioseq installation did not install its cache dependency';
+  END IF;
+END $cache_dependency$;
 """,
     )
 
@@ -4147,6 +4097,9 @@ def _run_live(args: argparse.Namespace) -> Path:
         "install_sql": (args.install_sql, False),
         "manifest": (args.manifest, False),
         "dso": (args.dso, False),
+        "cache_control_file": (args.cache_control_file, False),
+        "cache_install_sql": (args.cache_install_sql, False),
+        "cache_dso": (args.cache_dso, False),
         "static_contract_script": (args.static_contract_script, False),
         "cmake_fragment": (args.cmake_fragment, False),
         "mode_source": (args.mode_source, False),
@@ -4160,6 +4113,8 @@ def _run_live(args: argparse.Namespace) -> Path:
         name: _regular_file(value, name.replace("_", " "), executable=executable)
         for name, (value, executable) in raw_paths.items()
     }
+    cache_files = {name: paths["cache_" + name]
+                   for name in ("control_file", "install_sql", "dso")}
     manifest = _load_json(paths["manifest"], "generated SQL manifest")
     package = _validate_generated_manifest(
         manifest,
@@ -4260,6 +4215,7 @@ def _run_live(args: argparse.Namespace) -> Path:
                 stage_parent=stage_parent,
                 retained_root=partial,
                 timeout=timeout,
+                cache_files=cache_files,
             )
             bindir = _stage_member(stage_root, stage_manifest, "bindir")
             cluster = UniquePrivateCluster(ClusterInputs(
@@ -4343,11 +4299,8 @@ def _run_live(args: argparse.Namespace) -> Path:
                 "socket_directory_removed": socket_directory_removed,
             }
 
-        stage_summary["package_input_sha256"] = {
-            "control": _sha256(paths["control_file"]),
-            "install_sql": _sha256(paths["install_sql"]),
-            "library": _sha256(paths["dso"]),
-        }
+        stage_summary["package_input_sha256"] = _package_hashes(
+            paths["control_file"], paths["install_sql"], paths["dso"], cache_files)
         evidence_files = _evidence_file_inventory(partial)
         receipt = {
             "schema": RECEIPT_SCHEMA,
@@ -4749,6 +4702,9 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "install_sql": install_sql,
         "manifest": manifest_path,
         "dso": dso,
+        "cache_control_file": inputs_root / "bioseq_cache.control",
+        "cache_install_sql": inputs_root / "bioseq_cache--1.0.sql",
+        "cache_dso": inputs_root / "bioseq_cache.so",
         "static_contract_script": inputs_root / "verify_external.py",
         "cmake_fragment": inputs_root / "external-acceptance.cmake",
         "mode_source": inputs_root / "server.py",
@@ -4765,6 +4721,8 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
     for name, path in raw_input_paths.items():
         if name not in precreated:
             _write_bytes(path, f"synthetic {name}\n".encode("utf-8"))
+    cache_files = {name: raw_input_paths["cache_" + name]
+                   for name in ("control_file", "install_sql", "dso")}
     files = {
         name: _file_record(path)
         for name, path in sorted(raw_input_paths.items())
@@ -4815,11 +4773,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "run_nonce": run_nonce,
     }))
 
-    package_hashes = {
-        "control": _sha256(control_file),
-        "install_sql": _sha256(install_sql),
-        "library": _sha256(dso),
-    }
+    package_hashes = _package_hashes(control_file, install_sql, dso, cache_files)
     aggregate = _stage_package_aggregate(
         control_file=control_file,
         install_sql=install_sql,
@@ -4827,6 +4781,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         control_sha256=package_hashes["control"],
         install_sql_sha256=package_hashes["install_sql"],
         library_sha256=package_hashes["library"],
+        cache_files=cache_files,
     )
     source_roots = {
         "bindir": pg_config["bindir"],
@@ -4914,10 +4869,14 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             for name in sorted(POSTGRESQL_TOOLS)
         ],
     }
+    stage_manifest["extension_artifacts"]["artifacts"] = _expected_stage_artifacts(
+        staged=staged, control_file=control_file, install_sql=install_sql, dso=dso,
+        cache_files=cache_files, package_hashes=package_hashes)
     artifact_spec = _artifact_spec_document(
         control_file=control_file,
         install_sql=install_sql,
         dso=dso,
+        cache_files=cache_files,
     )
     artifact_spec_path = root / "stage" / "artifact-spec.json"
     _write_json(artifact_spec_path, artifact_spec)
@@ -5218,6 +5177,10 @@ def run_self_tests() -> None:
             artifact_spec_path, "synthetic artifact specification"
         )
         invalid_artifact_specs: dict[str, dict[str, Any]] = {}
+        invalid_artifact_specs["missing cache companion"] = copy.deepcopy(artifact_spec)
+        invalid_artifact_specs["missing cache companion"]["artifacts"].pop()
+        invalid_artifact_specs["wrong cache companion"] = copy.deepcopy(artifact_spec)
+        invalid_artifact_specs["wrong cache companion"]["artifacts"][1]["library"] += ".stale"
         invalid_artifact_specs["artifact specification current schema"] = (
             copy.deepcopy(artifact_spec)
         )
@@ -5244,6 +5207,7 @@ def run_self_tests() -> None:
                     control_file=control_path,
                     install_sql=install_path,
                     dso=library_path,
+                    cache_files=_cache_files_from_inputs(input_files),
                 ),
             )
 
@@ -5291,7 +5255,7 @@ def run_self_tests() -> None:
 
         path_mutations: dict[str, tuple[object, ...]] = {
             "receipt schema": ("schema", "invalid.acceptance_receipt"),
-            "receipt schema revision": ("schema_revision", 2),
+            "receipt schema revision": ("schema_revision", RECEIPT_SCHEMA_REVISION + 1),
             "header timestamp schema": (
                 "generated_at_utc", "2026-07-26T00:00:00"
             ),
@@ -5595,6 +5559,9 @@ def _parser() -> argparse.ArgumentParser:
         "install_sql",
         "manifest",
         "dso",
+        "cache_control_file",
+        "cache_install_sql",
+        "cache_dso",
         "static_contract_script",
         "cmake_fragment",
         "mode_source",

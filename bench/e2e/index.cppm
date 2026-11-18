@@ -7501,7 +7501,8 @@ static_assert(expected_algorithm_matrix_storage_engine(
             bioseq::indexing::minimizer_generation_manifest::
                 encoded_bytes);
     out.persisted_format5_manifest_contract_valid = expect_grouped_soa
-        && out.pre_restart_persisted_gpu_abi_version == 3
+        && out.pre_restart_persisted_gpu_abi_version == static_cast<std::int64_t>(
+            ::bioseq::indexing::k_grouped_soa_gpu_abi_revision)
         && counter(55) == out.persisted_generation_read_sessions
         && persisted_manifest_size_valid
             ? 1
@@ -11962,7 +11963,8 @@ template <sequence_alphabet p_alphabet>
                 || recompute_persist_disabled != 1
                 || generation_id <= 0
                 || observed_sequence_rowno != sequence_rowno
-                || gpu_abi_version != 3
+                || gpu_abi_version != static_cast<std::int64_t>(
+                    ::bioseq::indexing::k_grouped_soa_gpu_abi_revision)
                 || persisted_bp != in.target_bp
                 || persisted_k != in.kmer_size
                 || persisted_w != in.window_size) {
@@ -12053,7 +12055,8 @@ template <sequence_alphabet p_alphabet>
             || !persisted_bp.has_value() || *persisted_bp != in.target_bp
             || !persisted_k.has_value() || *persisted_k != in.kmer_size
             || !persisted_w.has_value() || *persisted_w != in.window_size
-            || !gpu_abi.has_value() || *gpu_abi != 3
+            || !gpu_abi.has_value() || *gpu_abi != static_cast<std::int64_t>(
+                ::bioseq::indexing::k_grouped_soa_gpu_abi_revision)
             || !in.paired_persisted_target_content_crc64.empty()) {
             std::fprintf(
                 stderr,
@@ -12718,12 +12721,13 @@ void capture_pre_restart_persisted_identity(
         || !fixed_lower_hex(*rows.front()[1], 16)
         || *rows.front()[1] == "0000000000000000"
         || !gpu_abi_version.has_value()
-        || *gpu_abi_version != 3
+        || *gpu_abi_version != static_cast<std::int64_t>(
+            ::bioseq::indexing::k_grouped_soa_gpu_abi_revision)
         || !observed_sequence_rowno.has_value()
         || *observed_sequence_rowno != sequence_rowno) {
         abort_pipeline_stats_capture(
             "pre-restart persisted generation is not the production "
-            "grouped-SoA layout with GPU ABI revision 3");
+            "grouped-SoA layout with the current GPU ABI revision");
     }
     const std::string& persisted_target_content_crc64 = *rows.front()[4];
     if (!fixed_lower_hex(persisted_target_content_crc64, 16)) {

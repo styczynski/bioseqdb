@@ -145,6 +145,14 @@ def parse_result(
         "preload_active",
         "bioseq_extension_created",
         "bioseq_cache_extension_created",
+        "external_api_enabled",
+        "dna5_roundtrip",
+        "release_defaults",
+        "default_insert_search",
+        "default_persisted_search",
+        "search_after_insert",
+        "column_defaults_and_vacuum",
+        "backend_only_cache_autoload",
         "nonempty_roundtrip",
     )
     if not isinstance(result, dict) or any(result.get(key) is not True for key in true_fields):

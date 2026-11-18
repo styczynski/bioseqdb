@@ -204,7 +204,7 @@ This is a prerelease/development server, not qualified for production data.
 It does not replace the distro server, initialize a database, or start a service.
 Use the server binaries in {sdk['prefix']}/bin to create a separate development cluster.
 Then configure shared_preload_libraries = 'bioseq', restart that cluster and run
-CREATE EXTENSION bioseq_cache; CREATE EXTENSION bioseq;
+CREATE EXTENSION bioseq CASCADE;
 The query cache remains disabled by default. Other prerelease ABIs are not interchangeable.
 ''')
                 sdk_details = dict(postgres_version=sdk['version'], postgres_runtime_requirement=requirement,

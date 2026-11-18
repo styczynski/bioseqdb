@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 
-from package_linux import _run, _write_json_atomic
+from package_linux import _run, _write_json_atomic, _parse_cmake_cache
 
 MODE = 'package-macos'
 REPORTING_SUBDIR = 'bioseq_package_macos'
@@ -151,7 +151,7 @@ def smoke_payload(repository, extracted, payload, pg_prefix, libdir, sharedir, r
     # Reuse the exact retained Linux SQL/default/cache checks. Only the host
     # setup and runuser wrapper differ; no new numerical tests are introduced.
     original = (repository / 'infra/packaging/scripts/smoke_installed_package.sh').read_text()
-    checks = original[original.index("run_pg \"${psql_command[@]}\" -c 'CREATE EXTENSION bioseq_cache;'"):]
+    checks = original[original.index("run_pg \"${psql_command[@]}\" -c 'CREATE EXTENSION bioseq CASCADE;'"):]
     script = run_root / 'smoke.sh'
     script.write_text('''#!/bin/bash
 set -euo pipefail
@@ -239,6 +239,11 @@ def build_one(repository, major, state, output, run, progress):
         targets_file = build / 'bioseq-package-target-artifacts.tsv'
         if not (build / 'CMakeCache.txt').is_file() or not targets_file.is_file():
             raise RuntimeError(f'No configured PostgreSQL {major} package payload to validate')
+        cache = _parse_cmake_cache(build / 'CMakeCache.txt')
+        required = {'BIOSEQ_BUILD_EXTERNAL_API_CLIENTS': 'ON', 'BIOSEQ_BUILD_CACHE': 'ON',
+                    'BIOSEQ_PACKAGE_BUILD': 'ON', 'BIOSEQ_TEST_INDEXES': 'OFF'}
+        if any(cache.get(key) != value for key, value in required.items()):
+            raise RuntimeError('Existing payload is not a production build with cache and external API enabled')
         existing = dict(line.split('\t') for line in targets_file.read_text().splitlines())
         for name in ('postgresql_bioseq', 'postgresql_bioseq_cache'):
             artifact = Path(existing[name]).resolve()
@@ -257,7 +262,7 @@ def build_one(repository, major, state, output, run, progress):
              '-DBIOSEQ_BUILD_TESTS=OFF', '-DBIOSEQ_TEST_INDEXES=OFF',
              '-DBIOSEQ_BUILD_CORE=ON', '-DBIOSEQ_BUILD_CACHE=ON',
              '-DBIOSEQ_BUILD_PAPERS=OFF', '-DBIOSEQ_BUILD_WEBSITE=OFF',
-             '-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF', '-DBIOSEQ_CACHE_BUILD_TESTS=OFF',
+             '-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON', '-DBIOSEQ_CACHE_BUILD_TESTS=OFF',
              '-DBIOSEQ_CACHE_TESTING=OFF', '-DPostgreSQL_CONFIG=' + str(pg_config)])
         progress(f'compiling native arm64 PostgreSQL {major} .pkg payload')
         run(['cmake', '--build', build, '--target', 'postgresql_bioseq', 'postgresql_bioseq_cache',
@@ -326,7 +331,7 @@ Prerelease PostgreSQL SDKs may change ABI; this package does not prove compatibi
 Built with Clang, -O3 -DNDEBUG, all_alphabets_uint64; E2E instrumentation OFF.
 Quit/restart PostgreSQL when installing or upgrading loaded extension files.
 Add bioseq to shared_preload_libraries, restart PostgreSQL, then run:
-CREATE EXTENSION bioseq_cache; CREATE EXTENSION bioseq;
+CREATE EXTENSION bioseq CASCADE;
 bioseq_cache loads automatically and its query cache is disabled by default.
 Default alignment is bounded ntHash SIMD + SIMD-DP + block aligner.
 The installer does not edit postgresql.conf, start services, or delete databases.

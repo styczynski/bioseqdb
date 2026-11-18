@@ -1,9 +1,19 @@
+# Production Bioseq loads the companion during _PG_init and owns a database
+# extension dependency; CREATE EXTENSION bioseq CASCADE installs both catalogs.
+set(_bioseq_extension_requires)
+if(NOT BIOSEQ_TEST_INDEXES)
+  if(NOT TARGET postgresql_bioseq_cache)
+    message(FATAL_ERROR "Production Bioseq requires BIOSEQ_BUILD_CACHE=ON")
+  endif()
+  set(_bioseq_extension_requires bioseq_cache)
+endif()
 bioseq_add_postgresql_extension(
   postgresql_bioseq
   TYPE POSTGRES_EXTENSION
   CXX 26
   RELOCATABLE
   NAME bioseq
+  REQUIRES ${_bioseq_extension_requires}
   COMMENT "BioSeqDB PG Extension"
   VERSION ${INSTALL_VERSION}
   COMPONENT ${PROJECT_NAME}
@@ -322,6 +332,8 @@ if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(
     bioseq_highway_fixed_target PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(
+    bioseq_highway_runtime PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_testing_support PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(
     bioseq_integration_test_support PRIVATE BIOSEQ_TEST_INDEXES=1)
@@ -352,6 +364,8 @@ if(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
   target_compile_definitions(bioseq_highway_fixed_target PRIVATE
     BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  target_compile_definitions(bioseq_highway_runtime PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
 endif()
 
 if(TARGET bioseq_integration_tests)
@@ -359,3 +373,8 @@ if(TARGET bioseq_integration_tests)
     bioseq_integration_tests
     postgresql_bioseq)
 endif()
+
+if(NOT BIOSEQ_TEST_INDEXES)
+  add_dependencies(postgresql_bioseq postgresql_bioseq_cache)
+endif()
+unset(_bioseq_extension_requires)

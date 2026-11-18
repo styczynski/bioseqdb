@@ -6,6 +6,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -115,6 +116,12 @@ hash_major_minimizer_selective_reader::open(
     }
     hash_major_minimizer_selective_reader reader;
     reader.manifest_ = *manifest;
+    // Preserve the u32 buckets; wide exact hashes use their profile's upper
+    // sixteen bits, including protein hashes wider than the old 40-bit limit.
+    reader.canonical_radix_shift_ =
+        manifest->storage_profile.hash_width_bytes == sizeof(std::uint32_t)
+            ? 16u
+            : std::max(16u, static_cast<unsigned>(std::bit_width(maximum_hash))) - 16u;
     reader.query_hashes_ = query_hashes;
     reader.memory_stats_.query_count = query_hashes.size();
     reader.memory_stats_.directory_entry_count = manifest->directory_entry_count;

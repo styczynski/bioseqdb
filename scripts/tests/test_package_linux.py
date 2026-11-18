@@ -63,14 +63,14 @@ class PackageLinuxPureContractTests(unittest.TestCase):
     def test_only_generated_output_and_bytecode_noise_are_ignored(self) -> None:
         status = (
             " M cmake/__pycache__/sanitizer_runtime.cpython-310.pyc\n"
-            " M build_mcp/package_linux.py\n"
+            " M build_auto_scripts/package_linux.py\n"
             "?? build/package-linux/partial\n"
             "?? reporting/package-linux/result.json\n"
             "?? untracked.txt\n"
         )
         self.assertEqual(
             subject._material_dirty_rows(status),
-            [" M build_mcp/package_linux.py", "?? untracked.txt"],
+            [" M build_auto_scripts/package_linux.py", "?? untracked.txt"],
         )
         self.assertEqual(
             subject._material_dirty_rows(
@@ -618,7 +618,7 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             unrelated_research.parent.mkdir(parents=True)
             unrelated_research.write_text(
                 "must not enter the source archive\n", encoding="utf-8")
-            generated_bytecode = repository / "build_mcp/__pycache__/ignored.pyc"
+            generated_bytecode = repository / "build_auto_scripts/__pycache__/ignored.pyc"
             generated_bytecode.parent.mkdir(parents=True)
             generated_bytecode.write_bytes(b"generated")
 
@@ -634,7 +634,7 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             git("init", "-q")
             git("add", "--", *subject.SOURCE_SNAPSHOT_PATHS,
                 "outside.txt", "research/unrelated/notes.txt",
-                "build_mcp/__pycache__/ignored.pyc")
+                "build_auto_scripts/__pycache__/ignored.pyc")
             commit_environment = {
                 **os.environ,
                 "GIT_AUTHOR_DATE": "2001-02-03T04:05:06+00:00",
@@ -673,7 +673,7 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                 self.assertNotIn("outside.txt", names)
                 self.assertNotIn("research/unrelated/notes.txt", names)
                 self.assertNotIn(
-                    "build_mcp/__pycache__/ignored.pyc", names)
+                    "build_auto_scripts/__pycache__/ignored.pyc", names)
 
     def test_source_snapshot_extracts_into_clean_repository_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

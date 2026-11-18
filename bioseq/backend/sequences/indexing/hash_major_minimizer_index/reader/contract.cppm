@@ -184,6 +184,7 @@ class hash_major_minimizer_selective_reader {
     std::unique_ptr<std::uint64_t[]> retained_positions64_{};
     std::size_t retained_position_count_ = 0u;
     std::vector<std::uint32_t> canonical_radix_prefix_{};
+    unsigned canonical_radix_shift_ = 16u;
     hash_major_minimizer_memory_stats memory_stats_{};
     std::uint64_t persistent_owner_bytes_ = 0u;
     std::size_t selected_hash_count_ = 0u;
@@ -267,11 +268,7 @@ class hash_major_minimizer_selective_reader {
 
     /// Select the radix bucket used to narrow the search for this hash.
     [[nodiscard]] std::size_t canonical_high16_bucket_(std::uint64_t hash) const noexcept {
-        // Use bits above bit 15 for four-byte hashes. Eight-byte hashes use
-        // bits above bit 23, fitting the 65536 buckets for a 40-bit hash.
-        const unsigned shift =
-            manifest_.storage_profile.hash_width_bytes == sizeof(std::uint64_t) ? 24u : 16u;
-        return static_cast<std::size_t>(hash >> shift);
+        return static_cast<std::size_t>(hash >> canonical_radix_shift_);
     }
 
     /// Find a prepared hash's index  by searching its radiy bucket.
@@ -341,6 +338,7 @@ class hash_major_minimizer_selective_reader {
           retained_positions64_(std::move(other.retained_positions64_)),
           retained_position_count_(std::exchange(other.retained_position_count_, 0u)),
           canonical_radix_prefix_(std::move(other.canonical_radix_prefix_)),
+          canonical_radix_shift_(std::exchange(other.canonical_radix_shift_, 16u)),
           memory_stats_(std::exchange(other.memory_stats_, hash_major_minimizer_memory_stats{})),
           persistent_owner_bytes_(std::exchange(other.persistent_owner_bytes_, 0u)),
           selected_hash_count_(std::exchange(other.selected_hash_count_, 0u)),

@@ -420,7 +420,7 @@ _require_contains("${_cache_cmake_source}"
 file(READ "${_repository_root}/CMakeLists.txt" _root_cmake_source)
 _require_contains("${_root_cmake_source}"
   "option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
-  \"Configure generated external API clients and their integration tests\" OFF)"
+  \"Configure generated external API clients and their integration tests\" ON)"
   "external-API compatibility option")
 
 set(_negative_cases

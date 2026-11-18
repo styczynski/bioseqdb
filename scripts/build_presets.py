@@ -467,6 +467,7 @@ MODES: Dict[str, ModeDefinition] = {
         preset_override=EXTERNAL_API_BUILD_PRESET,
         required_cache_variables={
             "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
+            "BIOSEQ_BUILD_CACHE": "ON",
             "BIOSEQ_BUILD_WEBSITE": "OFF",
             "BIOSEQ_WEBSITE_BROWSER_TESTS": "OFF",
         },
@@ -805,6 +806,8 @@ MODES: Dict[str, ModeDefinition] = {
         required_cache_variables={
             "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
             "BIOSEQ_TEST_INDEXES": "OFF",
+            "BIOSEQ_BUILD_CACHE": "ON",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
         },
         install_extension=True,
         commands=[["bioseq_benchmark_e2e"]],
